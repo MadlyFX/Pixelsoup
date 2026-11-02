@@ -2,7 +2,6 @@
 
 #include "bake.hpp"
 #include "catalog.hpp"
-#include "coach.hpp"
 #include "compile.hpp"
 #include "page_revision.hpp"
 #include "document_io.hpp"
@@ -79,14 +78,6 @@ inline Block& block_of(Layer& layer, std::string_view kind) {
     throw std::runtime_error{"no block " + std::string{kind}};
 }
 
-inline std::vector<std::string> titles_of(const std::vector<Suggestion>& suggestions) {
-    std::vector<std::string> titles;
-    for (const Suggestion& suggestion : suggestions) {
-        titles.push_back(suggestion.title);
-    }
-    return titles;
-}
-
 inline const ajfx::Emitter& emitter_of(const Compiled& compiled, const Layer& layer) {
     const LayerReport* report = compiled.layer(layer.uid);
     CHECK(report != nullptr && compiled.effect.has_value());
@@ -153,10 +144,4 @@ inline const ajfx::ParameterDesc* parameter_of(const Compiled& compiled, std::st
 }
 
 // Whether any note says this.
-inline bool said(const std::vector<Advice>& notes, std::string_view fragment) {
-    return std::any_of(notes.begin(), notes.end(), [&](const Advice& note) {
-        return note.message.find(fragment) != std::string::npos;
-    });
-}
-
 } // namespace studio_test

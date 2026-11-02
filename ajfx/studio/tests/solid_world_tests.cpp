@@ -431,34 +431,6 @@ void blasted_pieces_glow_and_cool_and_trail_embers() {
     CHECK(ever_embers >= 10U && ever_dust >= 5U);
 }
 
-// The coach says when a block born of solid things has nothing to come from,
-// or reads a solid layer that is gone, and the fix points it at all of them.
-void the_coach_names_a_missing_solid_layer() {
-    Document document;
-    Layer dust = make_layer(document, LayerWhat::Dust, "Dust");
-    add(document, dust, "hit_puffs");
-    document.layers.push_back(std::move(dust));
-    std::vector<Advice> notes = advise(document, compile(document, Purpose::Preview));
-    CHECK(said(notes, "No solid layer to come from."));
-
-    document.layers.push_back(one_object(document, "Crate", "cube", "block", 0.4F, {0.0F, 1.0F, 0.0F}));
-    notes = advise(document, compile(document, Purpose::Preview));
-    CHECK(!said(notes, "No solid layer to come from."));
-    // Pointed at a layer that is not on the page.
-    Block& hits = document.layers[0].blocks[0];
-    hits.set("solid", number(9999.0F));
-    const Compiled compiled = compile(document, Purpose::Preview);
-    CHECK(find_module<ajfx::SpawnFromContacts>(emitter_of(compiled, document.layers[0])) == nullptr);
-    notes = advise(document, compiled);
-    const auto gone = std::find_if(notes.begin(), notes.end(),
-                                   [](const Advice& note) { return note.message == "Its solid layer is gone."; });
-    CHECK(gone != notes.end() && gone->fix);
-    gone->fix(document);
-    CHECK(number_of(document.layers[0].blocks[0], "solid") == 0.0F);
-    CHECK(find_module<ajfx::SpawnFromContacts>(emitter_of(compile(document, Purpose::Preview), document.layers[0])) !=
-          nullptr);
-}
-
 } // namespace
 
 void add_solid_world_tests(std::vector<studio_test::Case>& cases) {
@@ -470,5 +442,4 @@ void add_solid_world_tests(std::vector<studio_test::Case>& cases) {
     cases.push_back({"the_rock_slide_kicks_up_dust_where_rocks_hit", the_rock_slide_kicks_up_dust_where_rocks_hit});
     cases.push_back({"a_trail_is_shed_only_while_things_move", a_trail_is_shed_only_while_things_move});
     cases.push_back({"blasted_pieces_glow_and_cool_and_trail_embers", blasted_pieces_glow_and_cool_and_trail_embers});
-    cases.push_back({"the_coach_names_a_missing_solid_layer", the_coach_names_a_missing_solid_layer});
 }

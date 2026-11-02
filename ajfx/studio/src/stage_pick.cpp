@@ -1,9 +1,4 @@
-#include "sandbox.hpp"
-
-#include "blast.hpp"
-#include "catalog.hpp"
-
-#include <ajfx/random.hpp>
+#include "stage_pick.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,26 +10,8 @@
 namespace ajfx::studio {
 namespace {
 
-// How far above the floor a dropped thing starts, in the page's metres.
-constexpr float drop_height = 1.0F;
-
 float page_scale(const Document& document) {
     return std::isfinite(document.scale) && document.scale > 0.0F ? document.scale : 1.0F;
-}
-
-// Sets a control through the catalog, so a value is held to its range as one
-// typed would be.
-void put(Block& block, std::string_view control, Value value) {
-    const BlockDef* def = find_block_def(block.kind);
-    const ControlDef* found = def != nullptr ? find_control(*def, control) : nullptr;
-    if (found != nullptr) {
-        block.set(control, sanitize(*found, std::move(value)));
-    }
-}
-
-Vec3 unit(Vec3 v, Vec3 fallback) {
-    const float length = std::sqrt(dot(v, v));
-    return length > 1.0e-6F && std::isfinite(length) ? v * (1.0F / length) : fallback;
 }
 
 ModuleId id_of(const SpawnModule& module) {
@@ -92,41 +69,6 @@ std::optional<float> meet_ball(Vec3 origin, Vec3 direction, Vec3 center, float r
         return std::nullopt;
     }
     return t;
-}
-
-// The layer a tool writes an event into: `hint` where it is one, else the
-// page's first; 0 on a page with none.
-Uid event_layer(const Document& document, Uid hint) {
-    if (document.layer(hint) != nullptr) {
-        return hint;
-    }
-    return document.layers.empty() ? 0U : document.layers.front().uid;
-}
-
-std::optional<SandboxEdit> add_event(Document& document, Uid hint, BlockKind kind,
-                                     std::initializer_list<std::pair<std::string_view, Value>> values) {
-    const Uid layer_uid = event_layer(document, hint);
-    std::optional<Block> block = make_block(document, kind);
-    Layer* layer = document.layer(layer_uid);
-    if (!block || layer == nullptr) {
-        return std::nullopt;
-    }
-    for (const auto& [control, value] : values) {
-        put(*block, control, value);
-    }
-    conform_block(*block, layer->kind);
-    const Uid uid = insert_block(*layer, layer->blocks.size(), std::move(*block));
-    return SandboxEdit{layer_uid, uid};
-}
-
-std::uint32_t next_seed(std::uint32_t seed, Uid uid) {
-    // Kept to six digits, as the seed field shows them, and never 0 (the
-    // layer's own) or the seed it was.
-    std::uint32_t next = hash_mix(hash_mix(0x5eed5eedU, seed), uid) % 1000000U;
-    if (next == 0U || next == seed) {
-        next = seed % 999999U + 1U;
-    }
-    return next;
 }
 
 } // namespace
@@ -264,130 +206,6 @@ std::optional<StageHit> pick_stage(std::span<const StageBody> bodies, Vec3 origi
         return StageHit{.point = point, .center = point, .layer = 0U, .block = 0U, .on_body = false};
     }
     return std::nullopt;
-}
-
-std::string sandbox_material(const Document& document, Uid selected, Uid layer_uid) {
-    const auto material_of = [](const Block& block) -> std::string {
-        const std::string material = choice_of(block, "material");
-        return find_material(material) != nullptr ? material : std::string{};
-    };
-    if (const Block* block = document.block(selected); block != nullptr && block->kind == BlockKind::Object) {
-        if (std::string material = material_of(*block); !material.empty()) {
-            return material;
-        }
-    }
-    if (const Layer* layer = document.layer(layer_uid)) {
-        for (auto it = layer->blocks.rbegin(); it != layer->blocks.rend(); ++it) {
-            if (it->kind == BlockKind::Object) {
-                if (std::string material = material_of(*it); !material.empty()) {
-                    return material;
-                }
-            }
-        }
-    }
-    return "wood";
-}
-
-std::optional<SandboxEdit> drop_thing(Document& document, Uid hint, Vec3 floor_point, float seconds,
-                                      std::string_view material) {
-    // Into a solid layer: the one asked for, the page's first, or a new one.
-    Uid layer_uid = 0U;
-    if (const Layer* asked = document.layer(hint); asked != nullptr && asked->kind == LayerKind::Rigid) {
-        layer_uid = hint;
-    } else {
-        for (const Layer& layer : document.layers) {
-            if (layer.kind == LayerKind::Rigid && layer.enabled) {
-                layer_uid = layer.uid;
-                break;
-            }
-        }
-    }
-    if (layer_uid == 0U) {
-        Layer made = make_layer(document, LayerWhat::Solid, "Dropped things");
-        layer_uid = made.uid;
-        document.layers.push_back(std::move(made));
-    }
-    std::optional<Block> block = make_block(document, BlockKind::Object);
-    Layer* layer = document.layer(layer_uid);
-    if (!block || layer == nullptr) {
-        return std::nullopt;
-    }
-    const float s = page_scale(document);
-    const float size = number_of(*block, "size");
-    const Vec3 at = floor_point * (1.0F / s) + Vec3{0.0F, size * 0.5F + drop_height, 0.0F};
-    put(*block, "model", choice("cube"));
-    put(*block, "at", vec3(at.x, at.y, at.z));
-    put(*block, "appear", number(std::max(seconds, 0.0F)));
-    put(*block, "material", choice(std::string{material.empty() ? std::string_view{"wood"} : material}));
-    conform_block(*block, layer->kind);
-    const Uid uid = insert_block(*layer, layer->blocks.size(), std::move(*block));
-    // Its weight, grip and bounce, as picking the material would set them.
-    static_cast<void>(apply_material(document, uid));
-    return SandboxEdit{layer_uid, uid};
-}
-
-std::optional<SandboxEdit> explode_here(Document& document, Uid hint, Vec3 point, float seconds) {
-    const Vec3 at = point * (1.0F / page_scale(document));
-    return add_event(document, hint, BlockKind::Explosion,
-                     {{"at", vec3(at.x, at.y, at.z)}, {"time", number(std::max(seconds, 0.0F))}});
-}
-
-std::optional<SandboxEdit> push_here(Document& document, Uid hint, Vec3 point, Vec3 away, float seconds) {
-    const Vec3 at = point * (1.0F / page_scale(document));
-    const Vec3 way = unit(away, Vec3{0.0F, 0.0F, -1.0F});
-    return add_event(document, hint, BlockKind::Push,
-                     {{"at", vec3(at.x, at.y, at.z)},
-                      {"toward", vec3(way.x, way.y, way.z)},
-                      {"time", number(std::max(seconds, 0.0F))}});
-}
-
-bool reroll_seed(Document& document, Uid layer_uid) {
-    const Layer* asked = layer_uid != 0U ? document.layer(layer_uid) : nullptr;
-    if (layer_uid != 0U && asked == nullptr) {
-        return false;
-    }
-    const bool solid = asked != nullptr && asked->kind == LayerKind::Rigid;
-    bool changed = false;
-    for (Layer& layer : document.layers) {
-        const bool chosen = layer_uid == 0U || layer.uid == layer_uid || (solid && layer.kind == LayerKind::Rigid);
-        if (chosen) {
-            layer.seed = next_seed(layer.seed, layer.uid);
-            changed = true;
-        }
-    }
-    return changed;
-}
-
-std::vector<PageEvent> page_events(const Document& document) {
-    std::vector<PageEvent> events;
-    for (const Layer& layer : document.layers) {
-        if (!layer.enabled) {
-            continue;
-        }
-        for (const Block& block : layer.blocks) {
-            if (!block.enabled) {
-                continue;
-            }
-            float seconds = -1.0F;
-            if (block.kind == BlockKind::Explosion || block.kind == BlockKind::Push) {
-                seconds = std::max(number_of(block, "time"), 0.0F);
-            } else if (block.kind == BlockKind::Object && layer.kind == LayerKind::Rigid &&
-                       choice_of(block, "arrange") == "one" && number_of(block, "appear") > 0.0F) {
-                seconds = number_of(block, "appear");
-            }
-            if (seconds < 0.0F) {
-                continue;
-            }
-            std::string label = block_title(block);
-            label += block.kind == BlockKind::Object ? " appears at " : " at ";
-            label += format_number(seconds, 2) + " s";
-            events.push_back(PageEvent{layer.uid, block.uid, seconds, std::move(label)});
-        }
-    }
-    std::sort(events.begin(), events.end(), [](const PageEvent& a, const PageEvent& b) {
-        return a.seconds != b.seconds ? a.seconds < b.seconds : a.block < b.block;
-    });
-    return events;
 }
 
 } // namespace ajfx::studio

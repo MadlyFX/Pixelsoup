@@ -6,9 +6,7 @@ namespace {
 using namespace studio_test;
 
 // The flat model was called "chip", which says nothing about how it looks. It
-// is half as tall as a cube and four fifths as deep: a slab. A page that named
-// it "chip" opens as the slab, since a choice not on the list takes the
-// control's default and the default is the same shape.
+// is half as tall as a cube and four fifths as deep: a slab.
 void the_flat_block_is_called_a_slab() {
     const ajfx::MeshData* slab = library_mesh("slab");
     CHECK(slab != nullptr && library_mesh("chip") == nullptr);
@@ -44,23 +42,12 @@ void the_flat_block_is_called_a_slab() {
     }
 
     Document document;
-    Layer layer = make_layer(document, LayerKind::Particles, "Rubble");
     std::optional<Block> appearance = make_block(document, "appearance");
     CHECK(appearance.has_value());
     appearance->set("material", choice("model"));
     appearance->set("mesh", choice("rock"));
     // The summary names the material as the page does, not as it once was.
     CHECK(block_summary(*appearance) == "Model, Rock");
-    insert_block(layer, 0U, std::move(*appearance));
-    document.layers.push_back(std::move(layer));
-    std::string text = save_document(document);
-    const std::size_t at = text.find("\"rock\"");
-    CHECK(at != std::string::npos);
-    text.replace(at, 6U, "\"chip\"");
-    const Loaded loaded = load_document(text);
-    CHECK(loaded.error.empty() && loaded.document.has_value());
-    Document reopened = *loaded.document;
-    CHECK(choice_of(block_of(reopened.layers[0], "appearance"), "mesh") == "slab");
 }
 
 // A kind is named once, in block_kind.hpp, and everything keyed by it reads

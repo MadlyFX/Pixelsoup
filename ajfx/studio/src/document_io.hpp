@@ -1,7 +1,6 @@
 #pragma once
 
 #include "document.hpp"
-#include "json.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -11,37 +10,21 @@
 #include <string_view>
 #include <vector>
 
-// Studio pages on disk: `.ajfxstudio`, JSON. A page keeps only the values an
-// artist changed, so it stays readable and survives new defaults.
+// Studio scenes on disk: `.ajfxstudio`, JSON in the `ajfx-studio-scene`
+// format (scene_io.hpp). The layers a scene lowers to are compiler IR and are
+// never saved.
 namespace ajfx::studio {
 
 inline constexpr std::string_view document_extension = ".ajfxstudio";
-// 3: Pile and Prop became one Object block (and so did the model, size and
-//    material each of them carried). Studio no longer converts them, so a
-//    page saved at 2 or earlier that holds either does not open.
-// 4: Appearance's "debris" material became "model", since it is the one
-//    that draws a 3D model and "Solid" beside it read as a near-synonym.
-// 5: a layer says whether it is baked or live ("baked", written only when
-//    it is), and Appearance gained the draw-time tint, brightness, opacity
-//    and size scale.
-inline constexpr int document_version = 5;
 
 [[nodiscard]] std::string save_document(const Document& document);
-
-// One block as the page stores it, and back. Detaching keeps the block it
-// detached as this text, to put it back together later.
-[[nodiscard]] json::Value block_to_json(const Block& block);
-[[nodiscard]] std::optional<Block> block_from_json(const json::Value& value, std::string& error);
-[[nodiscard]] std::string block_text(const Block& block);
-[[nodiscard]] std::optional<Block> block_from_text(std::string_view text, std::string& error);
 
 struct Loaded final {
     std::optional<Document> document;
     std::string error;
 };
 
-// Refuses other formats and newer versions with a reason. Values a control no
-// longer accepts are put back in range; unknown controls are dropped.
+// Refuses anything but a scene, with a reason.
 [[nodiscard]] Loaded load_document(std::string_view text);
 
 [[nodiscard]] bool write_file(const std::filesystem::path& path, std::span<const std::uint8_t> bytes,

@@ -125,5 +125,12 @@ bool group_item(Document &document, std::uint32_t uid, std::uint32_t parent);
 // Internal compiler IR only. Never saved, edited or cached as authored state.
 [[nodiscard]] Document lower_scene(const Document &document);
 [[nodiscard]] Compiled compile_scene(const Document &document, Purpose purpose);
+// The block of `lowered` that viewport handles drag for an item: its Object,
+// or its particle system's spawn shape. 0 for a group.
+[[nodiscard]] std::uint32_t handle_block(const Document &document, std::uint32_t item);
+// Writes what a handle drag changed in `lowered` (lower_scene of `document`)
+// back to the item that owns it, so the authored scene stays the one owner.
+// Returns whether the item changed.
+bool adopt_handle_edit(Document &document, const Document &lowered, std::uint32_t item);
 
 } // namespace ajfx::studio

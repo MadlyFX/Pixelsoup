@@ -27,6 +27,13 @@ preserves exactly its authored items; a deleted floor is not reinserted.
 The scene viewport draws the authored floor beneath the reference grid,
 without a second solid staging plane hiding floor edits or removal.
 
+A click in the viewport selects the solid object under the pointer, and the
+selected item's handles move it and set its size or spawn radius; the drag
+is written back to the item, never kept in the compiler's copy. In a narrow
+inspector, vectors drop under their label and then take one axis to a row,
+and the tree's Import and the inspector's Duplicate and Delete keep only
+their icons.
+
 Ctrl-click tree rows to extend a selection. Common inspector values apply to
 the selection in one undoable gesture; `*` marks mixed values. Each property
 has its own reset. The Group control changes organization, never transform
@@ -88,12 +95,12 @@ The current viewport still simulates: a green cache band means the cache is
 available, not that the viewport is reading it. Cache-backed preview and host
 cache adoption still need their own end-to-end integration.
 
-## Existing artist files and remaining boundaries
+## Remaining boundaries
 
-Layer documents remain editable through the old page workspace until it is
-removed. New does not open a scenario gallery; optional old recipes remain
-available through `--recipe`. There are no existing projects to migrate, so
-the page editor is retired without a conversion step.
+Studio opens only scenes. The old page editor (palette, block pages, coach,
+budget search and recipe gallery) has been removed without a conversion step,
+since no projects needed migrating. Its layers and blocks remain as the
+compiler's IR, and its recipes as compiler test fixtures.
 
 Continuous cross-population attraction/repulsion or flow coupling, explicit
 event endpoints, force/light scene items, reusable assemblies, library

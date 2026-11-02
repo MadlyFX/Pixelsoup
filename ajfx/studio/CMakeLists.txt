@@ -1,7 +1,8 @@
-# ajfx Studio: the block editor that authors .ajfx particle effects.
+# ajfx Studio: the scene workspace that authors .ajfx particle effects.
 #
-# The page model, block catalog, compiler, recipes and coach are plain C++ on
-# ajfx alone (ajfx_studio_core), so they are tested headless. The application
+# The scene model, its lowering to the block compiler's layers, and the
+# compiler itself are plain C++ on ajfx alone (ajfx_studio_core), so they are
+# tested headless. The application
 # previews through the media server's own renderer, so an effect looks in
 # Studio exactly as it will on the wall, and draws its interface with the
 # media server's UI toolkit; it is built when the host turns on
@@ -27,17 +28,12 @@ add_library(ajfx_studio_core STATIC
     src/layer_builder.cpp
     src/rigid_builder.cpp
     src/solid_world.cpp
-    src/detach.cpp
     src/document_io.cpp
-    src/recipes.cpp
-    src/coach.cpp
     src/guides.cpp
     src/user_assets.cpp
     src/session.cpp
     src/bake.cpp
-    src/blast.cpp
-    src/sandbox.cpp
-    src/budget.cpp
+    src/stage_pick.cpp
 )
 target_include_directories(ajfx_studio_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -53,19 +49,13 @@ if(AJFX_BUILD_STUDIO_APP)
     endif()
     find_package(tinyfiledialogs CONFIG REQUIRED)
 
-    # The page and its controls: drawn by the application and, headless of the
-    # window, by the UI tests.
+    # The scene's tree, inspector and controls: drawn by the application and,
+    # headless of the window, by the UI tests.
     add_library(ajfx_studio_page STATIC
         src/widgets.cpp
         src/scene_view.cpp
-        src/page_view.cpp
-        src/page_view_layer.cpp
-        src/page_view_block.cpp
-        src/page_view_notes.cpp
-        src/page_view_overlays.cpp
-        src/stage_camera.cpp
-        src/sandbox_tools.cpp
-    )
+                            src/stage_camera.cpp
+        )
     target_link_libraries(ajfx_studio_page PUBLIC
         ajfx_studio_core
         MediaServer::Gui
@@ -78,12 +68,10 @@ if(AJFX_BUILD_STUDIO_APP)
     add_executable(ajfx-studio
         src/main.cpp
         src/preview.cpp
-        src/budget_meter.cpp
-        src/package_builder.cpp
+            src/package_builder.cpp
         src/studio_app.cpp
         src/stage_overlay.cpp
-        src/palette.cpp
-    )
+        )
     target_link_libraries(ajfx-studio PRIVATE
         ajfx_studio_core
         ajfx_studio_page
@@ -100,11 +88,9 @@ if(AJFX_BUILD_STUDIO_APP)
     set_target_properties(ajfx-studio PROPERTIES FOLDER "ajfx")
 
     if(BUILD_TESTING)
-        # Studio's own controls and its page against synthetic input: they
-        # need the media server's UI toolkit, so they are built with the
-        # application. The page is here rather than with the headless tests
-        # because where a dragged block lands is a question about the
-        # drawing, and only the drawing knows.
+        # Studio's own controls and the scene workspace against synthetic
+        # input: they need the media server's UI toolkit, so they are built
+        # with the application.
         add_executable(ajfx_studio_ui_tests tests/studio_ui_tests.cpp)
         target_link_libraries(ajfx_studio_ui_tests PRIVATE ajfx_studio_page)
         ajfx_set_options(ajfx_studio_ui_tests)
@@ -121,19 +107,19 @@ if(BUILD_TESTING)
         tests/catalog_tests.cpp
         tests/document_tests.cpp
         tests/compile_tests.cpp
-        tests/detach_tests.cpp
         tests/rigid_objects_tests.cpp
         tests/rigid_break_tests.cpp
-        tests/coach_tests.cpp
         tests/guides_tests.cpp
         tests/bake_tests.cpp
         tests/world_tests.cpp
-        tests/blast_tests.cpp
         tests/solid_world_tests.cpp
-        tests/sandbox_tests.cpp
-        tests/budget_tests.cpp
+        tests/stage_pick_tests.cpp
+        tests/fixtures/recipes.cpp
+        tests/fixtures/blast.cpp
     )
-    # The rock pile recipe is run through the physics engine.
+    # The old page recipes are kept as compiler fixtures; the rock pile is run
+    # through the physics engine.
+    target_include_directories(ajfx_studio_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
     target_link_libraries(ajfx_studio_tests PRIVATE ajfx_studio_core ajfx::rigid)
     if(TARGET ajfx::d3d12)
         # Kernels for every recipe compile, where DXC is present.

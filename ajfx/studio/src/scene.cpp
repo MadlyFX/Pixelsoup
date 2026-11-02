@@ -518,4 +518,32 @@ Compiled compile_scene(const Document &document, Purpose purpose) {
     }
     return out;
 }
+Uid handle_block(const Document &document, Uid item) {
+    const SceneItem *owner = document.scene ? document.scene->item(item) : nullptr;
+    if (owner == nullptr || std::holds_alternative<Group>(owner->data)) {
+        return 0U;
+    }
+    return std::holds_alternative<Object>(owner->data) ? item + 2U : item + 7U;
+}
+
+bool adopt_handle_edit(Document &document, const Document &lowered, Uid item) {
+    SceneItem *owner = document.scene ? document.scene->item(item) : nullptr;
+    const Block *dragged = lowered.block(handle_block(document, item));
+    if (owner == nullptr || dragged == nullptr) {
+        return false;
+    }
+    const auto as_vec3 = [](const Value &value) { return Vec3{value.x, value.y, value.z}; };
+    if (auto *object = std::get_if<Object>(&owner->data)) {
+        const Object before = *object;
+        object->position = as_vec3(get(*dragged, "at"));
+        object->size = get(*dragged, "size").x;
+        return !(*object == before);
+    }
+    auto &system = std::get<ParticleSystem>(owner->data);
+    const ParticleSystem before = system;
+    system.position = as_vec3(get(*dragged, "offset"));
+    system.radius = get(*dragged, "size").y;
+    return !(system == before);
+}
+
 } // namespace ajfx::studio

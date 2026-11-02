@@ -1,24 +1,18 @@
 #include "studio_app.hpp"
 
 #include "bake.hpp"
-#include "budget.hpp"
-#include "budget_meter.hpp"
-#include "coach.hpp"
 #include "compile.hpp"
 #include "compile_worker.hpp"
 #include "document_io.hpp"
 #include "package_builder.hpp"
 #include "page_revision.hpp"
-#include "page_view.hpp"
-#include "palette.hpp"
 #include "preview.hpp"
-#include "recipes.hpp"
-#include "sandbox.hpp"
-#include "sandbox_tools.hpp"
-#include "session.hpp"
+#include "scene.hpp"
 #include "scene_view.hpp"
+#include "session.hpp"
 #include "stage_camera.hpp"
 #include "stage_overlay.hpp"
+#include "stage_pick.hpp"
 #include "widgets.hpp"
 
 #include <mediaserver/editor/operator_widgets.hpp>
@@ -36,7 +30,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <future>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -72,8 +65,8 @@ constexpr double submit_interval = 0.12;
 // sends the next, and the longest a drag waits for that.
 constexpr std::uint32_t settle_frames = 3U;
 constexpr double settle_timeout = 0.75;
-// A page with a solid world bakes it by itself once nothing has changed for
-// this long and the preview is up to date.
+// A scene bakes its solid world by itself once nothing has changed for this
+// long and the preview is up to date.
 constexpr double auto_bake_delay = 0.8;
 
 gui::FontAtlas load_font(float scale) {
@@ -135,57 +128,23 @@ public:
         }
         session_ = std::move(session);
         // The window's panels and overlays as they were left.
-        split_ = session_.split;
-        palette_.set_open(session_.palette);
-        palette_.set_folded(session_.palette_folded);
         show_guides_ = session_.guides;
         show_handles_ = session_.handles;
         show_paths_ = session_.paths;
         figure_ = session_.figure;
-        expert_ = session_.expert;
         night_ = session_.night;
         looping_ = session_.looping;
 
-        std::optional<Document> recipe = options.recipe.empty() ? std::optional<Document>{new_scene()} : make_recipe(options.recipe);
-        if (!recipe) { recipe = new_scene(); }
         const bool resumed = options.open.empty() && options.restore_page && resume_page();
         if (!resumed && (options.open.empty() || !open_path(options.open))) {
-            replace_document(std::move(*recipe), {});
+            replace_document(new_scene(), {});
         }
-        expert_ = expert_ || options.expert;
-        for (std::size_t l = 0U; l < document_.layers.size(); ++l) {
-            for (const Block& block : document_.layers[l].blocks) {
-                if (block.kind == options.open_blocks || (options.open_blocks == "all" && l == 0U)) {
-                    page_.open_block(block.uid);
-                }
-            }
-        }
-        open_picker_ = options.picker;
-        maximize_at_start_ = options.maximize;
-        report_budget_ = options.maximize;
         looping_ = looping_ && !options.once;
         show_guides_ = options.guides.value_or(show_guides_);
         show_handles_ = options.guides.value_or(show_handles_);
         show_paths_ = options.paths.value_or(show_paths_);
         if (options.lose_device >= 0.0F) {
             lose_device_at_ = window_.time_seconds() + static_cast<double>(options.lose_device);
-        }
-        for (const std::string& attempt : options.tries) {
-            const std::size_t equals = attempt.find('=');
-            if (equals == std::string::npos) {
-                continue;
-            }
-            ParameterValue value{};
-            std::size_t component = 0U;
-            for (std::size_t at = equals + 1U; at < attempt.size() && component < 4U; ++component) {
-                std::size_t end = attempt.find(',', at);
-                if (end == std::string::npos) {
-                    end = attempt.size();
-                }
-                value[component] = std::strtof(attempt.substr(at, end - at).c_str(), nullptr);
-                at = end + 1U;
-            }
-            page_.try_value(attempt.substr(0U, equals), value);
         }
         if (options.at >= 0.0F) {
             frame_ = static_cast<double>(options.at) * 60.0;
@@ -229,75 +188,31 @@ public:
         const gui::Theme& theme = ctx_.theme();
         ctx_.panel(window, theme.background);
 
-        // An open popover owns the pointer where its card is. The gallery is
-        // drawn after the page's own picker, so it covers that too.
-        const bool under_gallery = gallery_.covers(ctx_.pointer_x(), ctx_.pointer_y());
-        PopoverShield shield{ctx_, under_gallery || (document_.scene ? scene_view_.covers(ctx_.pointer_x(), ctx_.pointer_y()) : page_.popover_covers(ctx_.pointer_x(), ctx_.pointer_y()))};
+        // An open popover owns the pointer where its card is.
+        PopoverShield shield{ctx_, scene_view_.covers(ctx_.pointer_x(), ctx_.pointer_y())};
 
         draw_top_bar(gui::Rect{0.0F, 0.0F, width, top_bar_height});
         const gui::Rect body{10.0F, top_bar_height, std::max(width - 20.0F, 10.0F), std::max(height - top_bar_height - 10.0F, 10.0F)};
-        // The palette down the left, then the page and the preview.
-        if (document_.scene) {
-            // The viewport owns the center; tree and inspector are workspace
-            // panels with independent resize handles.
-            const gui::Split left = ctx_.split(gui::ui_id("scene.tree.split"), body, scene_tree_split_, gui::Axis::Row, 8.0F);
-            const gui::Split right = ctx_.split(gui::ui_id("scene.inspector.split"), left.second, scene_inspector_split_, gui::Axis::Row, 8.0F);
-            scene_view_.draw_tree(ctx_, left.first, document_);
-            scene_view_.draw_inspector(ctx_, right.second, document_, compiled_.error.empty() ? std::string_view{build_error_} : std::string_view{compiled_.error});
-            draw_preview(right.first, now);
-            shield.release();
-            scene_view_.draw_overlays(ctx_, window, document_);
-        } else {
-        const float palette_w = palette_.is_open() ? Palette::open_width : Palette::rail_width;
-        const gui::Rect palette_rect{body.x, body.y, palette_w, body.height};
-        const gui::Rect rest{body.x + palette_w + 10.0F, body.y, std::max(body.width - palette_w - 10.0F, 10.0F),
-                             body.height};
-        const gui::Split split = ctx_.split(gui::ui_id("studio.split"), rest, split_, gui::Axis::Row, 10.0F);
-
-        const std::vector<Advice>& advice = current_advice();
-        PageInputs inputs{&compiled_, &advice, analysis_ ? &*analysis_ : nullptr, expert_, natural_loop_};
-        inputs.bake = &bake_status_;
-        inputs.budget = &budget_view_;
-        palette_.draw(ctx_, palette_rect, document_, page_.target_layer(document_));
-        page_.set_incoming(palette_.held());
-        page_.draw(ctx_, split.first, document_, inputs);
-        if (std::optional<Incoming> clicked = palette_.take_clicked()) {
-            page_.add(document_, *clicked);
-        }
-        draw_preview(split.second, now);
+        // The viewport owns the center; tree and inspector are workspace
+        // panels with independent resize handles.
+        const gui::Split left = ctx_.split(gui::ui_id("scene.tree.split"), body, scene_tree_split_, gui::Axis::Row, 8.0F);
+        const gui::Split right = ctx_.split(gui::ui_id("scene.inspector.split"), left.second, scene_inspector_split_, gui::Axis::Row, 8.0F);
+        scene_view_.draw_tree(ctx_, left.first, document_);
+        scene_view_.draw_inspector(ctx_, right.second, document_, compiled_.error.empty() ? std::string_view{build_error_} : std::string_view{compiled_.error});
+        draw_preview(right.first, now);
         shield.release();
-        {
-            const PopoverShield over_page{ctx_, under_gallery};
-            page_.draw_overlays(ctx_, window, document_, inputs);
-            palette_.end_frame(ctx_);
-            page_.set_incoming(nullptr);
-        }
-        draw_gallery(window);
-        }
+        scene_view_.draw_overlays(ctx_, window, document_);
         draw_toast(window, now);
         ctx_.draw_overlays(window);
 
-        if (open_picker_ && frames_ > 2U) {
-            page_.open_block_picker(document_);
-            open_picker_ = false;
-        }
-        ++frames_;
-        // Whatever drew edited the page in place; this is the one look at it
+        // Whatever drew edited the scene in place; this is the one look at it
         // each frame, and what follows asks the number it leaves.
         changes_.observe(document_);
-        if (document_.scene && scene_motion_for_ != changes_.value()) {
+        if (scene_motion_for_ != changes_.value()) {
             if (!same_scene_motion(scene_motion_, document_)) { frame_ = 0.0; playing_ = false; }
             scene_motion_ = document_;
             scene_motion_for_ = changes_.value();
         }
-        if (std::optional<BudgetRequest> asked = page_.take_budget_request()) {
-            budget_request(*asked);
-        }
-        if (maximize_at_start_ && has_package_ && analysis_ && preview_ && !preview_->status().waiting) {
-            maximize_at_start_ = false;
-            budget_request(BudgetRequest{});
-        }
-        budget_step();
         shortcuts();
         record_history();
         follow_document(now);
@@ -309,7 +224,7 @@ public:
             // picture.
             if (const std::string_view lost = window_.device().lost_reason(); !lost.empty()) {
                 device_lost(lost);
-                // Whatever was saved or not, the page comes back next time.
+                // Whatever was saved or not, the scene comes back next time.
                 keep_session(false);
                 return false;
             }
@@ -347,17 +262,6 @@ private:
         }
     }
 
-    // The coach's notes, worked out again only when the page, what it
-    // compiled to or its bake status has changed.
-    const std::vector<Advice>& current_advice() {
-        const std::array<std::uint64_t, 3> key{changes_.value(), compiled_serial_, bake_serial_};
-        if (key != advice_key_) {
-            advice_ = advise(document_, compiled_, &bake_status_);
-            advice_key_ = key;
-        }
-        return advice_;
-    }
-
     void replace_document(Document document, std::filesystem::path path) {
         document_ = std::move(document);
         scene_motion_ = document_;
@@ -367,7 +271,6 @@ private:
         history_.assign(1U, document_);
         history_index_ = 0U;
         history_head_.set(document_, at);
-        page_.forget();
         scene_view_.forget();
         recompile(at);
         analysis_.reset();
@@ -379,8 +282,8 @@ private:
         ++page_generation_;
         want_frame_ = true;
         frame_ = 0.0;
-        playing_ = !document_.scene;
-        if (document_.scene) { looping_ = false; }
+        playing_ = false;
+        looping_ = false;
         submit(window_.time_seconds());
     }
 
@@ -396,20 +299,13 @@ private:
             toast(path.filename().string() + ": " + loaded.error, false);
             return false;
         }
-        // How the page now open was laid out, kept for when it opens again.
-        if (!path_.empty()) {
-            remember_view(session_, path_.generic_string(), page_.view_state());
-        }
         replace_document(std::move(*loaded.document), path);
-        if (const std::optional<PageViewState> view = remembered_view(session_, path.generic_string())) {
-            page_.restore(*view);
-        }
         toast("Opened " + path.filename().string(), true);
         return true;
     }
 
-    // The page Studio was left on, with its unsaved changes, its layout, the
-    // camera and the playhead. False when there is none to take up.
+    // The scene Studio was left on, with its unsaved changes, the camera and
+    // the playhead. False when there is none to take up.
     bool resume_page() {
         std::optional<Document> unsaved;
         if (!session_.unsaved.empty()) {
@@ -431,7 +327,7 @@ private:
         }
         if (unsaved) {
             if (opened) {
-                // On top of the file, so the page shows it has changes to save.
+                // On top of the file, so the scene shows it has changes to save.
                 document_ = std::move(*unsaved);
                 history_.push_back(document_);
                 history_index_ = history_.size() - 1U;
@@ -442,7 +338,6 @@ private:
         } else if (!opened) {
             return false;
         }
-        page_.restore(session_.view);
         if (session_.camera) {
             const std::array<float, 6>& c = *session_.camera;
             orbit_ = Orbit{c[0], c[1], c[2], mediaserver::scene::Vec3{c[3], c[4], c[5]}};
@@ -458,7 +353,7 @@ private:
         return true;
     }
 
-    // Writes where Studio is, for next time. `discarded`: the page had
+    // Writes where Studio is, for next time. `discarded`: the scene had
     // changes the artist chose to throw away, so they are not kept.
     void keep_session(bool discarded) {
         const std::filesystem::path file = session_path();
@@ -471,20 +366,14 @@ private:
         if (!discarded && (path_.empty() || unsaved())) {
             session.unsaved = save_document(document_);
         }
-        session.view = page_.view_state();
-        remember_view(session, session.page, session.view);
         // Window creation applies display scale; zoom is restored separately.
         session.width = static_cast<std::uint32_t>(std::lround(static_cast<float>(window_.width()) * window_.zoom()));
         session.height = static_cast<std::uint32_t>(std::lround(static_cast<float>(window_.height()) * window_.zoom()));
         session.zoom = window_.zoom();
-        session.split = split_;
-        session.palette = palette_.is_open();
-        session.palette_folded = palette_.folded();
         session.guides = show_guides_;
         session.handles = show_handles_;
         session.paths = show_paths_;
         session.figure = figure_;
-        session.expert = expert_;
         session.night = night_;
         session.looping = looping_;
         session.scene_tree_split = scene_tree_split_;
@@ -504,16 +393,16 @@ private:
     }
 
     // The GPU device is gone and nothing can be drawn again. Says why in a
-    // window of the system's own, which still works, offers to save the page,
+    // window of the system's own, which still works, offers to save the scene,
     // and lets Studio close.
     void device_lost(std::string_view reason) {
         std::string message = "ajfx Studio can no longer draw: " + std::string{reason} + ".\n\n";
         if (!unsaved()) {
-            message += "The page has no unsaved changes. Studio will close; open it again to carry on.";
+            message += "The scene has no unsaved changes. Studio will close; open it again to carry on.";
             tinyfd_messageBox("ajfx Studio", message.c_str(), "ok", "error", 1);
             return;
         }
-        message += "Save the page before Studio closes?";
+        message += "Save the scene before Studio closes?";
         if (tinyfd_messageBox("ajfx Studio", message.c_str(), "yesno", "error", 1) == 1) {
             static_cast<void>(save(false));
         }
@@ -538,8 +427,8 @@ private:
 #endif
     }
 
-    // Whether the page has changes the file does not. Looked at afresh,
-    // since the callers are about to keep or discard the page.
+    // Whether the scene has changes the file does not. Looked at afresh,
+    // since the callers are about to keep or discard the scene.
     bool unsaved() {
         return saved_.differs(document_, changes_.observe(document_));
     }
@@ -548,16 +437,16 @@ private:
         if (!unsaved()) {
             return true;
         }
-        const std::string message = "This effect has changes that are not saved. Discard them and " + std::string{action} + "?";
+        const std::string message = "This scene has changes that are not saved. Discard them and " + std::string{action} + "?";
         return tinyfd_messageBox("ajfx Studio", message.c_str(), "yesno", "question", 0) == 1;
     }
 
     void open_dialog() {
-        if (!confirm_discard("open another page")) {
+        if (!confirm_discard("open another scene")) {
             return;
         }
         const char* filters[] = {"*.ajfxstudio"};
-        if (const char* chosen = tinyfd_openFileDialog("Open an ajfx Studio page", "", 1, filters, "ajfx Studio pages", 0)) {
+        if (const char* chosen = tinyfd_openFileDialog("Open an ajfx Studio scene", "", 1, filters, "ajfx Studio scenes", 0)) {
             static_cast<void>(open_path(chosen));
         }
     }
@@ -566,8 +455,8 @@ private:
         std::filesystem::path path = path_;
         if (choose || path.empty()) {
             const char* filters[] = {"*.ajfxstudio"};
-            const std::string suggestion = (document_.name.empty() ? std::string{"effect"} : document_.name) + ".ajfxstudio";
-            const char* chosen = tinyfd_saveFileDialog("Save the page", suggestion.c_str(), 1, filters, "ajfx Studio pages");
+            const std::string suggestion = (document_.name.empty() ? std::string{"scene"} : document_.name) + ".ajfxstudio";
+            const char* chosen = tinyfd_saveFileDialog("Save the scene", suggestion.c_str(), 1, filters, "ajfx Studio scenes");
             if (chosen == nullptr) {
                 return false;
             }
@@ -602,20 +491,20 @@ private:
         if (path.extension() != ".ajfx") {
             path += ".ajfx";
         }
-        // The cache goes with it only while it holds every baked layer as
-        // it is: the export checks the rest as a host will.
+        // The cache goes with it only while it holds the scene as it is: the
+        // export checks the rest as a host will.
         builder_.submit_export(document_, path, path_.parent_path(), bake_status_.current ? bake_ : nullptr);
         toast("Exporting " + path.filename().string() + "...", true);
     }
 
-    // Bakes the page's baked layers, or stops the bake under way.
+    // Bakes the scene's simulation, or stops the bake under way.
     void bake_or_cancel() {
         if (builder_.bake_progress() >= 0.0) {
             builder_.cancel_bake();
             return;
         }
         if (!bake_status_.any_baked) {
-            toast("Nothing to bake: mark a layer Baked on its heading first", false);
+            toast("Nothing to bake: the scene has no objects or particle systems", false);
             return;
         }
         builder_.submit_bake(document_, path_.parent_path());
@@ -623,7 +512,7 @@ private:
         bake_quiet_ = false;
     }
 
-    // What baking the page now would come to, in a sentence.
+    // What baking the scene now would come to, in a sentence.
     [[nodiscard]] std::string bake_cost_text() const {
         const BakeCost& cost = bake_status_.cost;
         std::string text = "about " + bytes_text(cost.bytes) + " over " +
@@ -687,7 +576,7 @@ private:
                 toast(baked->message, false);
                 auto_bake_failure_ = baked->message;
             }
-            // A bake of a page since replaced is not this page's.
+            // A bake of a scene since replaced is not this scene's.
             if (baked->record && bake_asked_for_ == page_generation_) {
                 bake_ = baked->record;
                 bake_status_dirty_ = true;
@@ -706,17 +595,12 @@ private:
             compiler_.submit(document_, at);
             compile_asked_ = at;
         }
-        // What the baked layers' cache holds, against the page as it is. It
-        // compiles the page as the export does, so only when either changes,
-        // and only once the preview's compile has caught up with the page.
+        // What the cache holds, against the scene as it is: only when either
+        // changes, and only once the preview's compile, which is the
+        // export's, has caught up with the scene.
         if (!compile_behind && (bake_status_dirty_ || bake_status_for_.differs(document_, at))) {
-            // The preview's compile is the export's unless a layer plays
-            // alone, so it is compiled again only then.
-            const bool soloed = std::any_of(document_.layers.begin(), document_.layers.end(),
-                                            [](const Layer& layer) { return layer.solo && layer.enabled; });
-            bake_status_ = bake_status(document_, soloed ? compile(document_, Purpose::Export) : compiled_,
-                                       bake_.get(), analysis_ ? &analysis_->peak_alive : nullptr);
-            // Studio bakes the solid world by itself once the page settles.
+            bake_status_ = bake_status(document_, compiled_, bake_.get(), analysis_ ? &analysis_->peak_alive : nullptr);
+            // Studio bakes the solid world by itself once the scene settles.
             bake_status_.automatic = true;
             bake_status_for_.set(document_, at);
             ++bake_serial_;
@@ -727,7 +611,7 @@ private:
             ++settled_frames_;
         }
         if (submitted_.differs(document_, at)) {
-            const bool live = (document_.scene ? scene_view_.gesture_live() : page_.gesture_live()) || ctx_.pointer_down() || overlay_.dragging();
+            const bool live = scene_view_.gesture_live() || ctx_.pointer_down() || overlay_.dragging();
             // While a value is dragged, the next package waits for the preview
             // to have taken in the last; the gesture's end always sends one.
             const bool settled = !builder_.busy() && (settled_frames_ >= settle_frames || !preview_ ||
@@ -738,11 +622,12 @@ private:
         }
     }
 
-    // Bakes a page with a solid world by itself once it has settled: nothing
+    // Bakes a scene with a solid world by itself once it has settled: nothing
     // changed for a moment, nothing held, the preview built and the cache not
     // current. An edit stops a bake Studio took by itself, so a drag never
-    // waits on one, and it is taken again once the page settles again. Once
-    // a page, so a bake that fails is not tried again until the page changes.
+    // waits on one, and it is taken again once the scene settles again. Once
+    // a revision, so a bake that fails is not tried again until the scene
+    // changes.
     void bake_when_settled(double now, std::uint64_t at, bool compile_behind) {
         if (at != change_seen_) {
             change_seen_ = at;
@@ -751,7 +636,7 @@ private:
                 builder_.cancel_bake();
             }
         }
-        const bool held = (document_.scene ? scene_view_.gesture_live() : page_.gesture_live()) || ctx_.pointer_down() || overlay_.dragging();
+        const bool held = scene_view_.gesture_live() || ctx_.pointer_down() || overlay_.dragging();
         const bool settled = !compile_behind && !bake_status_dirty_ && !bake_status_for_.differs(document_, at) &&
                              now - change_time_ >= auto_bake_delay && !held && !builder_.busy() &&
                              !submitted_.differs(document_, at) && builder_.bake_progress() < 0.0;
@@ -771,7 +656,7 @@ private:
     }
 
     void record_history() {
-        const bool gesture = (document_.scene ? scene_view_.gesture_live() : page_.gesture_live()) || ctx_.pointer_down() || ctx_.focus() != gui::UiId{} ||
+        const bool gesture = scene_view_.gesture_live() || ctx_.pointer_down() || ctx_.focus() != gui::UiId{} ||
                              ctx_.pointer_blocked();
         if (gesture || !history_head_.differs(document_, changes_.value())) {
             return;
@@ -785,7 +670,7 @@ private:
         history_head_.set(document_, changes_.value());
     }
 
-    // The page as the history kept it at `index`.
+    // The scene as the history kept it at `index`.
     void step_history(std::size_t index) {
         history_index_ = index;
         document_ = history_[index];
@@ -831,8 +716,7 @@ private:
             looping_ = !looping_;
         }
         if (typed.find('/') != std::string_view::npos) {
-            if (document_.scene) { scene_view_.open_add(20.0F, top_bar_height + 40.0F); }
-            else { page_.open_block_picker(document_); }
+            scene_view_.open_add(20.0F, top_bar_height + 40.0F);
         }
         if (typed.find('f') != std::string_view::npos || typed.find('F') != std::string_view::npos) {
             orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
@@ -869,26 +753,18 @@ private:
         const double frames = loop_frames();
         if (playing_) {
             frame_ += dt * 60.0;
-            if (frame_ >= frames && (!document_.scene || looping_)) {
-                if (looping_) {
-                    frame_ = std::fmod(frame_, frames);
-                } else {
-                    frame_ = frames - 1.0;
-                    playing_ = false;
-                }
+            // A scene that does not loop plays on past its capture range.
+            if (looping_ && frame_ >= frames) {
+                frame_ = std::fmod(frame_, frames);
             }
         }
         // Short of the loop's length rather than its last whole frame: on a
         // display faster than 60 Hz a refresh advances less than a frame, and
         // the playhead still has to reach the end to wrap.
-        frame_ = document_.scene && !looping_ ? std::max(frame_, 0.0) : std::clamp(frame_, 0.0, std::nextafter(frames, 0.0));
+        frame_ = looping_ ? std::clamp(frame_, 0.0, std::nextafter(frames, 0.0)) : std::max(frame_, 0.0);
     }
 
     void toggle_playing() {
-        // Play at the end of a run that does not loop starts it again.
-        if (!document_.scene && !playing_ && !looping_ && frame_ >= loop_frames() - 1.0) {
-            frame_ = 0.0;
-        }
         playing_ = !playing_;
     }
 
@@ -913,12 +789,12 @@ private:
         }
         x += file_button_w + 6.0F;
         if (editor::pill_button(ctx_, gui::ui_id("studio.open"), gui::Rect{x, y, file_button_w, 30.0F}, gui::Icon::Import,
-                                "Open", "Open an ajfx Studio page")) {
+                                "Open", "Open an ajfx Studio scene")) {
             open_dialog();
         }
         x += file_button_w + 6.0F;
         if (editor::pill_button(ctx_, gui::ui_id("studio.save"), gui::Rect{x, y, file_button_w, 30.0F}, std::nullopt, "Save",
-                                "Save the page (Ctrl+S)")) {
+                                "Save the scene (Ctrl+S)")) {
             static_cast<void>(save(false));
         }
         x += file_button_w + 6.0F;
@@ -940,20 +816,20 @@ private:
             tip.clear();
             if (baking) {
                 label = "Baking " + std::to_string(static_cast<int>(std::lround(progress * 100.0))) + "%";
-                tip = "Working out the baked layers on the CPU. Click to stop.";
+                tip = "Working out the simulation on the CPU. Click to stop.";
             } else if (!bake_status_.any_baked) {
-                tip = "Mark a layer Baked on its heading first.";
+                tip = "Add an object or a particle system first.";
             } else if (bake_status_.current) {
                 tip = "Cache is up to date. Baking again: " + bake_cost_text() + ".";
             } else {
-                tip = "Cache the baked layers: " + bake_cost_text() + ".";
+                tip = "Cache the simulation: " + bake_cost_text() + ".";
             }
             if (editor::pill_button(ctx_, gui::ui_id("studio.bake"), gui::Rect{x, y, 110.0F, 30.0F}, std::nullopt,
                                     label.c_str(), tip.c_str())) {
                 bake_or_cancel();
             }
             if (bake_status_.any_baked && !baking) {
-                // A dot on the button: green when the cache holds the page,
+                // A dot on the button: green when the cache holds the scene,
                 // amber when it needs taking (again).
                 ctx_.rounded(gui::Rect{x + 96.0F, y + 12.0F, 6.0F, 6.0F},
                              bake_status_.current ? theme.good : theme.caution, 3.0F);
@@ -961,7 +837,7 @@ private:
             x += 120.0F;
         }
 
-        // The page's file, and whether it has unsaved changes.
+        // The scene's file, and whether it has unsaved changes.
         std::string file = path_.empty() ? std::string{"Not saved yet"} : path_.filename().string();
         const bool dirty = saved_.differs(document_, changes_.value());
         const gui::Rect file_rect{x, bar.y, std::max(bar.right() - x - (compact ? 210.0F : 330.0F), 0.0F), bar.height};
@@ -974,20 +850,13 @@ private:
             }
         }
 
-        // Right: what the build is doing, history, and the expert view.
+        // Right: what the build is doing, history, and night dim.
         float rx = bar.right() - 16.0F;
         rx -= 30.0F;
-        if (document_.scene) {
-            if (editor::icon_button(ctx_, gui::ui_id("studio.night"), gui::Rect{rx, y + 1.0F, 28.0F, 28.0F},
-                                    gui::Icon::Night, night_ ? "Turn off night dim" : "Dim the workspace for night",
-                                    night_)) {
-                night_ = !night_;
-            }
-        } else if (editor::icon_button(ctx_, gui::ui_id("studio.expert"), gui::Rect{rx, y + 1.0F, 28.0F, 28.0F},
-                                gui::Icon::Details,
-                                expert_ ? "Hide what each block runs as" : "Show what each block runs as (under the hood)",
-                                expert_)) {
-            expert_ = !expert_;
+        if (editor::icon_button(ctx_, gui::ui_id("studio.night"), gui::Rect{rx, y + 1.0F, 28.0F, 28.0F},
+                                gui::Icon::Night, night_ ? "Turn off night dim" : "Dim the workspace for night",
+                                night_)) {
+            night_ = !night_;
         }
         rx -= 32.0F;
         if (editor::icon_button(ctx_, gui::ui_id("studio.redo"), gui::Rect{rx, y + 1.0F, 28.0F, 28.0F}, gui::Icon::Restart,
@@ -1003,7 +872,7 @@ private:
         // The state of the effect, as a dot and a word.
         std::string state = "Up to date";
         gui::UiColor tone = theme.good;
-        std::string tip = "The preview shows this page.";
+        std::string tip = "The preview shows this scene.";
         if (!preview_error_.empty()) {
             state = "No preview";
             tone = theme.warning;
@@ -1017,7 +886,7 @@ private:
             tone = theme.caution;
             tip = "Building the preview from your latest change.";
         } else if (!compiled_.error.empty()) {
-            state = "A layer cannot play";
+            state = "Cannot play";
             tone = theme.warning;
             tip = compiled_.error;
         } else if (!asset_issue_.empty()) {
@@ -1041,27 +910,6 @@ private:
         ctx_.tooltip(chip, state + ": " + tip);
     }
 
-    // ------------------------------------------------------- recipes
-
-    void open_gallery() {
-        std::vector<ListEntry> entries;
-        for (const Recipe& recipe : recipes()) {
-            entries.push_back(ListEntry{"Recipes", std::string{recipe.title}, std::string{recipe.description}, true, {}});
-        }
-        const float width = static_cast<float>(window_.width());
-        gallery_.open(width * 0.5F - 190.0F, top_bar_height + 30.0F, "Start a new effect", std::move(entries), false);
-    }
-
-    void draw_gallery(const gui::Rect& window) {
-        if (std::optional<std::size_t> picked = gallery_.draw(ctx_, window)) {
-            if (*picked < recipes().size() && confirm_discard("start a new effect")) {
-                if (std::optional<Document> document = make_recipe(recipes()[*picked].id)) {
-                    replace_document(std::move(*document), {});
-                }
-            }
-        }
-    }
-
     void draw_toast(const gui::Rect& window, double now) {
         if (toast_.text.empty() || now > toast_.until) {
             return;
@@ -1076,150 +924,9 @@ private:
         ctx_.label(gui::Rect{card.x + 28.0F, card.y, card.width - 36.0F, card.height}, toast_.text, theme.text);
     }
 
-    // ------------------------------------------------------- the budget
-
-    // "Maximize budget", "Scale down" or "Stop" from the page's budget row.
-    // The page's limit is worked out off this thread, then the stage alone
-    // is measured, then the page at each factor the search asks for, in the
-    // meter's own preview; the page itself changes once, at the end.
-    void budget_request(const BudgetRequest& asked) {
-        if (asked.stop) {
-            cancel_budget("Stopped");
-            return;
-        }
-        if (budget_phase_ != BudgetPhase::Idle) {
-            return;
-        }
-        if (!preview_) {
-            budget_view_ = BudgetView{false, "Needs the preview", false};
-            return;
-        }
-        if (!meter_) {
-            std::filesystem::path package = builder_.preview_path();
-            package.replace_filename("budget-" + package.filename().string());
-            std::string error;
-            meter_ = BudgetMeter::create(window_.device(), std::move(package), error);
-            if (!meter_) {
-                budget_view_ = BudgetView{false, error, false};
-                return;
-            }
-        }
-        budget_for_ = changes_.value();
-        budget_options_ = asked.options;
-        budget_down_ = asked.allow_down;
-        budget_issue_.clear();
-        // From a little before the busiest step, so the window it measures
-        // is the effect at its heaviest, inside the loop.
-        const double frames = loop_frames();
-        const double peak = analysis_ && analysis_->traced && analysis_->peak_step != 0U
-                                ? static_cast<double>(analysis_->peak_step)
-                                : frames * 0.5;
-        budget_from_ = static_cast<std::uint64_t>(std::clamp(std::min(peak - 15.0, frames - 40.0), 0.0, frames));
-        budget_limit_ = std::async(std::launch::async, [page = document_, options = asked.options] {
-            return density_limit(page, options);
-        });
-        budget_phase_ = BudgetPhase::Limiting;
-        budget_view_ = BudgetView{true, "Getting ready", false};
-    }
-
-    void cancel_budget(std::string words) {
-        if (budget_phase_ == BudgetPhase::Idle) {
-            return;
-        }
-        if (meter_) {
-            meter_->cancel();
-        }
-        budget_run_.reset();
-        budget_phase_ = BudgetPhase::Idle;
-        budget_view_ = BudgetView{false, std::move(words), false};
-    }
-
-    void budget_step() {
-        if (budget_phase_ == BudgetPhase::Idle) {
-            return;
-        }
-        // Measured against the page as it was: an edit makes it moot.
-        if (changes_.value() != budget_for_) {
-            cancel_budget("Stopped: the page changed");
-            return;
-        }
-        if (budget_phase_ == BudgetPhase::Limiting) {
-            if (budget_limit_.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
-                return;
-            }
-            budget_run_.emplace(document_, budget_options_, budget_limit_.get(), budget_down_);
-            if (budget_run_->done()) {
-                finish_budget();
-                return;
-            }
-            meter_->measure(nullptr, budget_from_, path_.parent_path());
-            budget_phase_ = BudgetPhase::Stage;
-            budget_view_.status = "Measuring";
-            return;
-        }
-        if (budget_look_.width == 0U) {
-            return;
-        }
-        meter_->frame(window_.device(), budget_look_);
-        const std::optional<BudgetMeasure> measured = meter_->take();
-        if (!measured) {
-            return;
-        }
-        if (report_budget_) {
-            std::cout << (budget_phase_ == BudgetPhase::Stage
-                              ? std::string{"stage"}
-                              : "factor " + std::to_string(budget_run_->next().value_or(1.0)))
-                      << ": " << measured->ms << " ms a frame" << (measured->issue.empty() ? "" : ", ")
-                      << measured->issue << std::endl;
-        }
-        if (budget_phase_ == BudgetPhase::Stage) {
-            if (!std::isfinite(measured->ms)) {
-                cancel_budget(measured->issue);
-                return;
-            }
-            budget_stage_ms_ = measured->ms;
-            budget_phase_ = BudgetPhase::Probing;
-        } else {
-            // What the page adds to the stage alone.
-            if (!measured->issue.empty()) {
-                budget_issue_ = measured->issue;
-            }
-            budget_run_->report(std::isfinite(measured->ms) ? std::max(measured->ms - budget_stage_ms_, 0.0)
-                                                             : std::numeric_limits<double>::infinity());
-            if (budget_run_->done()) {
-                finish_budget();
-                return;
-            }
-        }
-        const std::optional<double> factor = budget_run_->next();
-        const Document probe = budget_run_->page_at(factor.value_or(1.0));
-        meter_->measure(&probe, budget_from_, path_.parent_path());
-        budget_view_.status = budget_run_->progress();
-    }
-
-    // The run is done: its page goes in as one edit, and the row says what
-    // it came to.
-    void finish_budget() {
-        BudgetOutcome outcome = budget_run_->outcome();
-        std::string words = outcome.words;
-        if (!std::isfinite(outcome.ms) && !budget_issue_.empty()) {
-            words = "Over: " + budget_issue_;
-        }
-        if (outcome.page) {
-            document_ = std::move(*outcome.page);
-        }
-        if (report_budget_) {
-            std::cout << "budget: " << words << std::endl;
-        }
-        budget_view_ = BudgetView{false, std::move(words), outcome.stop == BudgetStop::Over};
-        budget_run_.reset();
-        budget_phase_ = BudgetPhase::Idle;
-    }
-
     // ------------------------------------------------------- preview
 
     Bounds frame_selection_bounds() const {
-        if (!document_.scene) { return analysis_ ? analysis_->bounds : Bounds{}; }
         Bounds bounds;
         for (const SceneItem& item : document_.scene->items) {
             if (!scene_view_.selection().empty() && std::find(scene_view_.selection().begin(), scene_view_.selection().end(), item.uid) == scene_view_.selection().end()) { continue; }
@@ -1259,26 +966,21 @@ private:
         }
         // Guides, handles and paths over the picture. Their handles take a
         // press before the camera does.
-        const Uid working = document_.scene ? scene_view_.selected() : page_.working_layer(document_);
-        if (document_.scene && scene_guides_for_ != changes_.value()) {
+        const Uid working = scene_view_.selected();
+        if (scene_guides_for_ != changes_.value()) {
             scene_guides_ = lower_scene(document_);
             scene_guides_for_ = changes_.value();
         }
-        Document& guide_document = document_.scene ? scene_guides_ : document_;
-        const SceneItem* selected_item = document_.scene ? document_.scene->item(working) : nullptr;
-        const Uid scene_focus = selected_item && std::holds_alternative<Object>(selected_item->data) ? working + 2U : working + 7U;
-        GuideOptions guide_options{.focus = document_.scene ? scene_focus : page_.focus(),
+        GuideOptions guide_options{.focus = handle_block(document_, working),
                                    .layer = working,
                                    .seconds = static_cast<float>(frame_ / 60.0),
                                    .outlines = &outlines_};
         if (analysis_ && analysis_->bounds.valid) {
             guide_options.bounds = std::pair{analysis_->bounds.minimum, analysis_->bounds.maximum};
         }
-        const GuideSet guides = build_guides(guide_document, guide_options);
-        const Block* selected_block = document_.scene ? guide_document.block(scene_focus) : nullptr;
-        const Value old_position = selected_block ? get(*selected_block, selected_block->kind == BlockKind::Object ? "at" : "offset") : Value{};
-        const Value old_size = selected_block ? get(*selected_block, "size") : Value{};
-        overlay_.draw(ctx_, view, orbit_, guide_document,
+        // The handles drag the lowered copy; the item takes back what moved.
+        const GuideSet guides = build_guides(scene_guides_, guide_options);
+        overlay_.draw(ctx_, view, orbit_, scene_guides_,
                       OverlayInputs{.guides = &guides,
                                     .analysis = analysis_ ? &*analysis_ : nullptr,
                                     .show_guides = show_guides_,
@@ -1286,22 +988,11 @@ private:
                                     .show_paths = show_paths_,
                                     .layer = working,
                                     .frame = frame_});
-        if (document_.scene && selected_block) {
-            SceneItem* item = document_.scene->item(working);
-            const Value position = get(*selected_block, selected_block->kind == BlockKind::Object ? "at" : "offset");
-            const Value size = get(*selected_block, "size");
-            if (auto* object = item ? std::get_if<Object>(&item->data) : nullptr) {
-                if (position != old_position) { object->position = Vec3{position.x, position.y, position.z}; }
-                if (size != old_size) { object->size = size.x; }
-            } else if (auto* system = item ? std::get_if<ParticleSystem>(&item->data) : nullptr) {
-                if (position != old_position) { system->position = Vec3{position.x, position.y, position.z}; }
-                if (size != old_size) { system->radius = size.y; }
-            }
-        }
+        static_cast<void>(adopt_handle_edit(document_, scene_guides_, working));
         ctx_.draw_list().add_corner_mask(view.x, view.y, view.width, view.height, theme.radius, theme.panel);
 
         // What the picture is, and anything holding it.
-        std::string note = document_.scene ? "Initial setup" : "Media server renderer";
+        std::string note = "Initial setup";
         gui::UiColor note_tone = theme.text_muted;
         if (!preview_error_.empty()) {
             note = preview_error_;
@@ -1325,25 +1016,25 @@ private:
             note = "Tracing particle paths";
             note_tone = theme.caution;
         } else if (show_paths_ && working == 0U) {
-            note = "Open a block to see paths";
+            note = "Select an item to see its paths";
             note_tone = theme.caution;
         } else if (show_paths_) {
             const auto count = static_cast<std::size_t>(
                 std::count_if(analysis_->paths.begin(), analysis_->paths.end(),
                               [&](const ParticlePath& path) { return path.layer == working; }));
-            const Layer* layer = document_.layer(working);
+            const SceneItem* item = document_.scene->item(working);
             note = "Paths of " + thousands(count) + " particles" +
-                   (layer != nullptr && !layer->name.empty() ? " in " + layer->name : std::string{});
+                   (item != nullptr && !item->name.empty() ? " in " + item->name : std::string{});
         }
         const float note_w = std::min(ctx_.font_width(note) + 24.0F, view.width - 100.0F);
         const gui::Rect note_rect{view.x + 10.0F, view.y + 10.0F, note_w, 24.0F};
         ctx_.rounded(note_rect, gui::fade(theme.background, 0.7F), note_rect.height * 0.5F);
         ctx_.label(gui::Rect{note_rect.x + 12.0F, note_rect.y, note_rect.width - 16.0F, note_rect.height}, note, note_tone);
-        ctx_.tooltip(note_rect, document_.scene ? "Motion edits pause and restart from the initial setup. Color edits preserve motion caches. Preview is simulating; cache playback is not connected yet." : "Drawn by the media server's renderer.");
+        ctx_.tooltip(note_rect, "Motion edits pause and restart from the initial setup. Color edits preserve motion caches. Preview is simulating; cache playback is not connected yet.");
 
         // View tools, top right.
         const gui::Rect frame_button{view.right() - 38.0F, view.y + 8.0F, 30.0F, 30.0F};
-        if (editor::icon_button(ctx_, gui::ui_id("studio.frame"), frame_button, gui::Icon::Fit, "Frame the effect (F)")) {
+        if (editor::icon_button(ctx_, gui::ui_id("studio.frame"), frame_button, gui::Icon::Fit, "Frame the selection, or the scene (F)")) {
             orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
         }
         const gui::Rect figure_button{frame_button.x - 34.0F, frame_button.y, 30.0F, 30.0F};
@@ -1360,8 +1051,8 @@ private:
         }
         const gui::Rect handles_button{paths_button.x - 34.0F, frame_button.y, 30.0F, 30.0F};
         if (editor::icon_button(ctx_, gui::ui_id("studio.handles"), handles_button, gui::Icon::Gizmo,
-                                show_handles_ ? "Hide the handles that drag the block you work on (H)"
-                                              : "Show handles to drag the block you work on (H)",
+                                show_handles_ ? "Hide the handles that drag the selected item (H)"
+                                              : "Show handles to drag the selected item (H)",
                                 show_handles_)) {
             show_handles_ = !show_handles_;
         }
@@ -1371,9 +1062,6 @@ private:
                                 show_guides_)) {
             show_guides_ = !show_guides_;
         }
-        // The sandbox tools down the left, under the note. The die deals the
-        // layer being worked on, or the whole page, another seed.
-        if (!document_.scene) { static_cast<void>(sandbox_.draw_strip(ctx_, view.x + 10.0F, view.y + 44.0F, document_, working)); }
         // After the tools over the picture: the first control a press lands
         // on takes it, and the camera covers the whole view.
         camera_input(view);
@@ -1403,8 +1091,8 @@ private:
             orbit_.pitch = std::clamp(orbit_.pitch + ctx_.pointer_dy() / 700.0F, -0.02F, 0.24F);
             want_frame_ = false;
         }
-        sandbox_click(view, hit);
-        if (hit.clicked && sandbox_.tool() == SandboxTool::Select && clicks_.double_click(1U, ctx_.time_seconds())) {
+        pick_click(view, hit);
+        if (hit.clicked && clicks_.double_click(1U, ctx_.time_seconds())) {
             orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
         }
         if (over || panning_ || dollying_) {
@@ -1443,46 +1131,19 @@ private:
         }
     }
 
-    // A click in the preview with the sandbox tool that is on: a solid thing
-    // picked, or an event written into the page at the playhead, against
-    // where the solid things stand now (the analysis's samples).
-    void sandbox_click(const gui::Rect& view, const gui::Interaction& hit) {
+    // A click in the preview selects the solid thing under it, where the
+    // analysis's samples have it at the playhead; Ctrl adds to the selection.
+    void pick_click(const gui::Rect& view, const gui::Interaction& hit) {
         const StageBodies* standing =
             analysis_ ? stage_bodies_at(analysis_->bodies, static_cast<std::uint64_t>(frame_)) : nullptr;
-        if (document_.scene) {
-            if (hit.clicked && standing) {
-                const StageCamera camera{camera_pose(orbit_), view};
-                Vec3 origin{}, direction{};
-                camera.ray(ctx_.pointer_x(), ctx_.pointer_y(), origin, direction);
-                if (const auto picked = pick_stage(standing->bodies, origin, direction, 0.0F); picked && picked->on_body) {
-                    scene_view_.select(picked->layer, ctx_.ctrl_held());
-                }
-            }
+        if (!hit.clicked || standing == nullptr) {
             return;
         }
-        SandboxScene scene;
-        if (standing != nullptr) {
-            scene.bodies = std::span<const StageBody>{standing->bodies};
-        }
-        scene.floor = stage_floor(document_);
-        // The show frame the playhead is on, which is the step the event
-        // happens in.
-        scene.seconds = static_cast<float>(std::floor(frame_) / 60.0);
-        scene.layer = page_.target_layer(document_);
-        scene.selected = page_.focus();
         const StageCamera camera{camera_pose(orbit_), view};
-        const std::optional<SandboxResult> result = sandbox_.use_click(ctx_, hit, camera, document_, scene);
-        if (!result) {
-            return;
-        }
-        if (result->block != 0U) {
-            page_.select_block(document_, result->block);
-        } else if (result->layer != 0U) {
-            page_.select_layer(result->layer);
-        }
-        if (result->tool != SandboxTool::Select) {
-            // Seen at once: paused where it was placed.
-            playing_ = false;
+        Vec3 origin{}, direction{};
+        camera.ray(ctx_.pointer_x(), ctx_.pointer_y(), origin, direction);
+        if (const auto picked = pick_stage(standing->bodies, origin, direction, 0.0F); picked && picked->on_body) {
+            scene_view_.select(picked->layer, ctx_.ctrl_held());
         }
     }
 
@@ -1518,34 +1179,13 @@ private:
         frame.backdrop = document_.backdrop;
         frame.glow = document_.glow;
         frame.figure = figure_;
-        frame.staging_floor = !document_.scene;
+        frame.staging_floor = false;
         frame.orbit = orbit_;
         frame.package = has_package_ ? builder_.preview_path().string() : std::string{};
         frame.package_generation = package_generation_;
         frame.frame = static_cast<std::uint64_t>(frame_);
         frame.revision = package_generation_;
         frame.paused = !playing_;
-        // Keys sorted, as a placement keeps them: "name.component".
-        for (const auto& [name, value] : page_.preview_values()) {
-            for (const ParameterDesc& parameter : compiled_.effect ? compiled_.effect->parameters : std::vector<ParameterDesc>{}) {
-                if (parameter.name != name) {
-                    continue;
-                }
-                const std::size_t components = parameter.type == ParameterType::Float ? 1U
-                                               : parameter.type == ParameterType::Vec3 ? 3U
-                                                                                        : 4U;
-                for (std::size_t i = 0U; i < components; ++i) {
-                    mediaserver::scene::ParticleParameter entry;
-                    entry.key = name + "." + std::to_string(i);
-                    entry.base = value[i];
-                    frame.parameters.push_back(std::move(entry));
-                }
-            }
-        }
-        std::sort(frame.parameters.begin(), frame.parameters.end(),
-                  [](const auto& a, const auto& b) { return a.key < b.key; });
-        // The budget's meter draws at this size, from this camera.
-        budget_look_ = frame;
         auto acquired = device.acquire_commands();
         if (!acquired) {
             return last_picture_;
@@ -1585,7 +1225,6 @@ private:
                                  format_number(static_cast<float>(frames / 60.0), 1) + " s";
         const float time_w = 96.0F;
         const gui::Rect track{bar.x + 150.0F, bar.center_y() - 10.0F, std::max(bar.width - 150.0F - time_w - 12.0F, 20.0F), 20.0F};
-        draw_events(track, frames);
         const gui::Interaction hit = ctx_.grab(gui::ui_id("studio.scrub"), track.inflated(0.0F, 6.0F));
         ctx_.cursor_for(hit, gui::Cursor::ResizeHorizontal);
         ctx_.rounded(gui::Rect{track.x, track.center_y() - 3.0F, track.width, 6.0F}, theme.track, 3.0F);
@@ -1597,7 +1236,7 @@ private:
             ctx_.panel(gui::Rect{tx, track.center_y() + 5.0F, 1.0F, 5.0F}, theme.text_muted);
         }
         // What the cache holds: a band over the steps it covers, green while
-        // it holds the baked layers as they are, amber once it is stale.
+        // it holds the scene as it is, amber once it is stale.
         if (bake_status_.any_baked && bake_status_.cached_frames > 0U) {
             const float covered =
                 std::clamp(static_cast<float>(static_cast<double>(bake_status_.cached_frames) / frames), 0.0F, 1.0F);
@@ -1617,35 +1256,6 @@ private:
         ctx_.label(gui::Rect{track.right() + 12.0F, bar.y, time_w, bar.height}, time, theme.text_muted);
     }
 
-    // The page's events over the scrub bar, a diamond each where it happens:
-    // explosions, pushes and things that appear. A click opens its block and
-    // takes the playhead there. Taken before the scrub bar, so a press on one
-    // is its own.
-    void draw_events(const gui::Rect& track, double frames) {
-        if (events_for_ != changes_.value() || events_dirty_) {
-            events_ = page_events(document_);
-            events_for_ = changes_.value();
-            events_dirty_ = false;
-        }
-        const gui::Theme& theme = ctx_.theme();
-        for (const PageEvent& event : events_) {
-            const float u = std::clamp(static_cast<float>(static_cast<double>(event.seconds) * 60.0 / frames), 0.0F, 1.0F);
-            const gui::UiPoint at{track.x + track.width * u, track.y - 6.0F};
-            const gui::Rect hit_rect{at.x - 6.0F, at.y - 6.0F, 12.0F, 12.0F};
-            const gui::Interaction hit = ctx_.grab(part_id(event.block, "studio.event"), hit_rect);
-            ctx_.cursor_for(hit, gui::Cursor::Hand);
-            const float lit = ctx_.ease(part_id(event.block, "studio.event.hover"),
-                                        hit.hovered || page_.focus() == event.block ? 1.0F : 0.0F);
-            gui::add_diamond(ctx_.draw_list(), at, 4.0F + lit, gui::blend(theme.text_muted, theme.accent, lit));
-            ctx_.tooltip(hit_rect, event.label);
-            if (hit.clicked) {
-                page_.select_block(document_, event.block);
-                frame_ = std::min(static_cast<double>(event.seconds) * 60.0, frames - 1.0);
-                playing_ = false;
-            }
-        }
-    }
-
     struct Flight final {
         rhi::SubmittedWork work;
     };
@@ -1659,7 +1269,6 @@ private:
     PackageBuilder builder_;
     std::unique_ptr<Preview> preview_;
     std::string preview_error_;
-    PageView page_;
     SceneView scene_view_;
     float scene_tree_split_{0.19F};
     float scene_inspector_split_{0.66F};
@@ -1668,12 +1277,6 @@ private:
     Document scene_motion_;
     std::uint64_t scene_motion_for_{};
     StageOverlay overlay_;
-    SandboxTools sandbox_;
-    // The page's events the transport marks, and the page they were read from.
-    std::vector<PageEvent> events_;
-    std::uint64_t events_for_{0U};
-    bool events_dirty_{true};
-    Palette palette_;
     SessionState session_;
     bool show_guides_{true};
     bool show_handles_{true};
@@ -1681,7 +1284,6 @@ private:
     std::string asset_issue_;
     std::map<std::string, std::vector<Vec3>, std::less<>> outlines_;
     std::uint32_t settled_frames_{0U};
-    PopoverList gallery_;
     editor::ClickTracker clicks_;
 
     Document document_;
@@ -1703,10 +1305,6 @@ private:
     // What `compiled_` came to, kept with it.
     float natural_loop_{2.0F};
     std::uint64_t compiled_serial_{0U};
-    // The coach's notes, and what they were worked out from: the page, its
-    // compile and its bake status.
-    std::vector<Advice> advice_;
-    std::array<std::uint64_t, 3> advice_key_{};
     std::vector<Document> history_;
     std::size_t history_index_{0U};
     std::filesystem::path path_;
@@ -1748,39 +1346,12 @@ private:
     bool panning_{false};
     bool dollying_{false};
     bool figure_{true};
-    bool expert_{false};
-    float split_{0.46F};
     std::array<Flight, 2> flights_{};
     const rhi::Texture* last_picture_{nullptr};
     double gpu_ms_{0.0};
-    // "Maximize budget": its meter (a second preview, made when first
-    // asked), where a run is, and what the page's budget row shows.
-    enum class BudgetPhase : std::uint8_t {
-        Idle,
-        Limiting, // working out how far the page may scale, off this thread
-        Stage,    // measuring the stage alone
-        Probing,  // measuring the page at the factors the search asks for
-    };
-    std::unique_ptr<BudgetMeter> meter_;
-    BudgetPhase budget_phase_{BudgetPhase::Idle};
-    std::future<DensityLimit> budget_limit_;
-    std::optional<BudgetRun> budget_run_;
-    DensityOptions budget_options_;
-    bool budget_down_{false};
-    std::uint64_t budget_for_{0U};
-    std::uint64_t budget_from_{0U};
-    double budget_stage_ms_{0.0};
-    std::string budget_issue_;
-    PreviewFrame budget_look_;
-    BudgetView budget_view_;
-    // --maximize: press it once the effect is up, and say what was measured.
-    bool maximize_at_start_{false};
-    bool report_budget_{false};
     Toast toast_;
-    bool open_picker_{false};
     bool night_{false};
     double lose_device_at_{-1.0};
-    std::uint64_t frames_{0U};
 };
 
 } // namespace

@@ -245,26 +245,6 @@ void make_cuts(Compiled& compiled, std::string& issue);
 // The texture, mesh and field entries a package of the compiled effect needs.
 [[nodiscard]] std::vector<PackageEntry> asset_entries(const Compiled& compiled);
 
-// The Module blocks a block compiles to, for "Detach": its own modules with
-// fresh uids. Empty for a block that has none or is not detachable. Each
-// carries the block it came from (Block::detached), so it can be recombined.
-[[nodiscard]] std::vector<Block> detach_block(Document& document, const Compiled& compiled, Uid block);
-
-// What a Module block was detached from, for recombining it.
-struct DetachedGroup final {
-    Uid from{};
-    std::string title;
-    // Module blocks of the detach still in the layer.
-    std::size_t modules{0U};
-    // Some were edited or deleted since: recombining puts back the block as
-    // it was, dropping those edits.
-    bool changed{false};
-};
-[[nodiscard]] std::optional<DetachedGroup> detached_group(const Document& document, Uid block);
-// Replaces every Module block detached with `block` by the block they came
-// from, where the first of them stands. Returns the block's uid.
-std::optional<Uid> recombine_block(Document& document, Uid block);
-
 // The seconds the effect takes to play out, from its emitters: a burst
 // until its last particle dies, a stream long enough to build up and show a
 // whole generation at its full. At least a second, at most two minutes.

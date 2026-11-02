@@ -225,12 +225,6 @@ void published_controls_become_parameters_with_budgets_for_their_range() {
     smoke.enabled = false;
     compiled = compile(document, Purpose::Export);
     CHECK(parameter_of(compiled, "smoke_drag") == nullptr);
-
-    // Detached, a published control keeps its value and names nothing.
-    std::vector<Block> raw = detach_block(document, compiled, block_of(flames, "color").uid);
-    const auto* init = std::get_if<ajfx::InitModule>(&*raw.front().raw);
-    CHECK(init != nullptr && !std::get<ajfx::InitColor>(*init).a.bound());
-    CHECK(near(std::get<ajfx::InitColor>(*init).a.value.r, 5.0F));
 }
 
 void ranges_give_each_particle_its_own_value() {
@@ -283,18 +277,6 @@ void ranges_give_each_particle_its_own_value() {
     const Compiled published = compile(document, Purpose::Export);
     const auto* bound = find_module<ajfx::Drag>(emitter_of(published, flames));
     CHECK(bound->scale_min.parameter == "flames_drag_min" && bound->scale_max.parameter == "flames_drag_max");
-
-    // Pages saved while these were single numbers read them sensibly: a
-    // strength as both ends, a spread as the cone's edge from 0.
-    const Loaded old = load_document(
-        R"({"format": "ajfx-studio", "version": 1, "layers": [{"uid": 1, "name": "A", "blocks": [)"
-        R"({"uid": 2, "kind": "gravity", "values": {"strength": 0.75}},)"
-        R"({"uid": 3, "kind": "launch", "values": {"spread": 35}},)"
-        R"({"uid": 4, "kind": "shape", "values": {"size": 0.4}}]}]})");
-    CHECK(old.error.empty());
-    CHECK(get(old.document->layers[0].blocks[0], "strength") == range(0.75F, 0.75F));
-    CHECK(get(old.document->layers[0].blocks[1], "spread") == range(0.0F, 35.0F));
-    CHECK(get(old.document->layers[0].blocks[2], "size") == range(0.4F, 0.4F));
 }
 
 void seeds_deal_new_values_to_their_block_alone() {
@@ -328,7 +310,7 @@ void seeds_deal_new_values_to_their_block_alone() {
           find_module<ajfx::CurlNoise>(emitter_of(before, flames))->seed);
     block_of(flames, "turbulence").clear("seed");
 
-    // A layer's seed reseeds its emitter and nothing else; it saves.
+    // A layer's seed reseeds its emitter and nothing else.
     flames.seed = 12U;
     const Compiled reseeded = compile(document, Purpose::Export);
     CHECK(emitter_of(reseeded, flames).seed != emitter_of(before, flames).seed);
@@ -336,9 +318,6 @@ void seeds_deal_new_values_to_their_block_alone() {
     restored.seed = emitter_of(before, flames).seed;
     CHECK(restored == emitter_of(before, flames));
     CHECK(emitter_of(reseeded, layer_named(document, "Embers")) == emitter_of(before, layer_named(document, "Embers")));
-    const Loaded loaded = load_document(save_document(document));
-    Document reloaded = *loaded.document;
-    CHECK(layer_named(reloaded, "Flames").seed == 12U);
 
     // Every block that deals random values offers a seed under More settings.
     for (const char* kind : {"shape", "launch", "gravity", "rise", "wind", "turbulence", "drag", "swirl", "draw_in",
@@ -504,10 +483,6 @@ void own_pictures_and_models_go_into_the_package() {
     const Compiled waiting = compile(document, Purpose::Export);
     CHECK(waiting.error.empty() && waiting.requests.empty());
     CHECK(emitter_of(waiting, layer_named(document, "Debris")).renderer.mesh == "slab");
-    // Saved and loaded, the files stay picked.
-    look.set("texture_file", choice("C:/art/puff.png"));
-    const Loaded loaded = load_document(save_document(document));
-    CHECK(loaded.document && *loaded.document == document);
 }
 
 void model_colliders_bake_to_distance_fields() {

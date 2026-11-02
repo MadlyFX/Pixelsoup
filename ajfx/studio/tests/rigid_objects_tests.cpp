@@ -209,29 +209,9 @@ void a_prop_takes_default_physics_and_names_what_it_cannot_be() {
     const Compiled plain = compile(document, Purpose::Preview);
     CHECK(plain.error.empty() && plain.effect.has_value());
     CHECK(find_module<ajfx::RigidPhysics>(plain.effect->emitters[0])->props[0].shape == ajfx::PropShape::Box);
-    // Asked for a model of its own and given none, the coach asks for one.
-    document.layers[0].blocks[0].set("model", choice("file"));
-    const Compiled wanting = compile(document, Purpose::Preview);
-    const std::vector<Advice> notes = advise(document, wanting);
-    CHECK(std::any_of(notes.begin(), notes.end(), [&](const Advice& a) {
-        return a.block == prop && a.message.find("Pick a model") != std::string::npos;
-    }));
 
-    // A prop that moves cannot collide as its own shape, whichever way it
-    // moves: a collision mesh can only stand still. The coach says so on the
-    // block and its fix is a shape that can move.
     document.layers[0].blocks[0].set("model", choice("file"));
     document.layers[0].blocks[0].set("model_file", choice("bucket.glb"));
-    // Driven, it cannot collide as its own shape: a collision mesh has no
-    // inside for the engine to move. The coach says so on the block, and
-    // its fix is a shape that can move.
-    document.layers[0].blocks[0].set("motion", choice("driven"));
-    const Compiled moving = compile(document, Purpose::Preview);
-    const std::vector<Advice> notes_for = advise(document, moving);
-    CHECK(std::any_of(notes_for.begin(), notes_for.end(), [&](const Advice& a) {
-        return a.block == prop && a.level == AdviceLevel::Error && a.fix &&
-               a.message.find("cannot collide as its own shape") != std::string::npos;
-    }));
 
     // Knocked about, it is one of the layer's own bodies and collides as
     // its model's hull, which is what Object made possible: it needs no
@@ -249,16 +229,11 @@ void a_prop_takes_default_physics_and_names_what_it_cannot_be() {
     CHECK(find_module<ajfx::RigidPhysics>(standing.effect->emitters[0])->props[0].shape ==
           ajfx::PropShape::Mesh);
 
-    // And a driven one mended by the coach's fix is a hollow bucket that
-    // the pieces can sit inside.
+    // Driven, it cannot collide as its own shape: a collision mesh has no
+    // inside for the engine to move. As a hollow crate the pieces can sit
+    // inside it.
     document.layers[0].blocks[0].set("motion", choice("driven"));
-    const Compiled loose = compile(document, Purpose::Preview);
-    std::vector<Advice> refused = advise(document, loose);
-    const auto hollow = std::find_if(refused.begin(), refused.end(), [&](const Advice& a) {
-        return a.block == prop && a.level == AdviceLevel::Error && a.fix;
-    });
-    CHECK(hollow != refused.end());
-    hollow->fix(document);
+    document.layers[0].blocks[0].set("collides", choice("crate"));
     const Compiled fixed = compile(document, Purpose::Preview);
     CHECK(fixed.error.empty());
     const auto* mended = find_module<ajfx::RigidPhysics>(fixed.effect->emitters[0]);
@@ -315,8 +290,7 @@ void an_object_draws_its_model_without_being_asked() {
 
 // A layer draws every piece one way. A Stream with no Appearance is slabs,
 // not the soft dots a particle layer would be; and an object in a glowing
-// layer is a glowing dot, which the coach says where the choice is, once,
-// with a fix that draws the layer as models.
+// layer is a glowing dot until the layer draws models.
 void a_rigid_layer_says_how_it_draws_its_pieces() {
     Document pour;
     Layer pieces = make_layer(pour, LayerKind::Rigid, "Pour");
@@ -324,12 +298,7 @@ void a_rigid_layer_says_how_it_draws_its_pieces() {
     pour.layers.push_back(std::move(pieces));
     Compiled compiled = compile(pour, Purpose::Preview);
     CHECK(compiled.error.empty() && compiled.effect.has_value());
-    // A look is offered as a next step, not said as a note, and it is slabs
-    // that are drawn until it is taken.
-    std::vector<Advice> notes = advise(pour, compiled);
-    CHECK(notes.empty());
-    const std::vector<Suggestion> steps = next_steps(pour, pour.layers[0]);
-    CHECK(std::any_of(steps.begin(), steps.end(), [](const Suggestion& step) { return step.title == "Look"; }));
+    // Slabs are drawn until a look is chosen.
     CHECK(compiled.effect->emitters[0].renderer.mesh == "slab");
 
     Document document;
@@ -348,20 +317,12 @@ void a_rigid_layer_says_how_it_draws_its_pieces() {
     compiled = compile(document, Purpose::Preview);
     CHECK(compiled.error.empty() && compiled.effect.has_value());
     CHECK(compiled.effect->emitters[0].renderer.geometry == ajfx::Geometry::Sprites);
-    notes = advise(document, compiled);
-    // Once, however many objects the layer holds, and on the first of them.
-    const auto glowing = [&](const Advice& note) { return note.message.find("a glowing dot") != std::string::npos; };
-    CHECK(std::count_if(notes.begin(), notes.end(), glowing) == 1);
-    const auto note = std::find_if(notes.begin(), notes.end(), glowing);
-    CHECK(note->block == sparks.blocks[1].uid && note->fix_label == "Draw as models" && note->fix);
-
-    // Its fix draws the layer as models, and then the coach has nothing to say.
-    note->fix(document);
+    // Drawn as models instead.
+    block_of(sparks, "appearance").set("material", choice("model"));
     CHECK(choice_of(block_of(sparks, "appearance"), "material") == "model");
     compiled = compile(document, Purpose::Preview);
     CHECK(compiled.error.empty() && compiled.effect.has_value());
     CHECK(compiled.effect->emitters[0].renderer.geometry == ajfx::Geometry::Mesh);
-    CHECK(!said(advise(document, compiled), "a glowing dot"));
 }
 
 // A Stream or Burst in a rigid layer can be a model of its own, so a stream of
@@ -446,17 +407,12 @@ void a_stream_can_be_a_model_of_its_own() {
           compiled.requests[0].path == "C:/art/rubble.glb");
     physics = find_module<ajfx::RigidPhysics>(compiled.effect->emitters[0]);
     CHECK(physics->bodies[0].mesh == compiled.requests[0].entry && physics->bodies[0].draw == compiled.requests[0].entry);
-    // No file picked yet: a cube until there is one, and the coach says so.
+    // No file picked yet: a cube until there is one.
     source.set("model_file", choice(""));
     compiled = compile(document, Purpose::Export);
     CHECK(compiled.error.empty() && compiled.requests.empty());
     physics = find_module<ajfx::RigidPhysics>(compiled.effect->emitters[0]);
     CHECK(physics->bodies[0].mesh == "cube");
-    const std::vector<Advice> notes = advise(document, compiled);
-    const auto asked = std::find_if(notes.begin(), notes.end(), [](const Advice& note) {
-        return note.message.find("Pick a model for this stream") != std::string::npos;
-    });
-    CHECK(asked != notes.end() && asked->block == stream_uid);
 
     // A Burst does the same.
     Document bursting;
@@ -488,8 +444,8 @@ void a_stream_can_be_a_model_of_its_own() {
 
 // A model only shows where the layer draws models. A Stream of rocks in a
 // glowing layer still hits things as rocks, but is drawn as the glow, and the
-// coach says why where the choice is, with the fix.
-void a_models_stream_in_a_glowing_layer_says_why_it_is_a_dot() {
+// layer drawn as models draws them as rocks.
+void a_models_stream_in_a_glowing_layer_is_a_dot() {
     Document document;
     Layer layer = make_layer(document, LayerKind::Rigid, "Sparks");
     std::optional<Block> flow = make_block(document, "stream");
@@ -497,7 +453,6 @@ void a_models_stream_in_a_glowing_layer_says_why_it_is_a_dot() {
     CHECK(flow.has_value() && look.has_value());
     flow->set("model", choice("rock"));
     look->set("material", choice("glow"));
-    const Uid flow_uid = flow->uid;
     insert_block(layer, 0U, std::move(*flow));
     insert_block(layer, 1U, std::move(*look));
     document.layers.push_back(std::move(layer));
@@ -509,17 +464,15 @@ void a_models_stream_in_a_glowing_layer_says_why_it_is_a_dot() {
     CHECK(physics != nullptr && physics->bodies.size() == 1U);
     CHECK(physics->bodies[0].mesh == "rock" && physics->bodies[0].draw.empty());
 
-    const std::vector<Advice> notes = advise(document, compiled);
-    const auto glowing = [](const Advice& note) { return note.message.find("a glowing dot") != std::string::npos; };
-    CHECK(std::count_if(notes.begin(), notes.end(), glowing) == 1);
-    const auto note = std::find_if(notes.begin(), notes.end(), glowing);
-    CHECK(note->block == flow_uid && note->fix_label == "Draw as models" && note->fix);
-    note->fix(document);
+    for (Block& block : document.layers[0].blocks) {
+        if (block.kind == BlockKind::Appearance) {
+            block.set("material", choice("model"));
+        }
+    }
     compiled = compile(document, Purpose::Export);
     CHECK(compiled.error.empty() && compiled.effect.has_value());
     CHECK(compiled.effect->emitters[0].renderer.geometry == ajfx::Geometry::Mesh);
     CHECK(find_module<ajfx::RigidPhysics>(compiled.effect->emitters[0])->bodies[0].draw == "rock");
-    CHECK(!said(advise(document, compiled), "a glowing dot"));
 }
 
 // A thing that stands there, or is moved, is a prop in the physics world, and
@@ -661,7 +614,7 @@ void add_rigid_objects_tests(std::vector<studio_test::Case>& cases) {
     cases.push_back({"an_object_draws_its_model_without_being_asked", an_object_draws_its_model_without_being_asked});
     cases.push_back({"a_rigid_layer_says_how_it_draws_its_pieces", a_rigid_layer_says_how_it_draws_its_pieces});
     cases.push_back({"a_stream_can_be_a_model_of_its_own", a_stream_can_be_a_model_of_its_own});
-    cases.push_back({"a_models_stream_in_a_glowing_layer_says_why_it_is_a_dot", a_models_stream_in_a_glowing_layer_says_why_it_is_a_dot});
+    cases.push_back({"a_models_stream_in_a_glowing_layer_is_a_dot", a_models_stream_in_a_glowing_layer_is_a_dot});
     cases.push_back({"a_standing_object_brings_its_model_to_the_package", a_standing_object_brings_its_model_to_the_package});
     cases.push_back({"piles_stand_until_the_effect_plays", piles_stand_until_the_effect_plays});
     cases.push_back({"a_rigid_layer_force_carries_its_strength", a_rigid_layer_force_carries_its_strength});

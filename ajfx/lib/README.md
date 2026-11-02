@@ -51,7 +51,7 @@ modules, a Vulkan backend and volumes are next.
   emitters that step exactly as they would beside the simulated ones (see
   [Caching](#caching)).
 
-The [roadmap](../docs/roadmap.md) has what remains.
+The [remaining work](../next-steps-plan.md) lists what is still to do.
 
 ## Getting started
 

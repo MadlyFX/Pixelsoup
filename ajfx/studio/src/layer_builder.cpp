@@ -847,7 +847,7 @@ private:
     // the units the value is in (page scale for distances).
     // What the control publishes, or null where it publishes nothing: on a
     // baked layer, a bake-time control is held where it is set instead, and
-    // the report says so for the coach.
+    // the report says so.
     const Published* publication(const Block& block, std::string_view control) {
         const Published* published = block.publication(control);
         if (published == nullptr || !layer_.baked || control_timing(block.kind, control) != ParameterTiming::Bake) {

@@ -13,9 +13,20 @@ namespace {
 namespace editor = mediaserver::editor;
 constexpr float row_height = 28.0F;
 
+// Below this an axis field cannot show a value such as "-12.50".
+constexpr float min_axis_width = 76.0F;
+
+// A vector sits beside its label when there is room, under it when not, and
+// one axis to a row when even that leaves its values unreadable.
 float property_height(const ControlDef &control, float width) {
+    if (control.type != ControlType::Vec3) {
+        return row_height;
+    }
     const float field_width = width - std::min(124.0F, width * 0.42F) - 24.0F;
-    return control.type == ControlType::Vec3 && field_width < 228.0F ? 56.0F : row_height;
+    if (field_width >= 228.0F) {
+        return row_height;
+    }
+    return (width - 24.0F - 8.0F) / 3.0F >= min_axis_width ? 2.0F * row_height : 4.0F * row_height + 6.0F;
 }
 
 bool field(editor::NumberField &numbers, gui::UiContext &ctx, Uid owner, const ControlDef &control,
@@ -26,6 +37,7 @@ bool field(editor::NumberField &numbers, gui::UiContext &ctx, Uid owner, const C
     const auto &theme = ctx.theme();
     const float label_w = std::min(124.0F, row.width * 0.42F);
     const bool stacked = control.type == ControlType::Vec3 && row.height > row_height;
+    const bool axis_rows = control.type == ControlType::Vec3 && row.height > 2.0F * row_height;
     const gui::Rect box{stacked ? row.x : row.x + label_w, stacked ? row.y + row_height : row.y,
                         std::max(row.width - (stacked ? 0.0F : label_w) - 24.0F, 20.0F), row_height};
     const gui::Rect reset{row.right() - 20.0F, row.y + 4.0F, 18.0F, 20.0F};
@@ -53,8 +65,10 @@ bool field(editor::NumberField &numbers, gui::UiContext &ctx, Uid owner, const C
         constexpr std::string_view axes[] = {"X", "Y", "Z"};
         for (std::uint32_t k = 0U; k < 3U; ++k) {
             double out = *values[k];
-            if (numbers.draw(ctx, part_id(owner, control.id, k),
-                             gui::Rect{box.x + static_cast<float>(k) * (width + 4.0F), box.y, width, box.height},
+            const gui::Rect axis_box =
+                axis_rows ? gui::Rect{box.x, box.y + static_cast<float>(k) * (row_height + 2.0F), box.width, box.height}
+                          : gui::Rect{box.x + static_cast<float>(k) * (width + 4.0F), box.y, width, box.height};
+            if (numbers.draw(ctx, part_id(owner, control.id, k), axis_box,
                              axes[k], *values[k], 0.01, out, control.decimals, nullptr,
                              mixed && (mixed_axes & (1U << k)) != 0U)) {
                 *values[k] = std::clamp(static_cast<float>(out), control.hard_min, control.hard_max);
@@ -198,12 +212,15 @@ void SceneView::import_models(Document &document) {
 void SceneView::draw_tree(gui::UiContext &ctx, const gui::Rect &bounds, Document &document) {
     const auto &theme = ctx.theme();
     ctx.rounded(bounds, theme.panel, theme.radius_large);
+    // Import keeps its word while both fit; Add, the one most reached for,
+    // always does.
+    const bool roomy = bounds.width >= 190.0F;
     const gui::Rect add{bounds.x + 10, bounds.y + 10, 72, 30};
     if (editor::pill_button(ctx, gui::ui_id("scene.add"), add, gui::Icon::Plus, "Add", "Create an item")) {
         open_add(add.x, add.bottom() + 4);
     }
-    if (editor::pill_button(ctx, gui::ui_id("scene.import"), gui::Rect{add.right() + 6, add.y, 92, 30},
-                            gui::Icon::Import, "Import", "Import models")) {
+    if (editor::pill_button(ctx, gui::ui_id("scene.import"), gui::Rect{add.right() + 6, add.y, roomy ? 92.0F : 34.0F, 30},
+                            gui::Icon::Import, roomy ? "Import" : "", "Import models")) {
         import_models(document);
     }
     const gui::Rect view{bounds.x + 8, bounds.y + 50, bounds.width - 16, bounds.height - 58};
@@ -311,7 +328,8 @@ void SceneView::draw_settings(gui::UiContext &ctx, Document &document, float x, 
     y += 40;
     ctx.label(gui::Rect{x, y, width, 28}, "Fixed step: 60 Hz", ctx.theme().text_muted);
     y += 32;
-    ctx.label(gui::Rect{x, y, width, 28}, std::to_string(document.scene->items.size()) + " scene items",
+    const std::size_t items = document.scene->items.size();
+    ctx.label(gui::Rect{x, y, width, 28}, std::to_string(items) + (items == 1U ? " scene item" : " scene items"),
               ctx.theme().text_muted);
     y += 32;
 }
@@ -420,8 +438,10 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
             ctx.label(gui::Rect{x, y, width, 30}, std::to_string(selection_.size()) + " items selected", theme.text);
         }
         y += 38;
-        if (editor::pill_button(ctx, gui::ui_id("scene.duplicate"), gui::Rect{x, y, 100, 28}, gui::Icon::Plus,
-                                "Duplicate", "Duplicate selection")) {
+        const bool worded = width >= 200.0F;
+        const float duplicate_w = worded ? 100.0F : 34.0F;
+        if (editor::pill_button(ctx, gui::ui_id("scene.duplicate"), gui::Rect{x, y, duplicate_w, 28}, gui::Icon::Plus,
+                                worded ? "Duplicate" : "", "Duplicate selection")) {
             const std::vector<Uid> selected = selection_;
             selection_.clear();
             for (Uid uid : selected) {
@@ -433,8 +453,9 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
             inspector_scroll_.end(ctx, y + offset - view.y + 40);
             return;
         }
-        if (editor::pill_button(ctx, gui::ui_id("scene.delete"), gui::Rect{x + 108, y, 86, 28}, gui::Icon::Trash,
-                                "Delete", "Remove selection", editor::ButtonTone::Danger)) {
+        if (editor::pill_button(ctx, gui::ui_id("scene.delete"),
+                                gui::Rect{x + duplicate_w + 8, y, worded ? 86.0F : 34.0F, 28}, gui::Icon::Trash,
+                                worded ? "Delete" : "", "Remove selection", editor::ButtonTone::Danger)) {
             for (Uid uid : selection_) {
                 remove_item(document, uid);
             }

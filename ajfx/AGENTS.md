@@ -18,10 +18,11 @@ Search with `rg`; the `CMakeLists.txt` files locate tests.
 | D3D12 reference backend and DXC compiler | `lib/backends/d3d12` |
 | Rigid physics: solver interface, Jolt solver, `RigidRunner` | `lib/include/ajfx/rigid*.hpp`, `lib/src/rigid`, `lib/src/rigid_runner.cpp`, `lib/third_party/jolt` |
 | Samples | `lib/examples/viewer`, `lib/examples/player` |
-| Studio core: pages, catalog, compiler, recipes, coach, bake | `studio/src` (`ajfx_studio_core`) |
+| Studio core: scene lowering, block catalog and compiler (layer IR), bake | `studio/src` (`ajfx_studio_core`) |
 | Scene ownership, metadata and persistence | `studio/src/scene.*`, `scene_properties.*`, `scene_io.*` |
 | Scene tree and selected-item inspector | `studio/src/scene_view.*`, `docs/studio-scene-reference.md` |
-| Studio application: window, preview, worker | `studio/src/studio_app.*`, `preview.*`, `package_builder.*`, `page_view.*` |
+| Studio application: window, preview, worker | `studio/src/studio_app.*`, `preview.*`, `package_builder.*`, `stage_overlay.*` |
+| Compiler fixtures (old layer recipes) | `studio/tests/fixtures` |
 
 `lib/` has no dependency outside the C++ standard library, the platform's
 D3D12 and the vendored Jolt. Studio's core depends on `lib/` alone. Only the
@@ -75,4 +76,4 @@ ajfx test) and `area-render` (the media server's particle pass).
 The root's [AGENTS.md](../AGENTS.md) covers that build environment.
 
 Write disposable builds, captures and exported packages
-under `../out/`; keep artists' `.ajfxstudio` pages out of commits.
+under `../out/`; keep artists' `.ajfxstudio` scenes out of commits.

@@ -203,16 +203,12 @@ void half_a_break_is_refused_with_the_missing_half() {
     Compiled compiled = compile(only_break, Purpose::Preview);
     CHECK(compiled.error.empty() && compiled.effect.has_value());
     CHECK(find_module<ajfx::Break>(compiled.effect->emitters[0]) == nullptr);
-    std::vector<Advice> notes = advise(only_break, compiled);
-    CHECK(said(notes, "Nothing to break into"));
 
     // A Part with nothing that breaks is never made.
     Document only_part = page(false, true);
     compiled = compile(only_part, Purpose::Preview);
     CHECK(compiled.error.empty() && compiled.effect.has_value());
     CHECK(find_module<ajfx::Break>(compiled.effect->emitters[0]) == nullptr);
-    notes = advise(only_part, compiled);
-    CHECK(said(notes, "No Break, so this part is never used"));
 
     // Both halves, and the layer breaks.
     Document both = page(true, true);
@@ -228,8 +224,7 @@ void half_a_break_is_refused_with_the_missing_half() {
     CHECK(!physics->bodies[1].draw.empty() && physics->bodies[1].draw == physics->bodies[1].mesh);
 
     // Asked for Glow instead, the layer draws sprites: the part still hits
-    // things as its own shape, is not drawn as its model, and the coach
-    // offers the fix.
+    // things as its own shape, and is not drawn as its model.
     Document glowing = both;
     for (Block& block : glowing.layers[0].blocks) {
         if (block.kind == BlockKind::Appearance) {
@@ -240,7 +235,6 @@ void half_a_break_is_refused_with_the_missing_half() {
     CHECK(sprites.error.empty() && sprites.effect.has_value());
     const auto* flat = find_module<ajfx::RigidPhysics>(sprites.effect->emitters[0]);
     CHECK(flat != nullptr && flat->bodies[1].draw.empty() && !flat->bodies[1].mesh.empty());
-    CHECK(said(advise(glowing, sprites), "Set Appearance to"));
 }
 
 // What the Object block is for. The complaint it answers was that fracturing

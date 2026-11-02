@@ -6,9 +6,10 @@
 #include <string_view>
 #include <vector>
 
-// Starting points. A recipe is a whole effect; a layer preset is one part of
-// one ("Embers", "Smoke") that can be added to any page. Both are ordinary
-// blocks with tuned values, so everything they do can be seen and changed.
+// Compiler fixtures: whole layer pages (recipes) and single layers (layer
+// presets) made of ordinary blocks with tuned values. They were the old page
+// editor's starting points; the tests keep them because between them they
+// reach nearly every block the scene compiler lowers to.
 namespace ajfx::studio {
 
 struct Recipe final {

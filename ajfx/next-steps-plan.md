@@ -5,11 +5,11 @@ The shipped foundation is described in
 criteria in [the design](docs/studio-ui-architecture.md) before treating the
 architecture as delivered.
 
-1. Finish and qualify the ownership slice in the native workflow at common
-   window sizes, themes and display scales. Include file import, color,
-   viewport handles, multi-edit, undo, bake and final export. Then remove the
-   legacy page editor; there are no existing projects to convert, so it needs
-   no importer.
+1. Finish qualifying the ownership slice in the native workflow: drive file
+   import, undo, an explicit bake and final export through the running app at
+   common window sizes. Layout at wide and narrow windows, night dim,
+   interface zoom, multi-edit, colour and handle drags are covered; the page
+   editor is removed.
 2. Add typed force, light and relationship owners, event endpoints and
    dependency diagnostics. Expose supported repeated-instance inspection,
    assemblies and asset/material libraries. Extend object collider/transform

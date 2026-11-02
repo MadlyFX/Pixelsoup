@@ -277,17 +277,14 @@ void standing_solids_stand_in_the_one_world() {
     CHECK(up >= 5U);
 }
 
-// The page's world saves with the page, and a Gravity block is a share of
-// the page's gravity.
-void the_page_world_saves_and_scales_gravity() {
+// A Gravity block is a share of the page's gravity.
+void the_page_world_scales_gravity() {
     Document document = recipe("snow");
     document.world.gravity = 0.5F;
     document.world.wind = 2.0F;
     document.world.wind_heading = 90.0F;
     document.world.ground = false;
-    const Loaded loaded = load_document(save_document(document));
-    CHECK(loaded.document && *loaded.document == document);
-    CHECK(loaded.document->layers[0].what == LayerWhat::Snow);
+    CHECK(document.layers[0].what == LayerWhat::Snow);
 
     // Snow feels a twenty-fifth of it, and the whole of the wind, which blows
     // toward -Z at 90 degrees.
@@ -314,11 +311,6 @@ void the_page_world_saves_and_scales_gravity() {
         }
     }
     CHECK(near(down, -9.81F * 0.5F * 2.0F));
-
-    // A page saved before the page had a world plays in the default one.
-    const Loaded older = load_document(
-        R"({"format":"ajfx-studio","version":1,"layers":[{"uid":1,"name":"A","blocks":[{"uid":2,"kind":"stream"}]}]})");
-    CHECK(older.document && older.document->world == PageWorld{} && older.document->layers[0].what == LayerWhat::Other);
 }
 
 // Every recipe plays in the page's world: compiled and built into a
@@ -387,7 +379,7 @@ void add_world_tests(std::vector<studio_test::Case>& cases) {
     cases.push_back({"sparks_fall_and_bounce_off_the_page_ground", sparks_fall_and_bounce_off_the_page_ground});
     cases.push_back({"dust_comes_to_rest_on_a_solid", dust_comes_to_rest_on_a_solid});
     cases.push_back({"standing_solids_stand_in_the_one_world", standing_solids_stand_in_the_one_world});
-    cases.push_back({"the_page_world_saves_and_scales_gravity", the_page_world_saves_and_scales_gravity});
+    cases.push_back({"the_page_world_scales_gravity", the_page_world_scales_gravity});
     cases.push_back({"every_recipe_plays_in_the_page_world", every_recipe_plays_in_the_page_world});
     cases.push_back({"a_compile_off_the_interface_thread_never_goes_back",
                      a_compile_off_the_interface_thread_never_goes_back});

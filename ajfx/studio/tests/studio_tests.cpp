@@ -11,17 +11,13 @@ void add_stream_object_tests(std::vector<studio_test::Case>& cases);
 void add_catalog_tests(std::vector<studio_test::Case>& cases);
 void add_document_tests(std::vector<studio_test::Case>& cases);
 void add_compile_tests(std::vector<studio_test::Case>& cases);
-void add_detach_tests(std::vector<studio_test::Case>& cases);
 void add_rigid_objects_tests(std::vector<studio_test::Case>& cases);
 void add_rigid_break_tests(std::vector<studio_test::Case>& cases);
-void add_coach_tests(std::vector<studio_test::Case>& cases);
 void add_guides_tests(std::vector<studio_test::Case>& cases);
 void add_bake_tests(std::vector<studio_test::Case>& cases);
 void add_world_tests(std::vector<studio_test::Case>& cases);
-void add_blast_tests(std::vector<studio_test::Case>& cases);
 void add_solid_world_tests(std::vector<studio_test::Case>& cases);
-void add_sandbox_tests(std::vector<studio_test::Case>& cases);
-void add_budget_tests(std::vector<studio_test::Case>& cases);
+void add_stage_pick_tests(std::vector<studio_test::Case>& cases);
 
 #if AJFX_STUDIO_TEST_KERNELS
 bool kernels_compile_for_every_recipe();
@@ -35,17 +31,13 @@ int main() {
     add_catalog_tests(cases);
     add_document_tests(cases);
     add_compile_tests(cases);
-    add_detach_tests(cases);
     add_rigid_objects_tests(cases);
     add_rigid_break_tests(cases);
-    add_coach_tests(cases);
     add_guides_tests(cases);
     add_bake_tests(cases);
     add_world_tests(cases);
-    add_blast_tests(cases);
     add_solid_world_tests(cases);
-    add_sandbox_tests(cases);
-    add_budget_tests(cases);
+    add_stage_pick_tests(cases);
     add_scene_tests(cases);
     int failures = 0;
     for (const studio_test::Case& test : cases) {

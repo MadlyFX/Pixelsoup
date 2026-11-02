@@ -80,26 +80,6 @@ void a_baked_layer_holds_what_its_simulation_reads() {
     CHECK(report->held.size() == 1U);
     CHECK(report->held[0].name == "snow_rate");
     CHECK(report->held[0].block == block_of(snow, "stream").uid);
-    // The coach says so, on the block, with a way back.
-    const std::vector<Advice> advice = advise(document, compiled);
-    const auto note = std::find_if(advice.begin(), advice.end(), [&](const Advice& a) {
-        return a.block == block_of(snow, "stream").uid && a.message.find("baked") != std::string::npos;
-    });
-    CHECK(note != advice.end() && note->fix);
-    note->fix(document);
-    CHECK(!layer_named(document, "Snow").baked);
-    CHECK(parameter_of(compile(document, Purpose::Export), "snow_rate") != nullptr);
-}
-
-void a_page_says_which_layers_are_baked() {
-    Document document = recipe("breaking_crates");
-    layer_named(document, "Crates and a dropped ball").baked = true;
-    const std::string text = save_document(document);
-    CHECK(text.find("\"baked\": true") != std::string::npos || text.find("\"baked\":true") != std::string::npos);
-    Loaded loaded = load_document(text);
-    CHECK(loaded.document.has_value());
-    CHECK(*loaded.document == document);
-    CHECK(!layer_named(*loaded.document, "Snow").baked);
 }
 
 void a_bake_says_what_it_holds_and_when_it_goes_stale() {
@@ -112,10 +92,6 @@ void a_bake_says_what_it_holds_and_when_it_goes_stale() {
     CHECK(status.layer(crates.uid)->state == BakeState::Unbaked);
     CHECK(status.layer(layer_named(document, "Snow").uid)->state == BakeState::Live);
     CHECK(status.cost.bytes > 0U && status.cost.bytes_per_second > 0U && status.cost.seconds < 0.0);
-    const std::vector<Advice> before = advise(document, compile(document, Purpose::Preview), &status);
-    CHECK(std::any_of(before.begin(), before.end(), [&](const Advice& a) {
-        return a.layer == crates.uid && a.message.find("Bake") != std::string::npos;
-    }));
 
     const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
     const Compiled ready = ready_to_bake(document);
@@ -167,10 +143,6 @@ void a_bake_says_what_it_holds_and_when_it_goes_stale() {
     CHECK(stale->block == breaking.uid);
     std::cout << "  stale because " << stale->why << '\n';
     CHECK(stale->why.find("Break") != std::string::npos);
-    const std::vector<Advice> advice = advise(edited, compile(edited, Purpose::Preview), &status);
-    CHECK(std::any_of(advice.begin(), advice.end(), [&](const Advice& a) {
-        return a.layer == crates.uid && a.block == breaking.uid && a.level == AdviceLevel::Warning;
-    }));
     // And so does a cache handed the edited effect.
     const Compiled edited_ready = ready_to_bake(edited);
     CHECK(ajfx::Cache::open(record.bytes, *edited_ready.effect, 5U, {}, edited_ready.meshes, edited_ready.fields)
@@ -205,7 +177,6 @@ void both_kinds_of_layer_bake() {
 void add_bake_tests(std::vector<studio_test::Case>& cases) {
     cases.push_back({"published_controls_say_when_they_take_effect", published_controls_say_when_they_take_effect});
     cases.push_back({"a_baked_layer_holds_what_its_simulation_reads", a_baked_layer_holds_what_its_simulation_reads});
-    cases.push_back({"a_page_says_which_layers_are_baked", a_page_says_which_layers_are_baked});
     cases.push_back({"a_bake_says_what_it_holds_and_when_it_goes_stale", a_bake_says_what_it_holds_and_when_it_goes_stale});
     cases.push_back({"both_kinds_of_layer_bake", both_kinds_of_layer_bake});
 }

@@ -3,7 +3,7 @@
 #include "bake.hpp"
 #include "compile.hpp"
 #include "document.hpp"
-#include "sandbox.hpp"
+#include "stage_pick.hpp"
 
 #include <ajfx/gpu/kernels.hpp>
 #include <ajfx/math.hpp>

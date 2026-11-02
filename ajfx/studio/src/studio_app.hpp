@@ -5,36 +5,23 @@
 #include <string>
 #include <vector>
 
-// ajfx Studio's window: the page on the left, the preview and its transport
-// on the right, and the few actions a whole effect has across the top.
+// ajfx Studio's window: the scene tree on the left, the viewport and its
+// transport in the middle, the inspector on the right, and the few actions a
+// whole scene has across the top.
 namespace ajfx::studio {
 
 struct StudioOptions final {
-    // A page to open at start; empty takes up where Studio was left, or
-    // starts from a recipe.
+    // A scene to open at start; empty takes up where Studio was left, or
+    // starts a new scene.
     std::filesystem::path open;
-    // Take up where Studio was left: the page, its layout, the window and
-    // panels. A page or recipe given at start replaces the page; --fresh
-    // forgets the lot.
+    // Take up where Studio was left: the scene, the window and panels. A
+    // scene given at start replaces it; --fresh forgets the lot.
     bool restore_page{true};
     bool fresh{false};
-    // The recipe to start from when no page is given.
-    std::string recipe;
-    // Starting states, for checking the interface: the expert view, blocks
-    // of one kind open ("all" for every block of the first layer), the
-    // block picker open.
-    bool expert{false};
-    std::string open_blocks;
-    bool picker{false};
     // Start paused this many seconds in; negative plays from the start.
     float at{-1.0F};
     // Play once and stop instead of looping.
     bool once{false};
-    // Press "Maximize budget" once the effect is built and analysed, and
-    // write what each probe measured to the console.
-    bool maximize{false};
-    // Values to try for published parameters ("name=v" or "name=r,g,b,a").
-    std::vector<std::string> tries;
     // The preview's overlays, when given at start: guides and handles, and
     // particle paths. Otherwise they are as they were left.
     std::optional<bool> guides;
