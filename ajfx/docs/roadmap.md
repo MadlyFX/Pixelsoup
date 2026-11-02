@@ -367,21 +367,41 @@ feedback forces could evaluate any frame directly.
      and it is not what a fracture sim does. Measured against two references
      (a Blender Fracturing Tools wall, a concrete pipe struck by a metal
      one), what is missing is:
-     - **Pieces that tile the thing they came from.** A fracture sim cuts
-       the model into cells that fill its volume exactly, so the break keeps
-       the silhouette and the torn edges match. A Part names a model of its
-       own at an offset, so the pieces are near the shape rather than of it.
-       Voronoi cells baked from the model, each a convex hull, would fit
-       everything already here: body kinds, hull collision, a model per
-       kind, and the Break module's list of pieces. Baking is off the frame
-       path, so it may take as long as it needs.
-     - **Cracks that run, rather than a threshold a whole body passes.** In
-       the wall, the middle blows out and both ends stay standing. That is a
-       network of breakable constraints between neighbouring cells, with the
-       pieces still joined moving as one island; ajfx has one threshold a
-       body and replaces all of it at once, so nothing can half break.
-       Jolt has the constraints; the work is the island bookkeeping and
-       keeping constraint breaks in a fixed order for determinism.
+     - **Pieces that tile the thing they came from, done (2026-11-01).**
+       `ajfx::fracture` (`lib/include/ajfx/fracture.hpp`) cuts a model into
+       Voronoi cells that fill it, each a closed convex mesh with its middle
+       and its volume, hashed from a seed and byte-identical for the same
+       model and options. `focus` and `focus_bias` crowd the cells at an
+       impact: 23 cells within a quarter unit against 2, averaging 24 times
+       smaller. It cuts the model's convex hull, not its hollows -- an L
+       beam of volume 0.75 fractures to its hull's 0.875 -- which is the
+       limit a body already has, since one collides as its model's hull.
+       Cutting is baking: a thousand-point model takes a fifth of a second
+       and the hull is almost all of it, growing with the square of the
+       points, so a scan rather than a crate would want quickhull.
+       - **Not yet:** nothing wires the cells to the Break module. A cell
+         is a body kind with its mesh, its draw model and a piece at its
+         middle, so the wiring is the authoring question (who cuts, when,
+         and where the cells live in a package), not a geometry one.
+     - **Cracks that run, done (2026-11-01).** A `Glue` module holds the
+       bodies born together where they touch, each join taking an impulse
+       before it gives way, so a crack runs through the joins rather than a
+       body breaking whole. Measured on a wall of 42 bricks under 67 joins,
+       hit in the middle: all twelve bricks at the ends stay exactly where
+       they were, where unglued only five of twelve do.
+       Two things had to be the engine's rather than ajfx's. Jolt renumbers
+       its constraints as they go and reads a checkpoint back by that
+       numbering, so the join list is taken from the world in the world's
+       order; and Jolt bakes a joint's rest from the world poses at the
+       moment it is made, so a join carries its own rest and the bodies are
+       put somewhere the join alone decides before it is made. Without the
+       second, a seek landed 1.4e-04 from the step it should have.
+       - **Not yet:** glued bodies are held by joints, not welded into one
+         body, so a large network sags a little under its own weight (a
+         wall of 42 settles 0.004) and costs a constraint a join. Islands
+         welded into compound bodies would be stiffer and cheaper, and are
+         what a sim does; they would also need island bookkeeping in the
+         checkpoints.
      - **Debris at several scales.** The references carry big chunks, rubble
        and a carpet of gravel thrown metres out. `max_break_pieces` is 32
        and each piece is one authored model.
