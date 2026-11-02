@@ -1,6 +1,8 @@
 #include "check.hpp"
 
 #include <ajfx/builder.hpp>
+#include <ajfx/fracture.hpp>
+#include <ajfx/mesh.hpp>
 #include <ajfx/presets.hpp>
 #include <ajfx/rigid.hpp>
 #include <ajfx/rigid_runner.hpp>
@@ -1727,6 +1729,132 @@ void impossible_glue_is_refused() {
     AJFX_CHECK(refused(twice.build(), "more than one 'glue' module"));
 }
 
+// ------------------------------------------------- a body cut into cells
+
+// One cube body standing on the floor, which comes apart into the cells the
+// cube model is cut into when something hits it hard enough.
+Effect cut_crate(std::uint32_t cells, MeshSet& meshes) {
+    const MeshData model = cube_mesh();
+    Result<FracturedPieces> cut = cells_as_pieces(model, "crate", FractureOptions{.count = cells, .seed = 7U});
+    if (!cut) {
+        std::cout << "  " << cut.error().message << '\n';
+    }
+    AJFX_CHECK(cut.ok());
+    meshes = cut.value().meshes;
+    meshes.emplace("crate", model);
+
+    // A ball dropped on it, as a prop, so the only body that can break is
+    // the crate: a second crate would be of the same kind and break too.
+    RigidProp ball{};
+    ball.shape = PropShape::Sphere;
+    ball.motion = PropMotion::Loose;
+    ball.position = Vec3{0.0F, 3.0F, 0.0F};
+    ball.radius = 0.3F;
+    ball.size = 1.0F;
+    ball.density = 3000.0F;
+    ball.restitution = 0.2F;
+
+    EffectBuilder builder{"cut"};
+    builder.emitter("crates")
+        .capacity(128U)
+        .spawn(SpawnPile{.count = 1U, .shape = PileShape::Box, .jitter = 0.0F, .release = 0.0F})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(InitSize{.min = 1.0F, .max = 1.0F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box,
+                             .friction = 0.7F,
+                             .restitution = 0.0F,
+                             .bodies = std::move(cut).value().bodies,
+                             .props = {ball}})
+        .update(Break{.body = 0U, .threshold = 3.0F, .scatter = 0.2F, .spin = 60.0F, .pieces = cut.value().pieces})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.8F})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "crate"});
+    Result<Effect> built = builder.build();
+    if (!built) {
+        std::cout << "  " << built.error().message << '\n';
+    }
+    AJFX_CHECK(built.ok());
+    return std::move(built).value();
+}
+
+void a_cut_body_comes_apart_into_its_cells() {
+    constexpr std::uint32_t cells = 8U;
+    MeshSet meshes;
+    const Effect effect = cut_crate(cells, meshes);
+    Result<Simulation> made =
+        Simulation::create(effect, 3U, SimulationOptions{.meshes = meshes, .rigid = g_solver.get()});
+    if (!made) {
+        std::cout << "  " << made.error().message << '\n';
+    }
+    AJFX_CHECK(made.ok());
+    Simulation simulation = std::move(made).value();
+    const EmitterState& s = simulation.emitter(0U);
+    // The crate stands, with the ball on its way down onto it.
+    simulation.advance_to(12U);
+    AJFX_CHECK(s.alive() == 1U);
+    const Vec3 stood = s.position[0];
+
+    std::uint64_t broke_at = 0U;
+    for (std::uint64_t tick = 13U; tick <= 300U && broke_at == 0U; ++tick) {
+        simulation.advance_to(tick);
+        if (s.alive() > 1U) {
+            broke_at = tick;
+        }
+    }
+    AJFX_CHECK(broke_at > 0U);
+    // The cells are all of it and nothing but it: eight pieces where one
+    // crate was, each starting inside the crate it was cut from. The crate
+    // is a unit across at size 1, so a cell's middle is within half a unit.
+    std::size_t within = 0U;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        AJFX_CHECK(s.body_kind[i] >= 1U && s.body_kind[i] <= cells);
+        const Vec3 d = s.position[i] - stood;
+        if (std::sqrt(dot(d, d)) < 0.87F) {
+            ++within;
+        }
+    }
+    std::cout << "  the cut crate came apart at step " << broke_at << " into " << s.alive() << " cells, "
+              << within << " of them starting inside where it stood\n";
+    AJFX_CHECK(s.alive() == cells);
+    AJFX_CHECK(within == cells);
+
+    // Every cell is a kind of its own, drawn and collided as that cell.
+    const RigidPhysics* physics = rigid_physics(effect.emitters[0]);
+    AJFX_CHECK(physics != nullptr && physics->bodies.size() == cells);
+    for (std::size_t i = 0U; i < cells; ++i) {
+        AJFX_CHECK(physics->bodies[i].shape == RigidShape::Hull);
+        AJFX_CHECK(physics->bodies[i].mesh == "crate.cell." + std::to_string(i));
+        AJFX_CHECK(physics->bodies[i].draw == physics->bodies[i].mesh);
+    }
+    AJFX_CHECK(check_meshes(effect, meshes).ok());
+
+    // And they settle rather than exploding: the cut puts them where they
+    // were, so they are not born inside one another.
+    simulation.advance_to(600U);
+    float highest = 0.0F;
+    std::size_t still = 0U;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        highest = std::max(highest, s.position[i].y);
+        still += length(s.velocity[i]) < 0.05F ? 1U : 0U;
+    }
+    std::cout << "  they rest no higher than " << highest << ", " << still << " of " << s.alive() << " still\n";
+    AJFX_CHECK(highest < 1.6F);
+    AJFX_CHECK(still >= s.alive() - 2U);
+}
+
+void cutting_more_than_a_body_may_hold_is_refused() {
+    const MeshData model = cube_mesh();
+    const Result<FracturedPieces> many =
+        cells_as_pieces(model, "crate", FractureOptions{.count = max_break_pieces + 1U});
+    AJFX_CHECK(!many.ok() && many.error().code == ErrorCode::BudgetExceeded);
+    std::cout << "  " << many.error().message << '\n';
+    // And the kinds a cut needs have to fit beside the ones already there.
+    const Result<FracturedPieces> crowded = cells_as_pieces(
+        model, "crate", FractureOptions{.count = 8U}, static_cast<std::uint32_t>(max_rigid_body_kinds) - 2U);
+    AJFX_CHECK(!crowded.ok() && crowded.error().code == ErrorCode::BudgetExceeded);
+    std::cout << "  " << crowded.error().message << '\n';
+}
+
 int main() {
     g_solver = rigid::make_jolt_solver();
     const ajfx::test::Case cases[] = {
@@ -1765,6 +1893,8 @@ int main() {
         {"a_glued_wall_breaks_where_it_is_hit", a_glued_wall_breaks_where_it_is_hit},
         {"glued_walls_rerun_and_seek_exactly", glued_walls_rerun_and_seek_exactly},
         {"impossible_glue_is_refused", impossible_glue_is_refused},
+        {"a_cut_body_comes_apart_into_its_cells", a_cut_body_comes_apart_into_its_cells},
+        {"cutting_more_than_a_body_may_hold_is_refused", cutting_more_than_a_body_may_hold_is_refused},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

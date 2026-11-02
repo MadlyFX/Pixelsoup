@@ -941,11 +941,14 @@ struct RigidPhysics final {
 
 inline constexpr std::uint32_t max_rigid_capacity = 65536U;
 // Pieces one body may come apart into. A crate is a few panels and slivers;
-// a hundred of them is a simulation of its own.
-inline constexpr std::size_t max_break_pieces = 32U;
+// a hundred of them is a simulation of its own. A model cut into cells makes
+// one of these per cell, which is what sets the number.
+inline constexpr std::size_t max_break_pieces = 64U;
 // Kinds of body beyond the emitter's own. Each is a shape to build and
-// another material; a handful is a scene, and a world is not a shop.
-inline constexpr std::size_t max_rigid_body_kinds = 15U;
+// another material; a handful is a scene, and a world is not a shop. A model
+// cut into cells makes one per cell, so this holds as many as a body may
+// come apart into.
+inline constexpr std::size_t max_rigid_body_kinds = 64U;
 // Props stand in the world for the whole effect, so a world full of them
 // costs every step. A few hundred is a stage; thousands are debris.
 inline constexpr std::size_t max_rigid_props = 256U;

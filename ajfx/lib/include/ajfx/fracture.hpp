@@ -2,9 +2,11 @@
 
 #include <ajfx/math.hpp>
 #include <ajfx/mesh.hpp>
+#include <ajfx/modules.hpp>
 #include <ajfx/result.hpp>
 
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 // Cutting a model into the pieces it breaks into.
@@ -76,5 +78,30 @@ struct FractureCell final {
 // `count` sites will not fit inside the model; with BudgetExceeded above
 // `max_fracture_cells`.
 [[nodiscard]] Result<std::vector<FractureCell>> fracture(const MeshData& model, const FractureOptions& options);
+
+// A model's cells, as a Break module uses them: a body kind per cell, which
+// collides and draws as that cell, and a piece putting each one back where it
+// was cut from.
+// - **Its frame:** the cells keep the model's own frame rather than each
+//   being fitted to a box of its own, so putting every piece at its offset
+//   lays the model back out as it was. A piece is therefore `size` 1: a cell
+//   already spans what it should beside the model it came from. The model
+//   itself is taken as it sits in the package, which is centred on its box
+//   and a unit across, so a piece's offset is a share of the body's size, as
+//   BreakPiece means it.
+// - **Its names:** cell `n` of a model called `crate` is `crate.cell.n`, and
+//   the meshes come back for a caller to put in its package beside it.
+// - **Its kinds:** the kinds are numbered from `first_kind`, the number a
+//   caller's RigidPhysics::bodies already holds plus one, since kind 0 is
+//   always the emitter's own.
+struct FracturedPieces final {
+    std::vector<RigidBodyKind> bodies;
+    std::vector<BreakPiece> pieces;
+    MeshSet meshes;
+};
+
+[[nodiscard]] Result<FracturedPieces> cells_as_pieces(const MeshData& model, std::string_view name,
+                                                      const FractureOptions& options,
+                                                      std::uint32_t first_kind = 1U);
 
 } // namespace ajfx

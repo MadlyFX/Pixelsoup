@@ -667,4 +667,45 @@ Result<std::vector<FractureCell>> fracture(const MeshData& model, const Fracture
     return cells;
 }
 
+Result<FracturedPieces> cells_as_pieces(const MeshData& model, std::string_view name,
+                                        const FractureOptions& options, std::uint32_t first_kind) {
+    if (options.count > max_break_pieces) {
+        return Error{ErrorCode::BudgetExceeded,
+                     "cutting " + std::string{name} + " into " + std::to_string(options.count) +
+                         " pieces: a body may come apart into " + std::to_string(max_break_pieces)};
+    }
+    if (static_cast<std::size_t>(first_kind) + options.count > max_rigid_body_kinds + 1U) {
+        return Error{ErrorCode::BudgetExceeded,
+                     "cutting " + std::string{name} + " into " + std::to_string(options.count) +
+                         " pieces needs that many body kinds, and the emitter already has " +
+                         std::to_string(first_kind - 1U) + " of the " + std::to_string(max_rigid_body_kinds) +
+                         " it may have"};
+    }
+    Result<std::vector<FractureCell>> cells = fracture(model, options);
+    if (!cells) {
+        return cells.error();
+    }
+    FracturedPieces out;
+    out.bodies.reserve(cells.value().size());
+    out.pieces.reserve(cells.value().size());
+    for (std::size_t i = 0U; i < cells.value().size(); ++i) {
+        FractureCell& cell = cells.value()[i];
+        const std::string entry = std::string{name} + ".cell." + std::to_string(i);
+        // The cell keeps the model's own frame and is moved to its middle, so
+        // the piece that puts it back at that middle lays it exactly where it
+        // was cut from. Nothing is fitted to a box of its own: that would
+        // scale each cell on its own and the pieces would no longer tile.
+        for (MeshVertex& vertex : cell.mesh.vertices) {
+            vertex.position -= cell.center;
+        }
+        out.bodies.push_back(RigidBodyKind{.shape = RigidShape::Hull, .mesh = entry, .draw = entry});
+        out.pieces.push_back(BreakPiece{.body = first_kind + static_cast<std::uint32_t>(i),
+                                        .offset = cell.center,
+                                        .turn = Vec3{},
+                                        .size = 1.0F});
+        out.meshes.emplace(entry, std::move(cell.mesh));
+    }
+    return out;
+}
+
 } // namespace ajfx

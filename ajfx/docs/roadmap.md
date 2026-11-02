@@ -379,10 +379,22 @@ feedback forces could evaluate any frame directly.
        Cutting is baking: a thousand-point model takes a fifth of a second
        and the hull is almost all of it, growing with the square of the
        points, so a scan rather than a crate would want quickhull.
-       - **Not yet:** nothing wires the cells to the Break module. A cell
-         is a body kind with its mesh, its draw model and a piece at its
-         middle, so the wiring is the authoring question (who cuts, when,
-         and where the cells live in a package), not a geometry one.
+       `cells_as_pieces` wires them to the Break module: it hands back a
+       body kind a cell, collided and drawn as that cell, a piece putting
+       each back where it was cut from, and the meshes to put in the
+       package. The cells keep the model's own frame rather than each being
+       fitted to a box of its own, which is what makes the pieces still
+       tile; a piece is therefore size 1 at the cell's middle. Measured: a
+       cube body hit by a dropped ball comes apart into exactly its 8
+       cells, every one of them starting inside where the crate stood, and
+       they settle no higher than 0.78 with all 8 at rest. Both budgets now
+       hold a cut: 64 pieces and 64 body kinds.
+       - **Not yet:** Studio cannot ask for a cut. A Part block names a
+         model; "cut this one into eight" needs the model's geometry, and a
+         user's own model is only read when the package is built, after the
+         compiler has run. The cut belongs where the assets are resolved,
+         which is the next piece of plumbing rather than a question about
+         the geometry.
      - **Cracks that run, done (2026-11-01).** A `Glue` module holds the
        bodies born together where they touch, each join taking an impulse
        before it gives way, so a crack runs through the joins rather than a

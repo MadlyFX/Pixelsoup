@@ -411,6 +411,13 @@ colliders, pile up, knock each other about and fall asleep at rest.
     them. The scatter and spin are hashed from the parent's spawn index and
     which piece it is, so a seek over a break finds the same pieces going
     the same way.
+  - **Cut from the model:** `cells_as_pieces` (`include/ajfx/fracture.hpp`)
+    cuts a model into cells and hands back the body kinds, the pieces and
+    the meshes to put in the package, so a body comes apart into pieces
+    that were it rather than into models placed beside one another. The
+    cells keep the model's frame, so a piece is `size` 1 at the cell's own
+    middle. Cutting belongs to baking: a thousand-point model is a fifth of
+    a second, and the hull is almost all of it.
   - **Again:** a piece breaks in its turn if its own kind has a `Break`. A
     cycle of kinds is refused, since breaking has to end.
   - **Room:** a body breaks only if every piece fits the emitter's
