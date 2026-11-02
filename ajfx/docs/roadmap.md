@@ -14,6 +14,16 @@ particles at a given show frame, and a timeline seek must land on exactly
 what playback would have shown. Replays and lockstep simulations elsewhere
 need the same promise.
 
+ajfx is deliberately a hybrid of the two ways an effect can be made. A
+simulation is authored at whatever quality the shot wants, above realtime if
+it has to be, and what it works out is then cached and played back at
+realtime where it is displayed. Determinism is what makes that possible: a
+bake is a pure function of the effect and the frame, so it can be taken once,
+trusted, and replayed on every node. The same property serves the live path,
+where a node resimulates rather than reading a cache. Caching is not built
+yet -- [Caching and playback](#caching-and-playback) is the phase for it, and
+today every host resimulates.
+
 ## What it delivers
 
 Three pieces with one file format between them. A host plays effects; it
@@ -485,6 +495,82 @@ feedback forces could evaluate any frame directly.
 9. **Publication.** A Vulkan backend, documentation, examples, presets,
    Studio builds, a license and versioned releases.
 
+## Caching and playback
+
+A simulation authored above realtime, cached, and played back at realtime is
+what ajfx is for. None of it is built: every host resimulates, so today an
+effect's simulation has to fit a frame wherever it plays.
+
+The ingredients are there and the path is not.
+
+- `RigidRunner` steps a track's physics ahead of the playhead on its own
+  thread, and the frame path picks up a finished tick or holds. So rigid
+  physics races the show clock and has a policy for losing.
+- `SimulationState` is the whole state, particles and solver state alike,
+  and `Simulation::restore` rebuilds worlds from one. Nothing serializes it.
+- The `.ajfx` package holds the effect, not what it works out: module
+  stacks, textures, meshes, fields, published parameters and kernels.
+- `CheckpointRing` is in memory and belongs to one timeline, cleared
+  whenever the effect changes, because checkpoints from before describe a
+  different timeline.
+
+What a cache changes beyond its own cost: the caps phases 5 and 6 settled
+become bake-time numbers rather than frame-time ones, physics leaves the
+frame path, a far seek costs a read rather than a resimulate, and
+cross-machine agreement becomes a matter of every node reading the same
+bytes rather than each deriving them. It also moves the failure to watch
+from disagreement to staleness, which is why B1 is identity before it is
+bytes.
+
+- **B1: state on disk.** A versioned serialization of `SimulationState`,
+  refused with a reason on an unknown version exactly as the package format
+  is. Jolt's `SaveState` and `RestoreState` already carry the solver half.
+  A cache is identified by the effect package's content hash together with
+  the bake-time parameter values it was taken with (B4), so a cache that
+  does not belong to the effect in front of it is refused loudly rather
+  than played. What proves it: a bake restored frame by frame equals the
+  simulation it was taken from, bit for bit, including after a seek.
+- **B2: a rigid cache.** Rigid physics first: it is the expensive half, it
+  is what the frame path waits on, and its state is small. Each body needs
+  its pose, its kind and a packed colour -- about 33 bytes, so 4,000 bodies
+  are roughly 130 KB a frame and 8 MB a second at 60 Hz (arithmetic, not
+  measured; Jolt's own full `SaveState` of 4,000 chips is 610 KB in 1.8 ms).
+  A cached layer needs no runner, no lead and no hold.
+- **B3: particles, per layer.** A million particles at 32 bytes a frame is
+  32 MB a frame and about 1.9 GB a second at 60 Hz, against 1.9 ms to
+  simulate the same step on an RTX 3090. So a cheap GPU layer is cheaper to
+  resimulate than to stream, and caching is a per-layer choice rather than
+  an effect-wide one. Keyframes at the checkpoint interval with quantised
+  deltas between them, and a measured size and bandwidth per layer in
+  Studio beside the budget it already shows.
+- **B4: bake-time and playback-time parameters.** Open, and the decision
+  everything else keys off. A cached simulation cannot honour a parameter
+  the simulation reads, so published parameters have to divide:
+  - *bake-time* -- rates, spawn radius, speeds, force strengths, break
+    thresholds, cell counts. An operator's change invalidates the cache, so
+    either the control is not published on a cached layer, or the cache is
+    baked per value over the published range, or that layer stays live.
+  - *playback-time* -- colour, brightness, opacity, overall size scale,
+    time offset and the placement's own transform, which apply to cached
+    state as it is drawn and cost nothing.
+  `ControlDef::publishable` does not make this distinction today, and
+  several publishable controls (spawn radius, speed, spread, turbulence
+  strength) are squarely bake-time, so the media server's Inspector
+  currently offers operators values a cached effect could not honour.
+- **B5: Studio's bake.** Bake state per layer, the cached range on the
+  transport, what a re-bake would cost before it is asked for, and a coach
+  note when a layer's cache is stale because a bake-time setting changed
+  under it. A layer is baked or live, and the page says which.
+
+Open beyond B4: whether a cache travels inside the `.ajfx` package or
+beside it as a sidecar keyed by the package hash (a package is already
+content-addressed, which suits either); and how a cache is produced, since
+a bake taken in Studio on one machine and a bake taken by a farm want the
+same format but not the same trigger. The host half of this -- streaming
+playback in place of simulation, and refusing a stale cache -- belongs in
+the media server's [plan](../../next-steps-plan.md), as the rest of its
+hosting does.
+
 ## Volumes
 
 After phase 5, a companion module sharing the same backend, hashing, budgets
@@ -497,6 +583,13 @@ and checkpoints:
 - V3: cellular flood-fill volumes through a voxelized scene.
 - V4: sparse smoke and fire simulation, with particles depositing into the
   grid and advecting in its velocity.
+
+V1 is the cheapest large gain in the plan, because a host's froxel fog is
+lit by the scene's own lights through the same shadow lookup a surface
+uses, so injected smoke is shadowed where a sprite plume is not. V4 wants
+[caching](#caching-and-playback) under it: a grid stepped at authoring
+quality is not a frame's work, and a cached grid is a streamed sequence.
+Accumulation (phase 5) is the same shape.
 
 Volumes are simulated once in world space and raymarched per node against
 the full-canvas camera. Ray jitter is hashed from the show frame and canvas
@@ -511,3 +604,8 @@ why not, has a measured GPU cost, and plays in its host exactly as it
 previewed. The host-side criteria (two-node slice agreement, loading without
 stalling the control or frame path) are in the media server's
 [plan](../../next-steps-plan.md).
+
+Once [caching](#caching-and-playback) is in, one more: an effect baked in
+Studio plays from its cache frame for frame as the simulation it was taken
+from, within a declared size and bandwidth, and a cache that does not
+belong to the effect in front of it is refused rather than played.
