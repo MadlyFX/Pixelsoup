@@ -48,13 +48,33 @@ pose. Collider choices are explicit convex hull, sphere or box. Distribution
 creates a Single object or one Grid/Pile instance set. Repeated Static and
 Animated objects, and fracture on either, are diagnosed as unsupported.
 
-A particle system owns its sources, initial velocity, gravity share, drag,
-turbulence, appearance and object-collision switch. Sources have stable
+A particle system owns its sources, initial velocity, gravity share, a
+Motion stack, appearance and object-collision switch. Sources have stable
 identities and are Initial, Continuous or Burst. Additional sources are
 added inside the inspector. A bounded Initial/Burst population can be
 persistent; an unbounded Continuous source cannot. Source Initial currently
 uses the runtime's time-zero burst and becomes populated on the first step.
 It is not yet an arbitrary saved initial-state checkpoint.
+
+The Motion stack is an ordered list of typed behaviors, each with a stable
+identity, an on/off switch and its own controls: **Drag** (amount),
+**Turbulence** (amount, swirl size, churn) and **Vortex** (strength, axis,
+center). **Add behavior** appends one with that kind's defaults; a new system
+has an empty stack. The stack's authored order is the order the runtime
+applies the forces, so moving a row up or down is a motion edit. A switched-off
+behavior keeps its settings and lowers to nothing. Up to 16 behaviors per
+system. Behaviors have no viewport handles yet; a vortex center is typed.
+
+**Size over age** and **Color over age** are each **Constant** or **Keys**:
+between 2 and 16 keys followed from birth (age 0) to death (age 1). Size keys
+multiply the base size; color keys multiply the particle colour, alpha
+included, so a fade-out is a key with alpha 0. Keys stay in age order: an
+edited age is held between its neighbours, and **Add key** inserts one before
+the last. A strip above the keys previews the curve, birth on the left. The
+keys lower to the runtime's size-over-life and colour-over-life modules
+exactly as written. Size over age is a motion edit (collision reads size);
+colour over age keeps the motion cache. Drivers from other particle
+attributes, such as speed, need runtime support and are not offered.
 
 Scene settings own gravity, angular damping and sleep policy. The fixed
 simulation step is 60 Hz. The capture range controls bake/export duration;
@@ -68,7 +88,8 @@ Record actions and checkpoint adoption are not implemented.
 The authored scene is `Document::scene`. `scene.hpp` defines typed owners;
 `scene_properties.cpp` defines property metadata, defaults, bounds, units,
 resets, storage and motion invalidation. New scene files use
-`ajfx-studio-scene`, schema 1. Readers refuse unknown, duplicate, malformed
+`ajfx-studio-scene`, schema 2 (schema 1 lacked the Motion stack and drivers
+and is refused). Readers refuse unknown, duplicate, malformed
 or missing authored properties and unsupported versions. Window state is not
 part of this schema. Existing layer documents retain their existing format.
 

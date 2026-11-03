@@ -117,8 +117,6 @@ const std::vector<SceneProperty> &system_properties() {
             property("velocity", "Initial velocity", "Motion", &ParticleSystem::velocity, -10000, 10000, "m/s"),
             property("spread", "Velocity spread", "Motion", &ParticleSystem::spread, 0, 180, "deg"),
             property("gravity", "Gravity share", "Motion", &ParticleSystem::gravity, 0, 10, "x"),
-            property("drag", "Drag", "Motion", &ParticleSystem::drag, 0, 100),
-            property("turbulence", "Turbulence", "Motion", &ParticleSystem::turbulence, 0, 100),
             property("tint", "Color", "Appearance", &ParticleSystem::tint, 0, 64),
             property("size", "Size", "Appearance", &ParticleSystem::size, 0.001F, 100, "m"),
             property("look", "Renderer", "Appearance", &ParticleSystem::look, 0, 2, {}, {"Glow", "Smoke", "Solid"})};

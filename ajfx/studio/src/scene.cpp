@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <limits>
 #include <set>
+#include <type_traits>
 
 namespace ajfx::studio {
 namespace {
@@ -35,6 +36,14 @@ Block block(Uid uid, std::string kind, std::initializer_list<std::pair<std::stri
     return out;
 }
 
+Block raw_block(Uid uid, RawModule module) {
+    Block out;
+    out.uid = uid;
+    out.kind = std::string{block_kind_id(BlockKind::Module)};
+    out.raw = std::move(module);
+    return out;
+}
+
 Value value(Vec3 v) { return vec3(v.x, v.y, v.z); }
 float length(Vec3 v) { return std::sqrt(dot(v, v)); }
 void launch(Layer &layer, Uid uid, Vec3 v, float spread = 0.0F) {
@@ -45,7 +54,64 @@ void launch(Layer &layer, Uid uid, Vec3 v, float spread = 0.0F) {
                                   {"speed", range(speed, speed)},
                                   {"spread", range(0.0F, spread)}}));
 }
+bool within(float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; }
+bool within(Vec3 v, float lo, float hi) { return within(v.x, lo, hi) && within(v.y, lo, hi) && within(v.z, lo, hi); }
+std::string validate_behavior(const MotionBehavior &b) {
+    switch (b.kind) {
+    case BehaviorKind::Drag:
+        return within(b.strength, 0.0F, 100.0F) ? "" : "amount is outside its supported range";
+    case BehaviorKind::Turbulence:
+        if (!within(b.strength, 0.0F, 100.0F)) {
+            return "amount is outside its supported range";
+        }
+        if (!within(b.size, 0.01F, 1000.0F)) {
+            return "swirl size is outside its supported range";
+        }
+        return within(b.churn, 0.0F, 100.0F) ? "" : "churn is outside its supported range";
+    case BehaviorKind::Vortex:
+        if (!within(b.strength, -1000.0F, 1000.0F)) {
+            return "strength is outside its supported range";
+        }
+        return within(b.center, -10000.0F, 10000.0F) ? "" : "center is outside its supported range";
+    }
+    return "unknown behavior";
+}
+template <class Key> std::string validate_keys(const std::vector<Key> &keys, float lo, float hi) {
+    if (keys.size() < 2U || keys.size() > max_curve_keys) {
+        return "needs between 2 and 16 keys";
+    }
+    float last = 0.0F;
+    for (const Key &key : keys) {
+        if (!within(key.t, 0.0F, 1.0F) || key.t < last) {
+            return "keys must run from age 0 to 1 in order";
+        }
+        last = key.t;
+        if constexpr (std::is_same_v<Key, ColorKey>) {
+            if (!within(key.value.r, lo, hi) || !within(key.value.g, lo, hi) || !within(key.value.b, lo, hi) ||
+                !within(key.value.a, 0.0F, 1.0F)) {
+                return "a key's colour is outside its supported range";
+            }
+        } else {
+            if (!within(key.value, lo, hi)) {
+                return "a key's value is outside its supported range";
+            }
+        }
+    }
+    return {};
+}
 } // namespace
+
+std::string_view behavior_name(BehaviorKind kind) {
+    switch (kind) {
+    case BehaviorKind::Drag:
+        return "Drag";
+    case BehaviorKind::Turbulence:
+        return "Turbulence";
+    case BehaviorKind::Vortex:
+        return "Vortex";
+    }
+    return "Behavior";
+}
 
 SceneItem *Scene::item(std::uint32_t uid) {
     const auto found = std::find_if(items.begin(), items.end(), [uid](const SceneItem &i) { return i.uid == uid; });
@@ -148,6 +214,36 @@ Uid add_source(Document &document, Uid uid, SourceMode mode) {
     system->sources.push_back(ParticleSource{.uid = fresh, .mode = mode});
     return fresh;
 }
+Uid add_behavior(Document &document, Uid uid, BehaviorKind kind) {
+    SceneItem *item = document.scene ? document.scene->item(uid) : nullptr;
+    auto *system = item ? std::get_if<ParticleSystem>(&item->data) : nullptr;
+    if (!system || system->motion.size() >= max_behaviors) {
+        return 0U;
+    }
+    const Uid fresh = reserve(document);
+    if (fresh == 0U) {
+        return 0U;
+    }
+    MotionBehavior behavior{.uid = fresh, .kind = kind};
+    behavior.strength = kind == BehaviorKind::Drag ? 1.0F : kind == BehaviorKind::Turbulence ? 1.5F : 3.0F;
+    system->motion.push_back(behavior);
+    return fresh;
+}
+bool move_behavior(Document &document, Uid uid, Uid behavior, int by) {
+    SceneItem *item = document.scene ? document.scene->item(uid) : nullptr;
+    auto *system = item ? std::get_if<ParticleSystem>(&item->data) : nullptr;
+    if (!system || (by != -1 && by != 1)) {
+        return false;
+    }
+    const auto at = std::find_if(system->motion.begin(), system->motion.end(),
+                                 [behavior](const MotionBehavior &b) { return b.uid == behavior; });
+    if (at == system->motion.end() || (by < 0 && at == system->motion.begin()) ||
+        (by > 0 && at + 1 == system->motion.end())) {
+        return false;
+    }
+    std::iter_swap(at, at + by);
+    return true;
+}
 bool remove_item(Document &document, Uid uid) {
     if (!document.scene || document.scene->item(uid) == nullptr) {
         return false;
@@ -196,6 +292,12 @@ Uid duplicate_item(Document &document, Uid uid) {
         for (ParticleSource &source : system->sources) {
             source.uid = reserve(document);
             if (source.uid == 0U) {
+                return 0U;
+            }
+        }
+        for (MotionBehavior &behavior : system->motion) {
+            behavior.uid = reserve(document);
+            if (behavior.uid == 0U) {
                 return 0U;
             }
         }
@@ -283,6 +385,23 @@ std::string validate_scene(const Document &document, bool for_playback) {
                 if (for_playback && system->persistent && source.mode == SourceMode::Continuous) {
                     return where + "persistent populations require bounded Initial or Burst sources";
                 }
+            }
+            if (system->motion.size() > max_behaviors) {
+                return where + "Motion: behavior capacity exceeded (16)";
+            }
+            for (const MotionBehavior &behavior : system->motion) {
+                if (!identity(behavior.uid)) {
+                    return where + "Motion: invalid or overlapping behavior identity";
+                }
+                if (const std::string error = validate_behavior(behavior); !error.empty()) {
+                    return where + "Motion / " + std::string{behavior_name(behavior.kind)} + ": " + error;
+                }
+            }
+            if (const std::string error = validate_keys(system->size_over_age, 0.0F, 100.0F); !error.empty()) {
+                return where + "Appearance / Size over age: " + error;
+            }
+            if (const std::string error = validate_keys(system->tint_over_age, 0.0F, 64.0F); !error.empty()) {
+                return where + "Appearance / Color over age: " + error;
             }
         }
     }
@@ -391,10 +510,29 @@ Document lower_scene(const Document &document) {
             launch(layer, item->uid + 6U, system->velocity, system->spread);
             layer.blocks.push_back(
                 block(item->uid + 8U, "gravity", {{"strength", range(system->gravity, system->gravity)}}));
-            layer.blocks.push_back(block(item->uid + 9U, "drag", {{"amount", range(system->drag, system->drag)}}));
-            if (system->turbulence > 0.0F) {
-                layer.blocks.push_back(block(item->uid + 10U, "turbulence",
-                                             {{"strength", range(system->turbulence, system->turbulence)}}));
+            // The stack's authored order is the order the forces run in.
+            for (const MotionBehavior &b : system->motion) {
+                if (!b.enabled) {
+                    continue;
+                }
+                switch (b.kind) {
+                case BehaviorKind::Drag:
+                    layer.blocks.push_back(block(b.uid, "drag", {{"amount", range(b.strength, b.strength)}}));
+                    break;
+                case BehaviorKind::Turbulence:
+                    layer.blocks.push_back(block(b.uid, "turbulence",
+                                                 {{"strength", range(b.strength, b.strength)},
+                                                  {"size", number(b.size)},
+                                                  {"churn", number(b.churn)}}));
+                    break;
+                case BehaviorKind::Vortex:
+                    layer.blocks.push_back(block(b.uid, "swirl",
+                                                 {{"strength", range(b.strength, b.strength)},
+                                                  {"axis", choice(b.axis == VortexAxis::Horizontal ? "horizontal"
+                                                                                                    : "vertical")},
+                                                  {"center", value(b.center)}}));
+                    break;
+                }
             }
             layer.blocks.push_back(
                 block(item->uid + 4U, "appearance",
@@ -404,6 +542,14 @@ Document lower_scene(const Document &document) {
                        {"tint", color(system->tint.r, system->tint.g, system->tint.b, system->tint.a)}}));
             layer.blocks.push_back(block(item->uid + 3U, "color", {{"color", color(1.0F, 1.0F, 1.0F)}}));
             layer.blocks.push_back(block(item->uid + 5U, "size", {{"size", range(system->size, system->size)}}));
+            if (system->size_driver == Driver::Age) {
+                layer.blocks.push_back(
+                    raw_block(item->uid + 13U, UpdateModule{SizeOverLife{.keys = system->size_over_age}}));
+            }
+            if (system->tint_driver == Driver::Age) {
+                layer.blocks.push_back(
+                    raw_block(item->uid + 14U, UpdateModule{ColorOverLife{.keys = system->tint_over_age}}));
+            }
             if (!system->collide) {
                 layer.blocks.push_back(block(item->uid + 12U, "passes_through"));
             }
@@ -445,6 +591,12 @@ bool same_scene_motion(const Document &a, const Document &b) {
             std::sort(one.begin(), one.end(), order);
             std::sort(two.begin(), two.end(), order);
             if (one != two) {
+                return false;
+            }
+            const auto &next = std::get<ParticleSystem>(after->data);
+            // Size is read by collision; colour over age is draw-time only.
+            if (system->motion != next.motion || system->size_driver != next.size_driver ||
+                (system->size_driver == Driver::Age && system->size_over_age != next.size_over_age)) {
                 return false;
             }
         }

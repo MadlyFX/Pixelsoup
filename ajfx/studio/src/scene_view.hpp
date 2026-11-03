@@ -15,7 +15,7 @@ class SceneView final {
     void select(Uid uid, bool extend = false);
     void forget();
     [[nodiscard]] Uid selected() const { return selection_.empty() ? 0U : selection_.back(); }
-    [[nodiscard]] bool covers(float x, float y) const { return add_.covers(x, y); }
+    [[nodiscard]] bool covers(float x, float y) const { return add_.covers(x, y) || behavior_add_.covers(x, y); }
     [[nodiscard]] const std::vector<Uid> &selection() const { return selection_; }
     [[nodiscard]] bool gesture_live() const { return numbers_.live() || color_live_; }
     void import_models(Document &document);
@@ -30,12 +30,18 @@ class SceneView final {
     void tree_children(gui::UiContext &ctx, Document &document, Uid parent, float x, float &y, float width,
                        unsigned depth);
     void draw_sources(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y, float width);
+    // The Motion stack: typed behaviors in the order their forces run.
+    void draw_motion_stack(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y, float width);
+    // Size and colour over age: a driver choice, then editable keys.
+    void draw_over_age(gui::UiContext &ctx, SceneItem &item, float x, float &y, float width);
     void draw_settings(gui::UiContext &ctx, Document &document, float x, float &y, float width);
     std::vector<Uid> selection_;
     std::set<Uid> folded_;
     gui::ScrollRegion tree_scroll_;
     gui::ScrollRegion inspector_scroll_;
     PopoverList add_;
+    PopoverList behavior_add_;
+    Uid behavior_target_{};
     mediaserver::editor::NumberField numbers_;
     bool color_live_{};
 };

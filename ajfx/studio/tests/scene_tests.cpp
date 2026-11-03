@@ -87,6 +87,17 @@ void typed_scene_roundtrip_and_strict_fields() {
     auto &system = std::get<ParticleSystem>(document.scene->item(b)->data);
     system.sources.front().mode = SourceMode::Initial;
     system.persistent = true;
+    CHECK(add_behavior(document, b, BehaviorKind::Vortex) != 0U);
+    CHECK(add_behavior(document, b, BehaviorKind::Turbulence) != 0U);
+    system.motion[0].strength = -4.5F;
+    system.motion[0].axis = VortexAxis::Horizontal;
+    system.motion[0].center = {0.5F, 1.5F, -2.5F};
+    system.motion[1].enabled = false;
+    system.motion[1].size = 1.3F;
+    system.size_driver = Driver::Age;
+    system.size_over_age = {{0.0F, 0.25F}, {0.4F, 2.0F}, {1.0F, 0.0F}};
+    system.tint_driver = Driver::Age;
+    system.tint_over_age = {{0.0F, {1.0F, 0.5F, 0.25F, 1.0F}}, {1.0F, {0.1F, 0.2F, 0.3F, 0.0F}}};
     document.scene->physics.gravity = 0.37F;
     document.scene->physics.angular_damping = 0.19F;
     document.loop_seconds = 11.5F;
@@ -102,7 +113,13 @@ void typed_scene_roundtrip_and_strict_fields() {
     bad.insert(bad.find("\"position\""), "\"invented\": 1, ");
     CHECK(!load_document(bad).document);
     bad = saved;
-    bad.replace(bad.find("\"version\": 1"), 12U, "\"version\": 2");
+    bad.replace(bad.find("\"version\": 2"), 12U, "\"version\": 3");
+    CHECK(!load_document(bad).document);
+    bad = saved;
+    bad.insert(bad.find("\"churn\""), "\"invented\": 1, ");
+    CHECK(!load_document(bad).document);
+    bad = saved;
+    bad.replace(bad.find("\"size_driver\": 1"), 16U, "\"size_driver\": 7");
     CHECK(!load_document(bad).document);
     object(document, a).motion = ObjectMotion::Static;
     const Loaded unfinished = load_document(save_document(document));
@@ -282,7 +299,113 @@ void ten_distinct_models_fracture_without_losing_owners() {
 }
 } // namespace
 
+// The Motion stack is typed behaviors in an authored order; size and colour
+// over age reach the runtime as the keys the artist wrote.
+void motion_stack_and_age_drivers_reach_the_runtime() {
+    Document document = empty_scene();
+    const Uid uid = add_particle_system(document);
+    auto &system = std::get<ParticleSystem>(document.scene->item(uid)->data);
+    const Uid vortex = add_behavior(document, uid, BehaviorKind::Vortex);
+    const Uid drag = add_behavior(document, uid, BehaviorKind::Drag);
+    const Uid turbulence = add_behavior(document, uid, BehaviorKind::Turbulence);
+    CHECK(vortex != 0U && drag != 0U && turbulence != 0U && system.motion.size() == 3U);
+    CHECK(system.motion[0].strength == 3.0F && system.motion[1].strength == 1.0F && system.motion[2].strength == 1.5F);
+    system.motion[0].strength = -7.5F;
+    system.motion[0].axis = VortexAxis::Horizontal;
+    system.motion[0].center = {1.5F, 2.5F, 3.5F};
+    system.motion[1].strength = 2.25F;
+    system.motion[2].strength = 4.5F;
+    system.motion[2].size = 1.3F;
+    system.motion[2].churn = 0.9F;
+    // Moving turbulence up puts it before drag: stack order, not identity order.
+    CHECK(move_behavior(document, uid, turbulence, -1));
+    CHECK(!move_behavior(document, uid, vortex, -1));
+    CHECK(system.motion[1].uid == turbulence && system.motion[2].uid == drag);
+    CHECK(validate_scene(document).empty());
+
+    const auto kinds = [](const Document &lowered) {
+        std::vector<std::string> out;
+        for (const Block &block : lowered.layers.front().blocks) {
+            if (block.kind == "swirl" || block.kind == "turbulence" || block.kind == "drag") {
+                out.push_back(block.kind);
+            }
+        }
+        return out;
+    };
+    Document lowered = lower_scene(document);
+    CHECK(lowered.layers.size() == 1U);
+    CHECK((kinds(lowered) == std::vector<std::string>{"swirl", "turbulence", "drag"}));
+    const Block *swirl = lowered.block(vortex);
+    const Block *noise = lowered.block(turbulence);
+    CHECK(swirl && swirl->kind == "swirl" && get(*swirl, "strength").x == -7.5F &&
+          get(*swirl, "axis").text == "horizontal" && get(*swirl, "center").z == 3.5F);
+    CHECK(noise && get(*noise, "size").x == 1.3F && get(*noise, "churn").x == 0.9F);
+    system.motion[2].enabled = false;
+    lowered = lower_scene(document);
+    CHECK((kinds(lowered) == std::vector<std::string>{"swirl", "turbulence"}));
+    system.motion[2].enabled = true;
+
+    // Age drivers: the compiled effect carries the authored keys.
+    system.size_driver = Driver::Age;
+    system.size_over_age = {{0.0F, 0.25F}, {0.5F, 2.0F}, {1.0F, 0.5F}};
+    system.tint_driver = Driver::Age;
+    system.tint_over_age = {{0.0F, {1.0F, 0.5F, 0.25F, 1.0F}}, {1.0F, {0.1F, 0.2F, 0.3F, 0.0F}}};
+    const Compiled compiled = ready(document);
+    const ajfx::SizeOverLife *size = nullptr;
+    const ajfx::ColorOverLife *tint = nullptr;
+    unsigned forces = 0U;
+    for (const ajfx::UpdateModule &module : compiled.effect->emitters.front().update) {
+        if (const auto *sized = std::get_if<ajfx::SizeOverLife>(&module)) {
+            size = sized;
+        } else if (const auto *coloured = std::get_if<ajfx::ColorOverLife>(&module)) {
+            tint = coloured;
+        } else if (std::holds_alternative<ajfx::Vortex>(module) || std::holds_alternative<ajfx::CurlNoise>(module) ||
+                   std::holds_alternative<ajfx::Drag>(module)) {
+            ++forces;
+        }
+    }
+    CHECK(forces == 3U);
+    CHECK(size && size->keys == system.size_over_age);
+    CHECK(tint && tint->keys == system.tint_over_age);
+    auto run = simulation(compiled);
+    run.advance_to(30U);
+    CHECK(run.emitter(0).alive() > 0U);
+
+    // A motion or size-over-age edit stales the motion cache; colour does not.
+    Document other = document;
+    CHECK(same_scene_motion(document, other));
+    std::get<ParticleSystem>(other.scene->item(uid)->data).tint_over_age.front().value.g = 0.9F;
+    CHECK(same_scene_motion(document, other));
+    std::get<ParticleSystem>(other.scene->item(uid)->data).size_over_age.front().value = 0.75F;
+    CHECK(!same_scene_motion(document, other));
+    other = document;
+    std::get<ParticleSystem>(other.scene->item(uid)->data).motion[1].strength = 0.3F;
+    CHECK(!same_scene_motion(document, other));
+    other = document;
+    CHECK(move_behavior(other, uid, drag, -1));
+    CHECK(!same_scene_motion(document, other));
+
+    // A duplicate owns fresh behavior identities.
+    const Uid copy = duplicate_item(document, uid);
+    CHECK(copy != 0U);
+    const auto &twin = std::get<ParticleSystem>(document.scene->item(copy)->data);
+    CHECK(twin.motion.size() == 3U && twin.motion[0].uid != vortex && twin.motion[0].strength == -7.5F);
+    CHECK(validate_scene(document).empty());
+
+    // Keys out of age order, and too many behaviors, are refused. The
+    // duplicate grew the item list, so the system is looked up again.
+    auto &again = std::get<ParticleSystem>(document.scene->item(uid)->data);
+    again.size_over_age = {{0.6F, 1.0F}, {0.4F, 1.0F}};
+    CHECK(!validate_scene(document).empty());
+    again.size_over_age = {{0.0F, 1.0F}, {1.0F, 1.0F}};
+    while (add_behavior(document, uid, BehaviorKind::Drag) != 0U) {
+    }
+    CHECK(again.motion.size() == max_behaviors);
+    CHECK(validate_scene(document).empty());
+}
+
 void add_scene_tests(std::vector<studio_test::Case> &cases) {
+    cases.push_back({"motion_stack_and_age_drivers_reach_the_runtime", motion_stack_and_age_drivers_reach_the_runtime});
     cases.push_back({"new_scene_ground_catches_objects_and_can_be_removed", new_scene_ground_catches_objects_and_can_be_removed});
     cases.push_back({"typed_scene_roundtrip_and_strict_fields", typed_scene_roundtrip_and_strict_fields});
     cases.push_back({"independent_surfaces_share_one_colliding_world", independent_surfaces_share_one_colliding_world});

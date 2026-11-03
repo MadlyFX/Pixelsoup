@@ -17,6 +17,25 @@ enum class ObjectCollider { Hull, Sphere, Box };
 enum class Distribution { Single, Grid, Pile };
 enum class SourceMode { Initial, Continuous, Burst };
 enum class ParticleLook { Glow, Smoke, Solid };
+// A behavior in a system's Motion stack. Each is a typed owner of one runtime
+// force; the stack's order is authored and is the order the forces run in.
+enum class BehaviorKind { Drag, Turbulence, Vortex };
+enum class VortexAxis { Vertical, Horizontal };
+// What sets a value over a particle's life: a constant, or keys over its
+// normalized age (0 at birth, 1 at death).
+enum class Driver { Constant, Age };
+
+struct MotionBehavior final {
+    std::uint32_t uid{};
+    BehaviorKind kind{BehaviorKind::Drag};
+    bool enabled{true};
+    float strength{1.0F}; // Drag: speed lost per second; Turbulence: amount; Vortex: m/s^2, negative turns the other way
+    float size{0.6F};     // Turbulence: swirl size, metres
+    float churn{0.4F};    // Turbulence: how fast the swirls change
+    Vec3 center{};        // Vortex: where its axis passes
+    VortexAxis axis{VortexAxis::Vertical};
+    friend bool operator==(const MotionBehavior &, const MotionBehavior &) = default;
+};
 
 struct Object final {
     std::string mesh{"cube"}; // primitive name or the artist's model file
@@ -65,12 +84,17 @@ struct ParticleSystem final {
     Vec3 velocity{0.0F, 1.0F, 0.0F};
     float spread{20.0F};
     float gravity{0.0F}; // explicit share of scene gravity, independent of name
-    float drag{0.0F};
-    float turbulence{0.0F};
+    std::vector<MotionBehavior> motion; // in stack order
     bool collide{true};
     Color tint{1.0F, 1.0F, 1.0F, 1.0F};
     float size{0.05F};
     ParticleLook look{ParticleLook::Glow};
+    // Size and colour over age multiply the base size and the colour. Keys
+    // are sorted by age; values hold beyond the ends.
+    Driver size_driver{Driver::Constant};
+    std::vector<CurveKey> size_over_age{{0.0F, 1.0F}, {1.0F, 1.0F}};
+    Driver tint_driver{Driver::Constant};
+    std::vector<ColorKey> tint_over_age{{0.0F, {1.0F, 1.0F, 1.0F, 1.0F}}, {1.0F, {1.0F, 1.0F, 1.0F, 1.0F}}};
     friend bool operator==(const ParticleSystem &, const ParticleSystem &) = default;
 };
 
@@ -115,6 +139,13 @@ enum class Purpose : std::uint8_t;
 [[nodiscard]] std::uint32_t add_particle_system(Document &document);
 [[nodiscard]] std::uint32_t add_group(Document &document);
 [[nodiscard]] std::uint32_t add_source(Document &document, std::uint32_t system, SourceMode mode);
+// Appends a behavior to a system's Motion stack with that kind's defaults.
+[[nodiscard]] std::uint32_t add_behavior(Document &document, std::uint32_t system, BehaviorKind kind);
+// Moves a behavior one place up (-1) or down (+1) its stack.
+bool move_behavior(Document &document, std::uint32_t system, std::uint32_t behavior, int by);
+[[nodiscard]] std::string_view behavior_name(BehaviorKind kind);
+inline constexpr std::size_t max_behaviors = 16U;
+inline constexpr std::size_t max_curve_keys = 16U;
 bool remove_item(Document &document, std::uint32_t uid);
 bool group_item(Document &document, std::uint32_t uid, std::uint32_t parent);
 [[nodiscard]] std::uint32_t duplicate_item(Document &document, std::uint32_t uid);

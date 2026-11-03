@@ -2,6 +2,7 @@
 #include "scene_properties.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <set>
@@ -80,6 +81,27 @@ bool keys(const Json &v, std::initializer_list<std::string_view> allowed) {
     }
     return true;
 }
+Json numbers(std::initializer_list<float> values) {
+    Json array = Json::array();
+    for (const float v : values) {
+        array.push(numeric(v));
+    }
+    return array;
+}
+// An array of exactly N finite numbers.
+template <std::size_t N> bool numbers(const Json *in, std::array<float, N> &out) {
+    if (!in || in->type != Json::Type::Array || in->items.size() != N) {
+        return false;
+    }
+    for (std::size_t k = 0U; k < N; ++k) {
+        const Json &v = in->items[k];
+        if (v.type != Json::Type::Number || !std::isfinite(v.number)) {
+            return false;
+        }
+        out[k] = static_cast<float>(v.number);
+    }
+    return true;
+}
 bool integer(const Json &in, std::string_view key, std::uint32_t &value) {
     const Json *v = in.find(key);
     if (!v || v->type != Json::Type::Number || !std::isfinite(v->number) || v->number < 0.0 ||
@@ -94,7 +116,7 @@ bool integer(const Json &in, std::string_view key, std::uint32_t &value) {
 std::string save_scene(const Document &document) {
     Json root = Json::object();
     root.add("format", Json::of("ajfx-studio-scene"));
-    root.add("version", numeric(1));
+    root.add("version", numeric(2));
     root.add("name", Json::of(document.name));
     root.add("next_uid", numeric(document.next_uid));
     root.add("range_seconds", numeric(document.loop_seconds));
@@ -132,6 +154,34 @@ std::string save_scene(const Document &document) {
                 sources.push(std::move(s));
             }
             out.add("sources", std::move(sources));
+            Json motion = Json::array();
+            for (const MotionBehavior &b : system->motion) {
+                Json m = Json::object();
+                m.add("uid", numeric(b.uid));
+                m.add("kind", numeric(static_cast<int>(b.kind)));
+                m.add("enabled", Json::of(b.enabled));
+                m.add("strength", numeric(b.strength));
+                m.add("size", numeric(b.size));
+                m.add("churn", numeric(b.churn));
+                m.add("center", numbers({b.center.x, b.center.y, b.center.z}));
+                m.add("axis", numeric(static_cast<int>(b.axis)));
+                motion.push(std::move(m));
+            }
+            out.add("motion", std::move(motion));
+            Json over_age = Json::object();
+            over_age.add("size_driver", numeric(static_cast<int>(system->size_driver)));
+            Json size_keys = Json::array();
+            for (const CurveKey &key : system->size_over_age) {
+                size_keys.push(numbers({key.t, key.value}));
+            }
+            over_age.add("size", std::move(size_keys));
+            over_age.add("tint_driver", numeric(static_cast<int>(system->tint_driver)));
+            Json tint_keys = Json::array();
+            for (const ColorKey &key : system->tint_over_age) {
+                tint_keys.push(numbers({key.t, key.value.r, key.value.g, key.value.b, key.value.a}));
+            }
+            over_age.add("tint", std::move(tint_keys));
+            out.add("over_age", std::move(over_age));
         }
         items.push(std::move(out));
     }
@@ -144,7 +194,7 @@ Loaded load_scene(const Json &root) {
     if (!keys(root, {"format", "version", "name", "next_uid", "range_seconds", "scale", "physics", "items"})) {
         return fail("unknown or duplicate document field");
     }
-    if (root.number_or("version", 0) != 1) {
+    if (root.number_or("version", 0) != 2) {
         return fail("unsupported format version");
     }
     const auto has_type = [](const Json &object, std::string_view key, Json::Type type) {
@@ -183,7 +233,8 @@ Loaded load_scene(const Json &root) {
     scene.physics.angular_damping = static_cast<float>(physics->number_or("angular_damping", 0.05));
     scene.physics.allow_sleep = physics->bool_or("allow_sleep", true);
     for (const Json &in : items->items) {
-        if (!keys(in, {"uid", "parent", "name", "seed", "simulate", "type", "properties", "sources"})) {
+        if (!keys(in, {"uid", "parent", "name", "seed", "simulate", "type", "properties", "sources", "motion",
+                       "over_age"})) {
             return fail("unknown or duplicate item field");
         }
         SceneItem item;
@@ -238,8 +289,66 @@ Loaded load_scene(const Json &root) {
                 source.time = static_cast<float>(s.number_or("time", -1));
                 system->sources.push_back(source);
             }
-        } else if (in.find("sources")) {
-            return fail(item.name + ": sources belong to particle systems");
+            const Json *motion = in.find("motion");
+            const Json *over_age = in.find("over_age");
+            if (!motion || motion->type != Json::Type::Array || !over_age ||
+                !keys(*over_age, {"size_driver", "size", "tint_driver", "tint"})) {
+                return fail(item.name + ": missing motion stack or appearance over age");
+            }
+            for (const Json &m : motion->items) {
+                MotionBehavior b;
+                std::uint32_t kind{};
+                std::uint32_t axis{};
+                std::array<float, 3> center{};
+                if (!keys(m, {"uid", "kind", "enabled", "strength", "size", "churn", "center", "axis"}) ||
+                    !integer(m, "uid", b.uid) || !integer(m, "kind", kind) || kind > 2U ||
+                    !integer(m, "axis", axis) || axis > 1U || !has_type(m, "enabled", Json::Type::Bool) ||
+                    !has_type(m, "strength", Json::Type::Number) || !has_type(m, "size", Json::Type::Number) ||
+                    !has_type(m, "churn", Json::Type::Number) || !numbers(m.find("center"), center)) {
+                    return fail(item.name + ": invalid motion behavior");
+                }
+                b.kind = static_cast<BehaviorKind>(kind);
+                b.axis = static_cast<VortexAxis>(axis);
+                b.enabled = m.bool_or("enabled", true);
+                b.strength = static_cast<float>(m.number_or("strength", 0));
+                b.size = static_cast<float>(m.number_or("size", 0));
+                b.churn = static_cast<float>(m.number_or("churn", 0));
+                b.center = {center[0], center[1], center[2]};
+                system->motion.push_back(b);
+            }
+            std::uint32_t driver{};
+            if (!integer(*over_age, "size_driver", driver) || driver > 1U) {
+                return fail(item.name + ": invalid size driver");
+            }
+            system->size_driver = static_cast<Driver>(driver);
+            if (!integer(*over_age, "tint_driver", driver) || driver > 1U) {
+                return fail(item.name + ": invalid color driver");
+            }
+            system->tint_driver = static_cast<Driver>(driver);
+            const Json *size_keys = over_age->find("size");
+            const Json *tint_keys = over_age->find("tint");
+            if (!size_keys || size_keys->type != Json::Type::Array || !tint_keys ||
+                tint_keys->type != Json::Type::Array) {
+                return fail(item.name + ": invalid keys over age");
+            }
+            system->size_over_age.clear();
+            for (const Json &k : size_keys->items) {
+                std::array<float, 2> key{};
+                if (!numbers(&k, key)) {
+                    return fail(item.name + ": invalid size key");
+                }
+                system->size_over_age.push_back(CurveKey{key[0], key[1]});
+            }
+            system->tint_over_age.clear();
+            for (const Json &k : tint_keys->items) {
+                std::array<float, 5> key{};
+                if (!numbers(&k, key)) {
+                    return fail(item.name + ": invalid color key");
+                }
+                system->tint_over_age.push_back(ColorKey{key[0], Color{key[1], key[2], key[3], key[4]}});
+            }
+        } else if (in.find("sources") || in.find("motion") || in.find("over_age")) {
+            return fail(item.name + ": sources, motion and appearance over age belong to particle systems");
         }
         scene.items.push_back(std::move(item));
     }

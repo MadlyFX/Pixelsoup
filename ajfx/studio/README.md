@@ -8,7 +8,9 @@ reusable effects and captured ranges are delivery choices. Studio exports
 a tree, central viewport and selected-item inspector. **Add > Floor** creates
 another editable ground surface. Objects own geometry, visual and physical
 properties and fracture; Scene settings own shared physics. Import accepts
-multiple models. Particle systems own their sources, motion and appearance.
+multiple models. Particle systems own their sources, a Motion stack of typed
+behaviors (Drag, Turbulence, Vortex) in the order they run, and appearance,
+where size and colour are constant or follow keys over each particle's age.
 See the [current scene reference](../docs/studio-scene-reference.md) for
 implemented behavior and limitations, and the
 [remaining work](../next-steps-plan.md).

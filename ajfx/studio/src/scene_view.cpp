@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <type_traits>
 
 namespace ajfx::studio {
 namespace {
@@ -29,7 +30,7 @@ float property_height(const ControlDef &control, float width) {
     return (width - 24.0F - 8.0F) / 3.0F >= min_axis_width ? 2.0F * row_height : 4.0F * row_height + 6.0F;
 }
 
-bool field(editor::NumberField &numbers, gui::UiContext &ctx, Uid owner, const ControlDef &control,
+bool field(editor::NumberField &numbers, gui::UiContext &ctx, std::uint64_t owner, const ControlDef &control,
            const gui::Rect &row, Value &v, bool mixed = false, unsigned mixed_axes = 7U,
            unsigned *edited_axes = nullptr, bool *reset_value = nullptr) {
     if (edited_axes) { *edited_axes = 0U; }
@@ -399,6 +400,278 @@ void SceneView::draw_sources(gui::UiContext &ctx, Document &document, SceneItem 
     y += 36;
 }
 
+void SceneView::draw_motion_stack(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y,
+                                  float width) {
+    auto *system = std::get_if<ParticleSystem>(&item.data);
+    if (!system) {
+        return;
+    }
+    Uid remove{};
+    Uid moved{};
+    int by = 0;
+    const bool worded = width >= 300.0F;
+    for (std::size_t i = 0U; i < system->motion.size(); ++i) {
+        MotionBehavior &b = system->motion[i];
+        // One row names the behavior and holds its switch, order and removal.
+        const float buttons = 28.0F * 3.0F + 8.0F * 2.0F;
+        const float switch_w = 44.0F;
+        ctx.label(gui::Rect{x, y, width - buttons - switch_w - 16.0F, 28}, behavior_name(b.kind),
+                  b.enabled ? ctx.theme().text : ctx.theme().text_muted);
+        ctx.tooltip(gui::Rect{x, y, width - buttons - switch_w - 16.0F, 28},
+                    b.kind == BehaviorKind::Drag         ? "Slows particles: speed lost per second."
+                    : b.kind == BehaviorKind::Turbulence ? "Swirling, natural motion from curl noise."
+                                                         : "Spins particles around an axis.");
+        float bx = x + width - buttons;
+        if (editor::icon_button(ctx, part_id(b.uid, "behavior.up"), gui::Rect{bx, y, 28, 28}, gui::Icon::ToStart,
+                                "Run earlier in the stack", false, i > 0U)) {
+            moved = b.uid;
+            by = -1;
+        }
+        bx += 36.0F;
+        if (editor::icon_button(ctx, part_id(b.uid, "behavior.down"), gui::Rect{bx, y, 28, 28}, gui::Icon::ToEnd,
+                                "Run later in the stack", false, i + 1U < system->motion.size())) {
+            moved = b.uid;
+            by = 1;
+        }
+        bx += 36.0F;
+        if (editor::icon_button(ctx, part_id(b.uid, "behavior.remove"), gui::Rect{bx, y, 28, 28}, gui::Icon::Trash,
+                                "Remove this behavior")) {
+            remove = b.uid;
+        }
+        bool on = b.enabled;
+        if (switch_toggle(ctx, part_id(b.uid, "behavior.enabled"),
+                          gui::Rect{x + width - buttons - switch_w - 8.0F, y + 2.0F, switch_w, 24}, on)) {
+            b.enabled = on;
+        }
+        ctx.tooltip(gui::Rect{x + width - buttons - switch_w - 8.0F, y, switch_w, 28},
+                    on ? "On. Off keeps its settings but applies no force." : "Off. Its force is not applied.");
+        y += 30.0F;
+        Value v;
+        const auto number_row = [&](const ControlDef &control, float &target) {
+            v = number(target);
+            if (field(numbers_, ctx, b.uid, control, gui::Rect{x, y, width, row_height}, v)) {
+                target = v.x;
+            }
+            y += 32.0F;
+        };
+        switch (b.kind) {
+        case BehaviorKind::Drag:
+            number_row(numeric("strength", "Amount", 1.0F, 0.0F, 10.0F), b.strength);
+            break;
+        case BehaviorKind::Turbulence:
+            number_row(numeric("strength", "Amount", 1.5F, 0.0F, 10.0F), b.strength);
+            number_row(numeric("size", "Swirl size", 0.6F, 0.05F, 5.0F, "m"), b.size);
+            number_row(numeric("churn", "Churn", 0.4F, 0.0F, 3.0F), b.churn);
+            break;
+        case BehaviorKind::Vortex: {
+            number_row(numeric("strength", "Strength", 3.0F, -20.0F, 20.0F, "m/s^2", 1), b.strength);
+            ControlDef axis = numeric("axis", "Axis", 0.0F, 0.0F, 1.0F);
+            axis.type = ControlType::Choice;
+            axis.choices = {{"Vertical", "Vertical"}, {"Horizontal", "Horizontal"}};
+            v = number(static_cast<float>(b.axis));
+            if (field(numbers_, ctx, b.uid, axis, gui::Rect{x, y, width, row_height}, v)) {
+                b.axis = static_cast<VortexAxis>(static_cast<int>(v.x));
+            }
+            y += 32.0F;
+            ControlDef center = numeric("center", "Center", 0.0F, -10000.0F, 10000.0F, "m");
+            center.type = ControlType::Vec3;
+            center.fallback = vec3(0.0F, 0.0F, 0.0F);
+            v = vec3(b.center.x, b.center.y, b.center.z);
+            const float height = property_height(center, width);
+            if (field(numbers_, ctx, b.uid, center, gui::Rect{x, y, width, height}, v)) {
+                b.center = {v.x, v.y, v.z};
+            }
+            y += height + 4.0F;
+            break;
+        }
+        }
+        y += 4.0F;
+    }
+    if (remove) {
+        std::erase_if(system->motion, [remove](const MotionBehavior &b) { return b.uid == remove; });
+    } else if (moved) {
+        static_cast<void>(move_behavior(document, item.uid, moved, by));
+    }
+    if (system->motion.size() < max_behaviors &&
+        editor::pill_button(ctx, part_id(item.uid, "behavior.add"), gui::Rect{x, y + 4, worded ? 140.0F : 34.0F, 28},
+                            gui::Icon::Plus, worded ? "Add behavior" : "", "Add a force to this system's motion")) {
+        behavior_target_ = item.uid;
+        behavior_add_.open(x, y + 36, "Add behavior",
+                           {{"", "Drag", "Slows particles", true, {}},
+                            {"", "Turbulence", "Swirling, natural motion", true, {}},
+                            {"", "Vortex", "Spins particles around an axis", true, {}}},
+                           false);
+    }
+    y += 36.0F;
+}
+
+namespace {
+template <class Key> auto sample_keys(const std::vector<Key> &keys, float t) {
+    const auto next = std::find_if(keys.begin(), keys.end(), [t](const Key &key) { return key.t >= t; });
+    if (next == keys.begin()) {
+        return keys.front().value;
+    }
+    if (next == keys.end()) {
+        return keys.back().value;
+    }
+    const Key &a = *(next - 1);
+    const Key &b = *next;
+    const float f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 1.0F;
+    if constexpr (std::is_same_v<Key, ColorKey>) {
+        return Color{a.value.r + (b.value.r - a.value.r) * f, a.value.g + (b.value.g - a.value.g) * f,
+                     a.value.b + (b.value.b - a.value.b) * f, a.value.a + (b.value.a - a.value.a) * f};
+    } else {
+        return a.value + (b.value - a.value) * f;
+    }
+}
+// Keys stay in age order: an edited age is held between its neighbours.
+template <class Key> void clamp_age(std::vector<Key> &keys, std::size_t k) {
+    const float lo = k == 0U ? 0.0F : keys[k - 1U].t;
+    const float hi = k + 1U >= keys.size() ? 1.0F : keys[k + 1U].t;
+    keys[k].t = std::clamp(keys[k].t, lo, hi);
+}
+template <class Key> void add_key_between_last(std::vector<Key> &keys) {
+    const Key &a = keys[keys.size() - 2U];
+    const Key &b = keys.back();
+    Key fresh;
+    fresh.t = (a.t + b.t) * 0.5F;
+    fresh.value = sample_keys(keys, fresh.t);
+    keys.insert(keys.end() - 1, fresh);
+}
+} // namespace
+
+void SceneView::draw_over_age(gui::UiContext &ctx, SceneItem &item, float x, float &y, float width) {
+    auto *system = std::get_if<ParticleSystem>(&item.data);
+    if (!system) {
+        return;
+    }
+    // UI identities for keys live beside the item's, never among scene uids.
+    const auto owner = [&item](std::size_t slot) {
+        return (1ULL << 40U) | (static_cast<std::uint64_t>(item.uid) << 8U) | static_cast<std::uint64_t>(slot);
+    };
+    const auto driver_row = [&](std::string_view id, std::string_view label, Driver &driver, bool &switched) {
+        ControlDef control = numeric(id, label, 0.0F, 0.0F, 1.0F);
+        control.type = ControlType::Choice;
+        control.choices = {{"Constant", "Constant"}, {"Keys", "Keys"}};
+        control.help = "Constant keeps one value for life. Keys follow the particle's age from birth (0) to death (1).";
+        Value v = number(static_cast<float>(driver));
+        if (field(numbers_, ctx, item.uid, control, gui::Rect{x, y, width, row_height}, v)) {
+            const Driver chosen = static_cast<Driver>(static_cast<int>(v.x));
+            switched = chosen == Driver::Age && driver != Driver::Age;
+            driver = chosen;
+        }
+        y += 32.0F;
+    };
+    const auto strip = [&](auto sample_color, auto sample_height) {
+        constexpr int bars = 40;
+        const gui::Rect area{x, y, width - 24.0F, 36.0F};
+        ctx.rounded(area, ctx.theme().track, 6.0F);
+        const float bar = area.width / static_cast<float>(bars);
+        for (int k = 0; k < bars; ++k) {
+            const float t = (static_cast<float>(k) + 0.5F) / static_cast<float>(bars);
+            const float h = std::clamp(sample_height(t), 0.0F, 1.0F) * (area.height - 6.0F);
+            ctx.rounded(gui::Rect{area.x + bar * static_cast<float>(k) + 1.0F, area.bottom() - 3.0F - h, bar - 2.0F, h},
+                        sample_color(t), 2.0F);
+        }
+        ctx.tooltip(area, "Birth on the left, death on the right.");
+        y += area.height + 6.0F;
+    };
+
+    bool switched = false;
+    driver_row("size_driver", "Size over age", system->size_driver, switched);
+    if (switched && system->size_over_age == ParticleSystem{}.size_over_age) {
+        system->size_over_age = {{0.0F, 1.0F}, {1.0F, 0.0F}};
+    }
+    if (system->size_driver == Driver::Age) {
+        auto &keys = system->size_over_age;
+        float peak = 0.0F;
+        for (const CurveKey &key : keys) {
+            peak = std::max(peak, key.value);
+        }
+        const gui::UiColor accent = ctx.theme().accent;
+        strip([accent](float) { return accent; },
+              [&keys, peak](float t) { return peak > 0.0F ? sample_keys(keys, t) / peak : 0.0F; });
+        std::size_t remove = keys.size();
+        for (std::size_t k = 0U; k < keys.size(); ++k) {
+            const float half = (width - 24.0F - 8.0F) * 0.5F;
+            Value v = number(keys[k].t);
+            ControlDef age = numeric("age", "Age", k == 0U ? 0.0F : 1.0F, 0.0F, 1.0F);
+            if (field(numbers_, ctx, owner(k), age, gui::Rect{x, y, half, row_height}, v)) {
+                keys[k].t = v.x;
+                clamp_age(keys, k);
+            }
+            v = number(keys[k].value);
+            if (field(numbers_, ctx, owner(k), numeric("scale", "Size", 1.0F, 0.0F, 100.0F, "x"),
+                      gui::Rect{x + half + 8.0F, y, half, row_height}, v)) {
+                keys[k].value = v.x;
+            }
+            if (keys.size() > 2U &&
+                editor::icon_button(ctx, part_id(owner(k), "key.remove"), gui::Rect{x + width - 24.0F, y, 24, 28},
+                                    gui::Icon::Minus, "Remove this key")) {
+                remove = k;
+            }
+            y += 32.0F;
+        }
+        if (remove < keys.size()) {
+            keys.erase(keys.begin() + static_cast<std::ptrdiff_t>(remove));
+        }
+        if (keys.size() < max_curve_keys &&
+            editor::pill_button(ctx, part_id(item.uid, "size_key.add"), gui::Rect{x, y, 100, 28}, gui::Icon::Plus,
+                                "Add key", "Add a key before the last one")) {
+            add_key_between_last(keys);
+        }
+        y += 36.0F;
+    }
+
+    switched = false;
+    driver_row("tint_driver", "Color over age", system->tint_driver, switched);
+    if (switched && system->tint_over_age == ParticleSystem{}.tint_over_age) {
+        system->tint_over_age = {{0.0F, {1.0F, 1.0F, 1.0F, 1.0F}}, {1.0F, {1.0F, 1.0F, 1.0F, 0.0F}}};
+    }
+    if (system->tint_driver == Driver::Age) {
+        auto &keys = system->tint_over_age;
+        strip(
+            [&keys](float t) {
+                const Color c = sample_keys(keys, t);
+                return gui::UiColor{std::min(c.r, 1.0F), std::min(c.g, 1.0F), std::min(c.b, 1.0F), 1.0F};
+            },
+            [&keys](float t) { return sample_keys(keys, t).a; });
+        std::size_t remove = keys.size();
+        for (std::size_t k = 0U; k < keys.size(); ++k) {
+            const float half = (width - 24.0F - 8.0F) * 0.5F;
+            Value v = number(keys[k].t);
+            ControlDef age = numeric("age", "Age", k == 0U ? 0.0F : 1.0F, 0.0F, 1.0F);
+            if (field(numbers_, ctx, owner(32U + k), age, gui::Rect{x, y, half, row_height}, v)) {
+                keys[k].t = v.x;
+                clamp_age(keys, k);
+            }
+            ControlDef well = numeric("color", "Color", 1.0F, 0.0F, 64.0F);
+            well.type = ControlType::Color;
+            well.fallback = color(1.0F, 1.0F, 1.0F, 1.0F);
+            v = color(keys[k].value.r, keys[k].value.g, keys[k].value.b, keys[k].value.a);
+            if (field(numbers_, ctx, owner(32U + k), well, gui::Rect{x + half + 8.0F, y, half, row_height}, v)) {
+                keys[k].value = {v.x, v.y, v.z, v.w};
+            }
+            color_live_ = color_live_ || ctx.color_open(part_id(owner(32U + k), "color"));
+            if (keys.size() > 2U &&
+                editor::icon_button(ctx, part_id(owner(32U + k), "key.remove"),
+                                    gui::Rect{x + width - 24.0F, y, 24, 28}, gui::Icon::Minus, "Remove this key")) {
+                remove = k;
+            }
+            y += 32.0F;
+        }
+        if (remove < keys.size()) {
+            keys.erase(keys.begin() + static_cast<std::ptrdiff_t>(remove));
+        }
+        if (keys.size() < max_curve_keys &&
+            editor::pill_button(ctx, part_id(item.uid, "tint_key.add"), gui::Rect{x, y, 100, 28}, gui::Icon::Plus,
+                                "Add key", "Add a key before the last one")) {
+            add_key_between_last(keys);
+        }
+        y += 36.0F;
+    }
+}
+
 void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Document &document,
                                std::string_view issue) {
     color_live_ = false;
@@ -540,6 +813,9 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
                 continue;
             }
             if (section != p.section) {
+                if (selection_.size() == 1U && section == "Motion") {
+                    draw_motion_stack(ctx, document, *item, x, y, width);
+                }
                 section = p.section;
                 heading(ctx, section, x, y, width);
             }
@@ -569,6 +845,12 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
                 color_live_ = color_live_ || ctx.color_open(part_id(item->uid, p.control.id));
             }
             y += height + 4.0F;
+            if (selection_.size() == 1U && p.control.id == "look") {
+                draw_over_age(ctx, *item, x, y, width);
+            }
+        }
+        if (selection_.size() == 1U && section == "Motion") {
+            draw_motion_stack(ctx, document, *item, x, y, width);
         }
         if (selection_.size() == 1U) {
             draw_sources(ctx, document, *item, x, y, width);
@@ -577,6 +859,9 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
     inspector_scroll_.end(ctx, y + offset - view.y + 16);
 }
 void SceneView::draw_overlays(gui::UiContext &ctx, const gui::Rect &window, Document &document) {
+    if (const auto chosen = behavior_add_.draw(ctx, window)) {
+        static_cast<void>(add_behavior(document, behavior_target_, static_cast<BehaviorKind>(*chosen)));
+    }
     if (const auto chosen = add_.draw(ctx, window)) {
         if (*chosen == 0U) {
             select(add_object(document));
