@@ -198,6 +198,10 @@ enum class Purpose : std::uint8_t;
 [[nodiscard]] std::uint32_t add_relationship(Document &document, RelationKind kind, std::uint32_t object,
                                              std::uint32_t system);
 bool remove_relationship(Document &document, std::uint32_t uid);
+// Whether a rule can ever fire: hits and trails come from Dynamic objects,
+// so a rule on a Static or Animated one, or on every object when none is
+// Dynamic, is born nothing.
+[[nodiscard]] bool relationship_active(const Scene &scene, const Relationship &relationship);
 [[nodiscard]] std::string_view relation_name(RelationKind kind);
 inline constexpr std::size_t max_relationships = 256U;
 [[nodiscard]] std::string_view force_name(ForceKind kind);

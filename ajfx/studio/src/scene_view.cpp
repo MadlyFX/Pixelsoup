@@ -412,6 +412,14 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
             remove = r.uid;
         }
         y += 30.0F;
+        if (!relationship_active(*document.scene, r)) {
+            for (const std::string &part :
+                 wrap_text(ctx, "Nothing is born: hits and trails come from Dynamic objects.", width)) {
+                ctx.label(gui::Rect{x, y, width, 22}, part, ctx.theme().caution);
+                y += 22;
+            }
+            y += 6.0F;
+        }
         Value v;
         const auto number_row = [&](const ControlDef &control, float &target) {
             v = number(target);
@@ -480,8 +488,12 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
                 if (system ? std::holds_alternative<Object>(other.data)
                            : std::holds_alternative<ParticleSystem>(other.data)) {
                     relation_choices_.emplace_back(kind, other.uid);
+                    const auto *shape = std::get_if<Object>(&other.data);
+                    const bool still = shape != nullptr && shape->motion != ObjectMotion::Dynamic;
                     entries.push_back({group, other.name,
-                                       kind == RelationKind::EmitOnHit ? "Born where it hits" : "Shed behind it",
+                                       still ? std::string{"Not Dynamic: it never hits or moves, so nothing is born"}
+                                       : kind == RelationKind::EmitOnHit ? std::string{"Born where it hits"}
+                                                                         : std::string{"Shed behind it"},
                                        true, {}});
                 }
             }

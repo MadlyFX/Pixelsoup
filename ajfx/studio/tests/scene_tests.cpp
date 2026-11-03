@@ -744,7 +744,72 @@ void statistics_count_the_scene_and_name_limits_in_reach() {
     CHECK(stat_lines(crowded).back() == "Near a limit. Forces on one system: 14 of 16");
 }
 
+// Particles meet the floor and every other Static object, each as its own
+// shape, and pass through them when told to.
+void particles_meet_static_objects() {
+    Document document = new_scene();
+    const Uid ground = document.scene->items.front().uid;
+    const Uid wall = add_object(document);
+    object(document, wall).motion = ObjectMotion::Static;
+    object(document, wall).position = {3.0F, 0.5F, 0.0F};
+    object(document, wall).collider = ObjectCollider::Sphere;
+    const Uid system = add_particle_system(document);
+    auto &dust = std::get<ParticleSystem>(document.scene->item(system)->data);
+    dust.sources.front().mode = SourceMode::Initial;
+    dust.sources.front().count = 200U;
+    dust.position = {0.0F, 1.0F, 0.0F};
+    dust.direction = {0.0F, -1.0F, 0.0F};
+    dust.speed = {2.0F, 2.0F};
+    dust.spread = 0.0F;
+    dust.gravity = 1.0F;
+    dust.lifetime = {5.0F, 5.0F};
+    dust.size = {0.02F, 0.02F};
+
+    const Document lowered = lower_scene(document);
+    const Block *plane = lowered.block(ground + 3U);
+    const Block *ball = lowered.block(wall + 3U);
+    CHECK(plane && plane->kind == "ground" && near(get(*plane, "height").x, 0.0F, 0.001F));
+    CHECK(ball && ball->kind == "sphere" && get(*ball, "radius").x == 0.5F && get(*ball, "center").x == 3.0F);
+
+    const Compiled compiled = ready(document);
+    auto solver = ajfx::rigid::make_jolt_solver();
+    auto run = simulation(compiled, solver.get());
+    run.advance_to(180U);
+    std::size_t dust_emitter = 0U;
+    for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
+        if (!ajfx::rigid_physics(compiled.effect->emitters[e])) { dust_emitter = e; }
+    }
+    const auto &state = run.emitter(dust_emitter);
+    CHECK(state.alive() == 200U);
+    float lowest = 1.0F;
+    for (std::size_t i = 0U; i < state.alive(); ++i) {
+        lowest = std::min(lowest, state.position[i].y);
+    }
+    CHECK(lowest > -0.05F); // on the floor, not through it
+
+    dust.collide = false;
+    const Compiled through = ready(document);
+    auto fall = simulation(through, solver.get());
+    fall.advance_to(180U);
+    float deepest = 1.0F;
+    const auto &fallen = fall.emitter(dust_emitter);
+    for (std::size_t i = 0U; i < fallen.alive(); ++i) {
+        deepest = std::min(deepest, fallen.position[i].y);
+    }
+    CHECK(deepest < -1.0F);
+    CHECK(lower_scene(document).block(ground + 3U) == nullptr);
+
+    // A rule on the floor can never fire; one on a Dynamic object can.
+    const Uid rule = add_relationship(document, RelationKind::EmitOnHit, ground, system);
+    CHECK(rule != 0U && !relationship_active(*document.scene, document.scene->relationships.back()));
+    const Uid any = add_relationship(document, RelationKind::EmitOnHit, 0U, system);
+    CHECK(any != 0U && !relationship_active(*document.scene, document.scene->relationships.back()));
+    object(document, wall).motion = ObjectMotion::Dynamic;
+    CHECK(relationship_active(*document.scene, document.scene->relationships.back()));
+}
+
 void add_scene_tests(std::vector<studio_test::Case> &cases) {
+    cases.push_back({"particles_meet_static_objects", particles_meet_static_objects});
     cases.push_back({"statistics_count_the_scene_and_name_limits_in_reach", statistics_count_the_scene_and_name_limits_in_reach});
     cases.push_back({"timeline_tracks_are_the_scene_moments", timeline_tracks_are_the_scene_moments});
     cases.push_back({"relationships_bind_an_object_to_a_system", relationships_bind_an_object_to_a_system});

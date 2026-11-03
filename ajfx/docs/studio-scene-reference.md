@@ -99,6 +99,13 @@ systems it acts on by identity order, at most 16 per system, so tree order,
 names and other systems never move it. Forces have no viewport handle for a
 strength, and Wind has no position.
 
+Particles with **Collide with objects** on meet loose (Dynamic) objects
+through the shared world, and each Static object as its own shape: the
+floor as a plane at its top, a Sphere collider as a sphere, and a Box or
+Convex hull collider as the box of the object's longest side, without its
+rotation. Animated objects are not met by particles yet. Switching the
+collision off lets particles pass through everything.
+
 A **relationship** is one rule on the scene binding an object (or every
 object) to a particle system, stored once and shown from either endpoint and
 under Scene settings: `Crate / Hit -> Dust / Emit` has particles born where
@@ -107,7 +114,9 @@ the object hits something (hits from, per hit, per m/s, spread), and
 m/s, moving from, base amount, broken pieces only). Each rule has a seed.
 **Add relationship** on a particle system offers the objects, and on an
 object the particle systems. A system fed by a rule needs no source of its
-own; a persistent population cannot be fed by one. Removing either endpoint
+own; a persistent population cannot be fed by one. Hits and trails come
+from Dynamic objects: a rule on a Static or Animated object, or on every
+object when none is Dynamic, is marked as born nothing. Removing either endpoint
 removes the rule rather than re-aiming it at everything. Rules lower into
 the system in identity order and reach the runtime's contact and body
 spawners. Fracture, time and threshold events are not relationships yet.

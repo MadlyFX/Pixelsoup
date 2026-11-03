@@ -3,6 +3,7 @@
 #include "catalog.hpp"
 #include "compile.hpp"
 #include "document.hpp"
+#include "library.hpp"
 #include "scene_properties.hpp"
 
 #include <algorithm>
@@ -304,6 +305,17 @@ bool remove_relationship(Document &document, Uid uid) {
         return false;
     }
     return std::erase_if(document.scene->relationships, [uid](const Relationship &r) { return r.uid == uid; }) > 0U;
+}
+bool relationship_active(const Scene &scene, const Relationship &relationship) {
+    const auto dynamic = [](const SceneItem &item) {
+        const auto *object = std::get_if<Object>(&item.data);
+        return object != nullptr && item.simulate && object->motion == ObjectMotion::Dynamic;
+    };
+    if (relationship.object != 0U) {
+        const SceneItem *object = scene.item(relationship.object);
+        return object != nullptr && dynamic(*object);
+    }
+    return std::any_of(scene.items.begin(), scene.items.end(), dynamic);
 }
 std::string_view relation_name(RelationKind kind) {
     return kind == RelationKind::EmitOnHit ? "Emit on hit" : "Trail";
@@ -830,6 +842,45 @@ Document lower_scene(const Document &document) {
             }
             if (!system->collide) {
                 layer.blocks.push_back(block(item->uid + 12U, "passes_through"));
+            } else {
+                // Particles meet loose bodies through the world, but a Static
+                // object stands outside it, so each is met as its own shape:
+                // the floor as a plane at its top, a sphere as a sphere, and
+                // a box or hull as the box of its longest side (rotation is
+                // not taken into account). The block keeps the object's
+                // identity, so every system meets the same thing.
+                for (const SceneItem *other : ordered) {
+                    const auto *still = std::get_if<Object>(&other->data);
+                    if (still == nullptr || !other->simulate || still->motion != ObjectMotion::Static) {
+                        continue;
+                    }
+                                        const Uid uid = other->uid + 3U;
+                    if (still->mesh == "floor") {
+                        float top = 0.0F;
+                        if (const MeshData *mesh = library_mesh("floor")) {
+                            for (const auto &vertex : mesh->vertices) {
+                                top = std::max(top, vertex.position.y);
+                            }
+                        }
+                        layer.blocks.push_back(block(uid, "ground",
+                                                     {{"response", choice("bounce")},
+                                                      {"bounce", number(still->restitution)},
+                                                      {"friction", number(still->friction)},
+                                                      {"height", number(still->position.y + top * still->size)}}));
+                    } else if (still->collider == ObjectCollider::Sphere) {
+                        layer.blocks.push_back(block(uid, "sphere",
+                                                     {{"center", value(still->position)},
+                                                      {"radius", number(still->size * 0.5F)},
+                                                      {"bounce", number(still->restitution)},
+                                                      {"friction", number(still->friction)}}));
+                    } else {
+                        layer.blocks.push_back(block(uid, "box",
+                                                     {{"center", value(still->position)},
+                                                      {"size", vec3(still->size, still->size, still->size)},
+                                                      {"bounce", number(still->restitution)},
+                                                      {"friction", number(still->friction)}}));
+                    }
+                }
             }
             const std::vector<const SceneItem *> acting = forces_on(*document.scene, item->uid);
             for (std::size_t k = 0U; k < acting.size() && k < max_forces_per_system; ++k) {
