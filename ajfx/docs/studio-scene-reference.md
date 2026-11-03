@@ -48,8 +48,13 @@ pose. Collider choices are explicit convex hull, sphere or box. Distribution
 creates a Single object or one Grid/Pile instance set. Repeated Static and
 Animated objects, and fracture on either, are diagnosed as unsupported.
 
-A particle system owns its sources, initial velocity, gravity share, a
-Motion stack, appearance and object-collision switch. Sources have stable
+A particle system owns its sources, launch direction and speed, gravity
+share, a Motion stack, appearance and object-collision switch. Radius,
+lifetime, speed, size, brightness and spin are **ranges**: two values, and
+each particle picks its own between them once, at birth. A range whose two
+values are equal is a constant. The system's seed, and each behavior's seed,
+choose another set of picks; seeds are explicit, undoable and never change as
+a side effect of another edit. Sources have stable
 identities and are Initial, Continuous or Burst. Additional sources are
 added inside the inspector. A bounded Initial/Burst population can be
 persistent; an unbounded Continuous source cannot. Source Initial currently
@@ -57,10 +62,14 @@ uses the runtime's time-zero burst and becomes populated on the first step.
 It is not yet an arbitrary saved initial-state checkpoint.
 
 The Motion stack is an ordered list of typed behaviors, each with a stable
-identity, an on/off switch and its own controls: **Drag** (amount),
-**Turbulence** (amount, swirl size, churn) and **Vortex** (strength, axis,
-center). **Add behavior** appends one with that kind's defaults; a new system
-has an empty stack. The stack's authored order is the order the runtime
+identity, an on/off switch, a seed and its own controls: **Drag** (amount),
+**Turbulence** (amount, swirl size, churn), **Vortex** (strength, axis,
+center), **Wind** (strength, heading), **Attract** (strength, point, reach)
+and **Draw in** (pull, fade height, center). A behavior's strength is a
+range: each particle keeps its own share for life, so some sparks drag more
+and some smoke swirls harder. The seed picks another set of shares and, for
+Turbulence, another noise field. **Add behavior** appends one with that
+kind's defaults; a new system has an empty stack. The stack's authored order is the order the runtime
 applies the forces, so moving a row up or down is a motion edit. A switched-off
 behavior keeps its settings and lowers to nothing. Up to 16 behaviors per
 system. Behaviors have no viewport handles yet; a vortex center is typed.

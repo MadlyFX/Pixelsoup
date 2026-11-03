@@ -46,17 +46,28 @@ Block raw_block(Uid uid, RawModule module) {
 
 Value value(Vec3 v) { return vec3(v.x, v.y, v.z); }
 float length(Vec3 v) { return std::sqrt(dot(v, v)); }
-void launch(Layer &layer, Uid uid, Vec3 v, float spread = 0.0F) {
-    const float speed = length(v);
+void launch(Layer &layer, Uid uid, Vec3 direction, Range speed, float spread = 0.0F) {
     layer.blocks.push_back(block(uid, "launch",
                                  {{"direction", choice("custom")},
-                                  {"custom", value(v)},
-                                  {"speed", range(speed, speed)},
+                                  {"custom", value(direction)},
+                                  {"speed", range(speed.min, speed.max)},
                                   {"spread", range(0.0F, spread)}}));
 }
+void launch(Layer &layer, Uid uid, Vec3 v) {
+    const float speed = length(v);
+    launch(layer, uid, v, Range{speed, speed});
+}
+Value value(Range r) { return range(r.min, r.max); }
 bool within(float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; }
 bool within(Vec3 v, float lo, float hi) { return within(v.x, lo, hi) && within(v.y, lo, hi) && within(v.z, lo, hi); }
+bool within(Range r, float lo, float hi) { return within(r.min, lo, hi) && within(r.max, lo, hi); }
 std::string validate_behavior(const MotionBehavior &b) {
+    if (b.seed > 1000000U) {
+        return "seed is outside its supported range";
+    }
+    if (!within(b.center, -10000.0F, 10000.0F)) {
+        return "center is outside its supported range";
+    }
     switch (b.kind) {
     case BehaviorKind::Drag:
         return within(b.strength, 0.0F, 100.0F) ? "" : "amount is outside its supported range";
@@ -69,10 +80,21 @@ std::string validate_behavior(const MotionBehavior &b) {
         }
         return within(b.churn, 0.0F, 100.0F) ? "" : "churn is outside its supported range";
     case BehaviorKind::Vortex:
+    case BehaviorKind::Attract:
         if (!within(b.strength, -1000.0F, 1000.0F)) {
             return "strength is outside its supported range";
         }
-        return within(b.center, -10000.0F, 10000.0F) ? "" : "center is outside its supported range";
+        return within(b.reach, 0.0F, 1000.0F) ? "" : "reach is outside its supported range";
+    case BehaviorKind::Wind:
+        if (!within(b.strength, 0.0F, 1000.0F)) {
+            return "strength is outside its supported range";
+        }
+        return within(b.heading, 0.0F, 360.0F) ? "" : "heading is outside its supported range";
+    case BehaviorKind::DrawIn:
+        if (!within(b.strength, 0.0F, 1000.0F)) {
+            return "pull is outside its supported range";
+        }
+        return within(b.reach, 0.0F, 1000.0F) ? "" : "fade height is outside its supported range";
     }
     return "unknown behavior";
 }
@@ -109,6 +131,12 @@ std::string_view behavior_name(BehaviorKind kind) {
         return "Turbulence";
     case BehaviorKind::Vortex:
         return "Vortex";
+    case BehaviorKind::Wind:
+        return "Wind";
+    case BehaviorKind::Attract:
+        return "Attract";
+    case BehaviorKind::DrawIn:
+        return "Draw in";
     }
     return "Behavior";
 }
@@ -225,7 +253,18 @@ Uid add_behavior(Document &document, Uid uid, BehaviorKind kind) {
         return 0U;
     }
     MotionBehavior behavior{.uid = fresh, .kind = kind};
-    behavior.strength = kind == BehaviorKind::Drag ? 1.0F : kind == BehaviorKind::Turbulence ? 1.5F : 3.0F;
+    const float strength = kind == BehaviorKind::Drag         ? 1.0F
+                           : kind == BehaviorKind::Turbulence ? 1.5F
+                           : kind == BehaviorKind::Vortex     ? 3.0F
+                           : kind == BehaviorKind::Wind       ? 1.5F
+                           : kind == BehaviorKind::Attract    ? 4.0F
+                                                              : 6.0F;
+    behavior.strength = {strength, strength};
+    if (kind == BehaviorKind::Attract) {
+        behavior.center = {0.0F, 1.0F, 0.0F};
+    } else if (kind == BehaviorKind::DrawIn) {
+        behavior.reach = 1.0F;
+    }
     system->motion.push_back(behavior);
     return fresh;
 }
@@ -491,7 +530,8 @@ Document lower_scene(const Document &document) {
                 block(item->uid + 4U, "appearance", {{"material", choice("model")}, {"model", choice("cube")}}));
             launch(layer, item->uid + 6U, object->velocity);
         } else if (const auto *system = std::get_if<ParticleSystem>(&item->data)) {
-            layer.life_min = layer.life_max = system->persistent ? std::numeric_limits<float>::max() : system->lifetime;
+            layer.life_min = system->persistent ? std::numeric_limits<float>::max() : system->lifetime.min;
+            layer.life_max = system->persistent ? std::numeric_limits<float>::max() : system->lifetime.max;
             std::vector<ParticleSource> sources = system->sources;
             std::sort(sources.begin(), sources.end(),
                       [](const ParticleSource &a, const ParticleSource &b) { return a.uid < b.uid; });
@@ -506,8 +546,8 @@ Document lower_scene(const Document &document) {
             layer.blocks.push_back(block(item->uid + 7U, "shape",
                                          {{"shape", choice("ball")},
                                           {"offset", value(system->position)},
-                                          {"size", range(0.0F, system->radius)}}));
-            launch(layer, item->uid + 6U, system->velocity, system->spread);
+                                          {"size", value(system->radius)}}));
+            launch(layer, item->uid + 6U, system->direction, system->speed, system->spread);
             layer.blocks.push_back(
                 block(item->uid + 8U, "gravity", {{"strength", range(system->gravity, system->gravity)}}));
             // The stack's authored order is the order the forces run in.
@@ -515,22 +555,45 @@ Document lower_scene(const Document &document) {
                 if (!b.enabled) {
                     continue;
                 }
+                const Value seed = number(static_cast<float>(b.seed));
                 switch (b.kind) {
                 case BehaviorKind::Drag:
-                    layer.blocks.push_back(block(b.uid, "drag", {{"amount", range(b.strength, b.strength)}}));
+                    layer.blocks.push_back(block(b.uid, "drag", {{"amount", value(b.strength)}, {"seed", seed}}));
                     break;
                 case BehaviorKind::Turbulence:
                     layer.blocks.push_back(block(b.uid, "turbulence",
-                                                 {{"strength", range(b.strength, b.strength)},
+                                                 {{"strength", value(b.strength)},
                                                   {"size", number(b.size)},
-                                                  {"churn", number(b.churn)}}));
+                                                  {"churn", number(b.churn)},
+                                                  {"seed", seed}}));
                     break;
                 case BehaviorKind::Vortex:
                     layer.blocks.push_back(block(b.uid, "swirl",
-                                                 {{"strength", range(b.strength, b.strength)},
+                                                 {{"strength", value(b.strength)},
                                                   {"axis", choice(b.axis == VortexAxis::Horizontal ? "horizontal"
                                                                                                     : "vertical")},
-                                                  {"center", value(b.center)}}));
+                                                  {"center", value(b.center)},
+                                                  {"seed", seed}}));
+                    break;
+                case BehaviorKind::Wind:
+                    layer.blocks.push_back(block(b.uid, "wind",
+                                                 {{"strength", value(b.strength)},
+                                                  {"heading", number(b.heading)},
+                                                  {"seed", seed}}));
+                    break;
+                case BehaviorKind::Attract:
+                    layer.blocks.push_back(block(b.uid, "attract",
+                                                 {{"strength", value(b.strength)},
+                                                  {"point", value(b.center)},
+                                                  {"reach", number(b.reach)},
+                                                  {"seed", seed}}));
+                    break;
+                case BehaviorKind::DrawIn:
+                    layer.blocks.push_back(block(b.uid, "draw_in",
+                                                 {{"strength", value(b.strength)},
+                                                  {"height", number(b.reach)},
+                                                  {"center", value(b.center)},
+                                                  {"seed", seed}}));
                     break;
                 }
             }
@@ -540,8 +603,12 @@ Document lower_scene(const Document &document) {
                                            : system->look == ParticleLook::Smoke ? "smoke"
                                                                                  : "solid")},
                        {"tint", color(system->tint.r, system->tint.g, system->tint.b, system->tint.a)}}));
-            layer.blocks.push_back(block(item->uid + 3U, "color", {{"color", color(1.0F, 1.0F, 1.0F)}}));
-            layer.blocks.push_back(block(item->uid + 5U, "size", {{"size", range(system->size, system->size)}}));
+            layer.blocks.push_back(block(item->uid + 3U, "color",
+                                         {{"color", color(1.0F, 1.0F, 1.0F)}, {"brightness", value(system->brightness)}}));
+            layer.blocks.push_back(block(item->uid + 5U, "size", {{"size", value(system->size)}}));
+            if (system->spin.max > 0.0F || system->spin.min > 0.0F) {
+                layer.blocks.push_back(block(item->uid + 15U, "spin", {{"speed", value(system->spin)}}));
+            }
             if (system->size_driver == Driver::Age) {
                 layer.blocks.push_back(
                     raw_block(item->uid + 13U, UpdateModule{SizeOverLife{.keys = system->size_over_age}}));
@@ -694,7 +761,8 @@ bool adopt_handle_edit(Document &document, const Document &lowered, Uid item) {
     auto &system = std::get<ParticleSystem>(owner->data);
     const ParticleSystem before = system;
     system.position = as_vec3(get(*dragged, "offset"));
-    system.radius = get(*dragged, "size").y;
+    system.radius.max = get(*dragged, "size").y;
+    system.radius.min = std::min(system.radius.min, system.radius.max);
     return !(system == before);
 }
 

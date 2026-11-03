@@ -89,11 +89,20 @@ void typed_scene_roundtrip_and_strict_fields() {
     system.persistent = true;
     CHECK(add_behavior(document, b, BehaviorKind::Vortex) != 0U);
     CHECK(add_behavior(document, b, BehaviorKind::Turbulence) != 0U);
-    system.motion[0].strength = -4.5F;
+    system.motion[0].strength = {-4.5F, -1.5F};
     system.motion[0].axis = VortexAxis::Horizontal;
     system.motion[0].center = {0.5F, 1.5F, -2.5F};
+    system.motion[0].seed = 17U;
     system.motion[1].enabled = false;
     system.motion[1].size = 1.3F;
+    CHECK(add_behavior(document, b, BehaviorKind::Wind) != 0U);
+    system.motion[2].heading = 135.0F;
+    system.lifetime = {1.5F, 4.5F};
+    system.size = {0.02F, 0.09F};
+    system.speed = {0.5F, 2.5F};
+    system.radius = {0.1F, 0.4F};
+    system.brightness = {1.0F, 3.0F};
+    system.spin = {30.0F, 120.0F};
     system.size_driver = Driver::Age;
     system.size_over_age = {{0.0F, 0.25F}, {0.4F, 2.0F}, {1.0F, 0.0F}};
     system.tint_driver = Driver::Age;
@@ -223,7 +232,7 @@ void initial_population_is_bounded_and_persistent() {
     system.sources.front().mode = SourceMode::Initial;
     system.sources.front().count = 37;
     system.persistent = true;
-    system.velocity = {};
+    system.speed = {};
     const Compiled compiled = ready(document);
     CHECK(compiled.effect->emitters.front().capacity == 64U);
     auto run = simulation(compiled);
@@ -309,14 +318,16 @@ void motion_stack_and_age_drivers_reach_the_runtime() {
     const Uid drag = add_behavior(document, uid, BehaviorKind::Drag);
     const Uid turbulence = add_behavior(document, uid, BehaviorKind::Turbulence);
     CHECK(vortex != 0U && drag != 0U && turbulence != 0U && system.motion.size() == 3U);
-    CHECK(system.motion[0].strength == 3.0F && system.motion[1].strength == 1.0F && system.motion[2].strength == 1.5F);
-    system.motion[0].strength = -7.5F;
+    CHECK(system.motion[0].strength == Range{3.0F, 3.0F} && system.motion[1].strength == Range{1.0F, 1.0F} &&
+          system.motion[2].strength == Range{1.5F, 1.5F});
+    system.motion[0].strength = {-7.5F, -7.5F};
     system.motion[0].axis = VortexAxis::Horizontal;
     system.motion[0].center = {1.5F, 2.5F, 3.5F};
-    system.motion[1].strength = 2.25F;
-    system.motion[2].strength = 4.5F;
+    system.motion[1].strength = {0.75F, 2.25F};
+    system.motion[2].strength = {4.5F, 4.5F};
     system.motion[2].size = 1.3F;
     system.motion[2].churn = 0.9F;
+    system.motion[2].seed = 5U;
     // Moving turbulence up puts it before drag: stack order, not identity order.
     CHECK(move_behavior(document, uid, turbulence, -1));
     CHECK(!move_behavior(document, uid, vortex, -1));
@@ -339,7 +350,8 @@ void motion_stack_and_age_drivers_reach_the_runtime() {
     const Block *noise = lowered.block(turbulence);
     CHECK(swirl && swirl->kind == "swirl" && get(*swirl, "strength").x == -7.5F &&
           get(*swirl, "axis").text == "horizontal" && get(*swirl, "center").z == 3.5F);
-    CHECK(noise && get(*noise, "size").x == 1.3F && get(*noise, "churn").x == 0.9F);
+    CHECK(noise && get(*noise, "size").x == 1.3F && get(*noise, "churn").x == 0.9F && get(*noise, "seed").x == 5.0F);
+    CHECK(lowered.block(drag) && get(*lowered.block(drag), "amount") == range(0.75F, 2.25F));
     system.motion[2].enabled = false;
     lowered = lower_scene(document);
     CHECK((kinds(lowered) == std::vector<std::string>{"swirl", "turbulence"}));
@@ -371,6 +383,55 @@ void motion_stack_and_age_drivers_reach_the_runtime() {
     run.advance_to(30U);
     CHECK(run.emitter(0).alive() > 0U);
 
+    // Ranges reach the runtime as two values, and a behavior's seed changes
+    // its noise field and its per-particle shares.
+    system.lifetime = {1.5F, 4.5F};
+    system.size = {0.02F, 0.09F};
+    system.speed = {0.5F, 2.5F};
+    system.spin = {30.0F, 120.0F};
+    system.brightness = {1.0F, 3.0F};
+    const Compiled ranged = ready(document);
+    const ajfx::Emitter &emitter = ranged.effect->emitters.front();
+    const ajfx::Lifetime *life = nullptr;
+    const ajfx::InitSize *init_size = nullptr;
+    const ajfx::InitSpin *init_spin = nullptr;
+    const ajfx::Velocity *velocity = nullptr;
+    for (const ajfx::InitModule &module : emitter.init) {
+        if (const auto *m = std::get_if<ajfx::Lifetime>(&module)) { life = m; }
+        if (const auto *m = std::get_if<ajfx::InitSize>(&module)) { init_size = m; }
+        if (const auto *m = std::get_if<ajfx::InitSpin>(&module)) { init_spin = m; }
+        if (const auto *m = std::get_if<ajfx::Velocity>(&module)) { velocity = m; }
+    }
+    CHECK(life && life->min.value == 1.5F && life->max.value == 4.5F);
+    CHECK(init_size && init_size->min.value == 0.02F && init_size->max.value == 0.09F);
+    CHECK(init_spin && init_spin->speed_min.value == 30.0F && init_spin->speed_max.value == 120.0F);
+    CHECK(velocity && velocity->speed_min.value == 0.5F && velocity->speed_max.value == 2.5F);
+    const ajfx::Drag *drag_module = nullptr;
+    const ajfx::CurlNoise *noise_module = nullptr;
+    for (const ajfx::UpdateModule &module : emitter.update) {
+        if (const auto *m = std::get_if<ajfx::Drag>(&module)) { drag_module = m; }
+        if (const auto *m = std::get_if<ajfx::CurlNoise>(&module)) { noise_module = m; }
+    }
+    CHECK(drag_module && drag_module->scale_min.value == 0.75F && drag_module->scale_max.value == 2.25F);
+    CHECK(noise_module);
+    const std::uint32_t seeded = noise_module->seed;
+    system.motion[1].seed = 6U;
+    const Compiled reseeded = ready(document);
+    for (const ajfx::UpdateModule &module : reseeded.effect->emitters.front().update) {
+        if (const auto *m = std::get_if<ajfx::CurlNoise>(&module)) {
+            CHECK(m->seed != seeded);
+        }
+    }
+    Document brighter = document;
+    CHECK(same_scene_motion(document, brighter));
+    std::get<ParticleSystem>(brighter.scene->item(uid)->data).brightness = {2.0F, 2.0F};
+    CHECK(!same_scene_motion(document, brighter));
+    system.lifetime = {3.0F, 3.0F};
+    system.size = {0.05F, 0.05F};
+    system.speed = {1.0F, 1.0F};
+    system.spin = {};
+    system.brightness = {1.0F, 1.0F};
+
     // A motion or size-over-age edit stales the motion cache; colour does not.
     Document other = document;
     CHECK(same_scene_motion(document, other));
@@ -379,7 +440,7 @@ void motion_stack_and_age_drivers_reach_the_runtime() {
     std::get<ParticleSystem>(other.scene->item(uid)->data).size_over_age.front().value = 0.75F;
     CHECK(!same_scene_motion(document, other));
     other = document;
-    std::get<ParticleSystem>(other.scene->item(uid)->data).motion[1].strength = 0.3F;
+    std::get<ParticleSystem>(other.scene->item(uid)->data).motion[1].strength = {0.3F, 0.3F};
     CHECK(!same_scene_motion(document, other));
     other = document;
     CHECK(move_behavior(other, uid, drag, -1));
@@ -389,7 +450,7 @@ void motion_stack_and_age_drivers_reach_the_runtime() {
     const Uid copy = duplicate_item(document, uid);
     CHECK(copy != 0U);
     const auto &twin = std::get<ParticleSystem>(document.scene->item(copy)->data);
-    CHECK(twin.motion.size() == 3U && twin.motion[0].uid != vortex && twin.motion[0].strength == -7.5F);
+    CHECK(twin.motion.size() == 3U && twin.motion[0].uid != vortex && twin.motion[0].strength == Range{-7.5F, -7.5F});
     CHECK(validate_scene(document).empty());
 
     // Keys out of age order, and too many behaviors, are refused. The

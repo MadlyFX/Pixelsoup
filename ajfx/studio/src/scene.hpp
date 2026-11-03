@@ -19,7 +19,13 @@ enum class SourceMode { Initial, Continuous, Burst };
 enum class ParticleLook { Glow, Smoke, Solid };
 // A behavior in a system's Motion stack. Each is a typed owner of one runtime
 // force; the stack's order is authored and is the order the forces run in.
-enum class BehaviorKind { Drag, Turbulence, Vortex };
+// A value each particle picks for itself, between the two, once at birth.
+struct Range final {
+    float min{};
+    float max{};
+    friend bool operator==(const Range &, const Range &) = default;
+};
+enum class BehaviorKind { Drag, Turbulence, Vortex, Wind, Attract, DrawIn };
 enum class VortexAxis { Vertical, Horizontal };
 // What sets a value over a particle's life: a constant, or keys over its
 // normalized age (0 at birth, 1 at death).
@@ -29,11 +35,17 @@ struct MotionBehavior final {
     std::uint32_t uid{};
     BehaviorKind kind{BehaviorKind::Drag};
     bool enabled{true};
-    float strength{1.0F}; // Drag: speed lost per second; Turbulence: amount; Vortex: m/s^2, negative turns the other way
+    // Each particle's share, between the two. Drag: speed lost per second;
+    // Turbulence: amount; Vortex, Wind, Attract: m/s^2 (negative turns or
+    // pushes the other way); Draw in: pull per metre from the line.
+    Range strength{1.0F, 1.0F};
     float size{0.6F};     // Turbulence: swirl size, metres
     float churn{0.4F};    // Turbulence: how fast the swirls change
-    Vec3 center{};        // Vortex: where its axis passes
+    Vec3 center{};        // Vortex: where its axis passes; Attract: the point; Draw in: base of the line
     VortexAxis axis{VortexAxis::Vertical};
+    float heading{0.0F};  // Wind: degrees, 0 is +X and 90 is -Z
+    float reach{0.0F};    // Attract: no pull beyond this (0 is everywhere); Draw in: fades out by this height (0 is never)
+    std::uint32_t seed{0U}; // another random pick of shares, and another noise field; 0 is the default
     friend bool operator==(const MotionBehavior &, const MotionBehavior &) = default;
 };
 
@@ -77,17 +89,20 @@ struct ParticleSource final {
 
 struct ParticleSystem final {
     Vec3 position{0.0F, 1.0F, 0.0F};
-    float radius{0.2F};
+    Range radius{0.0F, 0.2F}; // born between the two distances from the position
     std::vector<ParticleSource> sources;
     bool persistent{false}; // only bounded initial/burst sources may be persistent
-    float lifetime{3.0F};
-    Vec3 velocity{0.0F, 1.0F, 0.0F};
+    Range lifetime{3.0F, 3.0F};
+    Vec3 direction{0.0F, 1.0F, 0.0F};
+    Range speed{1.0F, 1.0F}; // m/s along the direction
     float spread{20.0F};
     float gravity{0.0F}; // explicit share of scene gravity, independent of name
     std::vector<MotionBehavior> motion; // in stack order
     bool collide{true};
     Color tint{1.0F, 1.0F, 1.0F, 1.0F};
-    float size{0.05F};
+    Range brightness{1.0F, 1.0F}; // above 1 a particle blooms
+    Range size{0.05F, 0.05F};
+    Range spin{0.0F, 0.0F}; // degrees per second, either way
     ParticleLook look{ParticleLook::Glow};
     // Size and colour over age multiply the base size and the colour. Keys
     // are sorted by age; values hold beyond the ends.

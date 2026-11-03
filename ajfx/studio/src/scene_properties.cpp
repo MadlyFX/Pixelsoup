@@ -8,6 +8,8 @@ namespace {
 template <class T> Value encode(const T &v) {
     if constexpr (std::is_same_v<T, Vec3>) {
         return vec3(v.x, v.y, v.z);
+    } else if constexpr (std::is_same_v<T, Range>) {
+        return range(v.min, v.max);
     } else if constexpr (std::is_same_v<T, Color>) {
         return color(v.r, v.g, v.b, v.a);
     } else if constexpr (std::is_same_v<T, std::string>) {
@@ -21,6 +23,8 @@ template <class T> Value encode(const T &v) {
 template <class T> T decode(const Value &v) {
     if constexpr (std::is_same_v<T, Vec3>) {
         return {v.x, v.y, v.z};
+    } else if constexpr (std::is_same_v<T, Range>) {
+        return {v.x, v.y};
     } else if constexpr (std::is_same_v<T, Color>) {
         return {v.x, v.y, v.z, v.w};
     } else if constexpr (std::is_same_v<T, std::string>) {
@@ -45,6 +49,8 @@ SceneProperty property(std::string_view id, std::string_view label, std::string_
     control.unit = unit;
     if constexpr (std::is_same_v<T, Vec3>) {
         control.type = ControlType::Vec3;
+    } else if constexpr (std::is_same_v<T, Range>) {
+        control.type = ControlType::Range;
     } else if constexpr (std::is_same_v<T, Color>) {
         control.type = ControlType::Color;
     } else if constexpr (std::is_same_v<T, std::string>) {
@@ -114,11 +120,14 @@ const std::vector<SceneProperty> &system_properties() {
             property("radius", "Radius", "Initial state / Sources", &ParticleSystem::radius, 0, 1000, "m"),
             property("persistent", "Persistent population", "Initial state / Sources", &ParticleSystem::persistent),
             property("lifetime", "Lifetime", "Initial state / Sources", &ParticleSystem::lifetime, 0.01F, 3600, "s"),
-            property("velocity", "Initial velocity", "Motion", &ParticleSystem::velocity, -10000, 10000, "m/s"),
+            property("direction", "Direction", "Motion", &ParticleSystem::direction, -10000, 10000, "m"),
+            property("speed", "Speed", "Motion", &ParticleSystem::speed, 0, 10000, "m/s"),
             property("spread", "Velocity spread", "Motion", &ParticleSystem::spread, 0, 180, "deg"),
             property("gravity", "Gravity share", "Motion", &ParticleSystem::gravity, 0, 10, "x"),
             property("tint", "Color", "Appearance", &ParticleSystem::tint, 0, 64),
+            property("brightness", "Brightness", "Appearance", &ParticleSystem::brightness, 0, 64, "x"),
             property("size", "Size", "Appearance", &ParticleSystem::size, 0.001F, 100, "m"),
+            property("spin", "Spin", "Appearance", &ParticleSystem::spin, 0, 7200, "deg/s"),
             property("look", "Renderer", "Appearance", &ParticleSystem::look, 0, 2, {}, {"Glow", "Smoke", "Solid"})};
         out.push_back(property("collide", "Collide with objects", "Interactions", &ParticleSystem::collide));
         for (SceneProperty &p : out) {
@@ -149,7 +158,10 @@ std::string validate_scene_properties(const SceneItem &item) {
         if (c.type == ControlType::File) {
             continue;
         }
-        const int count = c.type == ControlType::Vec3 ? 3 : c.type == ControlType::Color ? 4 : 1;
+        const int count = c.type == ControlType::Vec3    ? 3
+                          : c.type == ControlType::Color ? 4
+                          : c.type == ControlType::Range ? 2
+                                                         : 1;
         const float values[] = {v.x, v.y, v.z, v.w};
         for (int k = 0; k < count; ++k) {
             if (!std::isfinite(values[k]) || values[k] < c.hard_min || values[k] > c.hard_max) {

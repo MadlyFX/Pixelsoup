@@ -19,12 +19,16 @@ Json encode(const SceneProperty &p, const SceneItem &item) {
     if (p.control.type == ControlType::Toggle) {
         return Json::of(v.x != 0.0F);
     }
-    if (p.control.type != ControlType::Vec3 && p.control.type != ControlType::Color) {
+    if (p.control.type != ControlType::Vec3 && p.control.type != ControlType::Color &&
+        p.control.type != ControlType::Range) {
         return numeric(v.x);
     }
     Json array = Json::array();
     array.push(numeric(v.x));
     array.push(numeric(v.y));
+    if (p.control.type == ControlType::Range) {
+        return array;
+    }
     array.push(numeric(v.z));
     if (p.control.type == ControlType::Color) {
         array.push(numeric(v.w));
@@ -43,8 +47,9 @@ bool decode(const SceneProperty &p, const Json &in, SceneItem &item) {
             return false;
         }
         v.x = in.boolean ? 1.0F : 0.0F;
-    } else if (p.control.type == ControlType::Vec3 || p.control.type == ControlType::Color) {
-        const std::size_t n = p.control.type == ControlType::Color ? 4U : 3U;
+    } else if (p.control.type == ControlType::Vec3 || p.control.type == ControlType::Color ||
+               p.control.type == ControlType::Range) {
+        const std::size_t n = p.control.type == ControlType::Color ? 4U : p.control.type == ControlType::Range ? 2U : 3U;
         if (in.type != Json::Type::Array || in.items.size() != n) {
             return false;
         }
@@ -160,7 +165,10 @@ std::string save_scene(const Document &document) {
                 m.add("uid", numeric(b.uid));
                 m.add("kind", numeric(static_cast<int>(b.kind)));
                 m.add("enabled", Json::of(b.enabled));
-                m.add("strength", numeric(b.strength));
+                m.add("strength", numbers({b.strength.min, b.strength.max}));
+                m.add("heading", numeric(b.heading));
+                m.add("reach", numeric(b.reach));
+                m.add("seed", numeric(b.seed));
                 m.add("size", numeric(b.size));
                 m.add("churn", numeric(b.churn));
                 m.add("center", numbers({b.center.x, b.center.y, b.center.z}));
@@ -300,17 +308,23 @@ Loaded load_scene(const Json &root) {
                 std::uint32_t kind{};
                 std::uint32_t axis{};
                 std::array<float, 3> center{};
-                if (!keys(m, {"uid", "kind", "enabled", "strength", "size", "churn", "center", "axis"}) ||
-                    !integer(m, "uid", b.uid) || !integer(m, "kind", kind) || kind > 2U ||
-                    !integer(m, "axis", axis) || axis > 1U || !has_type(m, "enabled", Json::Type::Bool) ||
-                    !has_type(m, "strength", Json::Type::Number) || !has_type(m, "size", Json::Type::Number) ||
-                    !has_type(m, "churn", Json::Type::Number) || !numbers(m.find("center"), center)) {
+                std::array<float, 2> strength{};
+                if (!keys(m, {"uid", "kind", "enabled", "strength", "size", "churn", "center", "axis", "heading",
+                              "reach", "seed"}) ||
+                    !integer(m, "uid", b.uid) || !integer(m, "kind", kind) || kind > 5U ||
+                    !integer(m, "axis", axis) || axis > 1U || !integer(m, "seed", b.seed) ||
+                    !has_type(m, "enabled", Json::Type::Bool) || !numbers(m.find("strength"), strength) ||
+                    !has_type(m, "size", Json::Type::Number) || !has_type(m, "churn", Json::Type::Number) ||
+                    !has_type(m, "heading", Json::Type::Number) || !has_type(m, "reach", Json::Type::Number) ||
+                    !numbers(m.find("center"), center)) {
                     return fail(item.name + ": invalid motion behavior");
                 }
                 b.kind = static_cast<BehaviorKind>(kind);
                 b.axis = static_cast<VortexAxis>(axis);
                 b.enabled = m.bool_or("enabled", true);
-                b.strength = static_cast<float>(m.number_or("strength", 0));
+                b.strength = {strength[0], strength[1]};
+                b.heading = static_cast<float>(m.number_or("heading", 0));
+                b.reach = static_cast<float>(m.number_or("reach", 0));
                 b.size = static_cast<float>(m.number_or("size", 0));
                 b.churn = static_cast<float>(m.number_or("churn", 0));
                 b.center = {center[0], center[1], center[2]};

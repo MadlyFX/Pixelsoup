@@ -938,7 +938,7 @@ private:
                 radius = object->size;
             } else if (const auto* system = std::get_if<ParticleSystem>(&item.data)) {
                 at = system->position;
-                radius = std::max(system->radius, 0.1F);
+                radius = std::max(system->radius.max, 0.1F);
             } else { continue; }
             const Vec3 r{radius, radius, radius};
             const Vec3 low = (at - r) * document_.scale;

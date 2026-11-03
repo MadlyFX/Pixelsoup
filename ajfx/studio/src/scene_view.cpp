@@ -78,6 +78,23 @@ bool field(editor::NumberField &numbers, gui::UiContext &ctx, std::uint64_t owne
             }
         }
         ctx.tooltip(box, std::string{control.label} + " (" + std::string{control.unit} + ")");
+    } else if (control.type == ControlType::Range) {
+        // Two values: each particle picks its own between them.
+        const float gap = 26.0F;
+        const float width = (box.width - gap) * 0.5F;
+        float *values[] = {&v.x, &v.y};
+        for (std::uint32_t k = 0U; k < 2U; ++k) {
+            double out = *values[k];
+            const gui::Rect part{box.x + static_cast<float>(k) * (width + gap), box.y, width, box.height};
+            if (numbers.draw(ctx, part_id(owner, control.id, k), part, {}, *values[k],
+                             control.decimals == 0 ? 1.0 : 0.01, out, control.decimals, nullptr, mixed)) {
+                *values[k] = std::clamp(static_cast<float>(out), control.hard_min, control.hard_max);
+                changed = true;
+            }
+        }
+        ctx.label_centered(gui::Rect{box.x + width, box.y, gap, box.height}, "to", theme.text_muted);
+        ctx.tooltip(box, std::string{control.label} + (control.unit.empty() ? "" : " (" + std::string{control.unit} + ")") +
+                             ": each particle picks its own, between the two.");
     } else if (control.type == ControlType::Color) {
         gui::UiColor tint{v.x, v.y, v.z, v.w};
         changed = ctx.color_well(part_id(owner, control.id), box, tint);
@@ -420,7 +437,10 @@ void SceneView::draw_motion_stack(gui::UiContext &ctx, Document &document, Scene
         ctx.tooltip(gui::Rect{x, y, width - buttons - switch_w - 16.0F, 28},
                     b.kind == BehaviorKind::Drag         ? "Slows particles: speed lost per second."
                     : b.kind == BehaviorKind::Turbulence ? "Swirling, natural motion from curl noise."
-                                                         : "Spins particles around an axis.");
+                    : b.kind == BehaviorKind::Vortex     ? "Spins particles around an axis."
+                    : b.kind == BehaviorKind::Wind       ? "A steady sideways push."
+                    : b.kind == BehaviorKind::Attract    ? "Pulls particles to a point, or pushes them from it."
+                                                         : "Pulls particles toward a line through the center.");
         float bx = x + width - buttons;
         if (editor::icon_button(ctx, part_id(b.uid, "behavior.up"), gui::Rect{bx, y, 28, 28}, gui::Icon::ToStart,
                                 "Run earlier in the stack", false, i > 0U)) {
@@ -454,17 +474,39 @@ void SceneView::draw_motion_stack(gui::UiContext &ctx, Document &document, Scene
             }
             y += 32.0F;
         };
+        const auto range_row = [&](std::string_view label, float fallback, float lo, float hi, std::string_view unit,
+                                   int decimals) {
+            ControlDef control = numeric("strength", label, fallback, lo, hi, unit, decimals);
+            control.type = ControlType::Range;
+            control.fallback = range(fallback, fallback);
+            v = range(b.strength.min, b.strength.max);
+            if (field(numbers_, ctx, b.uid, control, gui::Rect{x, y, width, row_height}, v)) {
+                b.strength = {v.x, v.y};
+            }
+            y += 32.0F;
+        };
+        const auto center_row = [&](std::string_view label, Vec3 fallback) {
+            ControlDef center = numeric("center", label, 0.0F, -10000.0F, 10000.0F, "m");
+            center.type = ControlType::Vec3;
+            center.fallback = vec3(fallback.x, fallback.y, fallback.z);
+            v = vec3(b.center.x, b.center.y, b.center.z);
+            const float height = property_height(center, width);
+            if (field(numbers_, ctx, b.uid, center, gui::Rect{x, y, width, height}, v)) {
+                b.center = {v.x, v.y, v.z};
+            }
+            y += height + 4.0F;
+        };
         switch (b.kind) {
         case BehaviorKind::Drag:
-            number_row(numeric("strength", "Amount", 1.0F, 0.0F, 10.0F), b.strength);
+            range_row("Amount", 1.0F, 0.0F, 10.0F, {}, 2);
             break;
         case BehaviorKind::Turbulence:
-            number_row(numeric("strength", "Amount", 1.5F, 0.0F, 10.0F), b.strength);
+            range_row("Amount", 1.5F, 0.0F, 10.0F, {}, 2);
             number_row(numeric("size", "Swirl size", 0.6F, 0.05F, 5.0F, "m"), b.size);
             number_row(numeric("churn", "Churn", 0.4F, 0.0F, 3.0F), b.churn);
             break;
         case BehaviorKind::Vortex: {
-            number_row(numeric("strength", "Strength", 3.0F, -20.0F, 20.0F, "m/s^2", 1), b.strength);
+            range_row("Strength", 3.0F, -20.0F, 20.0F, "m/s^2", 1);
             ControlDef axis = numeric("axis", "Axis", 0.0F, 0.0F, 1.0F);
             axis.type = ControlType::Choice;
             axis.choices = {{"Vertical", "Vertical"}, {"Horizontal", "Horizontal"}};
@@ -473,17 +515,31 @@ void SceneView::draw_motion_stack(gui::UiContext &ctx, Document &document, Scene
                 b.axis = static_cast<VortexAxis>(static_cast<int>(v.x));
             }
             y += 32.0F;
-            ControlDef center = numeric("center", "Center", 0.0F, -10000.0F, 10000.0F, "m");
-            center.type = ControlType::Vec3;
-            center.fallback = vec3(0.0F, 0.0F, 0.0F);
-            v = vec3(b.center.x, b.center.y, b.center.z);
-            const float height = property_height(center, width);
-            if (field(numbers_, ctx, b.uid, center, gui::Rect{x, y, width, height}, v)) {
-                b.center = {v.x, v.y, v.z};
-            }
-            y += height + 4.0F;
+            center_row("Center", {});
             break;
         }
+        case BehaviorKind::Wind:
+            range_row("Strength", 1.5F, 0.0F, 20.0F, "m/s^2", 1);
+            number_row(numeric("heading", "Heading", 0.0F, 0.0F, 360.0F, "deg", 0), b.heading);
+            break;
+        case BehaviorKind::Attract:
+            range_row("Strength", 4.0F, -30.0F, 30.0F, "m/s^2", 1);
+            center_row("Point", {0.0F, 1.0F, 0.0F});
+            number_row(numeric("reach", "Reach", 0.0F, 0.0F, 10.0F, "m"), b.reach);
+            break;
+        case BehaviorKind::DrawIn:
+            range_row("Pull", 6.0F, 0.0F, 30.0F, "/s^2", 1);
+            number_row(numeric("reach", "Fades by", 1.0F, 0.0F, 5.0F, "m"), b.reach);
+            center_row("Center", {});
+            break;
+        }
+        {
+            v = number(static_cast<float>(b.seed));
+            if (field(numbers_, ctx, b.uid, numeric("seed", "Seed", 0.0F, 0.0F, 1000000.0F, {}, 0),
+                      gui::Rect{x, y, width, row_height}, v)) {
+                b.seed = static_cast<std::uint32_t>(v.x);
+            }
+            y += 32.0F;
         }
         y += 4.0F;
     }
@@ -499,7 +555,10 @@ void SceneView::draw_motion_stack(gui::UiContext &ctx, Document &document, Scene
         behavior_add_.open(x, y + 36, "Add behavior",
                            {{"", "Drag", "Slows particles", true, {}},
                             {"", "Turbulence", "Swirling, natural motion", true, {}},
-                            {"", "Vortex", "Spins particles around an axis", true, {}}},
+                            {"", "Vortex", "Spins particles around an axis", true, {}},
+                            {"", "Wind", "A steady sideways push", true, {}},
+                            {"", "Attract", "Pulls to a point, or pushes from it", true, {}},
+                            {"", "Draw in", "Pulls toward a line, like a fire's draught", true, {}}},
                            false);
     }
     y += 36.0F;
