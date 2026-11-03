@@ -22,6 +22,8 @@ class SceneView final {
     [[nodiscard]] bool gesture_live() const { return numbers_.live() || color_live_; }
     void import_models(Document &document);
     void open_add(float x, float y);
+    // What the scene costs, as lines for Scene settings; the host counts them.
+    void set_statistics(std::vector<std::string> lines) { statistics_ = std::move(lines); }
     void restore(const std::vector<Uid> &selected, const std::vector<Uid> &folded) {
         selection_ = selected;
         folded_ = std::set<Uid>{folded.begin(), folded.end()};
@@ -53,6 +55,7 @@ class SceneView final {
     Uid relation_target_{};
     bool relation_from_system_{};
     std::vector<std::pair<RelationKind, Uid>> relation_choices_;
+    std::vector<std::string> statistics_;
     mediaserver::editor::NumberField numbers_;
     bool color_live_{};
 };

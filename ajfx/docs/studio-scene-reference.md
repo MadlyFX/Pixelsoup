@@ -112,6 +112,16 @@ removes the rule rather than re-aiming it at everything. Rules lower into
 the system in identity order and reach the runtime's contact and body
 spawners. Fracture, time and threshold events are not relationships yet.
 
+At the foot of the viewport a **HUD** says what the frame costs and what
+the scene is: GPU time and the cache's state, particles (the most alive at
+once through the loop when the CPU traced it, and the room reserved),
+bodies (room, things standing, kinds of 256), particle state in KiB, and
+the item counts. A limit is named in the caution colour once four fifths of
+it is used: body kinds, forces on one system, blasts, relationships and
+bodies. The same lines appear under Scene settings as Statistics. Nothing
+is thinned or dropped to stay inside a limit; the number is there so the
+artist can decide.
+
 Under the transport, the **timeline** shows a track for every item with
 time in it and nothing for the rest: an object's release and, when
 Animated, its move as a bar from its start for its duration; a particle

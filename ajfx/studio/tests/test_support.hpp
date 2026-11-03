@@ -11,6 +11,7 @@
 #include "recipes.hpp"
 #include "session.hpp"
 #include "timeline.hpp"
+#include "scene_stats.hpp"
 #include "user_assets.hpp"
 
 #include <ajfx/cache.hpp>

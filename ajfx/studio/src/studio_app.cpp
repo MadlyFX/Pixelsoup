@@ -12,6 +12,7 @@
 #include "session.hpp"
 #include "stage_camera.hpp"
 #include "stage_overlay.hpp"
+#include "scene_stats.hpp"
 #include "timeline.hpp"
 #include "stage_pick.hpp"
 #include "widgets.hpp"
@@ -1082,16 +1083,34 @@ private:
         camera_input(view);
 
         // What it costs, bottom left.
-        std::string cost = thousands(compiled_.total_capacity()) + " particles at most";
-        if (gpu_ms_ > 0.0) {
-            cost = "GPU " + format_number(static_cast<float>(gpu_ms_), 2) + " ms a frame, " + cost;
+        // The HUD: what the scene costs and how close its limits are, at the
+        // foot of the picture. The same lines go to Scene settings.
+        const SceneStats stats = scene_stats(*document_.scene, compiled_.effect ? &compiled_ : nullptr,
+                                             analysis_ && analysis_->traced ? &analysis_->peak_alive : nullptr);
+        std::vector<std::string> hud = stat_lines(stats);
+        scene_view_.set_statistics(hud);
+        std::string cost = "GPU " + (gpu_ms_ > 0.0 ? format_number(static_cast<float>(gpu_ms_), 2) + " ms a frame" : std::string{"not timed yet"});
+        if (bake_status_.any_baked && bake_status_.cached_frames > 0U) {
+            cost += bake_status_.current ? ", cache holds " + format_number(static_cast<float>(bake_status_.cached_frames) / 60.0F, 1) + " s"
+                                         : ", cache stale";
+        } else {
+            cost += ", no cache";
         }
-        const float cost_w = std::min(ctx_.font_width(cost) + 24.0F, view.width - 20.0F);
-        const gui::Rect cost_rect{view.x + 10.0F, view.bottom() - 34.0F, cost_w, 24.0F};
-        ctx_.rounded(cost_rect, gui::fade(theme.background, 0.7F), cost_rect.height * 0.5F);
-        ctx_.label(gui::Rect{cost_rect.x + 12.0F, cost_rect.y, cost_rect.width - 16.0F, cost_rect.height}, cost,
-                   theme.text_muted);
-        ctx_.tooltip(cost_rect, "GPU time for the whole preview frame.");
+        hud.insert(hud.begin(), cost);
+        if (hud.size() > 5U) { hud.resize(5U); }
+        float hud_w = 0.0F;
+        for (const std::string& line : hud) { hud_w = std::max(hud_w, ctx_.font_width(line) + 24.0F); }
+        hud_w = std::min(hud_w, view.width - 20.0F);
+        const float line_h = 20.0F;
+        const gui::Rect hud_rect{view.x + 10.0F, view.bottom() - 10.0F - line_h * static_cast<float>(hud.size()) - 8.0F, hud_w,
+                                 line_h * static_cast<float>(hud.size()) + 8.0F};
+        ctx_.rounded(hud_rect, gui::fade(theme.background, 0.7F), 10.0F);
+        for (std::size_t k = 0U; k < hud.size(); ++k) {
+            const bool warning = hud[k].rfind("Near a limit.", 0U) == 0U;
+            ctx_.label(gui::Rect{hud_rect.x + 12.0F, hud_rect.y + 4.0F + line_h * static_cast<float>(k), hud_rect.width - 16.0F, line_h},
+                       hud[k], warning ? theme.caution : theme.text_muted);
+        }
+        ctx_.tooltip(hud_rect, "GPU time for the whole preview frame, then what the scene costs. A limit is named once it is four fifths used.");
 
         const gui::Rect bar{pane.x + 8.0F, view.bottom() + 8.0F, pane.width - 16.0F, transport_height - 8.0F};
         draw_transport(bar);

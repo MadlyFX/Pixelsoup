@@ -364,10 +364,19 @@ void SceneView::draw_settings(gui::UiContext &ctx, Document &document, float x, 
     y += 40;
     ctx.label(gui::Rect{x, y, width, 28}, "Fixed step: 60 Hz", ctx.theme().text_muted);
     y += 32;
-    const std::size_t items = document.scene->items.size();
-    ctx.label(gui::Rect{x, y, width, 28}, std::to_string(items) + (items == 1U ? " scene item" : " scene items"),
-              ctx.theme().text_muted);
-    y += 32;
+    heading(ctx, "Statistics", x, y, width);
+    for (const std::string &line : statistics_) {
+        const bool warning = line.rfind("Near a limit.", 0U) == 0U;
+        for (const std::string &part : wrap_text(ctx, line, width)) {
+            ctx.label(gui::Rect{x, y, width, 22}, part, warning ? ctx.theme().caution : ctx.theme().text_muted);
+            y += 22;
+        }
+        y += 4;
+    }
+    ctx.tooltip(gui::Rect{x, y - 26.0F * static_cast<float>(std::max<std::size_t>(statistics_.size(), 1U)), width,
+                          26.0F * static_cast<float>(std::max<std::size_t>(statistics_.size(), 1U))},
+                "Counted from the compiled scene. A limit is named once it is four fifths used.");
+    y += 8;
     draw_relationships(ctx, document, nullptr, x, y, width);
 }
 

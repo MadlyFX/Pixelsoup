@@ -15,6 +15,7 @@ add_library(ajfx_studio_core STATIC
     src/scene_properties.cpp
     src/scene_io.cpp
     src/timeline.cpp
+    src/scene_stats.cpp
     src/catalog.cpp
     src/catalog_birth.cpp
     src/catalog_motion.cpp

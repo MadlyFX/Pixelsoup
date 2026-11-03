@@ -706,7 +706,46 @@ void timeline_tracks_are_the_scene_moments() {
     CHECK(validate_scene(document).empty());
 }
 
+// The statistics count what the scene is and what it compiles to, and name
+// a limit while there is still room, never only once it is hit.
+void statistics_count_the_scene_and_name_limits_in_reach() {
+    Document document = new_scene();
+    const Uid cube = add_object(document);
+    object(document, cube).position = {0.0F, 1.0F, 0.0F};
+    const Uid dust = add_particle_system(document);
+    static_cast<void>(add_group(document));
+    static_cast<void>(add_force(document, ForceKind::Blast));
+    static_cast<void>(add_relationship(document, RelationKind::TrailFrom, cube, dust));
+    const SceneStats plain = scene_stats(*document.scene, nullptr, nullptr);
+    CHECK(plain.objects == 2U && plain.systems == 1U && plain.forces == 1U && plain.groups == 1U &&
+          plain.relationships == 1U && plain.particle_capacity == 0U && plain.near_limits.empty());
+    const std::vector<std::string> bare = stat_lines(plain);
+    CHECK(bare.size() == 1U && bare.front().find("2 objects, 1 system, 1 force, 1 relationship") != std::string::npos);
+
+    const Compiled compiled = ready(document);
+    std::map<Uid, std::uint64_t> peaks{{dust, 1234U}};
+    const SceneStats full = scene_stats(*document.scene, &compiled, &peaks);
+    CHECK(full.particle_capacity == compiled.total_capacity() && full.particle_capacity > 0U);
+    CHECK(full.traced && full.peak_particles == 1234U);
+    CHECK(full.props == 1U && full.body_capacity >= 1U && full.blasts == 1U && full.state_bytes > 0U);
+    const std::vector<std::string> lines = stat_lines(full);
+    CHECK(lines.size() == 4U);
+    CHECK(lines[0].find("up to 1,234 alive") != std::string::npos);
+    CHECK(lines[1].find("1 standing") != std::string::npos && lines[1].find("of 256") != std::string::npos);
+    CHECK(lines[2].rfind("State: ", 0U) == 0U);
+
+    // Fourteen forces on one system is within a fifth of the limit of sixteen.
+    for (int k = 0; k < 14; ++k) {
+        CHECK(add_force(document, ForceKind::Wind) != 0U);
+    }
+    const SceneStats crowded = scene_stats(*document.scene, nullptr, nullptr);
+    CHECK(crowded.forces_on_busiest == 14U && crowded.near_limits.size() == 1U &&
+          crowded.near_limits.front() == "Forces on one system: 14 of 16");
+    CHECK(stat_lines(crowded).back() == "Near a limit. Forces on one system: 14 of 16");
+}
+
 void add_scene_tests(std::vector<studio_test::Case> &cases) {
+    cases.push_back({"statistics_count_the_scene_and_name_limits_in_reach", statistics_count_the_scene_and_name_limits_in_reach});
     cases.push_back({"timeline_tracks_are_the_scene_moments", timeline_tracks_are_the_scene_moments});
     cases.push_back({"relationships_bind_an_object_to_a_system", relationships_bind_an_object_to_a_system});
     cases.push_back({"forces_are_scene_items_that_act_on_their_targets", forces_are_scene_items_that_act_on_their_targets});
