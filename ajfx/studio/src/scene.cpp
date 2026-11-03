@@ -278,6 +278,36 @@ std::string_view force_name(ForceKind kind) {
 bool force_targets(const Force &force, Uid system) {
     return force.all_systems || std::find(force.targets.begin(), force.targets.end(), system) != force.targets.end();
 }
+Uid add_relationship(Document &document, RelationKind kind, Uid object, Uid system) {
+    if (!document.scene || document.scene->relationships.size() >= max_relationships) {
+        return 0U;
+    }
+    const SceneItem *target = document.scene->item(system);
+    const SceneItem *source = object == 0U ? nullptr : document.scene->item(object);
+    if (target == nullptr || !std::holds_alternative<ParticleSystem>(target->data) ||
+        (object != 0U && (source == nullptr || !std::holds_alternative<Object>(source->data)))) {
+        return 0U;
+    }
+    const Uid uid = reserve(document);
+    if (uid == 0U) {
+        return 0U;
+    }
+    Relationship relationship{.uid = uid, .kind = kind, .object = object, .system = system};
+    if (kind == RelationKind::TrailFrom) {
+        relationship.per_speed = 10.0F;
+    }
+    document.scene->relationships.push_back(relationship);
+    return uid;
+}
+bool remove_relationship(Document &document, Uid uid) {
+    if (!document.scene) {
+        return false;
+    }
+    return std::erase_if(document.scene->relationships, [uid](const Relationship &r) { return r.uid == uid; }) > 0U;
+}
+std::string_view relation_name(RelationKind kind) {
+    return kind == RelationKind::EmitOnHit ? "Emit on hit" : "Trail";
+}
 Uid add_source(Document &document, Uid uid, SourceMode mode) {
     SceneItem *item = document.scene ? document.scene->item(uid) : nullptr;
     auto *system = item ? std::get_if<ParticleSystem>(&item->data) : nullptr;
@@ -347,6 +377,9 @@ bool remove_item(Document &document, Uid uid) {
             std::erase(force->targets, uid);
         }
     }
+    // A rule with an endpoint gone is gone too, never re-aimed at everything.
+    std::erase_if(document.scene->relationships,
+                  [uid](const Relationship &r) { return r.system == uid || r.object == uid; });
     std::erase_if(document.scene->items, [uid](const SceneItem &i) { return i.uid == uid; });
     return true;
 }
@@ -460,8 +493,13 @@ std::string validate_scene(const Document &document, bool for_playback) {
                 return where + "repeated Static or Animated objects are not supported by this target";
             }
         } else if (const auto *system = std::get_if<ParticleSystem>(&item.data)) {
-            if (for_playback && system->sources.empty()) {
-                return where + "Initial state / Sources: add a source";
+            const bool bound = std::any_of(scene.relationships.begin(), scene.relationships.end(),
+                                           [&item](const Relationship &r) { return r.system == item.uid; });
+            if (for_playback && system->sources.empty() && !bound) {
+                return where + "Initial state / Sources: add a source or a relationship";
+            }
+            if (for_playback && system->persistent && bound) {
+                return where + "a persistent population cannot be born of hits or trails";
             }
             if (for_playback && system->sources.size() > 32U) {
                 return where + "source capacity exceeded (32)";
@@ -519,6 +557,28 @@ std::string validate_scene(const Document &document, bool for_playback) {
             if (force->targets.size() > 4096U) {
                 return where + "Targets: too many";
             }
+        }
+    }
+    if (scene.relationships.size() > max_relationships) {
+        return "Relationships: capacity exceeded (256)";
+    }
+    for (const Relationship &r : scene.relationships) {
+        const std::string where = "Relationship " + std::string{relation_name(r.kind)} + ": ";
+        if (!identity(r.uid)) {
+            return where + "invalid or overlapping identity";
+        }
+        const SceneItem *system = scene.item(r.system);
+        if (system == nullptr || !std::holds_alternative<ParticleSystem>(system->data)) {
+            return where + "its particle system is missing";
+        }
+        const SceneItem *object = r.object == 0U ? nullptr : scene.item(r.object);
+        if (r.object != 0U && (object == nullptr || !std::holds_alternative<Object>(object->data))) {
+            return where + "its object is missing";
+        }
+        if (!within(r.hardness, 0.0F, 10000.0F) || !within(r.per_hit, 0.0F, 100000.0F) ||
+            !within(r.per_speed, 0.0F, 100000.0F) || !within(r.spread, 0.0F, 180.0F) ||
+            !within(r.min_speed, 0.0F, 10000.0F) || !within(r.rate, 0.0F, 100000.0F) || r.seed > 1000000U) {
+            return where + "a value is outside its supported range";
         }
     }
     return {};
@@ -775,6 +835,36 @@ Document lower_scene(const Document &document) {
             for (std::size_t k = 0U; k < acting.size() && k < max_forces_per_system; ++k) {
                 layer.blocks.push_back(force_block(*acting[k], item->uid + 16U + static_cast<Uid>(k)));
             }
+            // Rules that feed this system, by identity: born where its object hits, or behind it.
+            std::vector<const Relationship *> rules;
+            for (const Relationship &r : document.scene->relationships) {
+                if (r.system == item->uid) {
+                    rules.push_back(&r);
+                }
+            }
+            std::sort(rules.begin(), rules.end(),
+                      [](const Relationship *a, const Relationship *b) { return a->uid < b->uid; });
+            for (const Relationship *r : rules) {
+                const Value seed = number(static_cast<float>(r->seed));
+                const Value solid = number(static_cast<float>(r->object));
+                if (r->kind == RelationKind::EmitOnHit) {
+                    layer.blocks.push_back(block(r->uid, "hit_puffs",
+                                                 {{"solid", solid},
+                                                  {"hardness", number(r->hardness)},
+                                                  {"per_hit", number(r->per_hit)},
+                                                  {"per_speed", number(r->per_speed)},
+                                                  {"spread", number(r->spread)},
+                                                  {"seed", seed}}));
+                } else {
+                    layer.blocks.push_back(block(r->uid, "trail",
+                                                 {{"solid", solid},
+                                                  {"pieces", toggle(r->pieces)},
+                                                  {"per_speed", number(r->per_speed)},
+                                                  {"min_speed", number(r->min_speed)},
+                                                  {"rate", number(r->rate)},
+                                                  {"seed", seed}}));
+                }
+            }
         }
         out.layers.push_back(std::move(layer));
     }
@@ -799,6 +889,14 @@ bool same_scene_motion(const Document &a, const Document &b) {
                              [](const SceneItem &item) { return !std::holds_alternative<Group>(item.data); });
     };
     if (count(*a.scene) != count(*b.scene)) {
+        return false;
+    }
+    std::vector<Relationship> rules_a = a.scene->relationships;
+    std::vector<Relationship> rules_b = b.scene->relationships;
+    const auto by_uid = [](const Relationship &x, const Relationship &y) { return x.uid < y.uid; };
+    std::sort(rules_a.begin(), rules_a.end(), by_uid);
+    std::sort(rules_b.begin(), rules_b.end(), by_uid);
+    if (rules_a != rules_b) {
         return false;
     }
     for (const SceneItem &before : a.scene->items) {

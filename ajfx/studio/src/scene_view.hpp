@@ -15,7 +15,9 @@ class SceneView final {
     void select(Uid uid, bool extend = false);
     void forget();
     [[nodiscard]] Uid selected() const { return selection_.empty() ? 0U : selection_.back(); }
-    [[nodiscard]] bool covers(float x, float y) const { return add_.covers(x, y) || behavior_add_.covers(x, y); }
+    [[nodiscard]] bool covers(float x, float y) const {
+        return add_.covers(x, y) || behavior_add_.covers(x, y) || relation_add_.covers(x, y);
+    }
     [[nodiscard]] const std::vector<Uid> &selection() const { return selection_; }
     [[nodiscard]] bool gesture_live() const { return numbers_.live() || color_live_; }
     void import_models(Document &document);
@@ -30,6 +32,9 @@ class SceneView final {
     void tree_children(gui::UiContext &ctx, Document &document, Uid parent, float x, float &y, float width,
                        unsigned depth);
     void draw_sources(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y, float width);
+    // The rules binding objects to particle systems: those touching `item`, or every one for null.
+    void draw_relationships(gui::UiContext &ctx, Document &document, const SceneItem *item, float x, float &y,
+                            float width);
     // A force's targets: a switch per particle system, when it does not act on every one.
     void draw_targets(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y, float width);
     // The Motion stack: typed behaviors in the order their forces run.
@@ -44,6 +49,10 @@ class SceneView final {
     PopoverList add_;
     PopoverList behavior_add_;
     Uid behavior_target_{};
+    PopoverList relation_add_;
+    Uid relation_target_{};
+    bool relation_from_system_{};
+    std::vector<std::pair<RelationKind, Uid>> relation_choices_;
     mediaserver::editor::NumberField numbers_;
     bool color_live_{};
 };

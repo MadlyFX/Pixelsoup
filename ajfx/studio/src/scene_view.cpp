@@ -368,6 +368,122 @@ void SceneView::draw_settings(gui::UiContext &ctx, Document &document, float x, 
     ctx.label(gui::Rect{x, y, width, 28}, std::to_string(items) + (items == 1U ? " scene item" : " scene items"),
               ctx.theme().text_muted);
     y += 32;
+    draw_relationships(ctx, document, nullptr, x, y, width);
+}
+
+void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, const SceneItem *item, float x,
+                                   float &y, float width) {
+    const bool system = item != nullptr && std::holds_alternative<ParticleSystem>(item->data);
+    const bool object = item != nullptr && std::holds_alternative<Object>(item->data);
+    if (item != nullptr && !system && !object) {
+        return;
+    }
+    const auto name_of = [&document](Uid uid) {
+        const SceneItem *found = document.scene->item(uid);
+        return found ? found->name : std::string{"(missing)"};
+    };
+    heading(ctx, "Relationships", x, y, width);
+    Uid remove{};
+    std::size_t shown = 0U;
+    for (Relationship &r : document.scene->relationships) {
+        if (item != nullptr && r.system != item->uid && !(object && (r.object == item->uid || r.object == 0U))) {
+            continue;
+        }
+        ++shown;
+        // The rule as a sentence: what the object does, and what the system does about it.
+        const std::string title = (r.object == 0U ? std::string{"Every object"} : name_of(r.object)) +
+                                  (r.kind == RelationKind::EmitOnHit ? " / Hit -> " : " / Moving -> ") +
+                                  name_of(r.system) + (r.kind == RelationKind::EmitOnHit ? " / Emit" : " / Trail");
+        ctx.label(gui::Rect{x, y, width - 32.0F, row_height}, title, ctx.theme().text);
+        ctx.tooltip(gui::Rect{x, y, width - 32.0F, row_height},
+                    r.kind == RelationKind::EmitOnHit ? "Particles are born where the object hits something."
+                                                      : "Particles are shed behind the object while it moves.");
+        if (editor::icon_button(ctx, part_id(r.uid, "relation.remove"), gui::Rect{x + width - 28.0F, y, 28, 28},
+                                gui::Icon::Trash, "Remove this relationship")) {
+            remove = r.uid;
+        }
+        y += 30.0F;
+        Value v;
+        const auto number_row = [&](const ControlDef &control, float &target) {
+            v = number(target);
+            if (field(numbers_, ctx, r.uid, control, gui::Rect{x, y, width, row_height}, v)) {
+                target = v.x;
+            }
+            y += 32.0F;
+        };
+        if (r.kind == RelationKind::EmitOnHit) {
+            number_row(numeric("hardness", "Hits from", 1.0F, 0.0F, 10.0F, "m/s", 1), r.hardness);
+            number_row(numeric("per_hit", "Per hit", 2.0F, 0.0F, 50.0F, {}, 0), r.per_hit);
+            number_row(numeric("per_speed", "Per m/s", 3.0F, 0.0F, 50.0F, {}, 1), r.per_speed);
+            number_row(numeric("spread", "Spread", 70.0F, 0.0F, 180.0F, "deg", 0), r.spread);
+        } else {
+            number_row(numeric("per_speed", "Per m/s", 10.0F, 0.0F, 100.0F, "/s", 1), r.per_speed);
+            number_row(numeric("min_speed", "Moving from", 0.5F, 0.0F, 10.0F, "m/s"), r.min_speed);
+            number_row(numeric("rate", "Base amount", 0.0F, 0.0F, 100.0F, "/s", 1), r.rate);
+            ControlDef pieces = numeric("pieces", "Broken pieces only", 0.0F, 0.0F, 1.0F);
+            pieces.type = ControlType::Toggle;
+            pieces.fallback = toggle(false);
+            v = toggle(r.pieces);
+            if (field(numbers_, ctx, r.uid, pieces, gui::Rect{x, y, width, row_height}, v)) {
+                r.pieces = v.x != 0.0F;
+            }
+            y += 32.0F;
+        }
+        v = number(static_cast<float>(r.seed));
+        if (field(numbers_, ctx, r.uid, numeric("seed", "Seed", 0.0F, 0.0F, 1000000.0F, {}, 0),
+                  gui::Rect{x, y, width, row_height}, v)) {
+            r.seed = static_cast<std::uint32_t>(v.x);
+        }
+        y += 36.0F;
+    }
+    if (remove) {
+        static_cast<void>(remove_relationship(document, remove));
+    }
+    if (shown == 0U) {
+        ctx.label(gui::Rect{x, y, width, row_height},
+                  item == nullptr ? "None. Add one from an object or a particle system."
+                                  : "None yet.",
+                  ctx.theme().text_muted);
+        y += 32.0F;
+    }
+    if (item == nullptr || document.scene->relationships.size() >= max_relationships) {
+        return;
+    }
+    const bool worded = width >= 300.0F;
+    if (editor::pill_button(ctx, part_id(item->uid, "relation.add"), gui::Rect{x, y + 4, worded ? 160.0F : 34.0F, 28},
+                            gui::Icon::Plus, worded ? "Add relationship" : "",
+                            system ? "Have particles born where an object hits, or shed behind it"
+                                   : "Have a particle system react to this object")) {
+        relation_target_ = item->uid;
+        relation_from_system_ = system;
+        relation_choices_.clear();
+        std::vector<ListEntry> entries;
+        for (const RelationKind kind : {RelationKind::EmitOnHit, RelationKind::TrailFrom}) {
+            const std::string group{relation_name(kind)};
+            if (system) {
+                relation_choices_.emplace_back(kind, 0U);
+                entries.push_back({group, "Every object",
+                                   kind == RelationKind::EmitOnHit ? "Born wherever anything hits"
+                                                                   : "Shed behind everything that moves",
+                                   true, {}});
+            }
+            for (const SceneItem &other : document.scene->items) {
+                if (system ? std::holds_alternative<Object>(other.data)
+                           : std::holds_alternative<ParticleSystem>(other.data)) {
+                    relation_choices_.emplace_back(kind, other.uid);
+                    entries.push_back({group, other.name,
+                                       kind == RelationKind::EmitOnHit ? "Born where it hits" : "Shed behind it",
+                                       true, {}});
+                }
+            }
+        }
+        if (entries.empty()) {
+            entries.push_back({"", system ? "No objects in the scene" : "No particle systems in the scene", "",
+                               false, {}});
+        }
+        relation_add_.open(x, y + 36, "Add relationship", std::move(entries), false);
+    }
+    y += 36.0F;
 }
 
 void SceneView::draw_sources(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y, float width) {
@@ -965,6 +1081,7 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
         if (selection_.size() == 1U) {
             draw_sources(ctx, document, *item, x, y, width);
             draw_targets(ctx, document, *item, x, y, width);
+            draw_relationships(ctx, document, item, x, y, width);
         }
     }
     inspector_scroll_.end(ctx, y + offset - view.y + 16);
@@ -972,6 +1089,13 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
 void SceneView::draw_overlays(gui::UiContext &ctx, const gui::Rect &window, Document &document) {
     if (const auto chosen = behavior_add_.draw(ctx, window)) {
         static_cast<void>(add_behavior(document, behavior_target_, static_cast<BehaviorKind>(*chosen)));
+    }
+    if (const auto chosen = relation_add_.draw(ctx, window)) {
+        if (*chosen < relation_choices_.size()) {
+            const auto [kind, other] = relation_choices_[*chosen];
+            static_cast<void>(relation_from_system_ ? add_relationship(document, kind, other, relation_target_)
+                                                    : add_relationship(document, kind, relation_target_, other));
+        }
     }
     if (const auto chosen = add_.draw(ctx, window)) {
         if (*chosen == 0U) {

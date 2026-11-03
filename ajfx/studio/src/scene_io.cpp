@@ -202,12 +202,31 @@ std::string save_scene(const Document &document) {
         items.push(std::move(out));
     }
     root.add("items", std::move(items));
+    Json rules = Json::array();
+    for (const Relationship &r : document.scene->relationships) {
+        Json rule = Json::object();
+        rule.add("uid", numeric(r.uid));
+        rule.add("kind", numeric(static_cast<int>(r.kind)));
+        rule.add("object", numeric(r.object));
+        rule.add("system", numeric(r.system));
+        rule.add("hardness", numeric(r.hardness));
+        rule.add("per_hit", numeric(r.per_hit));
+        rule.add("per_speed", numeric(r.per_speed));
+        rule.add("spread", numeric(r.spread));
+        rule.add("min_speed", numeric(r.min_speed));
+        rule.add("rate", numeric(r.rate));
+        rule.add("pieces", Json::of(r.pieces));
+        rule.add("seed", numeric(r.seed));
+        rules.push(std::move(rule));
+    }
+    root.add("relationships", std::move(rules));
     return json::write(root);
 }
 
 Loaded load_scene(const Json &root) {
     const auto fail = [](std::string reason) { return Loaded{{}, "Scene: " + std::move(reason)}; };
-    if (!keys(root, {"format", "version", "name", "next_uid", "range_seconds", "scale", "physics", "items"})) {
+    if (!keys(root, {"format", "version", "name", "next_uid", "range_seconds", "scale", "physics", "items",
+                     "relationships"})) {
         return fail("unknown or duplicate document field");
     }
     if (root.number_or("version", 0) != 2) {
@@ -390,6 +409,35 @@ Loaded load_scene(const Json &root) {
             return fail(item.name + ": targets belong to forces");
         }
         scene.items.push_back(std::move(item));
+    }
+    const Json *rules = root.find("relationships");
+    if (!rules || rules->type != Json::Type::Array) {
+        return fail("missing relationships");
+    }
+    for (const Json &rule : rules->items) {
+        Relationship r;
+        std::uint32_t kind{};
+        if (!keys(rule, {"uid", "kind", "object", "system", "hardness", "per_hit", "per_speed", "spread", "min_speed",
+                         "rate", "pieces", "seed"}) ||
+            !integer(rule, "uid", r.uid) || !integer(rule, "kind", kind) || kind > 1U ||
+            !integer(rule, "object", r.object) || !integer(rule, "system", r.system) || !integer(rule, "seed", r.seed) ||
+            !has_type(rule, "pieces", Json::Type::Bool)) {
+            return fail("invalid relationship");
+        }
+        for (const std::string_view key : {"hardness", "per_hit", "per_speed", "spread", "min_speed", "rate"}) {
+            if (!has_type(rule, key, Json::Type::Number)) {
+                return fail("invalid relationship");
+            }
+        }
+        r.kind = static_cast<RelationKind>(kind);
+        r.hardness = static_cast<float>(rule.number_or("hardness", 0));
+        r.per_hit = static_cast<float>(rule.number_or("per_hit", 0));
+        r.per_speed = static_cast<float>(rule.number_or("per_speed", 0));
+        r.spread = static_cast<float>(rule.number_or("spread", 0));
+        r.min_speed = static_cast<float>(rule.number_or("min_speed", 0));
+        r.rate = static_cast<float>(rule.number_or("rate", 0));
+        r.pieces = rule.bool_or("pieces", false);
+        scene.relationships.push_back(r);
     }
     if (const std::string error = validate_scene(document, false); !error.empty()) {
         return fail(error);

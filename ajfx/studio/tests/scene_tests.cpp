@@ -567,7 +567,97 @@ void forces_are_scene_items_that_act_on_their_targets() {
     CHECK(!validate_scene(document).empty());
 }
 
+// A relationship is one rule on the scene with two explicit endpoints: it
+// lowers into the system as a birth from the object's hits, feeds the same
+// runtime module the old blocks did, and goes when either endpoint goes.
+void relationships_bind_an_object_to_a_system() {
+    Document document = new_scene();
+    const Uid cube = add_object(document);
+    object(document, cube).position = {0.0F, 1.5F, 0.0F};
+    const Uid dust = add_particle_system(document);
+    auto &system = std::get<ParticleSystem>(document.scene->item(dust)->data);
+    system.sources.clear();
+    system.lifetime = {4.0F, 4.0F};
+    CHECK(!validate_scene(document).empty()); // no source and no rule
+    const Uid rule = add_relationship(document, RelationKind::EmitOnHit, cube, dust);
+    CHECK(rule != 0U);
+    CHECK(add_relationship(document, RelationKind::EmitOnHit, dust, dust) == 0U); // a system is not an object
+    CHECK(add_relationship(document, RelationKind::TrailFrom, cube, cube) == 0U);
+    auto &r = document.scene->relationships.front();
+    r.hardness = 0.3F;
+    r.per_hit = 7.0F;
+    r.per_speed = 0.0F;
+    r.spread = 45.0F;
+    r.seed = 9U;
+    CHECK(validate_scene(document).empty());
+
+    const Document lowered = lower_scene(document);
+    const Block *hits = lowered.block(rule);
+    CHECK(hits && hits->kind == "hit_puffs" && get(*hits, "solid").x == static_cast<float>(cube) &&
+          get(*hits, "per_hit").x == 7.0F && get(*hits, "spread").x == 45.0F && get(*hits, "seed").x == 9.0F);
+    CHECK(std::any_of(lowered.layers.begin(), lowered.layers.end(), [&](const Layer &layer) {
+        return layer.uid == dust && std::any_of(layer.blocks.begin(), layer.blocks.end(),
+                                                [rule](const Block &b) { return b.uid == rule; });
+    }));
+
+    // The cube lands on the ground and dust is born where it hits.
+    const Compiled compiled = ready(document);
+    bool contacts = false;
+    for (const ajfx::Emitter &emitter : compiled.effect->emitters) {
+        for (const ajfx::SpawnModule &module : emitter.spawn) {
+            if (const auto *found = std::get_if<ajfx::SpawnFromContacts>(&module)) {
+                contacts = true;
+                CHECK(found->per_hit == 7.0F && !found->bodies.empty());
+            }
+        }
+    }
+    CHECK(contacts);
+    auto solver = ajfx::rigid::make_jolt_solver();
+    auto run = simulation(compiled, solver.get());
+    run.advance_to(120U);
+    std::size_t born = 0U;
+    for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
+        if (compiled.effect->emitters[e].spawn.size() == 1U &&
+            std::holds_alternative<ajfx::SpawnFromContacts>(compiled.effect->emitters[e].spawn.front())) {
+            born = run.emitter(e).spawned;
+        }
+    }
+    CHECK(born >= 7U);
+
+    // A rule edit stales the motion cache; a rule shows from either endpoint.
+    Document other = document;
+    other.scene->relationships.front().per_hit = 3.0F;
+    CHECK(!same_scene_motion(document, other));
+    CHECK(same_scene_motion(document, document));
+
+    // Save and load keep the rule exactly; a missing endpoint is refused.
+    const Loaded loaded = load_document(save_document(document));
+    if (!loaded.document) {
+        throw std::runtime_error{loaded.error};
+    }
+    CHECK(*loaded.document == document);
+    std::string bad = save_document(document);
+    bad.replace(bad.find("\"object\": " + std::to_string(cube)), 10U + std::to_string(cube).size(), "\"object\": 7");
+    CHECK(!load_document(bad).document);
+
+    // A persistent population cannot be born of hits; a trail from every object can.
+    const Uid trail = add_relationship(document, RelationKind::TrailFrom, 0U, dust);
+    CHECK(trail != 0U && document.scene->relationships.back().per_speed == 10.0F);
+    CHECK(lower_scene(document).block(trail) && lower_scene(document).block(trail)->kind == "trail");
+    std::get<ParticleSystem>(document.scene->item(dust)->data).persistent = true;
+    CHECK(!validate_scene(document).empty());
+    std::get<ParticleSystem>(document.scene->item(dust)->data).persistent = false;
+
+    // Removing an endpoint removes its rules; the trail from every object stays.
+    CHECK(remove_item(document, cube));
+    CHECK(document.scene->relationships.size() == 1U && document.scene->relationships.front().uid == trail);
+    CHECK(remove_relationship(document, trail));
+    CHECK(document.scene->relationships.empty());
+    CHECK(!remove_relationship(document, trail));
+}
+
 void add_scene_tests(std::vector<studio_test::Case> &cases) {
+    cases.push_back({"relationships_bind_an_object_to_a_system", relationships_bind_an_object_to_a_system});
     cases.push_back({"forces_are_scene_items_that_act_on_their_targets", forces_are_scene_items_that_act_on_their_targets});
     cases.push_back({"motion_stack_and_age_drivers_reach_the_runtime", motion_stack_and_age_drivers_reach_the_runtime});
     cases.push_back({"new_scene_ground_catches_objects_and_can_be_removed", new_scene_ground_catches_objects_and_can_be_removed});

@@ -146,6 +146,26 @@ struct SceneItem final {
     friend bool operator==(const SceneItem &, const SceneItem &) = default;
 };
 
+// One rule binding an object to a particle system: particles born where the
+// object hits something, or shed behind it while it moves. It lives on the
+// scene, is shown from either endpoint, and is stored once.
+enum class RelationKind { EmitOnHit, TrailFrom };
+struct Relationship final {
+    std::uint32_t uid{};
+    RelationKind kind{RelationKind::EmitOnHit};
+    std::uint32_t object{}; // 0 is every object
+    std::uint32_t system{};
+    float hardness{1.0F};  // Emit on hit: softer hits make none, m/s
+    float per_hit{2.0F};   // Emit on hit: born at every hit
+    float per_speed{3.0F}; // Emit on hit: more per m/s of the hit; Trail: per m/s, each second
+    float spread{70.0F};   // Emit on hit: scatter around the bounce, degrees
+    float min_speed{0.5F}; // Trail: slower objects shed none, m/s
+    float rate{0.0F};      // Trail: per second while moving, whatever the speed
+    bool pieces{false};    // Trail: only the pieces a broken object became
+    std::uint32_t seed{0U};
+    friend bool operator==(const Relationship &, const Relationship &) = default;
+};
+
 struct ScenePhysics final {
     float gravity{1.0F}; // g, along -Y
     float angular_damping{0.05F};
@@ -156,6 +176,7 @@ struct ScenePhysics final {
 struct Scene final {
     ScenePhysics physics;
     std::vector<SceneItem> items;
+    std::vector<Relationship> relationships;
     [[nodiscard]] SceneItem *item(std::uint32_t uid);
     [[nodiscard]] const SceneItem *item(std::uint32_t uid) const;
     friend bool operator==(const Scene &, const Scene &) = default;
@@ -173,6 +194,12 @@ enum class Purpose : std::uint8_t;
 [[nodiscard]] std::uint32_t add_particle_system(Document &document);
 [[nodiscard]] std::uint32_t add_group(Document &document);
 [[nodiscard]] std::uint32_t add_force(Document &document, ForceKind kind);
+// Binds an object (0 for every object) to a particle system.
+[[nodiscard]] std::uint32_t add_relationship(Document &document, RelationKind kind, std::uint32_t object,
+                                             std::uint32_t system);
+bool remove_relationship(Document &document, std::uint32_t uid);
+[[nodiscard]] std::string_view relation_name(RelationKind kind);
+inline constexpr std::size_t max_relationships = 256U;
 [[nodiscard]] std::string_view force_name(ForceKind kind);
 // Whether a force acts on a particle system: every one, or one it names.
 [[nodiscard]] bool force_targets(const Force &force, std::uint32_t system);
