@@ -112,6 +112,17 @@ removes the rule rather than re-aiming it at everything. Rules lower into
 the system in identity order and reach the runtime's contact and body
 spawners. Fracture, time and threshold events are not relationships yet.
 
+Under the transport, the **timeline** shows a track for every item with
+time in it and nothing for the rest: an object's release and, when
+Animated, its move as a bar from its start for its duration; a particle
+system's sources, Initial at 0, Continuous as a bar across the range, Burst
+at its time; a blast at the moment it goes off. Points are diamonds and
+spans bars, lined up under the scrub bar with the playhead running through
+them. Dragging a release, burst, blast or move writes that one authored
+value, and dragging a move's end sets its duration; Initial and Continuous
+cannot be dragged. Clicking a track's name selects its item. Six tracks show
+before the list scrolls. There are no keyframe tracks for other values.
+
 Scene settings own gravity, angular damping and sleep policy. The fixed
 simulation step is 60 Hz. The capture range controls bake/export duration;
 non-looping scene playback can continue beyond it. Looping is an explicit

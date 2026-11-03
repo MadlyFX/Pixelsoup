@@ -656,7 +656,58 @@ void relationships_bind_an_object_to_a_system() {
     CHECK(!remove_relationship(document, trail));
 }
 
+// The timeline is a view of the authored moments: a track for every item
+// with time in it, and a dragged marker writes the one value it stands for.
+void timeline_tracks_are_the_scene_moments() {
+    Document document = empty_scene();
+    const Uid still = add_object(document);
+    const Uid released = add_object(document);
+    object(document, released).release = 1.5F;
+    const Uid moved = add_object(document);
+    object(document, moved).motion = ObjectMotion::Animated;
+    object(document, moved).move_at = 2.0F;
+    object(document, moved).move_over = 0.75F;
+    const Uid system = add_particle_system(document);
+    const Uid burst = add_source(document, system, SourceMode::Burst);
+    std::get<ParticleSystem>(document.scene->item(system)->data).sources.back().time = 3.25F;
+    const Uid group = add_group(document);
+    const Uid wind = add_force(document, ForceKind::Wind);
+    const Uid blast = add_force(document, ForceKind::Blast);
+    std::get<Force>(document.scene->item(blast)->data).time = 0.4F;
+    static_cast<void>(still);
+    static_cast<void>(group);
+    static_cast<void>(wind);
+
+    const std::vector<Track> tracks = collect_tracks(*document.scene, 6.0F);
+    CHECK(tracks.size() == 4U);
+    CHECK(tracks[0].item == released && tracks[0].markers.size() == 1U &&
+          tracks[0].markers[0].kind == MarkerKind::Release && tracks[0].markers[0].seconds == 1.5F);
+    CHECK(tracks[1].item == moved && tracks[1].markers[0].kind == MarkerKind::Move &&
+          tracks[1].markers[0].seconds == 2.0F && tracks[1].markers[0].duration == 0.75F);
+    CHECK(tracks[2].item == system && tracks[2].markers.size() == 2U);
+    CHECK(tracks[2].markers[0].kind == MarkerKind::Continuous && tracks[2].markers[0].duration == 6.0F &&
+          !tracks[2].markers[0].draggable);
+    CHECK(tracks[2].markers[1].kind == MarkerKind::Burst && tracks[2].markers[1].part == burst &&
+          tracks[2].markers[1].seconds == 3.25F);
+    CHECK(tracks[3].item == blast && tracks[3].markers[0].kind == MarkerKind::Blast &&
+          tracks[3].markers[0].seconds == 0.4F);
+
+    CHECK(set_marker_time(document, tracks[0].markers[0], 2.25F) && object(document, released).release == 2.25F);
+    CHECK(set_marker_time(document, tracks[0].markers[0], -1.0F) && object(document, released).release > 0.0F);
+    CHECK(set_marker_time(document, tracks[1].markers[0], 1.0F) && object(document, moved).move_at == 1.0F);
+    CHECK(set_marker_duration(document, tracks[1].markers[0], 2.5F) && object(document, moved).move_over == 2.5F);
+    CHECK(!set_marker_duration(document, tracks[0].markers[0], 2.5F));
+    CHECK(!set_marker_time(document, tracks[2].markers[0], 1.0F));
+    CHECK(set_marker_time(document, tracks[2].markers[1], 0.5F) &&
+          std::get<ParticleSystem>(document.scene->item(system)->data).sources.back().time == 0.5F);
+    CHECK(set_marker_time(document, tracks[3].markers[0], 2.0F) &&
+          std::get<Force>(document.scene->item(blast)->data).time == 2.0F);
+    CHECK(!set_marker_time(document, tracks[3].markers[0], 2.0F)); // unchanged
+    CHECK(validate_scene(document).empty());
+}
+
 void add_scene_tests(std::vector<studio_test::Case> &cases) {
+    cases.push_back({"timeline_tracks_are_the_scene_moments", timeline_tracks_are_the_scene_moments});
     cases.push_back({"relationships_bind_an_object_to_a_system", relationships_bind_an_object_to_a_system});
     cases.push_back({"forces_are_scene_items_that_act_on_their_targets", forces_are_scene_items_that_act_on_their_targets});
     cases.push_back({"motion_stack_and_age_drivers_reach_the_runtime", motion_stack_and_age_drivers_reach_the_runtime});

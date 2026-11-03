@@ -55,6 +55,8 @@ scene for scale.
 | G | Guides on or off |
 | H | Handles on or off |
 | P | Particle paths on or off |
+| Drag a timeline marker | Move a release, burst, blast or animated move in time; drag a move's end for its duration |
+| Click a timeline name | Select that item |
 | Space | Play or pause |
 | L | Loop over the capture range, or play on past it |
 | Home | Back to the start |

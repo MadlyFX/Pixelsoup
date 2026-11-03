@@ -10,6 +10,7 @@
 #include "raw_modules.hpp"
 #include "recipes.hpp"
 #include "session.hpp"
+#include "timeline.hpp"
 #include "user_assets.hpp"
 
 #include <ajfx/cache.hpp>

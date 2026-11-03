@@ -12,6 +12,7 @@
 #include "session.hpp"
 #include "stage_camera.hpp"
 #include "stage_overlay.hpp"
+#include "timeline.hpp"
 #include "stage_pick.hpp"
 #include "widgets.hpp"
 
@@ -55,6 +56,9 @@ namespace rhi = mediaserver::rhi;
 
 constexpr float top_bar_height = 52.0F;
 constexpr float transport_height = 54.0F;
+// The timeline under the transport: a row a track, up to this many before it scrolls.
+constexpr float track_height = 24.0F;
+constexpr std::size_t tracks_shown = 6U;
 constexpr std::size_t history_limit = 300U;
 // While a value is dragged, a new package at most this often, and only once
 // the preview has taken in the last: each package restarts the effect and
@@ -959,7 +963,11 @@ private:
     void draw_preview(const gui::Rect& pane, double now) {
         const gui::Theme& theme = ctx_.theme();
         ctx_.rounded(pane, theme.panel, theme.radius_large);
-        const gui::Rect view{pane.x + 8.0F, pane.y + 8.0F, pane.width - 16.0F, std::max(pane.height - transport_height - 16.0F, 10.0F)};
+        const std::vector<Track> tracks = collect_tracks(*document_.scene, loop_seconds(document_, compiled_));
+        const float timeline_h =
+            tracks.empty() ? 0.0F : track_height * static_cast<float>(std::min(tracks.size(), tracks_shown)) + 10.0F;
+        const gui::Rect view{pane.x + 8.0F, pane.y + 8.0F, pane.width - 16.0F,
+                             std::max(pane.height - transport_height - timeline_h - 16.0F, 10.0F)};
         preview_aspect_ = view.width / std::max(view.height, 1.0F);
 
         const rhi::Texture* picture = render_preview(view);
@@ -1085,7 +1093,11 @@ private:
                    theme.text_muted);
         ctx_.tooltip(cost_rect, "GPU time for the whole preview frame.");
 
-        draw_transport(gui::Rect{pane.x + 8.0F, view.bottom() + 8.0F, pane.width - 16.0F, transport_height - 8.0F});
+        const gui::Rect bar{pane.x + 8.0F, view.bottom() + 8.0F, pane.width - 16.0F, transport_height - 8.0F};
+        draw_transport(bar);
+        if (!tracks.empty()) {
+            draw_timeline(gui::Rect{bar.x, bar.bottom() + 2.0F, bar.width, timeline_h - 2.0F}, tracks, scrub_track(bar));
+        }
         static_cast<void>(now);
     }
 
@@ -1208,6 +1220,95 @@ private:
         return picture;
     }
 
+    // Where the transport's scrub bar runs, so the tracks line up under it.
+    [[nodiscard]] static gui::Rect scrub_track(const gui::Rect& bar) {
+        const float time_w = 96.0F;
+        return gui::Rect{bar.x + 150.0F, bar.center_y() - 10.0F, std::max(bar.width - 150.0F - time_w - 12.0F, 20.0F), 20.0F};
+    }
+
+    // One row a track: the item's name on the left, its moments on the right
+    // under the scrub bar. A point is a diamond, a span a bar; dragging either
+    // writes the authored value. Clicking the name selects the item.
+    void draw_timeline(const gui::Rect& area, const std::vector<Track>& tracks, const gui::Rect& scrub) {
+        const gui::Theme& theme = ctx_.theme();
+        const double frames = loop_frames();
+        const float seconds = static_cast<float>(frames / 60.0);
+        const float offset = timeline_scroll_.begin(ctx_, area);
+        float y = area.y + 4.0F - offset;
+        const float label_w = std::max(scrub.x - area.x - 12.0F, 40.0F);
+        const auto at_x = [&](float t) { return scrub.x + scrub.width * std::clamp(t / seconds, 0.0F, 1.0F); };
+        const auto to_seconds = [&](float x) { return std::clamp((x - scrub.x) / scrub.width, 0.0F, 1.0F) * seconds; };
+        for (const Track& track : tracks) {
+            const gui::Rect row{area.x, y, area.width, track_height};
+            const bool selected = std::find(scene_view_.selection().begin(), scene_view_.selection().end(), track.item) !=
+                                  scene_view_.selection().end();
+            const gui::Rect name{area.x, y, label_w, track_height};
+            const gui::Interaction pick = ctx_.grab(part_id(track.item, "track.name"), name);
+            ctx_.cursor_for(pick, gui::Cursor::Hand);
+            if (selected || pick.hovered) {
+                ctx_.rounded(row, selected ? gui::fade(theme.selection, 0.5F) : theme.row, theme.radius);
+            }
+            ctx_.label(gui::Rect{name.x + 8.0F, name.y, name.width - 8.0F, name.height}, track.name,
+                       selected ? theme.text : theme.text_muted);
+            ctx_.tooltip(name, "Select " + track.name);
+            if (pick.clicked) {
+                scene_view_.select(track.item, ctx_.ctrl_held());
+            }
+            // A faint line the moments sit on, under the scrub bar.
+            ctx_.panel(gui::Rect{scrub.x, row.center_y(), scrub.width, 1.0F}, theme.divider);
+            std::uint32_t k = 0U;
+            for (const TrackMarker& marker : track.markers) {
+                const gui::UiColor tone = marker.draggable ? theme.keyframe : theme.text_muted;
+                const std::string when = format_number(marker.seconds, 2) + " s";
+                if (marker.duration > 0.0F) {
+                    const float x0 = at_x(marker.seconds);
+                    const float x1 = at_x(marker.seconds + marker.duration);
+                    const gui::Rect span{x0, row.center_y() - 5.0F, std::max(x1 - x0, 4.0F), 10.0F};
+                    const gui::Interaction drag = marker.draggable ? ctx_.grab(part_id(track.item, "track.span", k), span)
+                                                                   : gui::Interaction{};
+                    const gui::Rect end{x1 - 5.0F, row.center_y() - 7.0F, 10.0F, 14.0F};
+                    const gui::Interaction stretch = marker.draggable ? ctx_.grab(part_id(track.item, "track.end", k), end)
+                                                                      : gui::Interaction{};
+                    ctx_.cursor_for(drag, gui::Cursor::ResizeHorizontal);
+                    ctx_.cursor_for(stretch, gui::Cursor::ResizeHorizontal);
+                    ctx_.rounded(span, (drag.held || drag.hovered) ? theme.accent : gui::fade(tone, 0.6F), 4.0F);
+                    if (marker.draggable) {
+                        ctx_.rounded(end, (stretch.held || stretch.hovered) ? theme.accent : tone, 3.0F);
+                    }
+                    ctx_.tooltip(span, std::string{marker.label()} + " from " + when + " for " +
+                                           format_number(marker.duration, 2) + " s" +
+                                           (marker.draggable ? ". Drag it; drag its end for how long." : ""));
+                    if (stretch.held) {
+                        if (stretch.pressed) { drag_grip_ = 0.0F; }
+                        static_cast<void>(set_marker_duration(document_, marker, to_seconds(ctx_.pointer_x()) - marker.seconds));
+                    } else if (drag.held) {
+                        if (drag.pressed) { drag_grip_ = to_seconds(ctx_.pointer_x()) - marker.seconds; }
+                        static_cast<void>(set_marker_time(document_, marker, to_seconds(ctx_.pointer_x()) - drag_grip_));
+                    }
+                } else {
+                    const float x = at_x(marker.seconds);
+                    const gui::Rect hit{x - 8.0F, row.y + 2.0F, 16.0F, track_height - 4.0F};
+                    const gui::Interaction drag = marker.draggable ? ctx_.grab(part_id(track.item, "track.point", k), hit)
+                                                                   : gui::Interaction{};
+                    ctx_.cursor_for(drag, gui::Cursor::ResizeHorizontal);
+                    editor::draw_diamond(ctx_, x, row.center_y(), (drag.held || drag.hovered) ? 7.0F : 6.0F,
+                                         (drag.held || drag.hovered) ? theme.accent : tone);
+                    ctx_.tooltip(hit, std::string{marker.label()} + " at " + when +
+                                          (marker.draggable ? ". Drag it." : ""));
+                    if (drag.held) {
+                        static_cast<void>(set_marker_time(document_, marker, to_seconds(ctx_.pointer_x())));
+                    }
+                }
+                ++k;
+            }
+            y += track_height;
+        }
+        // The playhead runs down through the tracks too.
+        const float head_x = scrub.x + scrub.width * std::clamp(static_cast<float>(frame_ / frames), 0.0F, 1.0F);
+        ctx_.rounded(gui::Rect{head_x - 0.5F, area.y, 1.0F, area.height}, gui::fade(theme.playhead, 0.5F), 0.5F);
+        timeline_scroll_.end(ctx_, y + offset - area.y + 4.0F);
+    }
+
     void draw_transport(const gui::Rect& bar) {
         const gui::Theme& theme = ctx_.theme();
         const float y = bar.y + (bar.height - 32.0F) * 0.5F;
@@ -1231,7 +1332,7 @@ private:
         const std::string time = format_number(static_cast<float>(frame_ / 60.0), 1) + " / " +
                                  format_number(static_cast<float>(frames / 60.0), 1) + " s";
         const float time_w = 96.0F;
-        const gui::Rect track{bar.x + 150.0F, bar.center_y() - 10.0F, std::max(bar.width - 150.0F - time_w - 12.0F, 20.0F), 20.0F};
+        const gui::Rect track = scrub_track(bar);
         const gui::Interaction hit = ctx_.grab(gui::ui_id("studio.scrub"), track.inflated(0.0F, 6.0F));
         ctx_.cursor_for(hit, gui::Cursor::ResizeHorizontal);
         ctx_.rounded(gui::Rect{track.x, track.center_y() - 3.0F, track.width, 6.0F}, theme.track, 3.0F);
@@ -1277,6 +1378,8 @@ private:
     std::unique_ptr<Preview> preview_;
     std::string preview_error_;
     SceneView scene_view_;
+    gui::ScrollRegion timeline_scroll_;
+    float drag_grip_{}; // seconds between a dragged span's start and where it was taken
     float scene_tree_split_{0.19F};
     float scene_inspector_split_{0.66F};
     Document scene_guides_;
