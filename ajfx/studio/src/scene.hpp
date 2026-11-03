@@ -198,6 +198,10 @@ enum class Purpose : std::uint8_t;
 [[nodiscard]] std::uint32_t add_relationship(Document &document, RelationKind kind, std::uint32_t object,
                                              std::uint32_t system);
 bool remove_relationship(Document &document, std::uint32_t uid);
+// A particle system that lives only on a rule from `object`: no source of
+// its own, so nothing plays until the object hits or moves. Returns the
+// system, named after the object.
+[[nodiscard]] std::uint32_t add_bound_system(Document &document, RelationKind kind, std::uint32_t object);
 // Whether a rule can ever fire: hits and trails come from Dynamic objects,
 // so a rule on a Static or Animated one, or on every object when none is
 // Dynamic, is born nothing.

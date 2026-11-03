@@ -480,6 +480,27 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
         y += 32.0F;
         return;
     }
+    if (object) {
+        // One edit: a system with no source of its own, and the rule that feeds it.
+        if (editor::pill_button(ctx, part_id(item->uid, "relation.new_hits"), gui::Rect{x, y + 4, worded ? 220.0F : 34.0F, 28},
+                                gui::Icon::Plus, worded ? "New system born of its hits" : "",
+                                "A particle system with no source of its own: particles only where this object hits")) {
+            if (const Uid made = add_bound_system(document, RelationKind::EmitOnHit, item->uid)) {
+                select(made);
+                return;
+            }
+        }
+        y += 36.0F;
+        if (editor::pill_button(ctx, part_id(item->uid, "relation.new_trail"), gui::Rect{x, y + 4, worded ? 220.0F : 34.0F, 28},
+                                gui::Icon::Plus, worded ? "New system trailing it" : "",
+                                "A particle system with no source of its own: particles only behind this object as it moves")) {
+            if (const Uid made = add_bound_system(document, RelationKind::TrailFrom, item->uid)) {
+                select(made);
+                return;
+            }
+        }
+        y += 36.0F;
+    }
     if (editor::pill_button(ctx, part_id(item->uid, "relation.add"), gui::Rect{x, y + 4, worded ? 160.0F : 34.0F, 28},
                             gui::Icon::Plus, worded ? "Add relationship" : "",
                             system ? "Have particles born where a Dynamic object hits, or shed behind it"
@@ -526,12 +547,23 @@ void SceneView::draw_sources(gui::UiContext &ctx, Document &document, SceneItem 
         return;
     }
     heading(ctx, "Sources", x, y, width);
+    const bool bound = std::any_of(document.scene->relationships.begin(), document.scene->relationships.end(),
+                                   [&item](const Relationship &r) { return r.system == item.uid; });
+    if (system->sources.empty()) {
+        ctx.label(gui::Rect{x, y, width, row_height},
+                  bound ? "None of its own: born only of its relationships." : "None: add one, or a relationship.",
+                  bound ? ctx.theme().text_muted : ctx.theme().caution);
+        y += 32.0F;
+    }
     Uid remove{};
     for (ParticleSource &source : system->sources) {
-        if (system->sources.size() > 1U) {
+        {
             ctx.label(gui::Rect{x, y, width - 30, 28}, "Source " + std::to_string(source.uid), ctx.theme().text_muted);
             if (editor::icon_button(ctx, part_id(source.uid, "remove"), gui::Rect{x + width - 28, y, 28, 28},
-                                    gui::Icon::Trash, "Remove source")) {
+                                    gui::Icon::Trash,
+                                    system->sources.size() == 1U && !bound
+                                        ? "Remove source. With none, and no relationship, nothing is born."
+                                        : "Remove source")) {
                 remove = source.uid;
             }
             y += 30;

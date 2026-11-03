@@ -115,7 +115,11 @@ m/s, moving from, base amount, broken pieces only). Each rule has a seed.
 **Add relationship** on a particle system offers the Dynamic objects, the
 rest listed but not takeable, and on a Dynamic object the particle systems;
 an object that is not Dynamic has no button. A system fed by a rule needs no source of its
-own; a persistent population cannot be fed by one. Hits and trails come
+own, and its last source can be removed; a persistent population cannot be
+fed by one. A Dynamic object's inspector offers **New system born of its
+hits** and **New system trailing it**: one edit that creates a particle
+system with no source and the rule that feeds it, so nothing plays until
+the object hits or moves. Hits and trails come
 from Dynamic objects: a rule on a Static or Animated object, or on every
 object when none is Dynamic, is marked as born nothing. Removing either endpoint
 removes the rule rather than re-aiming it at everything. Rules lower into

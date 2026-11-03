@@ -808,7 +808,43 @@ void particles_meet_static_objects() {
     CHECK(relationship_active(*document.scene, document.scene->relationships.back()));
 }
 
+// A system made from an object lives only on its rule: no source of its
+// own, so nothing plays until the object hits or moves.
+void a_bound_system_is_born_only_of_its_object() {
+    Document document = new_scene();
+    const Uid crate = add_object(document);
+    document.scene->item(crate)->name = "Crate";
+    object(document, crate).position = {0.0F, 1.5F, 0.0F};
+    const Uid dust = add_bound_system(document, RelationKind::EmitOnHit, crate);
+    CHECK(dust != 0U && document.scene->item(dust)->name == "Crate hits");
+    const auto &system = std::get<ParticleSystem>(document.scene->item(dust)->data);
+    CHECK(system.sources.empty());
+    CHECK(document.scene->relationships.size() == 1U && document.scene->relationships.front().system == dust &&
+          document.scene->relationships.front().object == crate);
+    CHECK(validate_scene(document).empty());
+    CHECK(add_bound_system(document, RelationKind::TrailFrom, dust) == 0U); // a system is not an object
+
+    // Nothing is born before the crate lands, and dust after.
+    const Compiled compiled = ready(document);
+    auto solver = ajfx::rigid::make_jolt_solver();
+    auto run = simulation(compiled, solver.get());
+    std::size_t emitter = 0U;
+    for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
+        if (!ajfx::rigid_physics(compiled.effect->emitters[e])) { emitter = e; }
+    }
+    run.advance_to(12U);
+    CHECK(run.emitter(emitter).spawned == 0U);
+    run.advance_to(120U);
+    CHECK(run.emitter(emitter).spawned > 0U);
+
+    // Removing the rule leaves a system with no source, refused for playback and kept for storage.
+    CHECK(remove_relationship(document, document.scene->relationships.front().uid));
+    CHECK(!validate_scene(document).empty());
+    CHECK(validate_scene(document, false).empty());
+}
+
 void add_scene_tests(std::vector<studio_test::Case> &cases) {
+    cases.push_back({"a_bound_system_is_born_only_of_its_object", a_bound_system_is_born_only_of_its_object});
     cases.push_back({"particles_meet_static_objects", particles_meet_static_objects});
     cases.push_back({"statistics_count_the_scene_and_name_limits_in_reach", statistics_count_the_scene_and_name_limits_in_reach});
     cases.push_back({"timeline_tracks_are_the_scene_moments", timeline_tracks_are_the_scene_moments});

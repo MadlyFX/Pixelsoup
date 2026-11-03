@@ -300,6 +300,34 @@ Uid add_relationship(Document &document, RelationKind kind, Uid object, Uid syst
     document.scene->relationships.push_back(relationship);
     return uid;
 }
+Uid add_bound_system(Document &document, RelationKind kind, Uid object) {
+    const SceneItem *source = document.scene ? document.scene->item(object) : nullptr;
+    if (source == nullptr || !std::holds_alternative<Object>(source->data)) {
+        return 0U;
+    }
+    const std::string name = source->name + (kind == RelationKind::EmitOnHit ? " hits" : " trail");
+    const Uid system = add_particle_system(document);
+    if (system == 0U) {
+        return 0U;
+    }
+    SceneItem *item = document.scene->item(system);
+    item->name = name;
+    auto &particles = std::get<ParticleSystem>(item->data);
+    particles.sources.clear();
+    particles.radius = {0.0F, 0.0F};
+    if (kind == RelationKind::TrailFrom) {
+        particles.speed = {0.0F, 0.2F};
+        particles.lifetime = {0.8F, 1.6F};
+    } else {
+        particles.speed = {0.5F, 1.5F};
+        particles.lifetime = {0.6F, 1.4F};
+    }
+    if (add_relationship(document, kind, object, system) == 0U) {
+        static_cast<void>(remove_item(document, system));
+        return 0U;
+    }
+    return system;
+}
 bool remove_relationship(Document &document, Uid uid) {
     if (!document.scene) {
         return false;
