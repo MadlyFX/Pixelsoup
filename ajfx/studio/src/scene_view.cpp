@@ -467,40 +467,53 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
         return;
     }
     const bool worded = width >= 300.0F;
+    // Only a Dynamic object hits or moves, so only one can feed a rule: an
+    // object that is not one has no button, and a system is offered only
+    // the Dynamic objects, the rest shown but not takeable.
+    const auto dynamic = [](const SceneItem &candidate) {
+        const auto *shape = std::get_if<Object>(&candidate.data);
+        return shape != nullptr && shape->motion == ObjectMotion::Dynamic;
+    };
+    if (object && !dynamic(*item)) {
+        ctx.label(gui::Rect{x, y, width, row_height},
+                  "Only a Dynamic object can feed one: set Physics > Motion to Dynamic.", ctx.theme().text_muted);
+        y += 32.0F;
+        return;
+    }
     if (editor::pill_button(ctx, part_id(item->uid, "relation.add"), gui::Rect{x, y + 4, worded ? 160.0F : 34.0F, 28},
                             gui::Icon::Plus, worded ? "Add relationship" : "",
-                            system ? "Have particles born where an object hits, or shed behind it"
+                            system ? "Have particles born where a Dynamic object hits, or shed behind it"
                                    : "Have a particle system react to this object")) {
         relation_target_ = item->uid;
         relation_from_system_ = system;
         relation_choices_.clear();
         std::vector<ListEntry> entries;
+        const bool any_dynamic = std::any_of(document.scene->items.begin(), document.scene->items.end(), dynamic);
         for (const RelationKind kind : {RelationKind::EmitOnHit, RelationKind::TrailFrom}) {
             const std::string group{relation_name(kind)};
             if (system) {
                 relation_choices_.emplace_back(kind, 0U);
-                entries.push_back({group, "Every object",
-                                   kind == RelationKind::EmitOnHit ? "Born wherever anything hits"
-                                                                   : "Shed behind everything that moves",
-                                   true, {}});
+                entries.push_back({group, "Every Dynamic object",
+                                   !any_dynamic ? std::string{"None in the scene yet"}
+                                   : kind == RelationKind::EmitOnHit ? std::string{"Born wherever any of them hits"}
+                                                                     : std::string{"Shed behind each as it moves"},
+                                   any_dynamic, {}});
             }
             for (const SceneItem &other : document.scene->items) {
                 if (system ? std::holds_alternative<Object>(other.data)
                            : std::holds_alternative<ParticleSystem>(other.data)) {
                     relation_choices_.emplace_back(kind, other.uid);
-                    const auto *shape = std::get_if<Object>(&other.data);
-                    const bool still = shape != nullptr && shape->motion != ObjectMotion::Dynamic;
+                    const bool still = system && !dynamic(other);
                     entries.push_back({group, other.name,
-                                       still ? std::string{"Not Dynamic: it never hits or moves, so nothing is born"}
+                                       still ? std::string{"Not Dynamic: it never hits or moves"}
                                        : kind == RelationKind::EmitOnHit ? std::string{"Born where it hits"}
                                                                          : std::string{"Shed behind it"},
-                                       true, {}});
+                                       !still, {}});
                 }
             }
         }
         if (entries.empty()) {
-            entries.push_back({"", system ? "No objects in the scene" : "No particle systems in the scene", "",
-                               false, {}});
+            entries.push_back({"", "No particle systems in the scene", "", false, {}});
         }
         relation_add_.open(x, y + 36, "Add relationship", std::move(entries), false);
     }

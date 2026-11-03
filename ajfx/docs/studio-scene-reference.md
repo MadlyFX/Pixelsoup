@@ -112,8 +112,9 @@ under Scene settings: `Crate / Hit -> Dust / Emit` has particles born where
 the object hits something (hits from, per hit, per m/s, spread), and
 `Crate / Moving -> Smoke / Trail` sheds them behind it while it moves (per
 m/s, moving from, base amount, broken pieces only). Each rule has a seed.
-**Add relationship** on a particle system offers the objects, and on an
-object the particle systems. A system fed by a rule needs no source of its
+**Add relationship** on a particle system offers the Dynamic objects, the
+rest listed but not takeable, and on a Dynamic object the particle systems;
+an object that is not Dynamic has no button. A system fed by a rule needs no source of its
 own; a persistent population cannot be fed by one. Hits and trails come
 from Dynamic objects: a rule on a Static or Animated object, or on every
 object when none is Dynamic, is marked as born nothing. Removing either endpoint
