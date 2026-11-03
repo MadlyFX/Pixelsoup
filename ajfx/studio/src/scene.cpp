@@ -229,6 +229,55 @@ Uid add_group(Document &document) {
     document.scene->items.push_back(SceneItem{.uid = uid, .name = "Group", .data = Group{}});
     return uid;
 }
+Uid add_force(Document &document, ForceKind kind) {
+    if (!document.scene) {
+        return 0U;
+    }
+    const Uid uid = reserve(document);
+    if (uid == 0U) {
+        return 0U;
+    }
+    Force force{.kind = kind};
+    switch (kind) {
+    case ForceKind::Wind:
+        force.strength = {1.5F, 1.5F};
+        break;
+    case ForceKind::Vortex:
+        force.strength = {3.0F, 3.0F};
+        break;
+    case ForceKind::Attract:
+        force.strength = {4.0F, 4.0F};
+        break;
+    case ForceKind::DrawIn:
+        force.strength = {6.0F, 6.0F};
+        force.position = {};
+        break;
+    case ForceKind::Blast:
+        force.position = {0.0F, 0.5F, 0.0F};
+        break;
+    }
+    document.scene->items.push_back(
+        SceneItem{.uid = uid, .name = std::string{force_name(kind)}, .seed = uid, .data = std::move(force)});
+    return uid;
+}
+std::string_view force_name(ForceKind kind) {
+    switch (kind) {
+    case ForceKind::Wind:
+        return "Wind";
+    case ForceKind::Vortex:
+        return "Vortex";
+    case ForceKind::Attract:
+        return "Attract";
+    case ForceKind::DrawIn:
+        return "Draw in";
+    case ForceKind::Blast:
+        return "Blast";
+    }
+    return "Force";
+}
+bool force_targets(const Force &force, Uid system) {
+    return force.all_systems || std::find(force.targets.begin(), force.targets.end(), system) != force.targets.end();
+}
 Uid add_source(Document &document, Uid uid, SourceMode mode) {
     SceneItem *item = document.scene ? document.scene->item(uid) : nullptr;
     auto *system = item ? std::get_if<ParticleSystem>(&item->data) : nullptr;
@@ -292,6 +341,10 @@ bool remove_item(Document &document, Uid uid) {
     for (SceneItem &item : document.scene->items) {
         if (item.parent == uid) {
             item.parent = parent;
+        }
+        // A force stops naming a system that is gone; it never retargets.
+        if (auto *force = std::get_if<Force>(&item.data)) {
+            std::erase(force->targets, uid);
         }
     }
     std::erase_if(document.scene->items, [uid](const SceneItem &i) { return i.uid == uid; });
@@ -442,10 +495,104 @@ std::string validate_scene(const Document &document, bool for_playback) {
             if (const std::string error = validate_keys(system->tint_over_age, 0.0F, 64.0F); !error.empty()) {
                 return where + "Appearance / Color over age: " + error;
             }
+            std::size_t acting = 0U;
+            for (const SceneItem &other : scene.items) {
+                const auto *force = std::get_if<Force>(&other.data);
+                if (force && force->kind != ForceKind::Blast && other.simulate && force_targets(*force, item.uid)) {
+                    ++acting;
+                }
+            }
+            if (acting > max_forces_per_system) {
+                return where + "more than 16 forces act on this system";
+            }
+        } else if (const auto *force = std::get_if<Force>(&item.data)) {
+            std::set<Uid> named;
+            for (const Uid target : force->targets) {
+                const SceneItem *named_system = scene.item(target);
+                if (named_system == nullptr || !std::holds_alternative<ParticleSystem>(named_system->data)) {
+                    return where + "Targets: a named particle system is missing";
+                }
+                if (!named.insert(target).second) {
+                    return where + "Targets: a particle system is named twice";
+                }
+            }
+            if (force->targets.size() > 4096U) {
+                return where + "Targets: too many";
+            }
         }
     }
     return {};
 }
+namespace {
+// The forces that act on a system, in identity order, and where each lowers
+// to: the system's own reserved identities from 16 up, so adding a system or
+// a force elsewhere moves nothing here.
+std::vector<const SceneItem *> forces_on(const Scene &scene, Uid system) {
+    std::vector<const SceneItem *> out;
+    for (const SceneItem &item : scene.items) {
+        const auto *force = std::get_if<Force>(&item.data);
+        if (force && force->kind != ForceKind::Blast && item.simulate && force_targets(*force, system)) {
+            out.push_back(&item);
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const SceneItem *a, const SceneItem *b) { return a->uid < b->uid; });
+    return out;
+}
+Uid force_block_uid(const Scene &scene, Uid force, Uid system) {
+    const std::vector<const SceneItem *> acting = forces_on(scene, system);
+    for (std::size_t k = 0U; k < acting.size() && k < max_forces_per_system; ++k) {
+        if (acting[k]->uid == force) {
+            return system + 16U + static_cast<Uid>(k);
+        }
+    }
+    return 0U;
+}
+Block force_block(const SceneItem &item, Uid uid) {
+    const Force &f = std::get<Force>(item.data);
+    const Value seed = number(static_cast<float>(item.seed));
+    switch (f.kind) {
+    case ForceKind::Wind:
+        return block(uid, "wind", {{"strength", value(f.strength)}, {"heading", number(f.heading)}, {"seed", seed}});
+    case ForceKind::Vortex:
+        return block(uid, "swirl",
+                     {{"strength", value(f.strength)},
+                      {"axis", choice(f.axis == VortexAxis::Horizontal ? "horizontal" : "vertical")},
+                      {"center", value(f.position)},
+                      {"seed", seed}});
+    case ForceKind::Attract:
+        return block(uid, "attract",
+                     {{"strength", value(f.strength)},
+                      {"point", value(f.position)},
+                      {"reach", number(f.reach)},
+                      {"seed", seed}});
+    case ForceKind::DrawIn:
+        return block(uid, "draw_in",
+                     {{"strength", value(f.strength)},
+                      {"height", number(f.height)},
+                      {"center", value(f.position)},
+                      {"seed", seed}});
+    case ForceKind::Blast:
+        return block(uid, "explosion",
+                     {{"at", value(f.position)},
+                      {"power", number(f.power)},
+                      {"radius", number(f.radius)},
+                      {"time", number(f.time)}});
+    }
+    return block(uid, "wind");
+}
+// The system a force's handles drag through: the lowest identity it acts on.
+Uid first_target(const Scene &scene, const SceneItem &item) {
+    const Force &force = std::get<Force>(item.data);
+    Uid best = 0U;
+    for (const SceneItem &other : scene.items) {
+        if (std::holds_alternative<ParticleSystem>(other.data) && force_targets(force, other.uid) &&
+            (best == 0U || other.uid < best)) {
+            best = other.uid;
+        }
+    }
+    return best;
+}
+} // namespace
 
 Document lower_scene(const Document &document) {
     if (!document.scene) {
@@ -460,9 +607,13 @@ Document lower_scene(const Document &document) {
         ordered.push_back(&item);
     }
     std::sort(ordered.begin(), ordered.end(), [](const SceneItem *a, const SceneItem *b) { return a->uid < b->uid; });
+    Uid host = 0U; // the first simulating layer holds every blast; a blast throws everything
     for (const SceneItem *item : ordered) {
-        if (std::holds_alternative<Group>(item->data)) {
+        if (std::holds_alternative<Group>(item->data) || std::holds_alternative<Force>(item->data)) {
             continue;
+        }
+        if (host == 0U && item->simulate) {
+            host = item->uid;
         }
         Layer layer;
         layer.uid = item->uid;
@@ -620,8 +771,21 @@ Document lower_scene(const Document &document) {
             if (!system->collide) {
                 layer.blocks.push_back(block(item->uid + 12U, "passes_through"));
             }
+            const std::vector<const SceneItem *> acting = forces_on(*document.scene, item->uid);
+            for (std::size_t k = 0U; k < acting.size() && k < max_forces_per_system; ++k) {
+                layer.blocks.push_back(force_block(*acting[k], item->uid + 16U + static_cast<Uid>(k)));
+            }
         }
         out.layers.push_back(std::move(layer));
+    }
+    if (host != 0U) {
+        Layer &layer = *std::find_if(out.layers.begin(), out.layers.end(), [host](const Layer &l) { return l.uid == host; });
+        for (const SceneItem *item : ordered) {
+            const auto *force = std::get_if<Force>(&item->data);
+            if (force && force->kind == ForceKind::Blast && item->simulate) {
+                layer.blocks.push_back(force_block(*item, item->uid + 1U));
+            }
+        }
     }
     return out;
 }
@@ -648,6 +812,12 @@ bool same_scene_motion(const Document &a, const Document &b) {
         }
         for (const SceneProperty &property : scene_properties(before)) {
             if (property.control.timing == ParameterTiming::Bake && property.read(before) != property.read(*after)) {
+                return false;
+            }
+        }
+        if (const auto *force = std::get_if<Force>(&before.data)) {
+            const auto &next = std::get<Force>(after->data);
+            if (force->all_systems != next.all_systems || force->targets != next.targets) {
                 return false;
             }
         }
@@ -739,10 +909,23 @@ Compiled compile_scene(const Document &document, Purpose purpose) {
 }
 Uid handle_block(const Document &document, Uid item) {
     const SceneItem *owner = document.scene ? document.scene->item(item) : nullptr;
-    if (owner == nullptr || std::holds_alternative<Group>(owner->data)) {
+    if (owner == nullptr) {
         return 0U;
     }
-    return std::holds_alternative<Object>(owner->data) ? item + 2U : item + 7U;
+    if (std::holds_alternative<Object>(owner->data)) {
+        return item + 2U;
+    }
+    if (std::holds_alternative<ParticleSystem>(owner->data)) {
+        return item + 7U;
+    }
+    if (const auto *force = std::get_if<Force>(&owner->data)) {
+        if (force->kind == ForceKind::Blast) {
+            return item + 1U;
+        }
+        const Uid system = first_target(*document.scene, *owner);
+        return system == 0U ? 0U : force_block_uid(*document.scene, item, system);
+    }
+    return 0U;
 }
 
 bool adopt_handle_edit(Document &document, const Document &lowered, Uid item) {
@@ -751,19 +934,43 @@ bool adopt_handle_edit(Document &document, const Document &lowered, Uid item) {
     if (owner == nullptr || dragged == nullptr) {
         return false;
     }
-    const auto as_vec3 = [](const Value &value) { return Vec3{value.x, value.y, value.z}; };
+    const auto as_vec3 = [](const Value &v) { return Vec3{v.x, v.y, v.z}; };
     if (auto *object = std::get_if<Object>(&owner->data)) {
-        const Object before = *object;
+        Object before = *object;
         object->position = as_vec3(get(*dragged, "at"));
         object->size = get(*dragged, "size").x;
-        return !(*object == before);
+        return before != *object;
+    }
+    if (auto *force = std::get_if<Force>(&owner->data)) {
+        Force before = *force;
+        switch (force->kind) {
+        case ForceKind::Wind:
+            force->heading = get(*dragged, "heading").x;
+            break;
+        case ForceKind::Vortex:
+            force->position = as_vec3(get(*dragged, "center"));
+            break;
+        case ForceKind::Attract:
+            force->position = as_vec3(get(*dragged, "point"));
+            force->reach = get(*dragged, "reach").x;
+            break;
+        case ForceKind::DrawIn:
+            force->position = as_vec3(get(*dragged, "center"));
+            force->height = get(*dragged, "height").x;
+            break;
+        case ForceKind::Blast:
+            force->position = as_vec3(get(*dragged, "at"));
+            force->radius = get(*dragged, "radius").x;
+            break;
+        }
+        return before != *force;
     }
     auto &system = std::get<ParticleSystem>(owner->data);
-    const ParticleSystem before = system;
+    ParticleSystem before = system;
     system.position = as_vec3(get(*dragged, "offset"));
     system.radius.max = get(*dragged, "size").y;
     system.radius.min = std::min(system.radius.min, system.radius.max);
-    return !(system == before);
+    return before != system;
 }
 
 } // namespace ajfx::studio

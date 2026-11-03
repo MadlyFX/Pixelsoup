@@ -139,6 +139,29 @@ const std::vector<SceneProperty> &system_properties() {
     }();
     return properties;
 }
+const std::vector<SceneProperty> &force_properties() {
+    static const std::vector<SceneProperty> properties = [] {
+        std::vector<SceneProperty> out{
+            property("kind", "Kind", "Force", &Force::kind, 0, 4, {}, {"Wind", "Vortex", "Attract", "Draw in", "Blast"}),
+            property("position", "Position", "Force", &Force::position, -10000, 10000, "m"),
+            property("strength", "Strength", "Force", &Force::strength, -1000, 1000, "m/s^2"),
+            property("heading", "Heading", "Force", &Force::heading, 0, 360, "deg"),
+            property("axis", "Axis", "Force", &Force::axis, 0, 1, {}, {"Vertical", "Horizontal"}),
+            property("reach", "Reach", "Force", &Force::reach, 0, 1000, "m"),
+            property("height", "Fades by", "Force", &Force::height, 0, 1000, "m"),
+            property("power", "Power", "Force", &Force::power, 0, 1000, "m/s"),
+            property("radius", "Radius", "Force", &Force::radius, 0.01F, 1000, "m"),
+            property("time", "Goes off at", "Force", &Force::time, 0, 3600, "s"),
+            property("all_systems", "Every particle system", "Targets", &Force::all_systems)};
+        for (SceneProperty &p : out) {
+            if (p.control.id == "heading" || p.control.id == "time") {
+                p.control.decimals = p.control.id == "heading" ? 0 : 2;
+            }
+        }
+        return out;
+    }();
+    return properties;
+}
 } // namespace
 
 std::span<const SceneProperty> scene_properties(const SceneItem &item) {
@@ -147,6 +170,9 @@ std::span<const SceneProperty> scene_properties(const SceneItem &item) {
     }
     if (std::holds_alternative<ParticleSystem>(item.data)) {
         return system_properties();
+    }
+    if (std::holds_alternative<Force>(item.data)) {
+        return force_properties();
     }
     return {};
 }

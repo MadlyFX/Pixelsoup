@@ -170,6 +170,18 @@ bool visible_property(const SceneItem &item, const SceneProperty &p) {
     if (const auto *s = std::get_if<ParticleSystem>(&item.data); s && s->persistent && p.control.id == "lifetime") {
         return false;
     }
+    if (const auto *f = std::get_if<Force>(&item.data)) {
+        const std::string_view id = p.control.id;
+        const bool blast = f->kind == ForceKind::Blast;
+        if (id == "position") { return f->kind != ForceKind::Wind; }
+        if (id == "strength") { return !blast; }
+        if (id == "heading") { return f->kind == ForceKind::Wind; }
+        if (id == "axis") { return f->kind == ForceKind::Vortex; }
+        if (id == "reach") { return f->kind == ForceKind::Attract; }
+        if (id == "height") { return f->kind == ForceKind::DrawIn; }
+        if (id == "power" || id == "radius" || id == "time") { return blast; }
+        if (id == "all_systems") { return !blast; }
+    }
     if (const auto *s = std::get_if<ParticleSystem>(&item.data);
         s && p.control.id == "persistent" &&
         std::any_of(s->sources.begin(), s->sources.end(),
@@ -205,7 +217,12 @@ void SceneView::open_add(float x, float y) {
                {"", "Particle system", "A source, motion and appearance", true, {}},
                {"", "Group", "Organize without changing simulation", true, {}},
                {"", "Import models", "Place OBJ, glTF or GLB files", true, {}},
-               {"", "Floor", "A static surface aligned with the grid", true, {}}},
+               {"", "Floor", "A static surface aligned with the grid", true, {}},
+               {"Forces", "Wind", "A steady push, on the systems it names", true, {}},
+               {"Forces", "Vortex", "Spins particles around an axis", true, {}},
+               {"Forces", "Attract", "Pulls to a point, or pushes from it", true, {}},
+               {"Forces", "Draw in", "Pulls toward a line, like a fire's draught", true, {}},
+               {"Forces", "Blast", "Throws everything out from a point, once", true, {}}},
               false);
 }
 void SceneView::import_models(Document &document) {
@@ -296,6 +313,7 @@ void SceneView::tree_children(gui::UiContext &ctx, Document &document, Uid paren
                   item.simulate ? theme.text : theme.text_muted);
         ctx.tooltip(row, group                                       ? "Organizational group"
                          : std::holds_alternative<Object>(item.data) ? "Mesh object"
+                         : std::holds_alternative<Force>(item.data)  ? "Force"
                                                                      : "Particle system");
         if (hit.clicked && (!group || ctx.pointer_x() >= row.x + 28)) {
             select(item.uid, ctx.ctrl_held());
@@ -415,6 +433,37 @@ void SceneView::draw_sources(gui::UiContext &ctx, Document &document, SceneItem 
             add_source(document, item.uid, system->persistent ? SourceMode::Initial : SourceMode::Continuous));
     }
     y += 36;
+}
+
+void SceneView::draw_targets(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y,
+                             float width) {
+    auto *force = std::get_if<Force>(&item.data);
+    if (!force || force->kind == ForceKind::Blast || force->all_systems) {
+        return;
+    }
+    // One switch per particle system: on, the force acts on it.
+    for (const SceneItem &other : document.scene->items) {
+        if (!std::holds_alternative<ParticleSystem>(other.data)) {
+            continue;
+        }
+        const auto at = std::find(force->targets.begin(), force->targets.end(), other.uid);
+        bool on = at != force->targets.end();
+        ctx.label(gui::Rect{x, y, width - 60.0F, row_height}, other.name, ctx.theme().text_muted);
+        if (switch_toggle(ctx, part_id(item.uid, "target", other.uid), gui::Rect{x + width - 68.0F, y + 2.0F, 44.0F, 24.0F},
+                          on)) {
+            if (on) {
+                force->targets.push_back(other.uid);
+            } else {
+                std::erase(force->targets, other.uid);
+            }
+        }
+        y += 32.0F;
+    }
+    if (force->targets.empty()) {
+        ctx.label(gui::Rect{x, y, width, row_height}, "Acts on nothing until a system is switched on.",
+                  ctx.theme().warning);
+        y += 32.0F;
+    }
 }
 
 void SceneView::draw_motion_stack(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y,
@@ -757,8 +806,10 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
         if (selection_.size() == 1U) {
             static_cast<void>(ctx.text_field(part_id(item->uid, "name"), gui::Rect{x, y, width - 24, 30}, item->name));
             const auto *object = std::get_if<Object>(&item->data);
+            const auto *force = std::get_if<Force>(&item->data);
             const std::string fallback =
                 object ? (object->mesh == "cube" ? "Object" : std::filesystem::path{object->mesh}.stem().string())
+                : force                                     ? std::string{force_name(force->kind)}
                 : std::holds_alternative<Group>(item->data) ? "Group"
                                                             : "Particle system";
             if (item->name != fallback &&
@@ -913,6 +964,7 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
         }
         if (selection_.size() == 1U) {
             draw_sources(ctx, document, *item, x, y, width);
+            draw_targets(ctx, document, *item, x, y, width);
         }
     }
     inspector_scroll_.end(ctx, y + offset - view.y + 16);
@@ -935,6 +987,8 @@ void SceneView::draw_overlays(gui::UiContext &ctx, const gui::Rect &window, Docu
             select(group);
         } else if (*chosen == 4U) {
             select(add_floor(document));
+        } else if (*chosen >= 5U) {
+            select(add_force(document, static_cast<ForceKind>(*chosen - 5U)));
         } else {
             import_models(document);
         }

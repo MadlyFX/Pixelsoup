@@ -6,7 +6,9 @@ reusable effects and captured ranges are delivery choices. Studio exports
 
 **New** opens a scene with a static **Ground** object aligned to the grid,
 a tree, central viewport and selected-item inspector. **Add > Floor** creates
-another editable ground surface. Objects own geometry, visual and physical
+another editable ground surface, and **Add** lists forces (Wind, Vortex,
+Attract, Draw in, Blast) that are placed items acting on the particle
+systems they name. Objects own geometry, visual and physical
 properties and fracture; Scene settings own shared physics. Import accepts
 multiple models. Particle systems own their sources, a Motion stack of typed
 behaviors (Drag, Turbulence, Vortex, Wind, Attract, Draw in) in the order

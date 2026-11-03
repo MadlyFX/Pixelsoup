@@ -939,6 +939,10 @@ private:
             } else if (const auto* system = std::get_if<ParticleSystem>(&item.data)) {
                 at = system->position;
                 radius = std::max(system->radius.max, 0.1F);
+            } else if (const auto* force = std::get_if<Force>(&item.data)) {
+                if (force->kind == ForceKind::Wind) { continue; }
+                at = force->position;
+                radius = std::max({force->kind == ForceKind::Blast ? force->radius : force->reach, 0.5F});
             } else { continue; }
             const Vec3 r{radius, radius, radius};
             const Vec3 low = (at - r) * document_.scale;
@@ -971,8 +975,11 @@ private:
             scene_guides_ = lower_scene(document_);
             scene_guides_for_ = changes_.value();
         }
+        // A force's guides are drawn in the system it acts on: its handle's layer.
+        const SceneItem* working_item = document_.scene->item(working);
+        const bool force_selected = working_item && std::holds_alternative<Force>(working_item->data);
         GuideOptions guide_options{.focus = handle_block(document_, working),
-                                   .layer = working,
+                                   .layer = force_selected ? 0U : working,
                                    .seconds = static_cast<float>(frame_ / 60.0),
                                    .outlines = &outlines_};
         if (analysis_ && analysis_->bounds.valid) {

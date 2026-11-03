@@ -465,7 +465,110 @@ void motion_stack_and_age_drivers_reach_the_runtime() {
     CHECK(validate_scene(document).empty());
 }
 
+// A force is a scene item: it lowers into the systems it acts on, by their
+// identities and never tree order; a blast throws everything from one host.
+void forces_are_scene_items_that_act_on_their_targets() {
+    Document document = empty_scene();
+    const Uid a = add_particle_system(document);
+    const Uid b = add_particle_system(document);
+    const Uid vortex = add_force(document, ForceKind::Vortex);
+    const Uid wind = add_force(document, ForceKind::Wind);
+    const Uid blast = add_force(document, ForceKind::Blast);
+    CHECK(vortex != 0U && wind != 0U && blast != 0U);
+    auto &v = std::get<Force>(document.scene->item(vortex)->data);
+    auto &w = std::get<Force>(document.scene->item(wind)->data);
+    auto &x = std::get<Force>(document.scene->item(blast)->data);
+    CHECK(document.scene->item(vortex)->name == "Vortex" && v.strength == Range{3.0F, 3.0F});
+    v.position = {1.0F, 2.0F, 3.0F};
+    v.strength = {-2.0F, -5.0F};
+    v.axis = VortexAxis::Horizontal;
+    w.all_systems = false;
+    w.targets = {b};
+    w.heading = 90.0F;
+    x.position = {0.0F, 0.7F, 0.0F};
+    x.power = 9.0F;
+    x.radius = 2.5F;
+    x.time = 1.25F;
+    CHECK(validate_scene(document).empty());
+
+    Document lowered = lower_scene(document);
+    CHECK(lowered.layers.size() == 2U);
+    const Block *swirl_a = lowered.block(a + 16U);
+    const Block *swirl_b = lowered.block(b + 16U);
+    const Block *wind_b = lowered.block(b + 17U);
+    CHECK(swirl_a && swirl_a->kind == "swirl" && get(*swirl_a, "center").z == 3.0F &&
+          get(*swirl_a, "strength") == range(-2.0F, -5.0F) && get(*swirl_a, "axis").text == "horizontal");
+    CHECK(swirl_b && swirl_b->kind == "swirl");
+    CHECK(wind_b && wind_b->kind == "wind" && get(*wind_b, "heading").x == 90.0F);
+    CHECK(lowered.block(a + 17U) == nullptr);
+    const Block *explosion = lowered.block(blast + 1U);
+    CHECK(explosion && explosion->kind == "explosion" && get(*explosion, "power").x == 9.0F);
+    CHECK(std::find_if(lowered.layers.front().blocks.begin(), lowered.layers.front().blocks.end(),
+                       [blast](const Block &block) { return block.uid == blast + 1U; }) !=
+          lowered.layers.front().blocks.end());
+    CHECK(handle_block(document, vortex) == a + 16U);
+    CHECK(handle_block(document, wind) == b + 17U);
+    CHECK(handle_block(document, blast) == blast + 1U);
+
+    // The compiled effect carries one blast and the forces in each emitter.
+    const Compiled compiled = ready(document);
+    CHECK(compiled.effect->blasts.size() == 1U && compiled.effect->blasts.front().time == 1.25F);
+    unsigned vortices = 0U;
+    unsigned winds = 0U;
+    for (const ajfx::Emitter &emitter : compiled.effect->emitters) {
+        for (const ajfx::UpdateModule &module : emitter.update) {
+            vortices += std::holds_alternative<ajfx::Vortex>(module) ? 1U : 0U;
+            winds += std::holds_alternative<ajfx::Gravity>(module) ? 1U : 0U;
+        }
+    }
+    CHECK(vortices == 2U);
+    CHECK(winds >= 1U);
+
+    // Tree order and names never change where a force lowers to.
+    std::swap(document.scene->items[0], document.scene->items[4]);
+    document.scene->item(vortex)->name = "Whirl";
+    const Document reordered = lower_scene(document);
+    CHECK(reordered.block(a + 16U) && get(*reordered.block(a + 16U), "center").z == 3.0F);
+    CHECK(reordered.block(b + 17U) && reordered.block(b + 17U)->kind == "wind");
+
+    // A dragged handle writes back to the force, never to the compiler's copy.
+    Document dragged = lowered;
+    dragged.block(a + 16U)->set("center", vec3(4.0F, 2.0F, 6.0F));
+    CHECK(adopt_handle_edit(document, dragged, vortex));
+    CHECK(v.position == ajfx::Vec3{4.0F, 2.0F, 6.0F});
+    dragged.block(blast + 1U)->set("radius", number(0.75F));
+    CHECK(adopt_handle_edit(document, dragged, blast));
+    CHECK(std::get<Force>(document.scene->item(blast)->data).radius == 0.75F); // the swap moved the items
+
+    // Removing a named system drops it from the force; a missing one is refused.
+    CHECK(remove_item(document, b));
+    auto &wind_again = std::get<Force>(document.scene->item(wind)->data); // the item list shrank
+    CHECK(wind_again.targets.empty());
+    CHECK(validate_scene(document).empty());
+    wind_again.targets = {b};
+    CHECK(!validate_scene(document).empty());
+    wind_again.targets.clear();
+
+    // Save and load keep forces and their targets exactly.
+    wind_again.targets = {a};
+    const Loaded loaded = load_document(save_document(document));
+    if (!loaded.document) {
+        throw std::runtime_error{loaded.error};
+    }
+    CHECK(*loaded.document == document);
+
+    // More than 16 forces on one system is refused: the vortex and the wind
+    // already act on it, so fourteen more fill it and one more is too many.
+    for (int k = 0; k < 14; ++k) {
+        CHECK(add_force(document, ForceKind::Attract) != 0U);
+    }
+    CHECK(validate_scene(document).empty());
+    CHECK(add_force(document, ForceKind::Attract) != 0U);
+    CHECK(!validate_scene(document).empty());
+}
+
 void add_scene_tests(std::vector<studio_test::Case> &cases) {
+    cases.push_back({"forces_are_scene_items_that_act_on_their_targets", forces_are_scene_items_that_act_on_their_targets});
     cases.push_back({"motion_stack_and_age_drivers_reach_the_runtime", motion_stack_and_age_drivers_reach_the_runtime});
     cases.push_back({"new_scene_ground_catches_objects_and_can_be_removed", new_scene_ground_catches_objects_and_can_be_removed});
     cases.push_back({"typed_scene_roundtrip_and_strict_fields", typed_scene_roundtrip_and_strict_fields});

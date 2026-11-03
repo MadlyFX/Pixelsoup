@@ -85,6 +85,20 @@ exactly as written. Size over age is a motion edit (collision reads size);
 colour over age keeps the motion cache. Drivers from other particle
 attributes, such as speed, need runtime support and are not offered.
 
+A **force** is a scene item in its own right: **Wind** (strength, heading),
+**Vortex** (position, strength, axis), **Attract** (position, strength,
+reach), **Draw in** (position, strength, fade height) and **Blast**
+(position, power, radius, time). **Add** lists them under Forces. A force
+acts on every particle system unless **Every particle system** is switched
+off, when a switch per system names its targets; a system that is removed
+drops out of every force. A blast throws everything, objects included, and
+takes no target list. Selecting a force shows its guide and handles in the
+viewport, drawn in the first system it acts on; the drag writes back to the
+force. The force's seed is the item's seed. Each force lowers into the
+systems it acts on by identity order, at most 16 per system, so tree order,
+names and other systems never move it. Forces have no viewport handle for a
+strength, and Wind has no position.
+
 Scene settings own gravity, angular damping and sleep policy. The fixed
 simulation step is 60 Hz. The capture range controls bake/export duration;
 non-looping scene playback can continue beyond it. Looping is an explicit
@@ -133,7 +147,7 @@ since no projects needed migrating. Its layers and blocks remain as the
 compiler's IR, and its recipes as compiler test fixtures.
 
 Continuous cross-population attraction/repulsion or flow coupling, explicit
-event endpoints, force/light scene items, reusable assemblies, library
+event endpoints, light scene items, reusable assemblies, library
 organization, authored checkpoints, captured actions, simulation-independent
 visibility/isolation, controls publishing and the full export review panel
 are not implemented in the scene workspace. There are no decorative controls

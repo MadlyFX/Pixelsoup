@@ -113,6 +113,25 @@ struct ParticleSystem final {
     friend bool operator==(const ParticleSystem &, const ParticleSystem &) = default;
 };
 
+// A placed influence on particle systems: a scene item with handles, acting
+// on every particle system or on the ones it names. Its seed is the item's.
+enum class ForceKind { Wind, Vortex, Attract, DrawIn, Blast };
+struct Force final {
+    ForceKind kind{ForceKind::Wind};
+    Vec3 position{0.0F, 1.0F, 0.0F}; // Vortex axis, Attract point, Draw in base, Blast centre; Wind has none
+    Range strength{1.5F, 1.5F};      // each particle's share: Wind, Vortex, Attract m/s^2; Draw in per metre
+    float heading{0.0F};             // Wind: degrees, 0 is +X and 90 is -Z
+    VortexAxis axis{VortexAxis::Vertical};
+    float reach{0.0F};               // Attract: no pull beyond this; 0 is everywhere
+    float height{1.0F};              // Draw in: fades out by this height; 0 is never
+    float power{12.0F};              // Blast: speed given at the centre, m/s
+    float radius{3.0F};              // Blast: nothing beyond this
+    float time{0.5F};                // Blast: when it goes off, seconds
+    bool all_systems{true};          // otherwise `targets` names the systems it acts on
+    std::vector<std::uint32_t> targets;
+    friend bool operator==(const Force &, const Force &) = default;
+};
+
 struct Group final {
     friend bool operator==(const Group &, const Group &) = default;
 };
@@ -123,7 +142,7 @@ struct SceneItem final {
     std::string name;
     std::uint32_t seed{1U};
     bool simulate{true};
-    std::variant<Object, ParticleSystem, Group> data;
+    std::variant<Object, ParticleSystem, Group, Force> data;
     friend bool operator==(const SceneItem &, const SceneItem &) = default;
 };
 
@@ -153,6 +172,13 @@ enum class Purpose : std::uint8_t;
 [[nodiscard]] std::uint32_t add_object(Document &document, std::string mesh = "cube");
 [[nodiscard]] std::uint32_t add_particle_system(Document &document);
 [[nodiscard]] std::uint32_t add_group(Document &document);
+[[nodiscard]] std::uint32_t add_force(Document &document, ForceKind kind);
+[[nodiscard]] std::string_view force_name(ForceKind kind);
+// Whether a force acts on a particle system: every one, or one it names.
+[[nodiscard]] bool force_targets(const Force &force, std::uint32_t system);
+// A blast throws everything; the others each lower into the systems they
+// act on, at most this many per system.
+inline constexpr std::size_t max_forces_per_system = 16U;
 [[nodiscard]] std::uint32_t add_source(Document &document, std::uint32_t system, SourceMode mode);
 // Appends a behavior to a system's Motion stack with that kind's defaults.
 [[nodiscard]] std::uint32_t add_behavior(Document &document, std::uint32_t system, BehaviorKind kind);

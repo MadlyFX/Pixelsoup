@@ -141,6 +141,7 @@ std::string save_scene(const Document &document) {
         out.add("simulate", Json::of(item.simulate));
         out.add("type", Json::of(std::holds_alternative<Object>(item.data)           ? "object"
                                  : std::holds_alternative<ParticleSystem>(item.data) ? "particles"
+                                 : std::holds_alternative<Force>(item.data)          ? "force"
                                                                                      : "group"));
         Json properties = Json::object();
         for (const SceneProperty &p : scene_properties(item)) {
@@ -190,6 +191,13 @@ std::string save_scene(const Document &document) {
             }
             over_age.add("tint", std::move(tint_keys));
             out.add("over_age", std::move(over_age));
+        }
+        if (const auto *force = std::get_if<Force>(&item.data)) {
+            Json targets = Json::array();
+            for (const std::uint32_t target : force->targets) {
+                targets.push(numeric(target));
+            }
+            out.add("targets", std::move(targets));
         }
         items.push(std::move(out));
     }
@@ -242,7 +250,7 @@ Loaded load_scene(const Json &root) {
     scene.physics.allow_sleep = physics->bool_or("allow_sleep", true);
     for (const Json &in : items->items) {
         if (!keys(in, {"uid", "parent", "name", "seed", "simulate", "type", "properties", "sources", "motion",
-                       "over_age"})) {
+                       "over_age", "targets"})) {
             return fail("unknown or duplicate item field");
         }
         SceneItem item;
@@ -261,6 +269,8 @@ Loaded load_scene(const Json &root) {
             item.data = ParticleSystem{};
         } else if (type == "group") {
             item.data = Group{};
+        } else if (type == "force") {
+            item.data = Force{};
         } else {
             return fail(item.name + ": unsupported item type");
         }
@@ -363,6 +373,21 @@ Loaded load_scene(const Json &root) {
             }
         } else if (in.find("sources") || in.find("motion") || in.find("over_age")) {
             return fail(item.name + ": sources, motion and appearance over age belong to particle systems");
+        }
+        if (auto *force = std::get_if<Force>(&item.data)) {
+            const Json *targets = in.find("targets");
+            if (!targets || targets->type != Json::Type::Array) {
+                return fail(item.name + ": missing targets");
+            }
+            for (const Json &t : targets->items) {
+                if (t.type != Json::Type::Number || !std::isfinite(t.number) || t.number < 1.0 ||
+                    std::floor(t.number) != t.number || t.number > std::numeric_limits<std::uint32_t>::max()) {
+                    return fail(item.name + ": invalid target");
+                }
+                force->targets.push_back(static_cast<std::uint32_t>(t.number));
+            }
+        } else if (in.find("targets")) {
+            return fail(item.name + ": targets belong to forces");
         }
         scene.items.push_back(std::move(item));
     }
