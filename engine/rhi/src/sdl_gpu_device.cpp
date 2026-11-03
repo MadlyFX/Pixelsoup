@@ -2444,9 +2444,10 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
             as_format(TextureFormat::Depth32Float);
         info.depth_stencil_state.enable_depth_test = true;
         info.depth_stencil_state.enable_depth_write = depth.write;
-        info.depth_stencil_state.compare_op = depth.greater
-            ? SDL_GPU_COMPAREOP_GREATER
-            : SDL_GPU_COMPAREOP_LESS;
+        info.depth_stencil_state.compare_op = !depth.test
+            ? SDL_GPU_COMPAREOP_ALWAYS
+            : depth.greater ? SDL_GPU_COMPAREOP_GREATER
+                            : SDL_GPU_COMPAREOP_LESS;
     }
 
     auto* const pipeline = SDL_CreateGPUGraphicsPipeline(device, &info);

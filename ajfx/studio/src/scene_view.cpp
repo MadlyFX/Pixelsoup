@@ -395,17 +395,22 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
     Uid remove{};
     std::size_t shown = 0U;
     for (Relationship &r : document.scene->relationships) {
-        if (item != nullptr && r.system != item->uid && !(object && (r.object == item->uid || r.object == 0U))) {
+        const bool from_system = r.kind == RelationKind::TrailFromSystem;
+        const bool touches = item == nullptr || r.system == item->uid ||
+                             (object && !from_system && (r.object == item->uid || r.object == 0U)) ||
+                             (system && from_system && r.object == item->uid);
+        if (!touches) {
             continue;
         }
         ++shown;
-        // The rule as a sentence: what the object does, and what the system does about it.
+        // The rule as a sentence: what the source does, and what the system does about it.
         const std::string title = (r.object == 0U ? std::string{"Every object"} : name_of(r.object)) +
                                   (r.kind == RelationKind::EmitOnHit ? " / Hit -> " : " / Moving -> ") +
                                   name_of(r.system) + (r.kind == RelationKind::EmitOnHit ? " / Emit" : " / Trail");
         ctx.label(gui::Rect{x, y, width - 32.0F, row_height}, title, ctx.theme().text);
         ctx.tooltip(gui::Rect{x, y, width - 32.0F, row_height},
                     r.kind == RelationKind::EmitOnHit ? "Particles are born where the object hits something."
+                    : from_system                     ? "Particles are shed behind that system's particles while they move."
                                                       : "Particles are shed behind the object while it moves.");
         if (editor::icon_button(ctx, part_id(r.uid, "relation.remove"), gui::Rect{x + width - 28.0F, y, 28, 28},
                                 gui::Icon::Trash, "Remove this relationship")) {
@@ -414,7 +419,10 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
         y += 30.0F;
         if (!relationship_active(*document.scene, r)) {
             for (const std::string &part :
-                 wrap_text(ctx, "Nothing is born: hits and trails come from Dynamic objects.", width)) {
+                 wrap_text(ctx,
+                           from_system ? "Nothing is born: the system it trails is switched off."
+                                       : "Nothing is born: hits and trails come from Dynamic objects.",
+                           width)) {
                 ctx.label(gui::Rect{x, y, width, 22}, part, ctx.theme().caution);
                 y += 22;
             }
@@ -437,14 +445,16 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
             number_row(numeric("per_speed", "Per m/s", 10.0F, 0.0F, 100.0F, "/s", 1), r.per_speed);
             number_row(numeric("min_speed", "Moving from", 0.5F, 0.0F, 10.0F, "m/s"), r.min_speed);
             number_row(numeric("rate", "Base amount", 0.0F, 0.0F, 100.0F, "/s", 1), r.rate);
-            ControlDef pieces = numeric("pieces", "Broken pieces only", 0.0F, 0.0F, 1.0F);
-            pieces.type = ControlType::Toggle;
-            pieces.fallback = toggle(false);
-            v = toggle(r.pieces);
-            if (field(numbers_, ctx, r.uid, pieces, gui::Rect{x, y, width, row_height}, v)) {
-                r.pieces = v.x != 0.0F;
+            if (!from_system) {
+                ControlDef pieces = numeric("pieces", "Broken pieces only", 0.0F, 0.0F, 1.0F);
+                pieces.type = ControlType::Toggle;
+                pieces.fallback = toggle(false);
+                v = toggle(r.pieces);
+                if (field(numbers_, ctx, r.uid, pieces, gui::Rect{x, y, width, row_height}, v)) {
+                    r.pieces = v.x != 0.0F;
+                }
+                y += 32.0F;
             }
-            y += 32.0F;
         }
         v = number(static_cast<float>(r.seed));
         if (field(numbers_, ctx, r.uid, numeric("seed", "Seed", 0.0F, 0.0F, 1000000.0F, {}, 0),
@@ -501,9 +511,24 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
         }
         y += 36.0F;
     }
+    if (system) {
+        // One edit: a system with no source of its own, trailing this one's particles.
+        if (editor::pill_button(ctx, part_id(item->uid, "relation.new_system_trail"),
+                                gui::Rect{x, y + 4, worded ? 260.0F : 34.0F, 28}, gui::Icon::Plus,
+                                worded ? "New system trailing its particles" : "",
+                                "A particle system with no source of its own: particles only behind this system's "
+                                "particles as they move")) {
+            if (const Uid made = add_bound_system(document, RelationKind::TrailFromSystem, item->uid)) {
+                select(made);
+                return;
+            }
+        }
+        y += 36.0F;
+    }
     if (editor::pill_button(ctx, part_id(item->uid, "relation.add"), gui::Rect{x, y + 4, worded ? 160.0F : 34.0F, 28},
                             gui::Icon::Plus, worded ? "Add relationship" : "",
-                            system ? "Have particles born where a Dynamic object hits, or shed behind it"
+                            system ? "Have particles born where a Dynamic object hits, shed behind it, or shed "
+                                     "behind another system's particles"
                                    : "Have a particle system react to this object")) {
         relation_target_ = item->uid;
         relation_from_system_ = system;
@@ -530,6 +555,16 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
                                        : kind == RelationKind::EmitOnHit ? std::string{"Born where it hits"}
                                                                          : std::string{"Shed behind it"},
                                        !still, {}});
+                }
+            }
+        }
+        if (system) {
+            // Another system's particles, moving: never this system's own.
+            const std::string group{relation_name(RelationKind::TrailFromSystem)};
+            for (const SceneItem &other : document.scene->items) {
+                if (other.uid != item->uid && std::holds_alternative<ParticleSystem>(other.data)) {
+                    relation_choices_.emplace_back(RelationKind::TrailFromSystem, other.uid);
+                    entries.push_back({group, other.name, "Shed behind its particles as they move", true, {}});
                 }
             }
         }

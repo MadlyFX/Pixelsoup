@@ -656,6 +656,144 @@ void relationships_bind_an_object_to_a_system() {
     CHECK(!remove_relationship(document, trail));
 }
 
+// A particle system can trail another's particles: embers thrown up and
+// slowed by drag, and smoke fed only by them. The rule lowers to the
+// runtime's spawn_from_particles module naming the embers' emitter, nothing
+// is born before the embers exist, smoke follows while they move, and a
+// system can neither trail itself nor a ring of systems.
+void a_system_trails_another_systems_particles() {
+    Document document = new_scene();
+    const Uid embers = add_particle_system(document);
+    {
+        auto &system = std::get<ParticleSystem>(document.scene->item(embers)->data);
+        system.sources.clear();
+        document.scene->item(embers)->name = "Embers";
+        const Uid burst = add_source(document, embers, SourceMode::Burst);
+        CHECK(burst != 0U);
+        auto &source = std::get<ParticleSystem>(document.scene->item(embers)->data).sources.back();
+        source.count = 24U;
+        source.time = 1.0F; // nothing to trail for the first second
+        auto &again = std::get<ParticleSystem>(document.scene->item(embers)->data);
+        again.lifetime = {6.0F, 6.0F};
+        again.speed = {3.0F, 4.0F};
+        again.spread = 30.0F;
+        again.collide = false;
+        CHECK(add_behavior(document, embers, BehaviorKind::Drag) != 0U);
+        std::get<ParticleSystem>(document.scene->item(embers)->data).motion.back().strength = {2.0F, 2.0F};
+    }
+    const Uid smoke = add_particle_system(document);
+    {
+        auto &system = std::get<ParticleSystem>(document.scene->item(smoke)->data);
+        system.sources.clear();
+        system.lifetime = {2.0F, 2.0F};
+        system.speed = {0.0F, 0.0F};
+        system.radius = {0.0F, 0.0F};
+        system.collide = false;
+    }
+    CHECK(!validate_scene(document).empty()); // no source and no rule
+    // Only another system feeds a trail from a system: not itself, not an object.
+    CHECK(add_relationship(document, RelationKind::TrailFromSystem, smoke, smoke) == 0U);
+    const Uid ground = document.scene->items.front().uid;
+    CHECK(std::holds_alternative<Object>(document.scene->item(ground)->data));
+    CHECK(add_relationship(document, RelationKind::TrailFromSystem, ground, smoke) == 0U);
+    CHECK(add_relationship(document, RelationKind::TrailFrom, embers, smoke) == 0U);
+    const Uid rule = add_relationship(document, RelationKind::TrailFromSystem, embers, smoke);
+    CHECK(rule != 0U);
+    {
+        auto &r = document.scene->relationships.back();
+        CHECK(r.per_speed == 10.0F);
+        r.per_speed = 20.0F;
+        r.min_speed = 0.5F;
+        r.seed = 4U;
+    }
+    CHECK(validate_scene(document).empty());
+    CHECK(relationship_active(*document.scene, document.scene->relationships.back()));
+
+    // Lowered: the runtime module itself, in the smoke's layer, naming the
+    // embers' layer emitter.
+    const Document lowered = lower_scene(document);
+    const Block *shed = lowered.block(rule);
+    CHECK(shed && shed->kind == "module" && shed->raw);
+    const auto *spawn = std::get_if<ajfx::SpawnModule>(&*shed->raw);
+    const auto *trail = spawn ? std::get_if<ajfx::SpawnFromParticles>(spawn) : nullptr;
+    CHECK(trail && trail->emitter == "item_" + std::to_string(embers) && trail->per_speed == 20.0F &&
+          trail->min_speed == 0.5F);
+    CHECK(get(*shed, "seed").x == 4.0F);
+    CHECK(std::any_of(lowered.layers.begin(), lowered.layers.end(), [&](const Layer &layer) {
+        return layer.uid == smoke &&
+               std::any_of(layer.blocks.begin(), layer.blocks.end(), [rule](const Block &b) { return b.uid == rule; });
+    }));
+
+    // Nothing before the embers are thrown; smoke while they fly; none once
+    // drag has stopped them.
+    const Compiled compiled = ready(document);
+    std::size_t embers_at = compiled.effect->emitters.size();
+    std::size_t smoke_at = compiled.effect->emitters.size();
+    for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
+        const ajfx::Emitter &emitter = compiled.effect->emitters[e];
+        if (emitter.name == "item_" + std::to_string(embers)) {
+            embers_at = e;
+        }
+        for (const ajfx::SpawnModule &module : emitter.spawn) {
+            if (const auto *found = std::get_if<ajfx::SpawnFromParticles>(&module)) {
+                smoke_at = e;
+                CHECK(found->emitter == "item_" + std::to_string(embers) && found->per_speed == 20.0F);
+            }
+        }
+    }
+    CHECK(embers_at < compiled.effect->emitters.size() && smoke_at < compiled.effect->emitters.size());
+    auto solver = ajfx::rigid::make_jolt_solver();
+    auto run = simulation(compiled, solver.get());
+    run.advance_to(59U);
+    CHECK(run.emitter(embers_at).spawned == 0U && run.emitter(smoke_at).spawned == 0U);
+    run.advance_to(120U);
+    CHECK(run.emitter(embers_at).alive() == 24U);
+    const std::uint64_t flying = run.emitter(smoke_at).spawned;
+    CHECK(flying > 50U);
+    run.advance_to(300U);
+    const std::uint64_t stopped = run.emitter(smoke_at).spawned;
+    run.advance_to(360U);
+    CHECK(run.emitter(smoke_at).spawned == stopped);
+    CHECK(stopped > flying);
+
+    // A rule edit stales the motion cache; save and load keep it exactly.
+    Document other = document;
+    other.scene->relationships.back().per_speed = 3.0F;
+    CHECK(!same_scene_motion(document, other));
+    const Loaded loaded = load_document(save_document(document));
+    if (!loaded.document) {
+        throw std::runtime_error{loaded.error};
+    }
+    CHECK(*loaded.document == document);
+    std::string bad = save_document(document);
+    const std::string kind = "\"kind\": 2";
+    CHECK(bad.find(kind) != std::string::npos);
+    bad.replace(bad.find(kind), kind.size(), "\"kind\": 3");
+    CHECK(!load_document(bad).document);
+
+    // A system feeding itself, or a ring of systems, is refused.
+    document.scene->relationships.back().object = smoke;
+    CHECK(validate_scene(document).find("cannot trail itself") != std::string::npos);
+    document.scene->relationships.back().object = embers;
+    CHECK(validate_scene(document).empty());
+    const Uid ring = add_relationship(document, RelationKind::TrailFromSystem, smoke, embers);
+    CHECK(ring != 0U);
+    CHECK(validate_scene(document).find("round in a ring") != std::string::npos);
+    CHECK(remove_relationship(document, ring));
+    CHECK(validate_scene(document).empty());
+
+    // One edit makes a trailing system from a system, named after it, and
+    // removing the source removes the rule.
+    const Uid made = add_bound_system(document, RelationKind::TrailFromSystem, embers);
+    CHECK(made != 0U && document.scene->item(made)->name == "Embers trail");
+    CHECK(std::get<ParticleSystem>(document.scene->item(made)->data).sources.empty());
+    CHECK(document.scene->relationships.size() == 2U && document.scene->relationships.back().system == made &&
+          document.scene->relationships.back().object == embers);
+    CHECK(validate_scene(document).empty());
+    CHECK(remove_item(document, embers));
+    CHECK(document.scene->relationships.empty());
+}
+
 // The timeline is a view of the authored moments: a track for every item
 // with time in it, and a dragged marker writes the one value it stands for.
 void timeline_tracks_are_the_scene_moments() {
@@ -849,6 +987,7 @@ void add_scene_tests(std::vector<studio_test::Case> &cases) {
     cases.push_back({"statistics_count_the_scene_and_name_limits_in_reach", statistics_count_the_scene_and_name_limits_in_reach});
     cases.push_back({"timeline_tracks_are_the_scene_moments", timeline_tracks_are_the_scene_moments});
     cases.push_back({"relationships_bind_an_object_to_a_system", relationships_bind_an_object_to_a_system});
+    cases.push_back({"a_system_trails_another_systems_particles", a_system_trails_another_systems_particles});
     cases.push_back({"forces_are_scene_items_that_act_on_their_targets", forces_are_scene_items_that_act_on_their_targets});
     cases.push_back({"motion_stack_and_age_drivers_reach_the_runtime", motion_stack_and_age_drivers_reach_the_runtime});
     cases.push_back({"new_scene_ground_catches_objects_and_can_be_removed", new_scene_ground_catches_objects_and_can_be_removed});

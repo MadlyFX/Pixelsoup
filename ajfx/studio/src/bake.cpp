@@ -269,6 +269,8 @@ std::vector<CacheMode> bake_modes(const Document& document, const Compiled& comp
                 reads = hits->emitter;
             } else if (const auto* moving = std::get_if<SpawnFromBodies>(&module)) {
                 reads = moving->emitter;
+            } else if (const auto* trail = std::get_if<SpawnFromParticles>(&module)) {
+                reads = trail->emitter;
             }
             if (reads.empty()) {
                 continue;

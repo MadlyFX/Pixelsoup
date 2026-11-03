@@ -20,8 +20,8 @@ The library depends on no host. This page is its reference; the
 
 ## Status
 
-The runtime, its first host and rendering depth are done; tuning, custom
-modules, a Vulkan backend and volumes are next.
+The runtime, its first host, rendering depth and a first grid volume are
+done; tuning, custom modules, a Vulkan backend and more of volumes are next.
 - **The CPU reference and the GPU runtime.** Per-emitter fused kernels are
   generated from the module stacks. The simulation runs on a D3D12 reference
   backend with a runtime compiler, stable compaction and indirect dispatch.
@@ -33,6 +33,9 @@ modules, a Vulkan backend and volumes are next.
 - **Rendering depth and physics.** Done:
   - deterministic depth sorting;
   - textured sprites and flipbooks;
+  - lit particles: sprites and meshes lit by the scene through six
+    directions, as rounded sprites or six-way lightmaps (see
+    [Lighting](#drawing));
   - soft particles and ribbons;
   - mesh particles and particle lights;
   - sphere, box and distance-field colliders;
@@ -50,6 +53,10 @@ modules, a Vulkan backend and volumes are next.
   particle emitters that play back in place of simulating them, beside live
   emitters that step exactly as they would beside the simulated ones (see
   [Caching](#caching)).
+- **Grid volumes.** A fixed-step smoke grid that particles feed and are
+  carried by, stepped the same to the bit on the CPU and the GPU, saved
+  with the state, and raymarched by the reference renderer (see
+  [Grid volumes](#grid-volumes)).
 
 The [remaining work](../next-steps-plan.md) lists what is still to do.
 
@@ -88,8 +95,8 @@ the emitter, module and field at fault.
 | Spawn | `SpawnRate`, `SpawnBurst`, `SpawnPile` (rigid physics only), `SpawnFromContacts` and `SpawnFromBodies` (particles born of another emitter's bodies) |
 | Init | `Lifetime` (required), `ShapeLocation` (point, sphere, box, disc), `Velocity` (cone), `InitColor`, `InitSize`, `InitRotation`, `InitSpin`, `InitTumble` |
 | Update: appearance | `ColorOverLife`, `SizeOverLife`, `Heat` (a glow that cools) |
-| Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor`, `Converge`, `Shockwave` (a blast, see below) |
-| Update: after integration | `RigidBody`, `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision` |
+| Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor`, `Converge`, `Shockwave` (a blast, see below), `VolumeAdvect` (carried by a grid volume) |
+| Update: after integration | `RigidBody`, `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `VolumeSource` (feeds a grid volume) |
 | Update: instead of all motion | `RigidPhysics` (needs a rigid solver, see below) |
 | Update: coming apart | `Break` (rigid physics only) |
 | Update: hitting another emitter's bodies | `BodyCollision`, and `Wake` (stirred by them as they move) |
@@ -234,6 +241,61 @@ breaks all follow it.
   digest holds the blasts it answers.
 - At most `max_blasts` (64) to an effect; names are unique.
 
+### Grid volumes
+
+An effect lists its grid volumes (`Effect::volumes`, `EffectBuilder::volume`):
+a `Volume` is a dense box of cells, `nx` by `ny` by `nz` of `cell_size` from
+`origin`, holding per cell a density, a temperature and a velocity, all
+three at the cell's centre (collocated, no staggered faces). It is an
+Eulerian smoke grid: particles feed it and ride it, and the grid carries the
+smoke on after the particles that made it have died.
+- **Feeding it:** `VolumeSource{.volume = "air"}` has every particle of its
+  emitter inside the grid deposit, into the cell it is in, `density` and
+  `temperature` per second and `velocity` of its own velocity per second
+  as momentum, each times `over_life` at its age. It runs after
+  integration, from where the step left the particle.
+- **Riding it:** `VolumeAdvect{.volume = "air"}` is a force: each step a
+  particle inside the grid takes `strength` times the step (at most all) of
+  the way to the velocity the grid holds at it, sampled trilinearly between
+  cell centres, times its own factor between `scale_min` and `scale_max`.
+  It reads the grid as the step began.
+- **The step:** every emitter steps first, then every grid, in the effect's
+  order, each in this fixed order: inject the step's deposits; buoyancy,
+  lifting by `buoyancy` times the temperature and sinking by `weight` times
+  the density along Y; vorticity confinement of `vorticity` (0 is off);
+  semi-Lagrangian advection of the velocity and both scalars; pressure
+  projection by `pressure_iterations` Jacobi iterations from zero pressure,
+  with still walls all round; then each field loses its
+  `*_dissipation` of itself per second, as `Drag` loses velocity.
+- **Exact:** the deposits are quantised to `volume_deposit_quantum`
+  (2^-20) and summed as 64-bit integers, so a cell's sum is exact and the
+  same whichever order its particles are taken in, on the CPU in particle
+  order and on the GPU through integer atomics. Every other operation of the
+  step is fixed and reads only the previous pass, so the GPU kernels run it
+  operation for operation as the reference does: with the confinement off a
+  grid stepped on either is the same grid to the bit, and reruns, seeks and
+  restores land on the same grid. The confinement's square roots and
+  divisions round as the GPU rounds them, so with it on the two agree within
+  tolerance.
+- **State:** the grids are part of `SimulationState` (`volumes`), so
+  `write_state`, checkpoints, `CheckpointRing::seek` and GPU checkpoints
+  carry them. A grid starts empty at step 0.
+- **Budget:** at most `max_volumes` (16) to an effect, `max_volume_size`
+  (256) cells along an axis, `max_volume_cells` (1,048,576) in a grid and
+  `max_volume_pressure_iterations` (256); a larger grid is refused with the
+  memory its state would need (20 bytes a cell; the GPU keeps 108 a cell
+  for its working buffers). A module must name a volume the effect lists,
+  and a rigid physics emitter can hold neither module.
+- **Caching:** an emitter that feeds a grid cannot be cached (a cache keeps
+  particles, not what they deposit); an emitter riding a grid depends, in
+  its digest, on the grid and on every emitter feeding it.
+- **On the GPU:** every grid lives in one buffer (`GpuSimulation::
+  volume_buffers`), which the update kernel is handed at `u4` where it
+  feeds or follows one; the step is seven compute kernels, the Jacobi one
+  dispatched as many times as asked. `read_volume` reads a grid back and
+  `write_volume` hands one in.
+- `Simulation::volume(i)` is a grid's cells on the CPU.
+
 ### Parameters, budgets and seeking
 
 - A host supplies parameter values per step through `ParameterProvider`.
@@ -260,8 +322,9 @@ breaks all follow it.
 
 A simulation can be worked out once and played back (`include/ajfx/cache.hpp`):
 - **State on disk.** `write_state` and `read_state` save the whole
-  `SimulationState`, rigid solver state included, versioned and checksummed
-  as the package is. A restored state carries on bit for bit.
+  `SimulationState`, rigid solver state and grid volumes included,
+  versioned and checksummed as the package is. A restored state carries on
+  bit for bit.
 - **Baking.** `bake` runs the effect from step 0 and writes a cache. Per
   emitter (`BakeSettings::modes`) it holds nothing (`Live`), every step's
   bodies (`Rigid`) or quantised particles (`Particles`), plus whole-state
@@ -370,17 +433,18 @@ before any tuning.
 | Path | Contents |
 | --- | --- |
 | `include/ajfx/` | Public C++ API; `gpu/` for the GPU runtime, `d3d12.hpp` for the backend |
-| `src/` | Library implementation; `gpu/` holds kernel generation and the GPU simulation |
+| `src/` | Library implementation; `gpu/` holds kernel generation and the GPU simulation; `volume.cpp` the grid volumes' reference step |
 | `backends/d3d12/` | The D3D12 device and the DXC compiler (target `ajfx::d3d12`, Windows) |
 | `src/rigid/`, `third_party/jolt/` | The Jolt rigid solver (target `ajfx::rigid`) and Jolt Physics v5.6.0, MIT licensed |
 | `examples/viewer/` | `ajfx_viewer`: plays, scrubs, captures and exports effects |
 | `examples/player/` | `ajfx_player`: a small media player for `.ajfx` files |
-| `shaders/` | Module functions and shared kernels in HLSL, embedded in the library at configure time |
+| `shaders/` | Module functions, shared kernels, the grid volumes' kernels and raymarch, and the sprite shaders in HLSL, embedded in the library at configure time |
 | `tests/` | Unit tests, registered with CTest as `ajfx.*` |
 
 Planned additions:
 - a Vulkan backend;
-- `volume/`, raymarched voxel volumes.
+- more of volumes: a staggered grid, open boundaries, fuel and combustion,
+  and shadowing the particles by the smoke.
 
 ajfx Studio, the authoring application, is beside the library in
 [`../studio`](../studio/README.md).
@@ -421,6 +485,51 @@ disc.
 distance as it nears the scene behind it, instead of cutting a hard line
 into a surface. It needs the host's scene depth. The reference renderer
 draws no scene, so there it has nothing to fade against.
+
+**Lighting.** By default a particle is unlit: its colour is what it shows,
+which is right for sparks, glows and anything that emits. With
+`SpriteRenderer::lighting` an emitter takes the scene's light instead, and
+smoke, dust and debris sit in the scene rather than on it.
+- **Six directions.** Light reaches a particle through six directions of
+  its own frame: right, left, up, down, towards the camera and away from
+  it. The vertex stage sums what every light gives each direction; the
+  pixel stage weighs the six by a normal or by lightmaps. The same basis
+  serves both kinds, so a lit sprite and a six-way one match in one effect.
+- **`lit`:** a sprite takes a rounded normal, facing the camera at its
+  centre and turning towards its edge by `curvature` (0 flat, 1 a full
+  sphere); a mesh keeps its own normals. `wrap` carries light past the
+  terminator (0 stops there, 1 reaches all the way round at half strength),
+  which is what makes a thin puff glow at its rim when lit from behind. `ambient` scales the
+  sky/ground hemisphere light it takes.
+- **`six_way`:** for smoke rendered offline into lightmaps. `texture`
+  holds in RGB how much light each texel takes from the right, from above
+  and from the front, and `lightmap` the same from the left, from below and
+  from behind; the texture's alpha is the coverage. Both are light, not
+  colour: author them linear. They share the flipbook grid and must be the
+  same size (`check_textures` refuses otherwise). Sprites only.
+- **`shadowed`:** a lit particle takes the scene's directional shadows,
+  where the host has them. Unlit particles, ribbons and the reference
+  renderer ignore it.
+- **The reference renderer** lights under a `gpu::SceneLight`: one
+  directional light and a hemisphere, passed to `render`. A host lights
+  from its scene: the media server sums its lights per particle and
+  samples its shadow cascades per pixel.
+
+**Grid volumes.** The reference renderer draws the effect's grid volumes
+before its emitters, so the particles draw over the smoke.
+- **How:** one full-screen pass per volume raymarches the density through
+  the grid's box in 64 steps along each view ray. Each step absorbs by the
+  density times `Volume::extinction`, and scatters `albedo` of what it
+  absorbed towards the camera, in `color`, lit by the `SceneLight`'s
+  directional light through 8 steps of its own back out of the box, plus
+  the average of the sky and ground. The step counts are fixed, so a frame
+  is the same frame on every run and node.
+- **What it does not do:** the smoke casts no shadow on the particles, and
+  the particles none on it; there is no depth, so a particle in front of or
+  behind the smoke draws over it alike. A host marches `VolumeBuffers`
+  itself.
+- `Camera::orthographic` now runs its depth from z = 1000 to z = -1000, so
+  the projection has an inverse for the rays; nothing between is clipped.
 
 **Ribbons.** With `geometry` set to `ribbon`, an emitter draws one strip
 through its live particles in birth order (oldest first). Each end is as
@@ -859,7 +968,10 @@ player.
 
 A small container of named entries, sorted by name, with an FNV-1a checksum
 (layout in `include/ajfx/package.hpp`).
-- `effect.json` holds the effect (format 5: per-kind/prop `draw_tint` and
+- `effect.json` holds the effect (format 7: the effect's `volumes` and the
+  `volume_source` and `volume_advect` modules; 6 the renderer's `lighting`,
+  `lightmap`, `curvature`, `wrap`, `ambient` and `shadowed`; 5 added
+  per-kind/prop `draw_tint` and
   SpawnPile initial velocity/turn; 4 added the `wake` module; 3 added the
   `spawn_from_contacts`, `spawn_from_bodies` and `heat` modules and the
   `only` scopes; 2 blasts, the `shockwave` module and
@@ -927,6 +1039,11 @@ checksum.
   and the contact's place or the body's spawn index, and set off by draws
   keyed by their own spawn indices; their births, starts and speeds are
   worked out on the CPU for the GPU too.
+- What particles deposit into a grid volume is quantised and summed as
+  integers, so the sum is the same whichever order the particles come in;
+  the grid's step reads only the previous pass and uses only products and
+  reciprocals worked out once on the CPU, never a division or square root
+  the GPU might round differently (vorticity confinement excepted).
 
 ## Building
 

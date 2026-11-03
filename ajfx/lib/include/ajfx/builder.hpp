@@ -53,6 +53,9 @@ public:
     EffectBuilder& playback();
     // Lists a blast (Effect::blasts), which Shockwave modules name.
     EffectBuilder& blast(Blast blast);
+    // Lists a grid volume (Effect::volumes), which VolumeSource and
+    // VolumeAdvect modules name.
+    EffectBuilder& volume(Volume volume);
 
     // The emitter with this name, added if it is new. The reference stays
     // valid for the builder's lifetime.

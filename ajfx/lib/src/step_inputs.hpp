@@ -157,20 +157,30 @@ inline BodySource body_source(const RigidPhysics& physics, const EmitterState& b
     return source;
 }
 
-// Where a particle born of a contact or a moving body starts, before its
-// init modules: added to the position and velocity they give it.
+// A particle emitter as the emitters shedding particles from it
+// (SpawnFromParticles) find it in a step: its particles where this step left
+// them, newborns included. By the name of the emitter.
+using ParticleSources = std::map<std::string, const EmitterState*, std::less<>>;
+
+// Where a particle born of a contact, a moving body or a moving particle
+// starts, before its init modules: added to the position and velocity they
+// give it.
 struct BirthOrigin final {
     Vec3 position{};
     Vec3 velocity{};
 };
 
 // What births need beyond the spawn stack: the step, the emitter's seed
-// (hash_mix(instance seed, emitter seed)) and the bodies it bears from.
+// (hash_mix(instance seed, emitter seed)), the bodies it bears from and the
+// particles it sheds from. The GPU simulation leaves `particles` null: its
+// kernels shed those births themselves (see gpu/kernels.cpp), and
+// for_each_birth then skips SpawnFromParticles.
 struct BirthContext final {
     std::uint64_t tick{0U};
     std::uint32_t seed{0U};
     float dt{0.0F};
     const BodySources* bodies{nullptr};
+    const ParticleSources* particles{nullptr};
 };
 
 inline Vec3 unit_or_zero(Vec3 v) {
@@ -213,6 +223,7 @@ inline Vec3 scatter(Vec3 v, float spread, float u1, float u2) {
 // Streams of the per-step counts, beside a module's per-particle draws.
 inline constexpr std::uint32_t contact_count_stream = 0x8000c047U;
 inline constexpr std::uint32_t body_count_stream = 0x8000b0d1U;
+inline constexpr std::uint32_t particle_count_stream = 0x8000a71cU;
 
 inline std::uint32_t step_key(std::uint64_t tick) {
     return hash_mix(static_cast<std::uint32_t>(tick), static_cast<std::uint32_t>(tick >> 32U));
@@ -331,14 +342,68 @@ void body_births(const SpawnFromBodies& m, std::uint32_t source, const BirthCont
     }
 }
 
+// How many of `wanted` (a mean) a roll makes, in single precision: the GPU
+// works this out too (ajfx_shed_count in gpu/kernels.cpp), operation for
+// operation, so both must stay in float.
+inline std::uint32_t rounded_count_f(float wanted, float roll, std::uint32_t room) {
+    const float count = std::floor(wanted + roll);
+    return count >= static_cast<float>(room) ? room : static_cast<std::uint32_t>(count);
+}
+
+// The births a SpawnFromParticles sheds in one step, as the GPU kernel sheds
+// them: every live particle of the source, in its order, in float
+// arithmetic throughout. `made` counts the module's births this step.
+template <class Birth>
+void particle_births(const SpawnFromParticles& m, std::uint32_t source, const BirthContext& context,
+                     std::vector<std::uint64_t>& counts, Birth& birth) {
+    if (context.particles == nullptr) {
+        return;
+    }
+    const auto found = context.particles->find(m.emitter);
+    if (found == context.particles->end() || found->second == nullptr) {
+        return;
+    }
+    const EmitterState& s = *found->second;
+    const std::uint32_t key = step_key(context.tick);
+    const float min_speed_squared = m.min_speed * m.min_speed;
+    std::uint32_t made = 0U;
+    for (std::size_t i = 0U; i < s.alive() && made < m.max_per_step; ++i) {
+        if (!m.particles.empty() && !in_scope(m.particles, s.spawn_index[i], 0U)) {
+            continue;
+        }
+        const Vec3 v = s.velocity[i];
+        const float speed_squared = dot(v, v);
+        if (speed_squared < min_speed_squared) {
+            continue;
+        }
+        const float speed = std::sqrt(speed_squared);
+        const float wanted = (m.rate + m.per_speed * speed) * context.dt;
+        const float roll =
+            particle_unit(context.seed, hash_mix(key, s.spawn_index[i]), hash_mix(m.id, particle_count_stream));
+        const std::uint32_t count = rounded_count_f(wanted, roll, m.max_per_step - made);
+        for (std::uint32_t n = 0U; n < count; ++n) {
+            // Spread along the step's stretch of the path, the first born
+            // the oldest, so a trail is continuous however fast the particle.
+            const float age =
+                context.dt * (1.0F - (static_cast<float>(n) + 0.5F) / static_cast<float>(count));
+            const std::uint32_t index = next_spawn_index(counts, source);
+            const BirthOrigin origin{s.position[i] - v * age, v * m.inherit};
+            birth(static_cast<double>(age), 0U, source, index, &origin);
+            ++made;
+        }
+    }
+}
+
 // Calls `birth(age, body_kind, source, spawn_index, origin)` for every
 // particle the emitter's spawn stack produces in the step [start, end), in
 // stack order, with the age each has reached by the end of the step, the
 // kind of body its spawn module asked for, that module's place in the stack
 // (its spawn source, see spawn_index_of), its spawn index (counted in
-// `counts`, EmitterState::spawn_counts) and, for a particle born of a contact
-// or a moving body, where it starts (null for the rest). `rate_carry` holds
-// one fractional count per SpawnRate.
+// `counts`, EmitterState::spawn_counts) and, for a particle born of a contact,
+// a moving body or a moving particle, where it starts (null for the rest).
+// `rate_carry` holds one fractional count per SpawnRate. The particles
+// SpawnFromParticles sheds come last, in stack order among themselves: the
+// GPU sheds those in a kernel after the births it was handed.
 template <class Birth>
 void for_each_birth(const Emitter& emitter, const Inputs& in, std::vector<double>& rate_carry,
                     std::vector<std::uint64_t>& counts, double start, double end, double steps_per_second,
@@ -399,6 +464,11 @@ void for_each_birth(const Emitter& emitter, const Inputs& in, std::vector<double
             contact_births(*contacts, source, context, counts, birth);
         } else if (const SpawnFromBodies* bodies = std::get_if<SpawnFromBodies>(&module)) {
             body_births(*bodies, source, context, counts, birth);
+        }
+    }
+    for (std::size_t slot = 0U; slot < emitter.spawn.size(); ++slot) {
+        if (const SpawnFromParticles* shed = std::get_if<SpawnFromParticles>(&emitter.spawn[slot])) {
+            particle_births(*shed, static_cast<std::uint32_t>(slot), context, counts, birth);
         }
     }
 }

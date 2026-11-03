@@ -8,7 +8,8 @@
 set(_ajfx_embedded "// Generated from ajfx/lib/shaders by ajfx/lib/CMakeLists.txt; do not edit.\n")
 string(APPEND _ajfx_embedded "#include \"hlsl_sources.hpp\"\n\nnamespace ajfx::detail {\n")
 foreach(_ajfx_shader IN ITEMS random:ajfx_random.hlsli particles:ajfx_particles.hlsli runtime:ajfx_runtime.hlsl
-                              sprite:ajfx_sprite.hlsl sort:ajfx_sort.hlsl)
+                              sprite:ajfx_sprite.hlsl sort:ajfx_sort.hlsl volume:ajfx_volume.hlsli
+                              volume_kernels:ajfx_volume.hlsl volume_draw:ajfx_volume_draw.hlsl)
     string(REPLACE ":" ";" _ajfx_pair "${_ajfx_shader}")
     list(GET _ajfx_pair 0 _ajfx_name)
     list(GET _ajfx_pair 1 _ajfx_file)
@@ -56,6 +57,7 @@ add_library(ajfx STATIC
     src/simulation.cpp
     src/texture.cpp
     src/version.cpp
+    src/volume.cpp
     "${_ajfx_embedded_path}"
 )
 add_library(ajfx::ajfx ALIAS ajfx)
@@ -188,7 +190,9 @@ if(BUILD_TESTING)
     add_test(NAME ajfx.fracture COMMAND ajfx_fracture_tests)
     set_target_properties(ajfx_fracture_tests PROPERTIES FOLDER "ajfx/tests")
 
-    foreach(suite IN ITEMS effect package simulation)
+    # particle_trail: particles shed from another emitter's moving particles;
+    # volume: grid volumes particles feed and are carried by.
+    foreach(suite IN ITEMS effect package simulation particle_trail volume)
         add_executable(ajfx_${suite}_tests tests/${suite}_tests.cpp)
         target_link_libraries(ajfx_${suite}_tests PRIVATE ajfx::ajfx)
         ajfx_set_options(ajfx_${suite}_tests)

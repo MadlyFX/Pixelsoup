@@ -119,6 +119,50 @@ void heat_and_births_from_bodies_reach_the_kernels() {
     AJFX_CHECK(layout.color >= 0 && layout.base_color >= 0 && layout.velocity >= 0);
 }
 
+
+void trails_from_particles_get_a_shed_kernel() {
+    Effect effect;
+    effect.name = "trail";
+    Emitter& embers = effect.emitters.emplace_back();
+    embers.name = "embers";
+    embers.spawn = {SpawnBurst{.id = 1U, .count = 4U}};
+    embers.init = {Lifetime{.id = 2U}, Velocity{.id = 3U}};
+    Emitter& smoke = effect.emitters.emplace_back();
+    smoke.name = "smoke";
+    smoke.capacity = 8192U;
+    smoke.spawn = {SpawnRate{.id = 1U}, SpawnFromParticles{.id = 2U, .emitter = "embers"}};
+    smoke.init = {Lifetime{.id = 3U}};
+    AJFX_CHECK(validate(effect).ok());
+    const std::vector<gpu::EmitterKernelSource> sources = gpu::generate_kernel_sources(effect);
+    AJFX_CHECK(!sources[0].sheds && !contains(sources[0].source, "void shed("));
+    AJFX_CHECK(sources[1].sheds && contains(sources[1].source, "void shed("));
+    const std::string& s = sources[1].source;
+    // The module's data follows the init stack (one lifetime: id, scope, two
+    // floats), its slot is baked, and the source's record layout is read
+    // directly: position first, then velocity, with the spawn index after
+    // age and lifetime.
+    AJFX_CHECK(contains(s, "o = 13u;") && contains(s, "id = ajfx_u32(12u);") && contains(s, "slot = 1u;"));
+    // (The emitters moved when the second was added, so by index.)
+    const gpu::ParticleLayout source = gpu::particle_layout(effect.emitters[0]);
+    AJFX_CHECK(contains(s, "source_stride = " + std::to_string(source.stride) + "u;"));
+    AJFX_CHECK(contains(s, "at_velocity = " + std::to_string(source.velocity) + "u;"));
+    AJFX_CHECK(contains(s, "at_spawn_index = " + std::to_string(source.spawn_index) + "u;"));
+    // Births shed on the GPU count with the ones the CPU scheduled.
+    AJFX_CHECK(contains(s, "if (b >= ajfx_births() ||"));
+    AJFX_CHECK(sources[1].module_floats == 12U + 1U + 14U);
+    // The shed kernel travels in the package beside the others, for the
+    // emitter that has one only.
+    gpu::KernelSet set;
+    set.emitters.resize(2U);
+    std::vector<PackageEntry> entries = gpu::kernel_package_entries(effect, set);
+    std::size_t sheds = 0U;
+    for (const PackageEntry& entry : entries) {
+        sheds += entry.name.ends_with("/shed") ? 1U : 0U;
+        AJFX_CHECK(!entry.name.ends_with("emitter/0/shed"));
+    }
+    AJFX_CHECK(sheds == 1U);
+}
+
 void generation_is_deterministic() {
     for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti(), presets::debris()}) {
         const auto a = gpu::generate_kernel_sources(effect);
@@ -214,6 +258,7 @@ int main() {
         {"module_calls_carry_their_data_offsets_and_ids", module_calls_carry_their_data_offsets_and_ids},
         {"spin_turns_where_position_integrates", spin_turns_where_position_integrates},
         {"heat_and_births_from_bodies_reach_the_kernels", heat_and_births_from_bodies_reach_the_kernels},
+        {"trails_from_particles_get_a_shed_kernel", trails_from_particles_get_a_shed_kernel},
         {"generation_is_deterministic", generation_is_deterministic},
         {"compiled_bytecode_is_reproducible", compiled_bytecode_is_reproducible},
         {"kernels_travel_in_packages_and_go_stale_with_their_source",

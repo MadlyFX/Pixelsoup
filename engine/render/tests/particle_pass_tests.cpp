@@ -471,6 +471,363 @@ void soft_particles_fade_as_they_near_the_scene() {
     PASS_CHECK(render_soft(pass, 2.0F, 0.0F).red(32U, 32U) == whole);
 }
 
+// One still white particle a unit across, lit as a full sphere with no wrap,
+// taking the hemisphere whole, drawn under `lighting` (or from the camera
+// with none) against a cascade when `cascade_depth` is given, stored over
+// the whole map.
+[[nodiscard]] Frame render_lit(render::ParticlePass& pass, const render::ParticleLighting* lighting,
+                               std::optional<float> cascade_depth = std::nullopt) {
+    render::ParticleInstance instance = make_instance(pass, [&] {
+        ajfx::EffectBuilder builder{"lit"};
+        builder.emitter("e")
+            .spawn(ajfx::SpawnBurst{.count = 1U})
+            .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+            .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+            .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+            .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Alpha, .lighting = ajfx::Lighting::Lit,
+                                           .curvature = 1.0F, .wrap = 0.0F, .ambient = 1.0F});
+        return builder.build().value();
+    }());
+    rhi::TextureDesc color_desc{};
+    color_desc.width = size;
+    color_desc.height = size;
+    color_desc.format = rhi::TextureFormat::Rgba8Unorm;
+    color_desc.color_target = true;
+    color_desc.sampled = true;
+    rhi::TextureDesc cascade_desc = color_desc;
+    cascade_desc.format = rhi::TextureFormat::R32Float;
+    rhi::TextureDesc depth_desc{};
+    depth_desc.width = size;
+    depth_desc.height = size;
+    depth_desc.format = rhi::TextureFormat::Depth32Float;
+    depth_desc.depth_target = true;
+    auto color = g_device->create_texture(color_desc);
+    auto cascade = g_device->create_texture(cascade_desc);
+    auto depth = g_device->create_texture(depth_desc);
+    auto readback = g_device->create_readback(size * size * 4U);
+    PASS_CHECK(color && cascade && depth && readback);
+
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, 1U, 24U, 1U));
+    render::ParticleLighting shadowed{};
+    if (cascade_depth) {
+        const std::vector<float> stored(static_cast<std::size_t>(size) * size, *cascade_depth);
+        PASS_CHECK(commands.upload(cascade.value(),
+                                   std::span<const core::u8>{reinterpret_cast<const core::u8*>(stored.data()),
+                                                             stored.size() * sizeof(float)}));
+        PASS_CHECK(lighting != nullptr);
+        shadowed = *lighting;
+        // One cascade: the view's own orthographic frame, with the particle
+        // at reversed depth 0.5 in it, and a texel's depth of 1/1000.
+        shadowed.cascade_count = 1U;
+        shadowed.cascades[0] = &cascade.value();
+        shadowed.cascade_view_projection[0] = orthographic().view_projection;
+        shadowed.cascade_texel_depth[0] = 0.001F;
+        lighting = &shadowed;
+    }
+    render::ParticleTargets targets{};
+    targets.color = &color.value();
+    targets.depth = &depth.value();
+    targets.load = false;
+    targets.clear = rhi::Color{0.0F, 0.0F, 0.0F, 0.0F};
+    targets.lighting = lighting;
+    PASS_CHECK(pass.draw(commands, instance, orthographic(), identity(), targets));
+    PASS_CHECK(commands.download(color.value(), readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    const auto mapped = readback.value().map();
+    Frame out{std::vector<core::u8>(mapped.begin(), mapped.begin() + size * size * 4U)};
+    readback.value().unmap();
+    return out;
+}
+
+// One light.hlsli record (128 bytes): a sun travelling `direction`, white.
+[[nodiscard]] rhi::StorageBuffer sun_buffer(float x, float y, float z) {
+    std::array<float, 32U> record{};
+    record[0] = x;
+    record[1] = y;
+    record[2] = z;
+    record[3] = 0.0F; // kind: directional
+    record[4] = record[5] = record[6] = record[7] = 1.0F;
+    auto buffer = g_device->create_storage_buffer(128U);
+    PASS_CHECK(buffer);
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(commands.upload(buffer.value(), std::span<const core::u8>{reinterpret_cast<const core::u8*>(record.data()),
+                                                                          record.size() * sizeof(float)}));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    return std::move(buffer).value();
+}
+
+void lit_particles_take_the_scenes_light_and_its_shadow() {
+    render::ParticlePass pass = make_pass();
+    // No scene: lit from the camera, as bright at the centre as unlit.
+    PASS_CHECK(render_lit(pass, nullptr).red(32U, 32U) >= 251U);
+    // A sun from the right (travelling -X), no hemisphere, unit exposure.
+    // Seven pixels right of the centre (uv.x = 13/16) the normal leans 13/16
+    // right under coverage 0.336: 0.273 of white; the same to the left faces
+    // away: nothing, covered alone (see the reference renderer's test).
+    rhi::StorageBuffer sun = sun_buffer(-1.0F, 0.0F, 0.0F);
+    render::ParticleLighting lighting{};
+    lighting.lights = &sun;
+    lighting.light_count = 1U;
+    lighting.ground_exposure = {0.0F, 0.0F, 0.0F, 1.0F};
+    const Frame from_right = render_lit(pass, &lighting);
+    PASS_CHECK(from_right.red(38U, 32U) >= 66U && from_right.red(38U, 32U) <= 73U);
+    PASS_CHECK(from_right.alpha(38U, 32U) >= 83U && from_right.alpha(38U, 32U) <= 88U);
+    PASS_CHECK(from_right.red(25U, 32U) <= 2U && from_right.alpha(25U, 32U) >= 83U);
+    // Exposure scales the light, not the coverage.
+    lighting.ground_exposure[3] = 0.5F;
+    const Frame exposed = render_lit(pass, &lighting);
+    PASS_CHECK(exposed.red(38U, 32U) >= 32U && exposed.red(38U, 32U) <= 37U && exposed.alpha(38U, 32U) >= 83U);
+    lighting.ground_exposure[3] = 1.0F;
+    // The hemisphere alone: a grey sky over black ground at half strength.
+    // The front faces sideways to it: a quarter of the sky, and a little
+    // more for the centre pixel's lean (see the reference test): 0.133.
+    render::ParticleLighting hemisphere{};
+    hemisphere.sky_ambient = {0.5F, 0.5F, 0.5F, 0.5F};
+    hemisphere.ground_exposure = {0.0F, 0.0F, 0.0F, 1.0F};
+    const Frame under_sky = render_lit(pass, &hemisphere);
+    PASS_CHECK(under_sky.red(32U, 32U) >= 31U && under_sky.red(32U, 32U) <= 37U && under_sky.alpha(32U, 32U) >= 251U);
+    // A cascade storing depth 1 (a caster at the light's near plane) over
+    // the particle at 0.5 shadows the sun away; one storing 0 (nothing drawn)
+    // leaves it lit; and an emitter that takes no shadows ignores the map.
+    PASS_CHECK(render_lit(pass, &lighting, 1.0F).red(38U, 32U) == 0U);
+    PASS_CHECK(render_lit(pass, &lighting, 1.0F).alpha(38U, 32U) >= 83U);
+    PASS_CHECK(render_lit(pass, &lighting, 0.0F).red(38U, 32U) == from_right.red(38U, 32U));
+}
+
+// A grid volume two units across from the origin, as the reference
+// renderer's slab test has it, with a red disc in front of it when asked.
+[[nodiscard]] ajfx::Effect slab(float extinction, float albedo, bool with_sprite) {
+    ajfx::EffectBuilder builder{"slab"};
+    builder.volume(ajfx::Volume{.name = "smoke",
+                                .origin = ajfx::Vec3{-1.0F, -1.0F, -1.0F},
+                                .cell_size = 0.25F,
+                                .nx = 8U,
+                                .ny = 8U,
+                                .nz = 8U,
+                                .extinction = extinction,
+                                .albedo = albedo,
+                                .color = ajfx::Vec3{1.0F, 0.5F, 0.25F}});
+    if (with_sprite) {
+        builder.emitter("dot")
+            .spawn(ajfx::SpawnBurst{.count = 1U})
+            .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point, .center = ajfx::Vec3{0.0F, 0.0F, 1.5F}})
+            .init(ajfx::InitColor{.a = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}})
+            .init(ajfx::InitSize{.min = 0.5F, .max = 0.5F})
+            .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Alpha});
+    }
+    return builder.build().value();
+}
+
+struct SlabScene final {
+    // The scene's light; null lights from the camera.
+    const render::ParticleLighting* lighting{};
+    // The scene's depth, as reversed device depth over the whole view.
+    std::optional<float> scene_depth;
+    // A shadow cascade over the whole view storing this depth.
+    std::optional<float> cascade_depth;
+};
+
+// Draws `effect` with its grid filled with a uniform `density`, placed three
+// units down the view (its box from view distance 2 to 4), through a
+// projection whose depth runs from z = 5 (near) to z = -5 (far).
+[[nodiscard]] Frame render_slab(render::ParticlePass& pass, const ajfx::Effect& effect, float density,
+                                const SlabScene& scene) {
+    render::ParticleInstance instance = make_instance(pass, effect);
+    ajfx::VolumeState cells;
+    cells.nx = cells.ny = cells.nz = 8U;
+    cells.density.assign(512U, density);
+    cells.temperature.assign(512U, 0.0F);
+    cells.velocity.assign(512U, ajfx::Vec3{});
+    instance.simulation().write_volume(0U, cells);
+    // Reading the grid back submits the write and confirms it landed.
+    ajfx::Result<ajfx::VolumeState> written = instance.simulation().read_volume(0U);
+    PASS_CHECK(written && written.value() == cells);
+
+    rhi::TextureDesc color_desc{};
+    color_desc.width = size;
+    color_desc.height = size;
+    color_desc.format = rhi::TextureFormat::Rgba8Unorm;
+    color_desc.color_target = true;
+    color_desc.sampled = true;
+    rhi::TextureDesc scene_desc = color_desc;
+    scene_desc.format = rhi::TextureFormat::Rgba32Float;
+    rhi::TextureDesc cascade_desc = color_desc;
+    cascade_desc.format = rhi::TextureFormat::R32Float;
+    rhi::TextureDesc depth_desc{};
+    depth_desc.width = size;
+    depth_desc.height = size;
+    depth_desc.format = rhi::TextureFormat::Depth32Float;
+    depth_desc.depth_target = true;
+    auto color = g_device->create_texture(color_desc);
+    auto scene_texture = g_device->create_texture(scene_desc);
+    auto cascade = g_device->create_texture(cascade_desc);
+    auto depth = g_device->create_texture(depth_desc);
+    auto readback = g_device->create_readback(size * size * 4U);
+    PASS_CHECK(color && scene_texture && cascade && depth && readback);
+
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, effect.emitters.empty() ? 0U : 1U, 24U, 1U));
+    if (scene.scene_depth) {
+        std::vector<float> product(static_cast<std::size_t>(size) * size * 4U, 0.0F);
+        for (std::size_t at = 2U; at < product.size(); at += 4U) {
+            product[at] = *scene.scene_depth;
+        }
+        PASS_CHECK(commands.upload(scene_texture.value(),
+                                   std::span<const core::u8>{reinterpret_cast<const core::u8*>(product.data()),
+                                                             product.size() * sizeof(float)}));
+    }
+    render::ParticleLighting shadowed{};
+    const render::ParticleLighting* lighting = scene.lighting;
+    if (scene.cascade_depth) {
+        const std::vector<float> stored(static_cast<std::size_t>(size) * size, *scene.cascade_depth);
+        PASS_CHECK(commands.upload(cascade.value(),
+                                   std::span<const core::u8>{reinterpret_cast<const core::u8*>(stored.data()),
+                                                             stored.size() * sizeof(float)}));
+        PASS_CHECK(lighting != nullptr);
+        shadowed = *lighting;
+        shadowed.cascade_count = 1U;
+        shadowed.cascades[0] = &cascade.value();
+        shadowed.cascade_view_projection[0] = orthographic().view_projection;
+        shadowed.cascade_texel_depth[0] = 0.001F;
+        lighting = &shadowed;
+    }
+    scene::ViewMatrices view = orthographic();
+    view.projection.set(2U, 2U, 0.1F);
+    view.view_projection = view.projection;
+    render::ParticleTargets targets{};
+    targets.color = &color.value();
+    targets.depth = &depth.value();
+    targets.load = false;
+    targets.clear = rhi::Color{0.0F, 0.0F, 0.0F, 0.0F};
+    targets.scene_depth = scene.scene_depth ? &scene_texture.value() : nullptr;
+    targets.lighting = lighting;
+    PASS_CHECK(pass.draw(commands, instance, view, translation(0.0F, 0.0F, -3.0F), targets));
+    PASS_CHECK(commands.download(color.value(), readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    const auto mapped = readback.value().map();
+    Frame out{std::vector<core::u8>(mapped.begin(), mapped.begin() + size * size * 4U)};
+    readback.value().unmap();
+    return out;
+}
+
+void volumes_raymarch_a_slab_of_smoke() {
+    render::ParticlePass pass = make_pass();
+    // A uniform slab two units deep of density 0.6 at extinction 1.5 covers
+    // 1 - exp(-1.8) = 0.835 of the pixel whatever the step count. Lit by a
+    // sun travelling with the view (down -Z) from its near face, the single
+    // scattering towards the camera is the march's own sum, in 64 steps
+    // along the ray, each lit through 8 steps of its own back to the face:
+    // the reference renderer's test (volumes_raymarch_a_slab_of_smoke in
+    // ajfx/lib/tests/render_tests.cpp), so the two agree.
+    const float density = 0.6F;
+    const float extinction = 1.5F;
+    const float albedo = 0.8F;
+    const double sigma = static_cast<double>(density) * extinction;
+    const double ds = 2.0 / 64.0;
+    const double through = std::exp(-sigma * ds);
+    double transmittance = 1.0;
+    double scattered = 0.0;
+    for (int k = 0; k < 64; ++k) {
+        const double t = (k + 0.5) * ds;
+        scattered += transmittance * (1.0 - through) * albedo * std::exp(-sigma * t);
+        transmittance *= through;
+    }
+    const auto expect = [](core::u8 value, double wanted, int slack) {
+        const int rounded = static_cast<int>(std::floor(wanted * 255.0 + 0.5));
+        return value >= rounded - slack && value <= rounded + slack;
+    };
+    rhi::StorageBuffer sun = sun_buffer(0.0F, 0.0F, -1.0F);
+    render::ParticleLighting lighting{};
+    lighting.lights = &sun;
+    lighting.light_count = 1U;
+    lighting.ground_exposure = {0.0F, 0.0F, 0.0F, 1.0F};
+    const Frame lit = render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&lighting});
+    PASS_CHECK(expect(lit.alpha(32U, 32U), 1.0 - std::exp(-1.8), 2));
+    PASS_CHECK(expect(lit.alpha(32U, 32U), 1.0 - transmittance, 2));
+    // The colour tints what is scattered: red takes all, green half, blue a
+    // quarter of it.
+    PASS_CHECK(expect(lit.red(32U, 32U), scattered, 3));
+    PASS_CHECK(expect(lit.green(32U, 32U), scattered * 0.5, 3));
+    PASS_CHECK(expect(lit.blue(32U, 32U), scattered * 0.25, 3));
+    // Every pixel in the slab's square reads the same; outside it nothing.
+    PASS_CHECK(lit.alpha(20U, 44U) == lit.alpha(32U, 32U) && lit.red(44U, 20U) == lit.red(32U, 32U));
+    PASS_CHECK(lit.alpha(14U, 32U) == 0U && lit.alpha(32U, 49U) == 0U && lit.alpha(0U, 0U) == 0U);
+    // Lit from behind (the sun travelling towards the camera) the far
+    // samples are brightest and most hidden: darker than lit from the front.
+    rhi::StorageBuffer from_behind_sun = sun_buffer(0.0F, 0.0F, 1.0F);
+    render::ParticleLighting from_behind_lighting = lighting;
+    from_behind_lighting.lights = &from_behind_sun;
+    const Frame from_behind =
+        render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&from_behind_lighting});
+    PASS_CHECK(from_behind.alpha(32U, 32U) == lit.alpha(32U, 32U) &&
+               from_behind.red(32U, 32U) + 20U < lit.red(32U, 32U));
+    // Exposure scales the light, not the cover.
+    render::ParticleLighting exposed = lighting;
+    exposed.ground_exposure[3] = 0.5F;
+    const Frame half_exposed = render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&exposed});
+    PASS_CHECK(expect(half_exposed.red(32U, 32U), scattered * 0.5, 3) &&
+               half_exposed.alpha(32U, 32U) == lit.alpha(32U, 32U));
+    // The hemisphere alone, a grey sky over black ground at half strength,
+    // lights every sample by a quarter of white with nothing to hide it.
+    render::ParticleLighting hemisphere{};
+    hemisphere.sky_ambient = {0.5F, 0.5F, 0.5F, 0.5F};
+    hemisphere.ground_exposure = {0.0F, 0.0F, 0.0F, 1.0F};
+    const Frame under_sky = render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&hemisphere});
+    PASS_CHECK(expect(under_sky.red(32U, 32U), 0.125 * albedo * (1.0 - std::exp(-1.8)), 3));
+    // A cascade storing depth 1 (a caster at the light's near plane) shadows
+    // the sun off every sample: the same cover, no light scattered; one
+    // storing 0 (nothing drawn) leaves it lit.
+    const Frame in_shadow = render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&lighting, {}, 1.0F});
+    PASS_CHECK(in_shadow.alpha(32U, 32U) == lit.alpha(32U, 32U) && in_shadow.red(32U, 32U) == 0U);
+    PASS_CHECK(render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&lighting, {}, 0.0F})
+                   .red(32U, 32U) == lit.red(32U, 32U));
+    // Absorption alone: the same cover and no light scattered.
+    const Frame dark = render_slab(pass, slab(extinction, 0.0F, false), density, SlabScene{&lighting});
+    PASS_CHECK(expect(dark.alpha(32U, 32U), 1.0 - std::exp(-1.8), 2) && dark.red(32U, 32U) == 0U);
+    // The scene's depth stops the march: a surface halfway through the slab
+    // (view distance 3, reversed depth 0.2) leaves one unit of smoke, and one
+    // behind it (distance 4.5, depth 0.05) leaves it whole. Nothing drawn
+    // behind (depth 0) leaves it whole too.
+    const Frame cut = render_slab(pass, slab(extinction, 0.0F, false), density, SlabScene{&lighting, 0.2F});
+    PASS_CHECK(expect(cut.alpha(32U, 32U), 1.0 - std::exp(-0.9), 2));
+    PASS_CHECK(render_slab(pass, slab(extinction, 0.0F, false), density, SlabScene{&lighting, 0.05F}).alpha(32U, 32U) ==
+               dark.alpha(32U, 32U));
+    PASS_CHECK(render_slab(pass, slab(extinction, 0.0F, false), density, SlabScene{&lighting, 0.0F}).alpha(32U, 32U) ==
+               dark.alpha(32U, 32U));
+    // Twice the density, twice the depth of smoke.
+    PASS_CHECK(expect(render_slab(pass, slab(extinction, 0.0F, false), 2.0F * density, SlabScene{&lighting}).alpha(32U, 32U),
+                      1.0 - std::exp(-3.6), 2));
+    // An empty grid draws nothing at all.
+    const Frame empty = render_slab(pass, slab(extinction, albedo, false), 0.0F, SlabScene{&lighting});
+    PASS_CHECK(std::all_of(empty.pixels.begin(), empty.pixels.end(), [](core::u8 byte) { return byte == 0U; }));
+    // Without a scene, lit from the camera: as the sun from the front.
+    PASS_CHECK(render_slab(pass, slab(extinction, albedo, false), density, SlabScene{}).red(32U, 32U) ==
+               lit.red(32U, 32U));
+    // The particles draw over the smoke: the red disc in front covers it at
+    // its centre, and the smoke shows beside it.
+    const Frame over = render_slab(pass, slab(extinction, albedo, true), density, SlabScene{&lighting});
+    PASS_CHECK(over.red(32U, 32U) >= 250U && over.green(32U, 32U) <= 2U && over.alpha(32U, 32U) >= 254U);
+    PASS_CHECK(over.red(44U, 20U) == lit.red(32U, 32U) && over.alpha(44U, 20U) == lit.alpha(32U, 32U));
+    // Frame after frame, the same frame.
+    PASS_CHECK(render_slab(pass, slab(extinction, albedo, true), density, SlabScene{&lighting}).pixels == over.pixels);
+}
+
 void distance_fields_reach_the_simulation() {
     // Particles thrown down onto a field floor at y = -0.5: once the first
     // advance has uploaded it, none fall through.
@@ -1554,6 +1911,8 @@ int main() {
         {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
         {"moving_particles_write_their_motion", moving_particles_write_their_motion},
         {"soft_particles_fade_as_they_near_the_scene", soft_particles_fade_as_they_near_the_scene},
+        {"lit_particles_take_the_scenes_light_and_its_shadow", lit_particles_take_the_scenes_light_and_its_shadow},
+        {"volumes_raymarch_a_slab_of_smoke", volumes_raymarch_a_slab_of_smoke},
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"distance_fields_reach_the_simulation", distance_fields_reach_the_simulation},
         {"mesh_particles_draw_solid_meshes", mesh_particles_draw_solid_meshes},

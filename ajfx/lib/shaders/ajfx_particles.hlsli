@@ -25,14 +25,17 @@ cbuffer AjfxConstants : register(b0, space1) {
     uint ajfx_seed;
     float ajfx_dt;
     uint ajfx_ages_offset;  // in floats, within ajfx_data; spawn indices follow capacity later
+    uint ajfx_tick_lo;      // the step being taken (detail::step_key), for the shed kernel's rolls
+    uint ajfx_tick_hi;
     uint ajfx_reserved0;
-    uint4 ajfx_reserved1;
-    uint4 ajfx_reserved2;
+    uint ajfx_reserved1;
+    uint ajfx_reserved2;
+    uint4 ajfx_reserved3;
 };
 
 RWByteAddressBuffer ajfx_src : register(u0);      // particles at the start of the step
 RWByteAddressBuffer ajfx_dst : register(u1);      // compacted survivors, then newborns
-RWByteAddressBuffer ajfx_counters : register(u2); // alive, compacted, refused
+RWByteAddressBuffer ajfx_counters : register(u2); // alive, compacted, refused, births shed from particles this step
 RWByteAddressBuffer ajfx_flags : register(u3);    // 1 per surviving particle
 RWByteAddressBuffer ajfx_offsets : register(u4);  // survivor's index within its block
 RWByteAddressBuffer ajfx_blocks : register(u5);   // block totals, then block offsets
@@ -47,6 +50,21 @@ static const float ajfx_infinity = asfloat(0x7f800000u);
 
 uint ajfx_index(uint3 group, uint thread) {
     return (group.y * ajfx_max_groups_x + group.x) * ajfx_group_size + thread;
+}
+
+// This step's births: the ones the CPU scheduled (ajfx_birth_count) and the
+// ones the shed kernel worked out from other emitters' particles, which it
+// counted into the counters' fourth word (zero for an emitter that sheds
+// from none).
+uint ajfx_births() {
+    return ajfx_birth_count + ajfx_counters.Load(12u);
+}
+
+void ajfx_write_groups(uint at, uint threads, uint per_group) {
+    uint groups = (threads + per_group - 1u) / per_group;
+    uint x = min(groups, ajfx_max_groups_x);
+    uint y = groups == 0u ? 1u : (groups + ajfx_max_groups_x - 1u) / ajfx_max_groups_x;
+    ajfx_args.Store3(at, uint3(x, y, 1u));
 }
 
 struct Particle {
@@ -743,6 +761,71 @@ void ajfx_wake(inout Particle p, uint o, uint id) {
     float t = k / (1.0f + k);
     float3 vb = ajfx_wf3(records + best * ajfx_body_floats + 9u);
     p.velocity = p.velocity + (vb - p.velocity) * t;
+}
+
+// ------------------------------------------------------------ grid volumes
+//
+// The grid volumes (Volume) live in one buffer the update kernel is handed at
+// u4 (the bookkeeping kernels' offsets, which the update kernel never
+// touches). A module's grid data, packed by pack_volume, is [cells at,
+// deposits at, nx, ny, nz, origin.xyz, 1 / cell]; a grid of no cells is one
+// the step has no buffer for.
+
+#define ajfx_volumes ajfx_offsets
+#include "ajfx_volume.hlsli"
+
+// [grid (9), strength * dt, scale_min, scale_max]. The particle takes at
+// most all of the way to the velocity the grid holds at it, as the
+// reference's VolumeAdvect does; nothing outside the grid's box.
+void ajfx_volume_advect(inout Particle p, uint o, uint id) {
+    uint nx = ajfx_u32(o + 2u);
+    uint ny = ajfx_u32(o + 3u);
+    uint nz = ajfx_u32(o + 4u);
+    if (nx == 0u) {
+        return;
+    }
+    float3 origin = ajfx_f3(o + 5u);
+    float inv = ajfx_f(o + 8u);
+    float ux = (p.position.x - origin.x) * inv;
+    float uy = (p.position.y - origin.y) * inv;
+    float uz = (p.position.z - origin.z) * inv;
+    if (!(ux >= 0.0f && uy >= 0.0f && uz >= 0.0f && ux <= (float)nx && uy <= (float)ny && uz <= (float)nz)) {
+        return;
+    }
+    AjfxVolumeTaps taps = ajfx_volume_taps(nx, ny, nz, float3(ux - 0.5f, uy - 0.5f, uz - 0.5f));
+    uint cells = nx * ny * nz;
+    float3 carried = ajfx_volume_sample_velocity(ajfx_u32(o) + 2u * cells, nx, ny, taps);
+    float t = min(ajfx_f(o + 9u) * ajfx_force_scale(p, o + 10u, id), 1.0f);
+    p.velocity = p.velocity + (carried - p.velocity) * t;
+}
+
+// [grid (9), density * dt, temperature * dt, velocity * dt, curve]. The
+// particle's deposits go into the sums of the cell it is in, quantised and
+// added as integers, as the reference's VolumeSource makes them.
+void ajfx_volume_source(inout Particle p, uint o, uint id) {
+    uint nx = ajfx_u32(o + 2u);
+    uint ny = ajfx_u32(o + 3u);
+    uint nz = ajfx_u32(o + 4u);
+    if (nx == 0u) {
+        return;
+    }
+    float3 origin = ajfx_f3(o + 5u);
+    float inv = ajfx_f(o + 8u);
+    float ux = (p.position.x - origin.x) * inv;
+    float uy = (p.position.y - origin.y) * inv;
+    float uz = (p.position.z - origin.z) * inv;
+    if (!(ux >= 0.0f && uy >= 0.0f && uz >= 0.0f && ux < (float)nx && uy < (float)ny && uz < (float)nz)) {
+        return;
+    }
+    uint cell = ajfx_volume_at(nx, ny, (uint)floor(ux), (uint)floor(uy), (uint)floor(uz));
+    float over_life = ajfx_curve(o + 12u, ajfx_normalized_age(p));
+    uint sums = ajfx_u32(o + 1u) + cell * 10u;
+    float k = ajfx_f(o + 11u) * over_life;
+    ajfx_volume_add(sums, ajfx_f(o + 9u) * over_life);
+    ajfx_volume_add(sums + 2u, ajfx_f(o + 10u) * over_life);
+    ajfx_volume_add(sums + 4u, p.velocity.x * k);
+    ajfx_volume_add(sums + 6u, p.velocity.y * k);
+    ajfx_volume_add(sums + 8u, p.velocity.z * k);
 }
 
 float ajfx_field_at(uint base, uint nx, uint ny, uint x, uint y, uint z) {

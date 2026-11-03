@@ -42,12 +42,23 @@ struct Effect final {
     // The effect's blasts, each set once and named by every module that
     // answers it (Shockwave, and Break::blast_threshold through it).
     std::vector<Blast> blasts;
+    // The effect's grid volumes, each named by the modules that feed it
+    // (VolumeSource) and follow it (VolumeAdvect).
+    std::vector<Volume> volumes;
 
     friend bool operator==(const Effect&, const Effect&) = default;
 };
 
 // The blast called `name`, if the effect has one.
 [[nodiscard]] const Blast* find_blast(const Effect& effect, std::string_view name) noexcept;
+
+// The volume called `name`, if the effect has one, and its place in
+// Effect::volumes.
+[[nodiscard]] const Volume* find_volume(const Effect& effect, std::string_view name) noexcept;
+[[nodiscard]] std::optional<std::size_t> volume_index(const Effect& effect, std::string_view name) noexcept;
+
+// Whether the emitter feeds or follows any grid volume.
+[[nodiscard]] bool uses_volumes(const Emitter& emitter) noexcept;
 
 // A particle's spawn index says which spawn module bore it and which of that
 // module's births it was: the module's place in the emitter's spawn stack in
@@ -105,6 +116,17 @@ inline constexpr std::uint32_t max_rigid_contacts = 4096U;
 // SpawnFromContacts naming it. None when nothing reads them. The world
 // collects contacts down to this whatever its host asked for.
 [[nodiscard]] std::optional<float> contact_floor(const Effect& effect, std::size_t index);
+
+// The order the emitters step in, as indices into `emitters`: every rigid
+// physics emitter first, in the effect's order, then the rest so that an
+// emitter named by another's SpawnFromParticles steps before it (the lowest
+// index whose sources have all stepped goes next). A particle that meets a
+// body meets it where this step left it, and one shed by a particle is shed
+// where this step left that particle; the order is fixed, declared and the
+// same on every node and on the GPU. For a validated effect every emitter
+// appears once; one whose particle sources form a cycle (which validation
+// refuses) is left out.
+[[nodiscard]] std::vector<std::size_t> step_order(const Effect& effect);
 
 // Checks names, ranges, parameter bindings, module ids and that each
 // emitter's worst case fits its capacity. Builders and package readers call

@@ -5,9 +5,11 @@
 #include <ajfx/package.hpp>
 #include <ajfx/result.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Kernel generation.
@@ -49,8 +51,11 @@ struct ParticleLayout final {
 [[nodiscard]] ParticleLayout particle_layout(const Emitter& emitter);
 
 struct EmitterKernelSource final {
-    std::string source; // entry points "update" and "spawn"
+    std::string source; // entry points "update" and "spawn", and "shed" where `sheds`
     ParticleLayout layout;
+    // Whether the emitter sheds particles from other emitters' particles
+    // (SpawnFromParticles), so its source has a "shed" entry point too.
+    bool sheds{false};
     // Floats of per-step module data the kernels read, in front of the birth ages.
     std::uint32_t module_floats{0U};
 };
@@ -65,10 +70,28 @@ struct EmitterKernelSource final {
 // HLSL for the depth sort: entry points "sort_keys", "sort_count", "sort_scan"
 // and "sort_scatter".
 [[nodiscard]] std::string sort_kernel_source();
+// HLSL for the grid volumes' step: the entry points volume_kernel_names
+// lists, in that order.
+[[nodiscard]] std::string volume_kernel_source();
+// HLSL for the reference volume raymarch: entry points "volume_vertex" and
+// "volume_pixel".
+[[nodiscard]] std::string volume_shader_source();
+
+// The grid step's kernels, one dispatch each in this order (jacobi as many
+// times as the volume asks): inject (with buoyancy), curl, confine, advect,
+// divergence, jacobi, project (with dissipation).
+inline constexpr std::string_view volume_kernel_names[] = {"volume_inject",     "volume_curl",   "volume_confine",
+                                                           "volume_advect",     "volume_divergence",
+                                                           "volume_jacobi",     "volume_project"};
+inline constexpr std::size_t volume_kernel_count = 7U;
 
 struct EmitterKernels final {
     std::vector<std::uint8_t> update;
     std::vector<std::uint8_t> spawn;
+    // The births shed from other emitters' particles (SpawnFromParticles),
+    // worked out on the GPU before the spawn kernel; empty for an emitter
+    // that sheds from none.
+    std::vector<std::uint8_t> shed;
 };
 
 struct KernelSet final {
@@ -84,6 +107,11 @@ struct KernelSet final {
     std::vector<std::uint8_t> sprite_vertex;
     std::vector<std::uint8_t> sprite_pixel;
     std::vector<EmitterKernels> emitters;
+    // The grid volumes' kernels (volume_kernel_names) and the raymarch's
+    // shaders; empty for an effect without volumes.
+    std::vector<std::uint8_t> volume[volume_kernel_count];
+    std::vector<std::uint8_t> volume_vertex;
+    std::vector<std::uint8_t> volume_pixel;
 };
 
 // Generates and compiles every kernel and shader an effect needs.

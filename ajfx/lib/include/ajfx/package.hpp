@@ -34,8 +34,10 @@ inline constexpr std::uint32_t package_container_version = 1U;
 // the effect's blasts, the shockwave module and Break's blast threshold; 3
 // the spawn_from_contacts, spawn_from_bodies and heat modules and the `only`
 // scope of init modules and appearance curves; 4 the wake module; 5 per-kind
-// and prop draw tint and SpawnPile's initial velocity and turn.
-inline constexpr std::uint32_t effect_format_version = 5U;
+// and prop draw tint and SpawnPile's initial velocity and turn; 6 the
+// spawn_from_particles module and six-way lighting; 7 the effect's grid
+// volumes and the volume_source and volume_advect modules.
+inline constexpr std::uint32_t effect_format_version = 7U;
 
 struct PackageEntry final {
     std::string name;

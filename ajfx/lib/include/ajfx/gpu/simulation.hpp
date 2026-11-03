@@ -3,6 +3,7 @@
 #include <ajfx/effect.hpp>
 #include <ajfx/gpu/device.hpp>
 #include <ajfx/gpu/kernels.hpp>
+#include <ajfx/math.hpp>
 #include <ajfx/result.hpp>
 #include <ajfx/rigid_runner.hpp>
 #include <ajfx/simulation.hpp>
@@ -38,6 +39,21 @@ struct EmitterBuffers final {
     std::uint64_t block_args_offset{0U};
     ParticleLayout layout;
     std::uint32_t capacity{0U};
+};
+
+// Where a host finds a grid volume's cells (Volume): in `buffer`, from word
+// `cells_at`, `nx * ny * nz` densities, then as many temperatures, then as
+// many velocities of three floats, x fastest, then y, then z, at the centres
+// of cells `cell_size` across from `origin`. The grid moves between two
+// places as it steps; ask again after stepping.
+struct VolumeBuffers final {
+    Buffer buffer;
+    std::uint32_t cells_at{0U};
+    std::uint32_t nx{0U};
+    std::uint32_t ny{0U};
+    std::uint32_t nz{0U};
+    Vec3 origin{};
+    float cell_size{1.0F};
 };
 
 // A copy of a GpuSimulation's whole state, held on the device. Restoring it
@@ -120,6 +136,17 @@ public:
 
     // Buffers for drawing. They swap every step; ask again after stepping.
     [[nodiscard]] EmitterBuffers emitter_buffers(std::size_t emitter) const;
+    // A grid volume's cells for drawing (Effect::volumes order); they move
+    // every step too.
+    [[nodiscard]] VolumeBuffers volume_buffers(std::size_t volume) const;
+
+    // Records writing a grid volume's cells, as a host or a test has them,
+    // over what the simulation holds: the next step carries on from them.
+    // Nothing happens for cells of another size than the volume's.
+    void write_volume(std::size_t volume, const VolumeState& cells);
+    // Flushes the device and reads one grid volume back in the CPU
+    // reference's form, for tests and tools. Not for use on a frame path.
+    [[nodiscard]] Result<VolumeState> read_volume(std::size_t volume);
 
     // Flushes the device and reads one emitter back in the CPU reference's
     // form, for tests and tools. Not for use on a frame path.

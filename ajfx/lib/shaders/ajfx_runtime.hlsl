@@ -86,13 +86,6 @@ void scatter(uint3 group : SV_GroupID, uint thread : SV_GroupIndex) {
     }
 }
 
-void ajfx_write_groups(uint at, uint threads, uint per_group) {
-    uint groups = (threads + per_group - 1u) / per_group;
-    uint x = min(groups, ajfx_max_groups_x);
-    uint y = groups == 0u ? 1u : (groups + ajfx_max_groups_x - 1u) / ajfx_max_groups_x;
-    ajfx_args.Store3(at, uint3(x, y, 1u));
-}
-
 // The live count after births, refusals past capacity, the next step's
 // dispatch sizes ([0] particles in groups of 256, [12] blocks of 4096) and
 // the sprite draw ([24] six vertices per live particle).
@@ -100,10 +93,11 @@ void ajfx_write_groups(uint at, uint threads, uint per_group) {
 void finalize() {
     uint compacted = ajfx_counters.Load(4u);
     uint room = ajfx_capacity - compacted;
-    uint accepted = min(ajfx_birth_count, room);
+    uint births = ajfx_births();
+    uint accepted = min(births, room);
     uint alive = compacted + accepted;
     ajfx_counters.Store(0u, alive);
-    ajfx_counters.Store(8u, ajfx_counters.Load(8u) + (ajfx_birth_count - accepted));
+    ajfx_counters.Store(8u, ajfx_counters.Load(8u) + (births - accepted));
     ajfx_write_groups(0u, alive, ajfx_group_size);
     ajfx_write_groups(12u, alive, ajfx_block_size);
     ajfx_args.Store4(24u, uint4(6u, alive, 0u, 0u));

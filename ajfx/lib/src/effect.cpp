@@ -359,6 +359,14 @@ void check_module(const Effect&, const SpawnFromBodies& m, FieldChecker& check) 
     check.require(m.surface >= 0.0F && m.surface <= 1.0F, "surface", "must be between 0 and 1");
 }
 
+void check_module(const Effect&, const SpawnFromParticles& m, FieldChecker& check) {
+    check.require(m.min_speed >= 0.0F, "min_speed", "must not be negative");
+    check.require(m.rate >= 0.0F, "rate", "must not be negative");
+    check.require(m.per_speed >= 0.0F, "per_speed", "must not be negative");
+    check.require(m.max_per_step >= 1U && m.max_per_step <= max_emitter_capacity, "max_per_step",
+                  "must be between 1 and " + std::to_string(max_emitter_capacity));
+}
+
 void check_module(const Effect&, const Heat& m, FieldChecker& check) {
     check.require(m.start >= 0.0F, "start", "must not be negative");
     check.require(m.half_life > 0.0F, "half_life", "must be positive: a heat that never cools is a colour");
@@ -369,6 +377,21 @@ void check_module(const Effect&, const Heat& m, FieldChecker& check) {
 void check_module(const Effect& e, const Shockwave& m, FieldChecker& check) {
     check.require(find_blast(e, m.blast) != nullptr, "blast",
                   "names blast " + quoted(m.blast) + ", which this effect has none of");
+}
+
+// Both grid modules name a volume the effect lists.
+void check_module(const Effect& e, const VolumeAdvect& m, FieldChecker& check) {
+    check.require(find_volume(e, m.volume) != nullptr, "volume",
+                  "names volume " + quoted(m.volume) + ", which this effect has none of");
+    check.require(range(e, m.strength).lo >= 0.0F, "strength", "must not be negative");
+}
+
+void check_module(const Effect& e, const VolumeSource& m, FieldChecker& check) {
+    check.require(find_volume(e, m.volume) != nullptr, "volume",
+                  "names volume " + quoted(m.volume) + ", which this effect has none of");
+    check.require(range(e, m.density).lo >= 0.0F, "density", "must not be negative");
+    check.require(range(e, m.temperature).lo >= 0.0F, "temperature", "must not be negative");
+    check.require(range(e, m.velocity).lo >= 0.0F, "velocity", "must not be negative");
 }
 
 void check_module(const Effect&, const Glue& m, FieldChecker& check) {
@@ -541,6 +564,9 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
                 using M = std::decay_t<decltype(m)>;
                 if constexpr (std::is_same_v<M, SpawnFromContacts> || std::is_same_v<M, SpawnFromBodies>) {
                     refuse(m, "bears particles from another emitter's bodies; a rigid physics emitter's bodies "
+                              "are not born that way (give the particles an emitter of their own)");
+                } else if constexpr (std::is_same_v<M, SpawnFromParticles>) {
+                    refuse(m, "bears particles from another emitter's particles; a rigid physics emitter's bodies "
                               "are not born that way (give the particles an emitter of their own)");
                 }
             },
@@ -747,6 +773,60 @@ std::optional<Error> check_blasts(const Effect& effect) {
     return std::nullopt;
 }
 
+// Every volume is named once, has cells of some size, and fits its budget:
+// a grid past the cap is refused with the memory it would need.
+std::optional<Error> check_volumes(const Effect& effect) {
+    if (effect.volumes.size() > max_volumes) {
+        return Error{ErrorCode::InvalidEffect, "the effect lists " + std::to_string(effect.volumes.size()) +
+                                                   " volumes, more than the " + std::to_string(max_volumes) +
+                                                   " one effect may have"};
+    }
+    std::set<std::string_view> names;
+    for (const Volume& volume : effect.volumes) {
+        if (!valid_texture_name(volume.name)) {
+            return Error{ErrorCode::InvalidEffect,
+                         "a volume's name must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'"};
+        }
+        if (!names.insert(volume.name).second) {
+            return Error{ErrorCode::InvalidEffect, "volume " + quoted(volume.name) + " is declared twice"};
+        }
+        const std::string where = "volume " + quoted(volume.name);
+        FieldChecker check{effect, where};
+        Volume::fields(volume, check);
+        if (!check.error()) {
+            check.require(volume.cell_size > 0.0F, "cell_size", "must be positive");
+            check.require(volume.nx >= 2U && volume.ny >= 2U && volume.nz >= 2U, "nx",
+                          "and ny and nz must be at least 2: a grid is at least two cells each way");
+            check.require(volume.nx <= max_volume_size && volume.ny <= max_volume_size &&
+                              volume.nz <= max_volume_size,
+                          "nx", "and ny and nz must be at most " + std::to_string(max_volume_size) + " cells");
+            check.require(volume.vorticity >= 0.0F, "vorticity", "must not be negative");
+            check.require(volume.pressure_iterations <= max_volume_pressure_iterations, "pressure_iterations",
+                          "must be at most " + std::to_string(max_volume_pressure_iterations));
+            check.require(volume.density_dissipation >= 0.0F, "density_dissipation", "must not be negative");
+            check.require(volume.temperature_dissipation >= 0.0F, "temperature_dissipation",
+                          "must not be negative");
+            check.require(volume.velocity_dissipation >= 0.0F, "velocity_dissipation", "must not be negative");
+            check.require(volume.extinction >= 0.0F, "extinction", "must not be negative");
+            check.require(volume.albedo >= 0.0F && volume.albedo <= 1.0F, "albedo", "must be between 0 and 1");
+        }
+        if (check.error()) {
+            return check.error();
+        }
+        const std::uint64_t cells = volume_cells(volume);
+        if (cells > max_volume_cells) {
+            // Five floats a cell: density, temperature and the velocity.
+            const std::uint64_t megabytes = (cells * 20U + ((1U << 20U) - 1U)) >> 20U;
+            return Error{ErrorCode::BudgetExceeded,
+                         where + " has " + std::to_string(cells) + " cells (" + std::to_string(volume.nx) + "x" +
+                             std::to_string(volume.ny) + "x" + std::to_string(volume.nz) + "), more than the " +
+                             std::to_string(max_volume_cells) + " one grid may hold; its state alone would need " +
+                             std::to_string(megabytes) + " MB"};
+        }
+    }
+    return std::nullopt;
+}
+
 // What a scope (Scope) may name in `emitter`: its spawn modules, the pieces
 // of broken bodies where it has rigid physics, and its body kinds there. The
 // problem in words, or nothing.
@@ -804,6 +884,93 @@ void check_body_source(const Effect& effect, std::size_t index, const std::strin
             check.require(false, "bodies", *problem);
         }
     }
+}
+
+// The emitter a SpawnFromParticles sheds from must exist, be another and be
+// a plain particle emitter, and what its `particles` scope names must be
+// that emitter's spawn sources. A chain closing on itself is refused by
+// check_particle_cycles, once every emitter's modules have passed.
+void check_particle_source(const Effect& effect, std::size_t index, const SpawnFromParticles& m,
+                           FieldChecker& check) {
+    std::optional<std::size_t> at;
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        if (effect.emitters[i].name == m.emitter) {
+            at = i;
+            break;
+        }
+    }
+    if (!at) {
+        check.require(false, "emitter", "names emitter " + quoted(m.emitter) + ", which this effect has none of");
+        return;
+    }
+    check.require(*at != index, "emitter",
+                  "names its own emitter; particles are shed by another emitter's particles");
+    const Emitter& other = effect.emitters[*at];
+    check.require(rigid_physics(other) == nullptr, "emitter",
+                  "names emitter " + quoted(m.emitter) +
+                      ", which has a 'rigid_physics' module: its particles are bodies, which 'spawn_from_bodies' "
+                      "sheds from");
+    check.require(m.particles.kinds.empty(), "particles",
+                  "names body kinds, and emitter " + quoted(m.emitter) + "'s particles are no bodies");
+    if (rigid_physics(other) == nullptr && m.particles.kinds.empty()) {
+        if (std::optional<std::string> problem = scope_problem(other, m.particles)) {
+            check.require(false, "particles", *problem);
+        }
+    }
+}
+
+// The emitters emitter `index` sheds particles from (SpawnFromParticles),
+// as indices, each once, in the order its spawn stack names them.
+std::vector<std::size_t> particle_sources(const Effect& effect, std::size_t index) {
+    std::vector<std::size_t> out;
+    for (const SpawnModule& module : effect.emitters[index].spawn) {
+        const auto* shed = std::get_if<SpawnFromParticles>(&module);
+        for (std::size_t other = 0U; shed != nullptr && other < effect.emitters.size(); ++other) {
+            if (effect.emitters[other].name == shed->emitter && std::find(out.begin(), out.end(), other) == out.end()) {
+                out.push_back(other);
+            }
+        }
+    }
+    return out;
+}
+
+// Emitters shedding particles from one another in a ring could never agree
+// which steps first, so the ring is refused, named from the emitter that
+// closes it.
+std::optional<Error> check_particle_cycles(const Effect& effect) {
+    const std::size_t count = effect.emitters.size();
+    // 0 unseen, 1 on the current path, 2 done.
+    std::vector<std::uint8_t> mark(count, 0U);
+    std::vector<std::size_t> path;
+    std::optional<Error> error;
+    const auto visit = [&](auto& self, std::size_t at) -> void {
+        if (error || mark[at] == 2U) {
+            return;
+        }
+        if (mark[at] == 1U) {
+            std::string chain = quoted(effect.emitters[at].name);
+            const auto start = std::find(path.begin(), path.end(), at);
+            for (auto it = start + 1; it != path.end(); ++it) {
+                chain += ", which sheds from " + quoted(effect.emitters[*it].name);
+            }
+            error = Error{ErrorCode::InvalidEffect,
+                          "emitter " + chain + ", which sheds from " + quoted(effect.emitters[at].name) +
+                              ": emitters shedding particles from one another in a ring cannot each step after "
+                              "their source ('spawn_from_particles' field 'emitter')"};
+            return;
+        }
+        mark[at] = 1U;
+        path.push_back(at);
+        for (const std::size_t source : particle_sources(effect, at)) {
+            self(self, source);
+        }
+        path.pop_back();
+        mark[at] = 2U;
+    };
+    for (std::size_t i = 0U; i < count && !error; ++i) {
+        visit(visit, i);
+    }
+    return error;
 }
 
 // The bodies a wake follows: another emitter's, of no more than the grid
@@ -995,6 +1162,13 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
                 scoped = checker.error();
             }
         }
+        if constexpr (std::is_same_v<M, SpawnFromParticles>) {
+            FieldChecker checker{effect, where + " module " + quoted(kind_of(m)) + " #" + std::to_string(m.id)};
+            check_particle_source(effect, index, m, checker);
+            if (checker.error()) {
+                scoped = checker.error();
+            }
+        }
     };
     for (const SpawnModule& module : emitter.spawn) {
         std::visit(check_scoped, module);
@@ -1058,6 +1232,21 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
                          (emitter.renderer.flipbook_columns == 1U && emitter.renderer.flipbook_rows == 1U &&
                           !emitter.renderer.flipbook_blend),
                      "flipbook", "needs a texture");
+    // Lighting: a rounded sprite or a lit mesh; six-way maps are sprites
+    // with both textures. A ribbon has no frame to light in.
+    renderer.require(sprite.curvature >= 0.0F && sprite.curvature <= 1.0F, "curvature", "must be 0 to 1");
+    renderer.require(sprite.wrap >= 0.0F && sprite.wrap <= 1.0F, "wrap", "must be 0 to 1");
+    renderer.require(sprite.ambient >= 0.0F, "ambient", "must not be negative");
+    renderer.require(sprite.lighting == Lighting::Unlit || sprite.geometry != Geometry::Ribbon, "lighting",
+                     "a ribbon is unlit");
+    if (sprite.lighting == Lighting::SixWay) {
+        renderer.require(sprite.geometry == Geometry::Sprites, "lighting", "six-way maps light sprites only");
+        renderer.require(!sprite.texture.empty(), "lighting", "six-way maps need a texture (right, up, front)");
+        renderer.require(!sprite.lightmap.empty() && valid_texture_name(sprite.lightmap), "lightmap",
+                         "six-way maps need a second texture (left, down, behind) named like any texture");
+    } else {
+        renderer.require(sprite.lightmap.empty(), "lightmap", "is only for six-way lighting");
+    }
     if (renderer.error()) {
         return renderer.error();
     }
@@ -1173,6 +1362,9 @@ Result<bool> validate(const Effect& effect) {
     if (std::optional<Error> error = check_blasts(effect)) {
         return *std::move(error);
     }
+    if (std::optional<Error> error = check_volumes(effect)) {
+        return *std::move(error);
+    }
     std::set<std::string_view> names;
     for (const Emitter& emitter : effect.emitters) {
         if (emitter.name.empty()) {
@@ -1186,7 +1378,42 @@ Result<bool> validate(const Effect& effect) {
             return *std::move(error);
         }
     }
+    if (std::optional<Error> error = check_particle_cycles(effect)) {
+        return *std::move(error);
+    }
     return true;
+}
+
+std::vector<std::size_t> step_order(const Effect& effect) {
+    const std::size_t count = effect.emitters.size();
+    std::vector<std::size_t> order;
+    std::vector<bool> placed(count, false);
+    for (std::size_t i = 0U; i < count; ++i) {
+        if (rigid_physics(effect.emitters[i]) != nullptr) {
+            order.push_back(i);
+            placed[i] = true;
+        }
+    }
+    // The lowest index whose particle sources have all stepped, until none
+    // is left or the rest wait on one another.
+    while (order.size() < count) {
+        std::optional<std::size_t> next;
+        for (std::size_t i = 0U; i < count && !next; ++i) {
+            if (placed[i]) {
+                continue;
+            }
+            const std::vector<std::size_t> sources = particle_sources(effect, i);
+            if (std::all_of(sources.begin(), sources.end(), [&](std::size_t s) { return placed[s] || s == i; })) {
+                next = i;
+            }
+        }
+        if (!next) {
+            break;
+        }
+        order.push_back(*next);
+        placed[*next] = true;
+    }
+    return order;
 }
 
 std::uint32_t required_attributes(const Emitter& emitter) {
@@ -1216,8 +1443,10 @@ std::uint32_t required_attributes(const Emitter& emitter) {
             module);
     }
     for (const SpawnModule& module : emitter.spawn) {
-        // A particle born of a contact or a moving body may be thrown by it.
-        if (std::holds_alternative<SpawnFromContacts>(module) || std::holds_alternative<SpawnFromBodies>(module)) {
+        // A particle born of a contact, a moving body or a moving particle
+        // may be thrown by it.
+        if (std::holds_alternative<SpawnFromContacts>(module) || std::holds_alternative<SpawnFromBodies>(module) ||
+            std::holds_alternative<SpawnFromParticles>(module)) {
             add(Attribute::Velocity);
         }
     }
@@ -1282,6 +1511,30 @@ std::uint64_t blast_tick(const Blast& blast, std::uint32_t simulation_rate) noex
     return static_cast<std::uint64_t>(std::ceil(static_cast<double>(blast.time) * simulation_rate));
 }
 
+const Volume* find_volume(const Effect& effect, std::string_view name) noexcept {
+    for (const Volume& volume : effect.volumes) {
+        if (volume.name == name) {
+            return &volume;
+        }
+    }
+    return nullptr;
+}
+
+std::optional<std::size_t> volume_index(const Effect& effect, std::string_view name) noexcept {
+    for (std::size_t i = 0U; i < effect.volumes.size(); ++i) {
+        if (effect.volumes[i].name == name) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+bool uses_volumes(const Emitter& emitter) noexcept {
+    return std::any_of(emitter.update.begin(), emitter.update.end(), [](const UpdateModule& module) {
+        return std::holds_alternative<VolumeAdvect>(module) || std::holds_alternative<VolumeSource>(module);
+    });
+}
+
 std::optional<float> contact_floor(const Effect& effect, std::size_t index) {
     if (index >= effect.emitters.size()) {
         return std::nullopt;
@@ -1338,6 +1591,8 @@ Effect rigid_physics_part(const Effect& effect) {
             part.emitters.push_back(emitter);
         }
     }
+    // Bodies neither feed nor follow a grid, so the part carries none.
+    part.volumes.clear();
     return part;
 }
 

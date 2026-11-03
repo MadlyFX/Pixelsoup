@@ -441,6 +441,47 @@ void write_state_into(Writer& w, const SimulationState& state) {
     for (const EmitterState& emitter : state.emitters) {
         write_emitter(w, emitter);
     }
+    w.u32(static_cast<std::uint32_t>(state.volumes.size()));
+    for (const VolumeState& volume : state.volumes) {
+        w.u32(volume.nx);
+        w.u32(volume.ny);
+        w.u32(volume.nz);
+        w.u32(static_cast<std::uint32_t>(volume.cells()));
+        for (const float d : volume.density) {
+            w.f32(d);
+        }
+        for (const float t : volume.temperature) {
+            w.f32(t);
+        }
+        for (const Vec3& v : volume.velocity) {
+            w.vec3(v);
+        }
+    }
+}
+
+// A grid's cells, checked against its size: the three counts must agree and
+// fit what is left.
+bool read_volume(Reader& r, VolumeState& v) {
+    v.nx = r.u32();
+    v.ny = r.u32();
+    v.nz = r.u32();
+    const std::uint32_t cells = r.u32();
+    if (cells > max_volume_cells || std::uint64_t{v.nx} * v.ny * v.nz != cells || !r.fits(cells, 20U)) {
+        return false;
+    }
+    v.density.resize(cells);
+    v.temperature.resize(cells);
+    v.velocity.resize(cells);
+    for (float& d : v.density) {
+        d = r.f32();
+    }
+    for (float& t : v.temperature) {
+        t = r.f32();
+    }
+    for (Vec3& u : v.velocity) {
+        u = r.vec3();
+    }
+    return r.ok();
 }
 
 // ------------------------------------------------------------ what a layer keeps
@@ -1027,6 +1068,26 @@ std::uint64_t own_digest(const Effect& effect, std::size_t index, const MeshSet&
             }
         }
     }
+    // The grids it feeds or follows are part of what it does; how they are
+    // drawn is not.
+    for (const UpdateModule& module : emitter.update) {
+        const std::string* named = nullptr;
+        if (const auto* follows = std::get_if<VolumeAdvect>(&module)) {
+            named = &follows->volume;
+        } else if (const auto* feeds = std::get_if<VolumeSource>(&module)) {
+            named = &feeds->volume;
+        }
+        const Volume* volume = named != nullptr ? find_volume(effect, *named) : nullptr;
+        const bool listed = named != nullptr && std::any_of(one.volumes.begin(), one.volumes.end(),
+                                                              [&](const Volume& v) { return v.name == *named; });
+        if (volume != nullptr && !listed) {
+            Volume simulated_volume = *volume;
+            simulated_volume.extinction = Volume{}.extinction;
+            simulated_volume.albedo = Volume{}.albedo;
+            simulated_volume.color = Volume{}.color;
+            one.volumes.push_back(std::move(simulated_volume));
+        }
+    }
     Emitter simulated = emitter;
     // Only what the simulation reads of the renderer: rigid hulls wrap its
     // mesh, and its geometry decides how a body is met.
@@ -1182,8 +1243,9 @@ struct Slice final {
 namespace {
 
 // The emitters whose bodies or contacts emitter `index` bears particles
-// from (SpawnFromContacts, SpawnFromBodies), or whose bodies' speeds stir it
-// (Wake): what a cache of bodies does not keep.
+// from (SpawnFromContacts, SpawnFromBodies), whose particles it sheds from
+// (SpawnFromParticles), or whose bodies' speeds stir it (Wake): what a cache
+// of bodies or particles does not keep.
 std::vector<std::size_t> born_of(const Effect& effect, std::size_t index) {
     std::vector<std::size_t> out;
     for (const UpdateModule& module : effect.emitters[index].update) {
@@ -1200,6 +1262,8 @@ std::vector<std::size_t> born_of(const Effect& effect, std::size_t index) {
             named = &contacts->emitter;
         } else if (const auto* shed = std::get_if<SpawnFromBodies>(&module)) {
             named = &shed->emitter;
+        } else if (const auto* trail = std::get_if<SpawnFromParticles>(&module)) {
+            named = &trail->emitter;
         }
         for (std::size_t other = 0U; named != nullptr && other < effect.emitters.size(); ++other) {
             if (other != index && effect.emitters[other].name == *named) {
@@ -1251,8 +1315,19 @@ Result<SimulationState> read_state(std::span<const std::uint8_t> bytes) {
                              " is truncated or inconsistent");
         }
     }
+    const std::uint32_t volumes = r.u32();
+    if (volumes > max_volumes || !r.fits(volumes, 16U)) {
+        return malformed("saved simulation state is truncated");
+    }
+    state.volumes.resize(volumes);
+    for (std::size_t i = 0U; i < volumes; ++i) {
+        if (!read_volume(r, state.volumes[i])) {
+            return malformed("saved simulation state's volume " + std::to_string(i) +
+                             " is truncated or inconsistent");
+        }
+    }
     if (r.remaining() != 0U) {
-        return malformed("saved simulation state has bytes after its last emitter");
+        return malformed("saved simulation state has bytes after its last volume");
     }
     return state;
 }
@@ -1272,7 +1347,7 @@ std::uint64_t emitter_digest(const Effect& effect, std::size_t index, const Mesh
         }
     };
     // The bodies it meets are part of what it does, and so are the bodies
-    // and contacts it bears particles from.
+    // and contacts it bears particles from and the particles it sheds from.
     for (const UpdateModule& module : effect.emitters[index].update) {
         if (const auto* meets = std::get_if<BodyCollision>(&module)) {
             depend_on(meets->emitter);
@@ -1285,6 +1360,23 @@ std::uint64_t emitter_digest(const Effect& effect, std::size_t index, const Mesh
             depend_on(contacts->emitter);
         } else if (const auto* shed = std::get_if<SpawnFromBodies>(&module)) {
             depend_on(shed->emitter);
+        } else if (const auto* trail = std::get_if<SpawnFromParticles>(&module)) {
+            depend_on(trail->emitter);
+        }
+    }
+    // A grid it follows is what every emitter feeding that grid made of it.
+    for (const UpdateModule& module : effect.emitters[index].update) {
+        const auto* follows = std::get_if<VolumeAdvect>(&module);
+        if (follows == nullptr) {
+            continue;
+        }
+        for (const Emitter& other : effect.emitters) {
+            for (const UpdateModule& feeding : other.update) {
+                const auto* feeds = std::get_if<VolumeSource>(&feeding);
+                if (feeds != nullptr && feeds->volume == follows->volume) {
+                    depend_on(other.name);
+                }
+            }
         }
     }
     return hash;
@@ -1805,6 +1897,15 @@ Result<Baked> bake(const Effect& effect, std::uint32_t instance_seed, Simulation
         if (modes[i] == CacheMode::Rigid && !rigid) {
             return Error{ErrorCode::InvalidEffect, "emitter " + quoted(emitter.name) +
                                                        " has no rigid physics, so its bodies cannot be cached"};
+        }
+        if (modes[i] != CacheMode::Live) {
+            for (const UpdateModule& module : emitter.update) {
+                if (const auto* feeds = std::get_if<VolumeSource>(&module)) {
+                    return Error{ErrorCode::InvalidEffect,
+                                 "emitter " + quoted(emitter.name) + " feeds volume " + quoted(feeds->volume) +
+                                     ", so it cannot be cached: a cache keeps particles, not what they deposit"};
+                }
+            }
         }
         if (modes[i] == CacheMode::Particles && rigid) {
             return Error{ErrorCode::InvalidEffect, "emitter " + quoted(emitter.name) +

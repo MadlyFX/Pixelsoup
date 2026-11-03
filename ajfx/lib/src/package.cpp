@@ -154,6 +154,14 @@ Json to_json(const Blast& blast) {
     return object;
 }
 
+Json to_json(const Volume& volume) {
+    Json object = Json::object();
+    Volume::fields(volume, [&object](std::string_view name, const auto& field) {
+        object.add(std::string{name}, to_json(field));
+    });
+    return object;
+}
+
 template <class Module>
 Json module_to_json(const Module& module) {
     Json object = Json::object();
@@ -601,6 +609,22 @@ public:
         }
     }
 
+    // A volume is an object of Volume's own fields, refused as a module's
+    // are when one is misspelt.
+    void read_volumes(const std::string& path, const Json& json, std::vector<Volume>& out) {
+        if (json.type != Json::Type::Array) {
+            fail(path, "must be an array of volumes");
+            return;
+        }
+        out.clear();
+        out.reserve(json.items.size());
+        for (std::size_t i = 0U; i < json.items.size() && !failed(); ++i) {
+            Volume volume;
+            read_fields(path + "[" + std::to_string(i) + "]", json.items[i], volume, {});
+            out.push_back(std::move(volume));
+        }
+    }
+
     void read_emitter(const std::string& path, const Json& json, Emitter& out) {
         if (json.type != Json::Type::Object) {
             fail(path, "must be an object");
@@ -742,6 +766,12 @@ std::string effect_to_json(const Effect& effect) {
             blasts.items.push_back(to_json(blast));
         }
     }
+    if (!effect.volumes.empty()) {
+        Json& volumes = root.add("volumes", Json::array());
+        for (const Volume& volume : effect.volumes) {
+            volumes.items.push_back(to_json(volume));
+        }
+    }
     return detail::write_json(root);
 }
 
@@ -768,7 +798,7 @@ Result<Effect> effect_from_json(std::string_view json) {
     }
     for (const auto& [name, value] : root->members) {
         if (name != "format" && name != "name" && name != "simulation_rate" && name != "parameters" &&
-            name != "emitters" && name != "blasts") {
+            name != "emitters" && name != "blasts" && name != "volumes") {
             reader.fail("", "has unknown field '" + name + "'");
         }
     }
@@ -802,6 +832,9 @@ Result<Effect> effect_from_json(std::string_view json) {
     }
     if (const Json* blasts = root->find("blasts"); blasts != nullptr && !reader.failed()) {
         reader.read_blasts("blasts", *blasts, effect.blasts);
+    }
+    if (const Json* volumes = root->find("volumes"); volumes != nullptr && !reader.failed()) {
+        reader.read_volumes("volumes", *volumes, effect.volumes);
     }
     if (reader.failed()) {
         return reader.error();

@@ -1,6 +1,7 @@
 # AJFX Studio: proposed UI and authoring architecture
 
-Status: design reference, partially implemented. Based on the working source on November 2, 2026.
+Status: design reference, partially implemented. Product direction revised on
+November 2, 2026; workspace redesign and UI technology selection are pending.
 The [scene reference](studio-scene-reference.md) records delivered behavior;
 [remaining work](../next-steps-plan.md) tracks the unfinished acceptance criteria.
 
@@ -32,6 +33,55 @@ content. Avoid a product identity built around particular props, materials,
 or demonstrations. Scenario presets are optional reference content, not the
 navigation, the creation model, or a prerequisite for a working scene.
 
+## Product direction and quality bar
+
+Studio is a professional creative application for sustained scene and simulation
+authoring. It has a different purpose from MediaServer's show-operation editor.
+Its visual identity, workspace, information density and interaction model must
+serve that authoring work. Matching MediaServer's appearance or using its UI
+framework is not a requirement. This supersedes the earlier requirement to
+reuse the host's theme and widgets throughout Studio.
+
+The current product has been described as feeling toy-like. Treat that as a
+product-design problem to investigate through actual editing tasks. Establish
+the desired workflow and workspace before committing further architecture to
+the current presentation. A palette change alone does not meet this requirement.
+
+The quality bar is:
+
+| Area | Required experience |
+| --- | --- |
+| Viewport | The scene occupies the main working area. Navigation, selection, framing and manipulation remain predictable across tools and selections. |
+| Workspace | Panels resize, collapse and restore reliably. Useful information remains visible at practical densities, with a deliberate hierarchy and layouts suited to authoring tasks. |
+| Precision | Numeric entry and scrubbing agree, units are consistent, mixed values are explicit, and supported snapping and coordinate modes are discoverable. |
+| Editing | Selection, focus, shortcuts, drag cancellation and undo behave consistently across the tree, viewport, inspector and time controls. |
+| Time | Playhead, playback range, simulation, baking, cached playback and stale results have distinct, truthful states. Seeking and frame stepping are central operations. |
+| Visual design | Typography, spacing, alignment, contrast, icons and surface hierarchy form one Studio design system. Colour identifies selection, tools and status consistently; decorative treatment does not compete with the scene. |
+| Long sessions | Common operations support keyboard use, readable display scaling and efficient repeated edits. Progress, cancellation and failures preserve context and the artist's work. |
+
+Professional quality is assessed through a complete editing session and its
+edge cases. Controls for unsupported features must not be added to make the
+workspace appear more capable. General keyframing, new solver capabilities
+and cache-backed preview retain their separate engineering acceptance criteria.
+
+The detailed design and technology decision sequence is tracked in
+[the delivery plan](../next-steps-plan.md#workspace-and-application-design).
+Produce workspace prototypes and a working vertical slice before selecting
+an application shell. Evaluate the existing toolkit alongside plausible
+alternatives against those tasks; no replacement framework is selected here.
+Record the choice, evidence, limitations, dependency/licensing implications
+and implementation cost in this design when the evaluation is complete.
+
+Keep the scene model, property metadata, edit operations, undo semantics,
+compiler, bake and deterministic runtime independent of UI widgets and host
+headers. Workspace preferences remain separate from authored scene state.
+Renderer reuse is a separate decision from UI toolkit reuse: preserve
+production-renderer fidelity through an explicit preview boundary where useful.
+Assess viewport embedding, input ownership, GPU resource lifetime and device
+loss behavior in the application prototype. Shared code is useful where it
+meets Studio's requirements; it must not determine the product's interaction
+or visual language.
+
 ## Product-defining scenes
 
 Use these two scenes as design and engineering acceptance scenarios:
@@ -59,7 +109,10 @@ evidence that the sandbox architecture works.
 
 ## Findings in the current implementation
 
-These are source findings, not observations from a running UI session:
+These findings motivated the scene redesign; several describe the retired
+page editor and are not a current defect list. The
+[scene reference](studio-scene-reference.md) records implemented behavior.
+They are source findings, not observations from a running UI session:
 
 | Finding | Evidence | Consequence |
 | --- | --- | --- |
@@ -181,7 +234,9 @@ supports damping globally, the UI exposes it globally until support changes.
 
 ## Workspace
 
-Use one stable workspace rather than a sequence of mandatory setup modes:
+Use a stable workspace rather than a sequence of mandatory setup modes. The
+following arrangement is a starting hypothesis for workflow prototypes, not
+a fixed layout or a constraint imposed by the current toolkit:
 
 - Top: project name, save/undo, Add, and Export package.
 - Left: scene tree with named items, collapsible groups, selection, visibility, and simulation enablement.
@@ -201,10 +256,15 @@ Multiple selection shows common editable properties, mixed values, and a single
 undoable batch operation. Selecting a behavior or relationship reveals its
 handles and relevant curve, without changing the current scene selection.
 
-Use existing theme, widgets, color picker, reset behavior, focus indication,
-and motion controls. Retain visible words for core creation and export actions
-and unfamiliar tools; icon-only navigation is not a goal. Do not repeat the
-type's introductory sentence under every object heading.
+Define Studio's typography, spacing, density, colour roles and control behavior
+as a coherent design system. Preserve useful interaction semantics such as
+reliable colour editing, reset to documented defaults, visible keyboard focus
+and immediate feedback. Their presentation and implementation may change.
+Retain visible words for core creation and export actions and unfamiliar tools;
+icon-only navigation is not a goal. Do not repeat the type's introductory
+sentence under every object heading. Persistent and switchable task layouts,
+including whether docking is needed, must be evaluated in the workspace
+prototype before a panel system is chosen.
 
 ## Creation and discovery
 
@@ -542,6 +602,12 @@ they do not occupy the default creation browser.
 
 ## Delivery sequence and acceptance
 
+First complete the workflow, workspace prototype and application-shell decision
+in [the delivery plan](../next-steps-plan.md#workspace-and-application-design).
+The sequence below describes the scene capability milestones; it does not
+require building their presentation on the current UI framework. Preserve and
+qualify the ownership work already delivered rather than restarting the core.
+
 1. **Ownership foundation and an end-to-end vertical slice.** Model one scene
    physics configuration, explicit object/system properties, initial state,
    continuous relationships, and event references.
@@ -588,7 +654,9 @@ Required observable checks:
 - Changing tint preserves a valid motion cache; changing a collider invalidates its dependent simulation.
 - Save/load, undo/redo, deterministic reruns, seeks, and package playback agree.
 - Export refuses stale required caches, unsupported capabilities, and capacity overflow.
-- Input, focus, hit targets, resets, both themes, and common display sizes are inspected in the shipping native UI.
+- The selected workspace supports a complete import, edit, preview, save and export session with consistent selection, focus, undo, units and keyboard behavior.
+- Panel resize/collapse/restore, display scaling, input, hit targets, resets and supported themes are inspected at common display sizes in the shipping application.
+- Application-shell acceptance includes an embedded production preview, responsive background work, cancellation, save/reopen and the documented device-loss path.
 
 Use the same creation tasks for usability comparison: batch-import ten models
 and create a shared destruction sandbox; build two mutually interacting magical
@@ -613,11 +681,17 @@ and world precedence with explicit scene and item ownership. Allow labels on
 important creation actions despite the general preference for frequent
 actions to use icons. Record these as intentional design changes.
 
+Studio's own design governs its visual identity, widgets and application shell.
+The host's UI design rules do not mandate a framework, shape language, palette,
+icon-only controls or shared layout. Existing toolkit dependencies describe the
+current implementation; change them only after the workflow prototype and
+technology evaluation establish the replacement or justify retention.
+
 Remove scenario-specific built-ins from the default creation model and stop
 using a small set of sample props as the vocabulary for the whole product.
 Keep optional learning projects separate from tools and artist-authored assets.
 
 Retain determinism, honest budgets and capabilities, host-independent core,
-theme/widget reuse, independent behavioral tests, and actionable errors.
-They support this workflow. A simpler interface should make those guarantees
-easier to understand and use.
+independent behavioral tests, and actionable errors. Preserve useful renderer
+and infrastructure reuse behind clear boundaries. The workspace should make
+those guarantees understandable while supporting precise, sustained work.

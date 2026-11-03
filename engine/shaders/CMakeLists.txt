@@ -532,6 +532,13 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         particle_lights.comp.hlsl cs_6_2
         mediaserver_particle_lights_comp_dxil particle_lights_comp_dxil.h)
+    # ajfx grid volumes: the grid's box, and the smoke raymarched through it.
+    mediaserver_compile_dxil(
+        particle_volume.vert.hlsl vs_6_2
+        mediaserver_particle_volume_vert_dxil particle_volume_vert_dxil.h)
+    mediaserver_compile_dxil(
+        particle_volume.frag.hlsl ps_6_2
+        mediaserver_particle_volume_frag_dxil particle_volume_frag_dxil.h)
     # Test probes for writable buffers and indirect dispatch and draw.
     mediaserver_compile_dxil(
         buffer_scale_probe.comp.hlsl cs_6_2

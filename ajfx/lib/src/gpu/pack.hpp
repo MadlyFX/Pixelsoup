@@ -43,6 +43,16 @@ inline std::uint64_t body_region_floats(std::uint32_t capacity) {
     return std::uint64_t{body_grid_cells} + 1U + std::uint64_t{capacity} * (1U + body_record_floats);
 }
 
+// Where one grid volume's cells and this step's deposits sit in the volumes
+// buffer (in 32-bit words), by the volume's name. The cells move between two
+// buffers as the grid steps, so this is packed every step.
+struct VolumeLayout final {
+    std::uint32_t grid_at{0U};
+    std::uint32_t deposits_at{0U};
+};
+
+using VolumeLayouts = std::map<std::string, VolumeLayout, std::less<>>;
+
 struct PackContext final {
     const Inputs& in;
     float dt;
@@ -57,6 +67,9 @@ struct PackContext final {
     // The step being taken, which a blast goes off in or not. Kernel
     // generation leaves it at 0: only the data's size matters there.
     std::uint64_t tick{0U};
+    // The grid volumes this step's VolumeAdvect and VolumeSource modules
+    // read and feed, by name. None (kernel generation) packs empty grids.
+    const VolumeLayouts* volumes{nullptr};
 };
 
 class Packer final {
@@ -353,6 +366,46 @@ inline void pack(const SdfCollision& m, const PackContext& c, Packer& p) {
     p.u(m.kill ? 1U : 0U);
 }
 
+// Where the named grid is this step and how it is laid out, in 9 words, as
+// ajfx_volume_grid reads it: [cells at (density; temperature follows after
+// `cells` floats, velocity after two times that), deposits at, nx, ny, nz,
+// origin.xyz, 1 / cell]. A grid of no cells where there is no buffer to find
+// it in (kernel generation).
+inline void pack_volume(const std::string& name, const PackContext& c, Packer& p) {
+    const Volume* volume = find_volume(c.in.effect, name);
+    VolumeLayout layout;
+    bool present = false;
+    if (volume != nullptr && c.volumes != nullptr) {
+        if (const auto found = c.volumes->find(name); found != c.volumes->end()) {
+            layout = found->second;
+            present = true;
+        }
+    }
+    p.u(layout.grid_at);
+    p.u(layout.deposits_at);
+    p.u(present ? volume->nx : 0U);
+    p.u(present ? volume->ny : 0U);
+    p.u(present ? volume->nz : 0U);
+    p.v3(volume != nullptr ? volume->origin : Vec3{});
+    p.f(volume != nullptr ? 1.0F / volume->cell_size : 1.0F);
+}
+
+// [grid (pack_volume), strength * dt, scale_min, scale_max]
+inline void pack(const VolumeAdvect& m, const PackContext& c, Packer& p) {
+    pack_volume(m.volume, c, p);
+    p.f(c.in(m.strength) * c.dt);
+    pack_scale(m, c, p);
+}
+
+// [grid (pack_volume), density * dt, temperature * dt, velocity * dt, curve]
+inline void pack(const VolumeSource& m, const PackContext& c, Packer& p) {
+    pack_volume(m.volume, c, p);
+    p.f(c.in(m.density) * c.dt);
+    p.f(c.in(m.temperature) * c.dt);
+    p.f(c.in(m.velocity) * c.dt);
+    pack_curve(m.over_life, p);
+}
+
 inline void pack(const BoxCollision& m, const PackContext& c, Packer& p) {
     p.v3(c.in(m.center));
     p.v3(m.half_size);
@@ -431,7 +484,23 @@ void pack_module(const Module& module, const PackContext& context, Packer& p) {
     pack(module, context, p);
 }
 
-// The init stack, then the update stack, in order.
+// [min_speed squared, rate, per_speed, max_per_step, inherit, particles
+// scope (scope_floats)], as the emitter's shed kernel reads them
+// (gpu/kernels.cpp) and particle_births works with them. The source
+// emitter's layout and this module's place in the spawn stack are baked into
+// the kernel: they are structure, not data.
+inline void pack(const SpawnFromParticles& m, const PackContext&, Packer& p) {
+    p.f(m.min_speed * m.min_speed);
+    p.f(m.rate);
+    p.f(m.per_speed);
+    p.u(m.max_per_step);
+    p.f(m.inherit);
+    pack_scope(m.particles, p);
+}
+
+// The init stack, then the update stack, in order, then the spawn modules
+// that shed from particles (SpawnFromParticles), in stack order: the only
+// spawn modules whose births a kernel works out.
 inline void pack_emitter(const Emitter& emitter, const PackContext& context, std::vector<float>& out) {
     Packer packer{out};
     const auto visit = [&](const auto& module) { pack_module(module, context, packer); };
@@ -441,15 +510,43 @@ inline void pack_emitter(const Emitter& emitter, const PackContext& context, std
     for (const UpdateModule& module : emitter.update) {
         std::visit(visit, module);
     }
+    for (const SpawnModule& module : emitter.spawn) {
+        if (const auto* shed = std::get_if<SpawnFromParticles>(&module)) {
+            pack_module(*shed, context, packer);
+        }
+    }
 }
 
-// Whether an emitter bears particles from contacts or moving bodies, whose
-// newborns then start where those put them: the spawn kernel reads each
-// one's start (birth_origin_floats) after the ages and spawn indices.
+// Whether an emitter bears particles from contacts, moving bodies or moving
+// particles, whose newborns then start where those put them: the spawn
+// kernel reads each one's start (birth_origin_floats) after the ages and
+// spawn indices.
 inline bool has_birth_origins(const Emitter& emitter) {
     return std::any_of(emitter.spawn.begin(), emitter.spawn.end(), [](const SpawnModule& module) {
-        return std::holds_alternative<SpawnFromContacts>(module) || std::holds_alternative<SpawnFromBodies>(module);
+        return std::holds_alternative<SpawnFromContacts>(module) || std::holds_alternative<SpawnFromBodies>(module) ||
+               std::holds_alternative<SpawnFromParticles>(module);
     });
+}
+
+// The places in the spawn stack of an emitter's SpawnFromParticles modules,
+// in stack order: the births its shed kernel works out, and the slots whose
+// counts (EmitterState::spawn_counts) the GPU keeps (shed_state_words).
+inline std::vector<std::uint32_t> shedding_slots(const Emitter& emitter) {
+    std::vector<std::uint32_t> slots;
+    for (std::size_t slot = 0U; slot < emitter.spawn.size(); ++slot) {
+        if (std::holds_alternative<SpawnFromParticles>(emitter.spawn[slot])) {
+            slots.push_back(static_cast<std::uint32_t>(slot));
+        }
+    }
+    return slots;
+}
+
+// What a shedding emitter keeps on the GPU between steps, in uint32 words:
+// the births its shed kernel has made so far (low word, high word), then
+// one count per shedding slot (the low 32 bits of EmitterState::spawn_counts
+// for that slot, which is all spawn_index_of reads).
+inline std::uint32_t shed_state_words(const Emitter& emitter) {
+    return 2U + static_cast<std::uint32_t>(shedding_slots(emitter).size());
 }
 
 // [position.xyz, velocity.xyz, 1 where it has one] a birth.

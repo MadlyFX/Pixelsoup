@@ -419,7 +419,7 @@ Loaded load_scene(const Json &root) {
         std::uint32_t kind{};
         if (!keys(rule, {"uid", "kind", "object", "system", "hardness", "per_hit", "per_speed", "spread", "min_speed",
                          "rate", "pieces", "seed"}) ||
-            !integer(rule, "uid", r.uid) || !integer(rule, "kind", kind) || kind > 1U ||
+            !integer(rule, "uid", r.uid) || !integer(rule, "kind", kind) || kind > 2U ||
             !integer(rule, "object", r.object) || !integer(rule, "system", r.system) || !integer(rule, "seed", r.seed) ||
             !has_type(rule, "pieces", Json::Type::Bool)) {
             return fail("invalid relationship");

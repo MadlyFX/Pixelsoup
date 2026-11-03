@@ -9,6 +9,7 @@
 // Register spaces follow the scene stage: storage at (t[n], space0), uniforms
 // at (b[n], space1). Matrices are explicit columns, as in scene.vert.hlsl.
 
+#include "light.hlsli"
 #include "scene_motion_vector.hlsli"
 
 ByteAddressBuffer particles : register(t0, space0);
@@ -21,6 +22,8 @@ ByteAddressBuffer counters : register(t2, space0);
 // triangle list's indices.
 ByteAddressBuffer mesh_vertices : register(t3, space0);
 ByteAddressBuffer mesh_indices : register(t4, space0);
+// The scene's lights, lighting.x of them, for lit emitters.
+StructuredBuffer<Light> scene_lights : register(t5, space0);
 
 cbuffer ParticleView : register(b0, space1) {
     // This slice's projection. Rasterisation only.
@@ -70,6 +73,19 @@ cbuffer ParticleView : register(b0, space1) {
     // depth maps back to view distance.
     float4 depth_terms;
     float4 draw_tint;
+    // The scene's light, for lit emitters. rgb: the sky half of the ambient
+    // hemisphere; a: overall ambient strength.
+    float4 sky_ambient;
+    // rgb: the ground half; a: the exposure the scene applies to what it
+    // lights.
+    float4 ground_exposure;
+    // The emitter's look: curvature, wrap, ambient, shadow bias in texels.
+    float4 look;
+    // x: lights in scene_lights. y: shadow cascades. z: the emitter's
+    // lighting (0 unlit, 1 lit, 2 six-way). w: 1 when it takes shadows.
+    uint4 lighting;
+    column_major float4x4 shadow_view_projection[4];
+    float4 shadow_texel_depth;
 };
 
 static const uint absent = 0xffffffffU;
@@ -89,9 +105,95 @@ struct Output {
     nointerpolation float4 motion : TEXCOORD4;
     nointerpolation float4 depth_terms : TEXCOORD5;
     nointerpolation float soft_distance : TEXCOORD6;
+    // Light arriving from the particle's right, left, up, down, front
+    // (towards the camera) and behind, the directional lights apart so a
+    // pixel can shadow them: `radiance` is the rest, `sun` the directional.
+    float3 radiance[6] : TEXCOORD7;
+    float3 sun[6] : TEXCOORD13;
+    // A mesh vertex's normal in the sprite frame; a sprite rounds its own.
+    float3 normal : TEXCOORD19;
+    // Each cascade's shadow coordinates for this vertex (uv, reversed depth):
+    // the cascades are orthographic, so they interpolate exactly.
+    float3 shadow[4] : TEXCOORD20;
+    // Each cascade's bias in its own depth.
+    nointerpolation float4 shadow_bias : TEXCOORD24;
+    nointerpolation float curvature : TEXCOORD25;
     // Premultiplied.
     float4 color : COLOR0;
 };
+
+// What the scene's light gives each of six directions of the frame with axes
+// `right`, `up` and `front` (towards the camera) at `world`: the hemisphere
+// by the look's ambient, every local light by its falloff and cone, and the
+// directional lights apart in `sun`, each wrapped past the terminator by the
+// look's wrap and all under the scene's exposure. Without a scene (no
+// lights, no hemisphere) one white light at the camera, so a lit particle
+// still reads.
+void six_way_light(float3 world, float3 right, float3 up, float3 front, out float3 radiance[6], out float3 sun[6]) {
+    const float wrap = look.y;
+    const float exposure = ground_exposure.a;
+    const float3 directions[6] = {right, -right, up, -up, front, -front};
+    [unroll] for (uint d = 0U; d < 6U; ++d) {
+        radiance[d] = lerp(ground_exposure.rgb, sky_ambient.rgb, directions[d].y * 0.5F + 0.5F) * sky_ambient.a
+            * look.z * exposure;
+        sun[d] = float3(0.0F, 0.0F, 0.0F);
+    }
+    const bool no_scene = lighting.x == 0U && sky_ambient.a <= 0.0F;
+    const uint count = no_scene ? 1U : lighting.x;
+    for (uint l = 0U; l < count; ++l) {
+        float3 to_light;
+        float3 light = float3(1.0F, 1.0F, 1.0F);
+        bool directional = true;
+        if (no_scene) {
+            to_light = front;
+        } else {
+            const Light record = scene_lights[l];
+            light = record.color_intensity.rgb * record.color_intensity.a * exposure;
+            if (record.kind == LIGHT_DIRECTIONAL) {
+                to_light = -normalize(record.vector);
+            } else {
+                directional = false;
+                const float3 offset = record.vector - world;
+                const float distance = length(offset);
+                const float range = max(record.params.x, 1e-3F);
+                if (distance >= range) {
+                    continue;
+                }
+                to_light = offset / max(distance, 1e-5F);
+                const float falloff = saturate(1.0F - distance / range);
+                light *= falloff * falloff / max(distance * distance, 1e-4F);
+                if (record.kind == LIGHT_SPOT) {
+                    const float cone = light_cone_weight(record, dot(-to_light, record.spot.xyz));
+                    if (cone <= 0.0F) {
+                        continue;
+                    }
+                    light *= cone;
+                }
+            }
+        }
+        [unroll] for (uint d = 0U; d < 6U; ++d) {
+            const float3 given = light * saturate((dot(to_light, directions[d]) + wrap) / (1.0F + wrap));
+            if (directional) {
+                sun[d] += given;
+            } else {
+                radiance[d] += given;
+            }
+        }
+    }
+}
+
+// Where `world` falls in each shadow cascade, and each one's bias.
+void shadow_coordinates(float3 world, out float3 shadow[4], out float4 shadow_bias) {
+    shadow_bias = look.w * shadow_texel_depth;
+    [unroll] for (uint c = 0U; c < 4U; ++c) {
+        shadow[c] = float3(0.0F, 0.0F, 0.0F);
+        if (c < lighting.y) {
+            const float4 clip = mul(shadow_view_projection[c], float4(world, 1.0F));
+            shadow[c] = clip.w > 0.0F ? float3((clip.xy / clip.w) * float2(0.5F, -0.5F) + 0.5F, clip.z / clip.w)
+                                      : float3(0.0F, 0.0F, 0.0F);
+        }
+    }
+}
 
 // The flipbook cells a particle shows: its life split evenly over the cells,
 // left to right, top to bottom. Age is simulation state, so every view and
@@ -124,9 +226,28 @@ float3 to_world_direction(float3 d) {
 
 // What every geometry's vertex carries for its particle (the record at
 // `base`, at world `position`): flags, depth terms, the motion product, and
-// the premultiplied colour, its light scaled by `shade`.
-void finish_vertex(inout Output output, uint base, float3 position, float shade) {
-    output.flags = flags;
+// the premultiplied colour, its light scaled by `shade`. A lit emitter's
+// vertex (at world `vertex_world`, in the sprite frame `right`, `up`,
+// `front`) also carries the scene's light, which the pixel stage weighs.
+void finish_vertex(inout Output output, uint base, float3 position, float shade, float3 vertex_world, float3 right,
+                   float3 up, float3 front, float3 local_normal) {
+    output.flags = flags | (lighting.z != 0U ? 256U : 0U) | (lighting.z == 2U ? 512U : 0U)
+        | (lighting.w != 0U ? 1024U : 0U) | (min(lighting.y, 4U) << 11U);
+    output.normal = local_normal;
+    output.curvature = look.x;
+    if (lighting.z != 0U) {
+        six_way_light(vertex_world, right, up, front, output.radiance, output.sun);
+        shadow_coordinates(vertex_world, output.shadow, output.shadow_bias);
+    } else {
+        [unroll] for (uint d = 0U; d < 6U; ++d) {
+            output.radiance[d] = float3(0.0F, 0.0F, 0.0F);
+            output.sun[d] = float3(0.0F, 0.0F, 0.0F);
+        }
+        [unroll] for (uint c = 0U; c < 4U; ++c) {
+            output.shadow[c] = float3(0.0F, 0.0F, 0.0F);
+        }
+        output.shadow_bias = float4(0.0F, 0.0F, 0.0F, 0.0F);
+    }
     output.depth_terms = depth_terms;
     output.soft_distance = motion.z;
     // Where the particle was a frame ago, by its own velocity: one value per
@@ -181,7 +302,8 @@ Output ribbon_vertex(float2 corner, uint instance) {
     const float life = lifetime > 0.0F ? saturate(age / lifetime) : 0.0F;
     output.cells = float2(life, 0.5F - corner.y * 0.5F).xyxy;
     output.blend = 0.0F;
-    finish_vertex(output, base, position, 1.0F);
+    finish_vertex(output, base, position, 1.0F, position, camera_right.xyz, camera_up.xyz, -camera_forward.xyz,
+                  float3(0.0F, 0.0F, 1.0F));
     return output;
 }
 
@@ -239,7 +361,14 @@ Output mesh_vertex(uint vertex, uint instance) {
     output.position = mul(view_projection, float4(position + offset, 1.0F));
     // Solid (no disc), textured by the mesh's own coordinates.
     output.cells = uv.xyxy;
-    finish_vertex(output, base, position, 0.35F + 0.65F * saturate(dot(n, -camera_forward.xyz)));
+    // Lit by the scene through its own normal, taken into the camera's
+    // frame; unlit, by a light at the camera so its shape still reads.
+    const float3 right = camera_right.xyz;
+    const float3 up = camera_up.xyz;
+    const float3 front = -camera_forward.xyz;
+    const float shade = lighting.z != 0U ? 1.0F : 0.35F + 0.65F * saturate(dot(n, front));
+    finish_vertex(output, base, position, shade, position + offset, right, up, front,
+                  float3(dot(n, right), dot(n, up), dot(n, front)));
     return output;
 }
 
@@ -286,6 +415,9 @@ Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     output.position = mul(view_projection, float4(world, 1.0F));
     output.uv = corner;
     flipbook_cells(base, corner, output.cells, output.blend);
-    finish_vertex(output, base, position, 1.0F);
+    // The frame the quad was built in, turned with it, so the rounded normal
+    // and the six-way maps follow the picture.
+    finish_vertex(output, base, position, 1.0F, world, normalize(right), normalize(up), -forward,
+                  float3(0.0F, 0.0F, 1.0F));
     return output;
 }

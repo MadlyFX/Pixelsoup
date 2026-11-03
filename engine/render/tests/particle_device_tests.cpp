@@ -1,10 +1,12 @@
 #include <mediaserver/render/particle_device.hpp>
 
+#include <ajfx/builder.hpp>
 #include <ajfx/d3d12.hpp>
 #include <ajfx/gpu/simulation.hpp>
 #include <ajfx/presets.hpp>
 #include <ajfx/simulation.hpp>
 
+#include <algorithm>
 #include <exception>
 #include <iostream>
 #include <memory>
@@ -82,6 +84,79 @@ void both_backends_leave_identical_particles() {
         PARTICLE_CHECK(read.value().age == cpu.value().emitter(0U).age);
         PARTICLE_CHECK(read.value().refused == 0U);
     }
+}
+
+// A fire feeding a grid of air with smoke and heat, and motes riding the
+// air: every module one the GPU reproduces to the bit, and no vorticity
+// confinement, so the grids may be compared exactly.
+[[nodiscard]] ajfx::Effect plume() {
+    ajfx::EffectBuilder builder{"plume"};
+    builder.volume(ajfx::Volume{.name = "air",
+                                .origin = ajfx::Vec3{-1.0F, 0.0F, -1.0F},
+                                .cell_size = 0.25F,
+                                .nx = 8U,
+                                .ny = 12U,
+                                .nz = 8U,
+                                .buoyancy = 2.0F,
+                                .weight = 0.1F,
+                                .pressure_iterations = 12U,
+                                .density_dissipation = 0.2F,
+                                .temperature_dissipation = 0.5F,
+                                .velocity_dissipation = 0.1F});
+    builder.emitter("fire")
+        .capacity(2000U)
+        .seed(3U)
+        .spawn(ajfx::SpawnRate{.rate = 300.0F})
+        .init(ajfx::Lifetime{.min = 0.4F, .max = 0.8F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Box, .center = ajfx::Vec3{0.0F, 0.2F, 0.0F},
+                                  .size = ajfx::Vec3{0.5F, 0.1F, 0.5F}})
+        .init(ajfx::Velocity{.direction = ajfx::Vec3{0.0F, 1.0F, 0.0F}, .speed_min = 0.5F, .speed_max = 1.0F})
+        .update(ajfx::VolumeSource{.volume = "air", .density = 4.0F, .temperature = 3.0F, .velocity = 0.5F});
+    builder.emitter("motes")
+        .capacity(512U)
+        .seed(5U)
+        .spawn(ajfx::SpawnBurst{.count = 256U})
+        .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Box, .center = ajfx::Vec3{0.0F, 1.5F, 0.0F},
+                                  .size = ajfx::Vec3{1.6F, 1.0F, 1.6F}})
+        .update(ajfx::VolumeAdvect{.volume = "air", .strength = 6.0F, .scale_min = 0.5F, .scale_max = 1.5F});
+    return builder.build().value();
+}
+
+[[nodiscard]] ajfx::VolumeState grid(ajfx::gpu::GpuSimulation& simulation) {
+    ajfx::Result<ajfx::VolumeState> cells = simulation.read_volume(0U);
+    if (!cells) {
+        std::cout << cells.error().message << '\n';
+    }
+    PARTICLE_CHECK(cells);
+    return std::move(cells).value();
+}
+
+void grid_volumes_step_identically_on_both_backends() {
+    const ajfx::Effect effect = plume();
+    auto device = particle_device();
+    ajfx::gpu::GpuSimulation on_rhi = simulate_on(*device, effect);
+    ajfx::gpu::GpuSimulation on_reference = simulate_on(*g_reference, effect);
+    on_rhi.advance_to(90U);
+    on_reference.advance_to(90U);
+    // The grid the RHI's kernels left is the reference device's to the bit,
+    // and so are the motes it carried.
+    const ajfx::VolumeState smoke = grid(on_rhi);
+    PARTICLE_CHECK(smoke.cells() == 8U * 12U * 8U);
+    PARTICLE_CHECK(std::any_of(smoke.density.begin(), smoke.density.end(), [](float d) { return d > 0.0F; }));
+    PARTICLE_CHECK(smoke == grid(on_reference));
+    ajfx::Result<std::vector<std::uint8_t>> motes = on_rhi.read_particle_bytes(1U);
+    ajfx::Result<std::vector<std::uint8_t>> reference_motes = on_reference.read_particle_bytes(1U);
+    PARTICLE_CHECK(motes && reference_motes && !motes.value().empty() && motes.value() == reference_motes.value());
+    // And the grid is the CPU reference's exactly.
+    ajfx::Result<ajfx::Simulation> cpu = ajfx::Simulation::create(effect, 4U);
+    PARTICLE_CHECK(cpu);
+    cpu.value().advance_to(90U);
+    PARTICLE_CHECK(smoke == cpu.value().volume(0U));
+    // The grid for drawing resolves to an RHI buffer holding that many cells.
+    const ajfx::gpu::VolumeBuffers cells = on_rhi.volume_buffers(0U);
+    PARTICLE_CHECK(device->buffer(cells.buffer) != nullptr);
+    PARTICLE_CHECK(cells.nx == 8U && cells.ny == 12U && cells.nz == 8U && cells.cell_size == 0.25F);
 }
 
 void steps_record_into_the_renderers_list() {
@@ -195,6 +270,7 @@ int main() {
     };
     const Case cases[] = {
         {"both_backends_leave_identical_particles", both_backends_leave_identical_particles},
+        {"grid_volumes_step_identically_on_both_backends", grid_volumes_step_identically_on_both_backends},
         {"steps_record_into_the_renderers_list", steps_record_into_the_renderers_list},
         {"checkpoints_resume_exactly", checkpoints_resume_exactly},
         {"released_buffers_wait_for_the_gpu", released_buffers_wait_for_the_gpu},

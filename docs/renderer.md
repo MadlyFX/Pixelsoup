@@ -348,6 +348,36 @@ Basic refuses a started effect with the reason.
 - **Soft particles** read scene depth from the velocity product's z, so all
   effects' colour draws before any effect's motion. Perspective and
   orthographic views both work.
+- **Grid volumes** (`Effect::volumes`, see
+  [Grid volumes](../ajfx/lib/README.md#grid-volumes)) simulate on the RHI
+  through the same particle device, grid for grid what ajfx's own device
+  leaves. Each is drawn after the props and before the sprites, so particles
+  draw over the smoke as in the reference renderer: the grid's box is
+  rasterised in world space from the effect's placement, and each pixel of
+  its back faces marches the view ray through the cells in 64 fixed steps,
+  absorbing by density times `extinction` and scattering `albedo` of it in
+  `color`, lit by the scene's first directional light through 8 fixed steps
+  back out of the box and that light's shadow cascades (four-tap compare,
+  the sprites' bias), plus the hemisphere, under the scene's exposure. The
+  reference renderer's absorption and single scattering exactly, so a uniform
+  slab draws the same cover and colour on both. Rays come from the camera's
+  eye and forward axis and the box, never from the slice's projection, so
+  slices agree. The pipeline tests no depth: the march stops at the scene's
+  depth read from the velocity product, as soft particles do, so smoke stays
+  behind a wall and surrounds a camera inside its box; props and other
+  effects' particles are not in that depth. Volumes write no motion and
+  cast no shadow on the particles, nor the particles on them.
+- **Lit particles** (`SpriteRenderer::lighting`, see
+  [Lighting](../ajfx/lib/README.md#drawing)) take the scene's light: the
+  vertex stage sums every scene light (suns, points, spots with their cones;
+  no shadows, profiles or area shapes) into six directions of the sprite's
+  frame, with the hemisphere ambient and the scene's exposure, and the pixel
+  stage weighs them by the rounded normal, the mesh normal or the six-way
+  maps. A shadowed emitter reads the directional cascades per pixel with a
+  four-tap compare and a constant bias of three texels, choosing the cascade
+  from the world point as the lit pass does. Unlit emitters are drawn as
+  before; the scene renderer hands the pass a `ParticleLighting` each frame,
+  and a pass drawn without one lights from the camera.
 - **Particle lights** go into 64 reserved light slots, written by a compute
   pass so positions never leave the GPU; an effect that would overrun them is
   refused with the reason. The Advanced lit pass adds them without shadows,

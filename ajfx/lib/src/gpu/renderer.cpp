@@ -1,5 +1,6 @@
 #include <ajfx/gpu/renderer.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -24,6 +25,62 @@ Vec3 unit(Vec3 v) {
 std::uint32_t offset_or_absent(std::int32_t offset) {
     return offset >= 0 ? static_cast<std::uint32_t>(offset) : absent;
 }
+
+// Steps the volume raymarch takes along a view ray, and from each of them
+// towards the light. Fixed, so a frame is the same frame everywhere.
+constexpr std::uint32_t volume_ray_steps = 64U;
+constexpr std::uint32_t volume_light_steps = 8U;
+
+// The inverse of a 4x4 (rows in order), by cofactors; the identity when the
+// matrix has no inverse.
+std::array<float, 16> inverse(const std::array<float, 16>& m) {
+    std::array<float, 16> inv{};
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] +
+             m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] -
+             m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] +
+             m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] -
+              m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] -
+             m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] +
+             m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] -
+             m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] +
+              m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] +
+             m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] -
+             m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] +
+              m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] -
+              m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] -
+             m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] +
+             m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] -
+              m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] +
+              m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    const float determinant = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (determinant == 0.0F || !std::isfinite(determinant)) {
+        return {1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    }
+    const float scale = 1.0F / determinant;
+    for (float& value : inv) {
+        value *= scale;
+    }
+    return inv;
+}
+
+// Floats in the camera buffer: the view projection, the three axes, the
+// four light rows and the inverse view projection, each row four floats.
+constexpr std::size_t camera_floats = 60U;
 
 } // namespace
 
@@ -57,10 +114,12 @@ Camera Camera::look_at(Vec3 eye, Vec3 target, Vec3 world_up, float vertical_fov,
 
 Camera Camera::orthographic(Vec3 center, float half_width, float half_height) {
     Camera camera;
+    // Depth runs from z = 1000 (0) to z = -1000 (1), so the projection has
+    // an inverse for the volume raymarch; nothing between is clipped.
     camera.view_projection = {
         1.0F / half_width, 0.0F, 0.0F, -center.x / half_width,
         0.0F, 1.0F / half_height, 0.0F, -center.y / half_height,
-        0.0F, 0.0F, 0.0F, 0.5F,
+        0.0F, 0.0F, -1.0F / 2000.0F, 0.5F,
         0.0F, 0.0F, 0.0F, 1.0F,
     };
     return camera;
@@ -75,10 +134,15 @@ struct ParticleRenderer::State final {
     // near side.
     Pipeline blended_mesh;
     Pipeline additive_mesh;
+    // The grid volumes' raymarch; invalid for an effect without volumes.
+    Pipeline volume;
     Buffer camera;
-    // Each emitter's texture, invalid for an untextured one; one upload per
-    // name.
+    // Each emitter's look (curvature, wrap, ambient), four floats apiece.
+    Buffer looks;
+    // Each emitter's texture and six-way lightmap, invalid where it has
+    // none; one upload per name.
     std::vector<Texture> emitter_textures;
+    std::vector<Texture> emitter_lightmaps;
     std::vector<Texture> uploaded;
     // Each mesh emitter's models and its draw arguments (the largest model's
     // index count, then the live count copied from the simulation). An
@@ -101,7 +165,11 @@ struct ParticleRenderer::State final {
             device->destroy_pipeline(additive);
             device->destroy_pipeline(blended_mesh);
             device->destroy_pipeline(additive_mesh);
+            if (volume.valid()) {
+                device->destroy_pipeline(volume);
+            }
             device->destroy_buffer(camera);
+            device->destroy_buffer(looks);
             for (const Texture texture : uploaded) {
                 device->destroy_texture(texture);
             }
@@ -218,24 +286,44 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
         out = buffers;
     }
     std::map<std::string, Texture, std::less<>> by_name;
-    for (const Emitter& emitter : effect.emitters) {
-        Texture texture;
-        if (!emitter.renderer.texture.empty()) {
-            const auto found = by_name.find(emitter.renderer.texture);
-            if (found != by_name.end()) {
-                texture = found->second;
-            } else {
-                Result<Texture> created = device.create_texture(textures.find(emitter.renderer.texture)->second,
-                                                                "ajfx texture " + emitter.renderer.texture);
-                if (!created) {
-                    return created.error();
-                }
-                texture = created.value();
-                state->uploaded.push_back(texture);
-                by_name.emplace(emitter.renderer.texture, texture);
-            }
+    const auto upload = [&](const std::string& name) -> Result<Texture> {
+        if (name.empty()) {
+            return Texture{};
         }
-        state->emitter_textures.push_back(texture);
+        if (const auto found = by_name.find(name); found != by_name.end()) {
+            return found->second;
+        }
+        Result<Texture> created = device.create_texture(textures.find(name)->second, "ajfx texture " + name);
+        if (!created) {
+            return created.error();
+        }
+        state->uploaded.push_back(created.value());
+        by_name.emplace(name, created.value());
+        return created.value();
+    };
+    std::vector<float> looks;
+    for (const Emitter& emitter : effect.emitters) {
+        Result<Texture> texture = upload(emitter.renderer.texture);
+        if (!texture) {
+            return texture.error();
+        }
+        Result<Texture> lightmap = upload(emitter.renderer.lightmap);
+        if (!lightmap) {
+            return lightmap.error();
+        }
+        state->emitter_textures.push_back(texture.value());
+        state->emitter_lightmaps.push_back(lightmap.value());
+        looks.insert(looks.end(), {emitter.renderer.curvature, emitter.renderer.wrap, emitter.renderer.ambient, 0.0F});
+    }
+    Result<Buffer> look_buffer =
+        device.create_buffer(std::max<std::size_t>(looks.size(), 4U) * sizeof(float), "ajfx looks");
+    if (!look_buffer) {
+        return look_buffer.error();
+    }
+    state->looks = look_buffer.value();
+    if (!looks.empty()) {
+        device.write_buffer(state->looks, 0U,
+                            std::span{reinterpret_cast<const std::uint8_t*>(looks.data()), looks.size() * sizeof(float)});
     }
     for (const auto& [blend, cull, out, name] :
          {std::tuple{Blend::Premultiplied, false, &state->blended, "ajfx sprites (blended)"},
@@ -249,7 +337,19 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
         }
         *out = pipeline.value();
     }
-    Result<Buffer> camera = device.create_buffer(28U * sizeof(float), "ajfx camera");
+    if (!effect.volumes.empty()) {
+        if (kernels.volume_vertex.empty() || kernels.volume_pixel.empty()) {
+            return Error{ErrorCode::GpuUnavailable, "the kernel set has no volume shaders for this device"};
+        }
+        Result<Pipeline> pipeline = device.create_graphics_pipeline(
+            GraphicsPipelineDesc{kernels.volume_vertex, kernels.volume_pixel, Blend::Premultiplied, format, false},
+            "ajfx volumes");
+        if (!pipeline) {
+            return pipeline.error();
+        }
+        state->volume = pipeline.value();
+    }
+    Result<Buffer> camera = device.create_buffer(camera_floats * sizeof(float), "ajfx camera");
     if (!camera) {
         return camera.error();
     }
@@ -258,15 +358,20 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
 }
 
 void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& sorter, const Camera& camera,
-                              Texture target, const std::array<float, 4>* clear_color) {
+                              Texture target, const std::array<float, 4>* clear_color, const SceneLight& light) {
     Device& device = *state_->device;
-    float data[28]{};
+    float data[camera_floats]{};
     std::memcpy(data, camera.view_projection.data(), sizeof(float) * 16U);
-    for (const auto& [at, axis] : {std::pair{16, camera.right}, std::pair{20, camera.up}, std::pair{24, camera.forward}}) {
+    for (const auto& [at, axis] :
+         {std::pair{16, camera.right}, std::pair{20, camera.up}, std::pair{24, camera.forward},
+          std::pair{28, light.direction}, std::pair{32, light.color}, std::pair{36, light.sky},
+          std::pair{40, light.ground}}) {
         data[at] = axis.x;
         data[at + 1] = axis.y;
         data[at + 2] = axis.z;
     }
+    const std::array<float, 16> unprojection = inverse(camera.view_projection);
+    std::memcpy(data + 44, unprojection.data(), sizeof(float) * 16U);
     device.write_buffer(state_->camera, 0U,
                         std::span{reinterpret_cast<const std::uint8_t*>(data), sizeof(data)});
 
@@ -287,6 +392,37 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
     }
 
     device.begin_rendering(target, clear_color);
+    // The grid volumes first, raymarched; the particles draw over them.
+    for (std::size_t v = 0U; state_->volume.valid() && v < effect.volumes.size(); ++v) {
+        const Volume& volume = effect.volumes[v];
+        const VolumeBuffers cells = simulation.volume_buffers(v);
+        if (!cells.buffer.valid()) {
+            continue;
+        }
+        Draw draw;
+        draw.pipeline = state_->volume;
+        draw.constants = {cells.cells_at,
+                          cells.nx,
+                          cells.ny,
+                          cells.nz,
+                          std::bit_cast<std::uint32_t>(cells.origin.x),
+                          std::bit_cast<std::uint32_t>(cells.origin.y),
+                          std::bit_cast<std::uint32_t>(cells.origin.z),
+                          std::bit_cast<std::uint32_t>(cells.cell_size),
+                          std::bit_cast<std::uint32_t>(volume.extinction),
+                          std::bit_cast<std::uint32_t>(volume.albedo),
+                          std::bit_cast<std::uint32_t>(volume.color.x),
+                          std::bit_cast<std::uint32_t>(volume.color.y),
+                          std::bit_cast<std::uint32_t>(volume.color.z),
+                          volume_ray_steps,
+                          volume_light_steps,
+                          0U};
+        draw.buffers[0] = cells.buffer;
+        draw.buffers[1] = state_->camera;
+        draw.vertex_count = 3U;
+        draw.instance_count = 1U;
+        device.draw(draw);
+    }
     for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
         const SpriteRenderer& settings = effect.emitters[i].renderer;
         const EmitterBuffers buffers = simulation.emitter_buffers(i);
@@ -308,14 +444,18 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
         draw.constants[11] = offset_or_absent(buffers.layout.lifetime);
         draw.constants[12] = settings.flipbook_columns | (settings.flipbook_rows << 16U);
         const Texture texture = i < state_->emitter_textures.size() ? state_->emitter_textures[i] : Texture{};
-        draw.constants[13] = (texture.valid() ? 1U : 0U) | (settings.flipbook_blend ? 2U : 0U);
+        draw.constants[13] = (texture.valid() ? 1U : 0U) | (settings.flipbook_blend ? 2U : 0U) |
+                             (static_cast<std::uint32_t>(settings.lighting) << 4U) |
+                             (static_cast<std::uint32_t>(i) << 8U);
         draw.constants[14] = static_cast<std::uint32_t>(settings.geometry);
         draw.constants[15] = offset_or_absent(buffers.layout.orientation);
         draw.textures[0] = texture;
+        draw.textures[1] = i < state_->emitter_lightmaps.size() ? state_->emitter_lightmaps[i] : Texture{};
         draw.buffers[0] = buffers.particles;
         draw.buffers[1] = state_->camera;
         draw.buffers[2] = orders[i];
         draw.buffers[3] = buffers.counters;
+        draw.buffers[7] = state_->looks;
         draw.indirect = buffers.args;
         draw.indirect_offset = buffers.draw_args_offset;
         if (i < state_->meshes.size() && state_->meshes[i]) {

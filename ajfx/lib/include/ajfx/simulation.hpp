@@ -88,9 +88,26 @@ struct EmitterState final {
     friend bool operator==(const EmitterState&, const EmitterState&) = default;
 };
 
+// One grid volume's cells (Volume), x fastest, then y, then z: a density, a
+// temperature and a velocity per cell, all at the cell's centre.
+struct VolumeState final {
+    std::uint32_t nx{0U};
+    std::uint32_t ny{0U};
+    std::uint32_t nz{0U};
+    std::vector<float> density;
+    std::vector<float> temperature;
+    std::vector<Vec3> velocity;
+
+    [[nodiscard]] std::size_t cells() const noexcept { return density.size(); }
+    friend bool operator==(const VolumeState&, const VolumeState&) = default;
+};
+
 struct SimulationState final {
     std::uint64_t tick{0U};
     std::vector<EmitterState> emitters;
+    // The effect's grid volumes, in Effect::volumes order, as the tick left
+    // them.
+    std::vector<VolumeState> volumes;
     friend bool operator==(const SimulationState&, const SimulationState&) = default;
 };
 
@@ -195,6 +212,10 @@ void adjust_for_drawing(const DrawAdjustment& adjustment, EmitterState& particle
 
 class Simulation final {
 public:
+    // Each grid volume's step working memory (simulation.cpp): this step's
+    // deposits and the buffers a step writes into, none of it state.
+    struct VolumeWork;
+
     // Fails if the effect does not validate, or with MissingField when
     // `fields` lacks a distance field the effect collides with.
     [[nodiscard]] static Result<Simulation> create(Effect effect, std::uint32_t instance_seed = 0U,
@@ -234,6 +255,9 @@ public:
     // One emitter's particles. A rigid physics emitter's `solver_state` may
     // be out of date here; state() brings it up to date.
     [[nodiscard]] const EmitterState& emitter(std::size_t index) const { return state_.emitters[index]; }
+    // One grid volume's cells (Effect::volumes order), as the last step left
+    // them.
+    [[nodiscard]] const VolumeState& volume(std::size_t index) const { return state_.volumes[index]; }
 
     // What emitter `index`'s bodies hit in the last step, in
     // `contact_before`'s order, which is a pure function of the step: a
@@ -291,6 +315,8 @@ private:
     Effect effect_;
     std::uint32_t instance_seed_{0U};
     float step_seconds_{0.0F};
+    // The order the emitters step in (step_order).
+    std::vector<std::size_t> order_;
     mutable SimulationState state_;
     std::vector<ParameterValue> values_;
     FieldSet fields_;
@@ -308,6 +334,7 @@ private:
     std::shared_ptr<const Cache> cache_;
     // Per parameter, the value the cache pins it to (bake-time ones only).
     std::vector<std::optional<ParameterValue>> pinned_;
+    std::vector<VolumeWork> volume_work_;
 };
 
 // Snapshots taken every `interval` steps, so a seek resimulates at most one

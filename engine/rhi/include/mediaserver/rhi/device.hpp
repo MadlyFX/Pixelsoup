@@ -537,6 +537,11 @@ struct DepthState final {
     bool enabled{};
     bool write{true};
     bool greater{true};
+    // With `enabled`, whether fragments are compared against the depth
+    // target at all. Off, every fragment passes while the depth target stays
+    // bound, for a pass that draws into a depth-tested scene but decides
+    // its own occlusion (a raymarch that stops at the scene's depth).
+    bool test{true};
 
     bool operator==(const DepthState&) const = default;
 };

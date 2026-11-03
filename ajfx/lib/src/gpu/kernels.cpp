@@ -27,6 +27,8 @@ std::string expand_includes(std::string_view source) {
             out += detail::hlsl_random;
         } else if (line.starts_with("#include \"ajfx_particles.hlsli\"")) {
             out += expand_includes(detail::hlsl_particles);
+        } else if (line.starts_with("#include \"ajfx_volume.hlsli\"")) {
+            out += detail::hlsl_volume;
         } else {
             out += line;
         }
@@ -142,6 +144,163 @@ bool is_appearance(const UpdateModule& module) {
     return std::holds_alternative<ColorOverLife>(module) || std::holds_alternative<SizeOverLife>(module);
 }
 
+// Where a stored field of another emitter's record is, as HLSL: its byte
+// offset, or the no-such-field mark for one it does not store.
+std::string field_offset(std::int32_t offset) {
+    return offset < 0 ? std::string{"0xffffffffu"} : std::to_string(offset) + "u";
+}
+
+// The shed kernel: the births one SpawnFromParticles module makes this step,
+// worked out from the named emitter's particles as this step left them,
+// exactly as detail::particle_births works them out (float throughout, the
+// same hash rolls, the same clamp at max_per_step in particle order) and
+// written where the spawn kernel reads births: after the ones the CPU
+// scheduled (ajfx_birth_count) and the ones earlier shed dispatches of this
+// step made. One group walks the source's particles in chunks of 4096, four
+// a thread, a group scan turning each particle's count into its place in the
+// step's births.
+//
+// Bound for a shed dispatch: u0 the source emitter's particles after its
+// step, u1 the source's counters (live count first), u2 this emitter's
+// counters (word 3 counts the step's shed births), u3 its shed state
+// (shed_state_words), u6 its data and u7 its args (spawn groups at 40).
+// ajfx_shed_module (a constant) picks the module; one dispatch per module,
+// in stack order.
+template <class Shedding>
+void generate_shed(std::string& out, const Emitter& emitter, const std::vector<Shedding>& shedding) {
+    static_cast<void>(emitter);
+    out += "\n// Births shed from other emitters' particles (SpawnFromParticles).\n"
+           "#define ajfx_shed_module ajfx_reserved0\n"
+           "groupshared uint ajfx_scan[1024];\n\n"
+           "// Inclusive scan across the group, saturating well above any max_per_step.\n"
+           "uint ajfx_shed_scan(uint value, uint thread) {\n"
+           "    ajfx_scan[thread] = value;\n"
+           "    GroupMemoryBarrierWithGroupSync();\n"
+           "    for (uint offset = 1u; offset < 1024u; offset <<= 1u) {\n"
+           "        uint add = thread >= offset ? ajfx_scan[thread - offset] : 0u;\n"
+           "        GroupMemoryBarrierWithGroupSync();\n"
+           "        ajfx_scan[thread] = min(ajfx_scan[thread] + add, 0x40000000u);\n"
+           "        GroupMemoryBarrierWithGroupSync();\n"
+           "    }\n"
+           "    return ajfx_scan[thread];\n"
+           "}\n\n"
+           "// Whether the source particle is in the module's scope: [every particle, 8\n"
+           "// words of one bit per spawn source], as pack_scope packs it.\n"
+           "bool ajfx_shed_in_scope(uint spawn_index, uint o) {\n"
+           "    if (ajfx_u32(o) != 0u) {\n"
+           "        return true;\n"
+           "    }\n"
+           "    uint source = spawn_index >> 24u;\n"
+           "    return ((ajfx_u32(o + 1u + (source >> 5u)) >> (source & 31u)) & 1u) != 0u;\n"
+           "}\n\n"
+           "// How many a source particle sheds this step, before the step's cap:\n"
+           "// detail::particle_births and rounded_count_f, operation for operation.\n"
+           "uint ajfx_shed_count(uint o, uint id, uint key, float3 v, uint spawn_index) {\n"
+           "    if (!ajfx_shed_in_scope(spawn_index, o + 5u)) {\n"
+           "        return 0u;\n"
+           "    }\n"
+           "    float speed_squared = ajfx_dot(v, v);\n"
+           "    if (speed_squared < ajfx_f(o)) {\n"
+           "        return 0u;\n"
+           "    }\n"
+           "    float speed = sqrt(speed_squared);\n"
+           "    float wanted = (ajfx_f(o + 1u) + ajfx_f(o + 2u) * speed) * ajfx_dt;\n"
+           "    float roll = ajfx_particle_unit(ajfx_seed, ajfx_hash_mix(key, spawn_index), ajfx_hash_mix(id, 0x8000a71cu));\n"
+           "    float count = floor(wanted + roll);\n"
+           "    uint max_per_step = ajfx_u32(o + 3u);\n"
+           "    return count >= (float)max_per_step ? max_per_step : (uint)count;\n"
+           "}\n\n"
+           "[numthreads(1024, 1, 1)]\n"
+           "void shed(uint thread : SV_GroupIndex) {\n"
+           "    uint o = 0u;\n"
+           "    uint id = 0u;\n"
+           "    uint slot = 0u;\n"
+           "    uint source_stride = 0u;\n"
+           "    uint at_position = 0u;\n"
+           "    uint at_velocity = 0xffffffffu;\n"
+           "    uint at_spawn_index = 0u;\n";
+    for (std::size_t k = 0U; k < shedding.size(); ++k) {
+        const Shedding& m = shedding[k];
+        out += std::string{k == 0U ? "    if" : " else if"} + " (ajfx_shed_module == " + std::to_string(k) +
+               "u) {\n"
+               "        o = " +
+               std::to_string(m.offset + 1U) + "u;\n        id = ajfx_u32(" + std::to_string(m.offset) +
+               "u);\n        slot = " + std::to_string(m.slot) + "u;\n        source_stride = " +
+               std::to_string(m.source.stride) + "u;\n        at_position = " + field_offset(m.source.position) +
+               ";\n        at_velocity = " + field_offset(m.source.velocity) +
+               ";\n        at_spawn_index = " + field_offset(m.source.spawn_index) + ";\n    }";
+    }
+    out += "\n"
+           "    uint key = ajfx_hash_mix(ajfx_tick_lo, ajfx_tick_hi);\n"
+           "    uint shed_before = ajfx_shed_module == 0u ? 0u : ajfx_counters.Load(12u);\n"
+           "    uint base = ajfx_birth_count + shed_before;\n"
+           "    uint alive = ajfx_dst.Load(0u);\n"
+           "    uint max_per_step = ajfx_u32(o + 3u);\n"
+           "    float inherit = ajfx_f(o + 4u);\n"
+           "    uint counted = ajfx_flags.Load((2u + ajfx_shed_module) * 4u);\n"
+           "    uint made = 0u;\n"
+           "    for (uint first = 0u; first < alive && made < max_per_step; first += 4096u) {\n"
+           "        uint counts[4];\n"
+           "        uint sum = 0u;\n"
+           "        for (uint k = 0u; k < 4u; ++k) {\n"
+           "            uint i = first + thread * 4u + k;\n"
+           "            counts[k] = 0u;\n"
+           "            if (i < alive) {\n"
+           "                uint record = i * source_stride;\n"
+           "                float3 v = at_velocity != 0xffffffffu ? asfloat(ajfx_src.Load3(record + at_velocity))\n"
+           "                                                      : float3(0.0f, 0.0f, 0.0f);\n"
+           "                counts[k] = ajfx_shed_count(o, id, key, v, ajfx_src.Load(record + at_spawn_index));\n"
+           "            }\n"
+           "            sum += counts[k];\n"
+           "        }\n"
+           "        uint inclusive = ajfx_shed_scan(sum, thread);\n"
+           "        uint chunk_total = ajfx_scan[1023u];\n"
+           "        uint running = inclusive >= 0x40000000u ? 0x40000000u : made + (inclusive - sum);\n"
+           "        for (uint k = 0u; k < 4u; ++k) {\n"
+           "            uint i = first + thread * 4u + k;\n"
+           "            if (i < alive && counts[k] != 0u) {\n"
+           "                uint before = min(running, max_per_step);\n"
+           "                uint n = min(counts[k], max_per_step - before);\n"
+           "                uint record = i * source_stride;\n"
+           "                float3 position = asfloat(ajfx_src.Load3(record + at_position));\n"
+           "                float3 v = at_velocity != 0xffffffffu ? asfloat(ajfx_src.Load3(record + at_velocity))\n"
+           "                                                      : float3(0.0f, 0.0f, 0.0f);\n"
+           "                for (uint j = 0u; j < n; ++j) {\n"
+           "                    uint b = base + before + j;\n"
+           "                    if (b < ajfx_capacity) {\n"
+           "                        // Along the step's stretch of the path, the first born the oldest.\n"
+           "                        float age = ajfx_dt * (1.0f - ((float)j + 0.5f) / (float)n);\n"
+           "                        float3 at = position - v * age;\n"
+           "                        float3 thrown = v * inherit;\n"
+           "                        ajfx_data.Store((ajfx_ages_offset + b) * 4u, asuint(age));\n"
+           "                        ajfx_data.Store((ajfx_ages_offset + ajfx_capacity + b) * 4u,\n"
+           "                                        (slot << 24u) | ((counted + before + j) & 0x00ffffffu));\n"
+           "                        uint origin = (ajfx_ages_offset + 2u * ajfx_capacity + b * " +
+           std::to_string(detail::birth_origin_floats) +
+           "u) * 4u;\n"
+           "                        ajfx_data.Store3(origin, asuint(at));\n"
+           "                        ajfx_data.Store3(origin + 12u, asuint(thrown));\n"
+           "                        ajfx_data.Store(origin + 24u, 1u);\n"
+           "                    }\n"
+           "                }\n"
+           "                running = min(running + counts[k], 0x40000000u);\n"
+           "            }\n"
+           "        }\n"
+           "        made = min(made + chunk_total, max_per_step);\n"
+           "        GroupMemoryBarrierWithGroupSync();\n"
+           "    }\n"
+           "    if (thread == 0u) {\n"
+           "        ajfx_flags.Store((2u + ajfx_shed_module) * 4u, counted + made);\n"
+           "        uint lo = ajfx_flags.Load(0u) + made;\n"
+           "        uint hi = ajfx_flags.Load(4u) + (lo < made ? 1u : 0u);\n"
+           "        ajfx_flags.Store2(0u, uint2(lo, hi));\n"
+           "        uint shed_total = shed_before + made;\n"
+           "        ajfx_counters.Store(12u, shed_total);\n"
+           "        ajfx_write_groups(40u, min(ajfx_birth_count + shed_total, ajfx_capacity), ajfx_group_size);\n"
+           "    }\n"
+           "}\n";
+}
+
 EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitter) {
     EmitterKernelSource result;
     result.layout = particle_layout(emitter);
@@ -218,7 +377,32 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
     }
     const std::string glow_calls =
         heat_calls.empty() ? std::string{} : "        p.color = p.base_color;\n" + color_calls + heat_calls;
+    // The spawn modules shedding from other emitters' particles, packed after
+    // the stacks (pack_emitter): each one's data offset, its place in the
+    // spawn stack and the layout of the emitter it sheds from, which its
+    // shed kernel reads directly.
+    struct Shedding final {
+        std::uint32_t offset;
+        std::uint32_t slot;
+        ParticleLayout source;
+    };
+    std::vector<Shedding> shedding;
+    for (std::size_t slot = 0U; slot < emitter.spawn.size(); ++slot) {
+        const auto* shed = std::get_if<SpawnFromParticles>(&emitter.spawn[slot]);
+        if (shed == nullptr) {
+            continue;
+        }
+        ParticleLayout source;
+        for (const Emitter& other : effect.emitters) {
+            if (other.name == shed->emitter) {
+                source = particle_layout(other);
+                break;
+            }
+        }
+        shedding.push_back(Shedding{offset_of(*shed), static_cast<std::uint32_t>(slot), source});
+    }
     result.module_floats = static_cast<std::uint32_t>(scratch.size());
+    result.sheds = !shedding.empty();
 
     std::string& out = result.source;
     out += "// Generated by ajfx for emitter '" + printable(emitter.name) + "' of effect '" +
@@ -253,7 +437,7 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
            "void spawn(uint3 group : SV_GroupID, uint thread : SV_GroupIndex) {\n"
            "    uint b = ajfx_index(group, thread);\n"
            "    uint compacted = ajfx_counters.Load(4u);\n"
-           "    if (b >= ajfx_birth_count || b >= ajfx_capacity - compacted) {\n"
+           "    if (b >= ajfx_births() || b >= ajfx_capacity - compacted) {\n"
            "        return;\n"
            "    }\n"
            "    Particle p = ajfx_default_particle();\n"
@@ -286,6 +470,9 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
     out += "    }\n"
            "    ajfx_store_dst((compacted + b) * ajfx_stride, p);\n"
            "}\n";
+    if (!shedding.empty()) {
+        generate_shed(out, emitter, shedding);
+    }
     return result;
 }
 
@@ -367,6 +554,14 @@ std::string sort_kernel_source() {
     return std::string{detail::hlsl_sort};
 }
 
+std::string volume_kernel_source() {
+    return expand_includes(detail::hlsl_volume_kernels);
+}
+
+std::string volume_shader_source() {
+    return expand_includes(detail::hlsl_volume_draw);
+}
+
 Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler) {
     Result<bool> valid = validate(effect);
     if (!valid) {
@@ -404,6 +599,27 @@ Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler
         }
         *out = std::move(code).value();
     }
+    if (!effect.volumes.empty()) {
+        const std::string volume = volume_kernel_source();
+        for (std::size_t k = 0U; k < volume_kernel_count; ++k) {
+            const std::string entry{volume_kernel_names[k]};
+            Result<std::vector<std::uint8_t>> code =
+                compiler.compile(volume, entry, ShaderStage::Compute, "ajfx " + entry);
+            if (!code) {
+                return code.error();
+            }
+            set.volume[k] = std::move(code).value();
+        }
+        const std::string draw = volume_shader_source();
+        for (const auto& [entry, stage, out] : {std::tuple{"volume_vertex", ShaderStage::Vertex, &set.volume_vertex},
+                                                std::tuple{"volume_pixel", ShaderStage::Pixel, &set.volume_pixel}}) {
+            Result<std::vector<std::uint8_t>> code = compiler.compile(draw, entry, stage, std::string{"ajfx "} + entry);
+            if (!code) {
+                return code.error();
+            }
+            *out = std::move(code).value();
+        }
+    }
     const std::vector<EmitterKernelSource> sources = generate_kernel_sources(effect);
     for (std::size_t i = 0U; i < sources.size(); ++i) {
         const std::string name = "ajfx " + effect.name + "/" + effect.emitters[i].name;
@@ -420,6 +636,14 @@ Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler
         }
         kernels.update = std::move(update).value();
         kernels.spawn = std::move(spawn).value();
+        if (sources[i].sheds) {
+            Result<std::vector<std::uint8_t>> shed =
+                compiler.compile(sources[i].source, "shed", ShaderStage::Compute, name + " shed");
+            if (!shed) {
+                return shed.error();
+            }
+            kernels.shed = std::move(shed).value();
+        }
     }
     return set;
 }
@@ -441,9 +665,10 @@ void hash_bytes(std::uint64_t& hash, std::string_view bytes) {
     }
 }
 
-// Every kernel set entry and its name within kernels/<format>/.
-std::vector<std::pair<std::string, std::vector<std::uint8_t>*>> named_kernels(KernelSet& set,
-                                                                               std::size_t emitters) {
+// Every kernel set entry the effect needs and its name within
+// kernels/<format>/: a shed kernel only for an emitter that sheds from
+// particles.
+std::vector<std::pair<std::string, std::vector<std::uint8_t>*>> named_kernels(KernelSet& set, const Effect& effect) {
     std::vector<std::pair<std::string, std::vector<std::uint8_t>*>> named{
         {"runtime/scan_blocks", &set.scan_blocks}, {"runtime/scan_totals", &set.scan_totals},
         {"runtime/scatter", &set.scatter},         {"runtime/finalize", &set.finalize},
@@ -451,10 +676,22 @@ std::vector<std::pair<std::string, std::vector<std::uint8_t>*>> named_kernels(Ke
         {"sort/scan", &set.sort_scan},             {"sort/scatter", &set.sort_scatter},
         {"sprite/vertex", &set.sprite_vertex},     {"sprite/pixel", &set.sprite_pixel},
     };
+    // The grid volumes' kernels and shaders, for an effect with volumes.
+    if (!effect.volumes.empty()) {
+        for (std::size_t k = 0U; k < volume_kernel_count; ++k) {
+            named.emplace_back("volume/" + std::string{volume_kernel_names[k]}, &set.volume[k]);
+        }
+        named.emplace_back("volume/vertex", &set.volume_vertex);
+        named.emplace_back("volume/pixel", &set.volume_pixel);
+    }
+    const std::size_t emitters = effect.emitters.size();
     set.emitters.resize(emitters);
     for (std::size_t i = 0U; i < emitters; ++i) {
         named.emplace_back("emitter/" + std::to_string(i) + "/update", &set.emitters[i].update);
         named.emplace_back("emitter/" + std::to_string(i) + "/spawn", &set.emitters[i].spawn);
+        if (!detail::shedding_slots(effect.emitters[i]).empty()) {
+            named.emplace_back("emitter/" + std::to_string(i) + "/shed", &set.emitters[i].shed);
+        }
     }
     return named;
 }
@@ -471,6 +708,10 @@ std::uint64_t kernel_source_hash(const Effect& effect) {
     add(runtime_kernel_source());
     add(sort_kernel_source());
     add(sprite_shader_source());
+    if (!effect.volumes.empty()) {
+        add(volume_kernel_source());
+        add(volume_shader_source());
+    }
     for (const EmitterKernelSource& source : generate_kernel_sources(effect)) {
         add(source.source);
     }
@@ -481,7 +722,7 @@ std::vector<PackageEntry> kernel_package_entries(const Effect& effect, const Ker
     const std::string prefix = "kernels/" + std::string{format_name(kernels.format)} + "/";
     KernelSet copy = kernels;
     std::vector<PackageEntry> entries;
-    for (auto& [name, code] : named_kernels(copy, kernels.emitters.size())) {
+    for (auto& [name, code] : named_kernels(copy, effect)) {
         entries.push_back({prefix + name, std::move(*code)});
     }
     std::vector<std::uint8_t> hash(8U);
@@ -521,7 +762,7 @@ Result<KernelSet> read_package_kernels(std::span<const std::uint8_t> package, co
     }
     KernelSet set;
     set.format = format;
-    for (auto& [name, code] : named_kernels(set, effect.emitters.size())) {
+    for (auto& [name, code] : named_kernels(set, effect)) {
         const auto found = by_name.find(prefix + name);
         if (found == by_name.end() || found->second->empty()) {
             return unavailable("'" + prefix + name + "' is missing");

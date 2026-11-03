@@ -44,8 +44,14 @@ Studio application links the media server's `MediaServer::Render`, `Gui` and
 - The package format is versioned and refuses unknown fields and newer
   versions. ajfx is unreleased: breaking format changes are acceptable, with
   no migration layers unless a concrete need appears.
-- Studio's interface follows the media server's `docs/ui-design.md` (it uses
-  that UI toolkit). The gui font atlas is ASCII-only.
+- Studio is a separate creative application with its own visual identity,
+  workspace and interaction model. Follow
+  [the Studio design](docs/studio-ui-architecture.md) and
+  [delivery plan](next-steps-plan.md). The media server's `docs/ui-design.md`
+  and shared-widget rules do not prescribe Studio's design or UI framework.
+  Reuse host UI code only where it serves Studio's workflow. The current
+  application still uses that toolkit, whose font atlas is ASCII-only;
+  framework replacement is a planned decision, not an implemented change.
 - Test observable behaviour with independent expectations: bit-identical
   reruns, seek equivalence, CPU and GPU agreement, pixels against
   hand-computed coverage.

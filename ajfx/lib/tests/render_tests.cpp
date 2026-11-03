@@ -50,8 +50,9 @@ private:
 };
 
 // Steps an effect, draws it into a fresh 64x64 RGBA8 target cleared to
-// transparent black, and reads the pixels back.
-Frame render(const Effect& effect, std::uint64_t steps, const gpu::Camera& camera, const TextureSet& textures = {}) {
+// transparent black under `light`, and reads the pixels back.
+Frame render(const Effect& effect, std::uint64_t steps, const gpu::Camera& camera, const TextureSet& textures = {},
+             const gpu::SceneLight& light = gpu::SceneLight{}) {
     const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
     gpu::GpuSimulation simulation = gpu::GpuSimulation::create(*g_device, effect, kernels).value();
     Result<gpu::ParticleRenderer> created =
@@ -66,7 +67,7 @@ Frame render(const Effect& effect, std::uint64_t steps, const gpu::Camera& camer
     gpu::ParticleSorter sorter = gpu::ParticleSorter::create(*g_device, effect, kernels).value();
     simulation.advance_to(steps);
     const std::array<float, 4> clear{0.0F, 0.0F, 0.0F, 0.0F};
-    renderer.render(simulation, sorter, camera, target, &clear);
+    renderer.render(simulation, sorter, camera, target, &clear, light);
     Result<std::vector<std::uint8_t>> pixels = g_device->read_texture(target);
     if (!pixels) {
         std::cout << pixels.error().message << '\n';
@@ -423,6 +424,217 @@ void tumbling_meshes_turn_by_their_orientation() {
     g_device->destroy_texture(target);
 }
 
+// One still white particle a unit across, lit as `renderer` says.
+Effect lit_still(SpriteRenderer renderer) {
+    EffectBuilder builder{"lit"};
+    builder.emitter("e")
+        .spawn(SpawnBurst{.count = 1U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(InitSize{.min = 1.0F, .max = 1.0F})
+        .renderer(renderer);
+    return builder.build().value();
+}
+
+// No hemisphere: only the directional light, travelling `direction`.
+gpu::SceneLight sun(Vec3 direction) {
+    return gpu::SceneLight{.direction = direction, .color = Vec3{1.0F, 1.0F, 1.0F}, .sky = Vec3{}, .ground = Vec3{}};
+}
+
+void lit_sprites_take_the_light_from_its_side() {
+    // A full sphere's normal, no wrap: the sprite turns from the camera at
+    // its centre to the edge's direction at its rim.
+    const Effect effect = lit_still(SpriteRenderer{.blend = BlendMode::Alpha, .lighting = Lighting::Lit,
+                                                   .curvature = 1.0F, .wrap = 0.0F, .ambient = 0.0F});
+    // Light from the camera (travelling away from it, down -Z): the centre
+    // faces it fully, so it is as bright as an unlit particle's.
+    const Frame from_camera = render(effect, 1U, ortho, {}, sun(Vec3{0.0F, 0.0F, -1.0F}));
+    const Pixel centre = from_camera.at(32U, 32U);
+    AJFX_CHECK(centre.r >= 251 && centre.g == centre.r && centre.b == centre.r && centre.a >= 251);
+    // Light from the right (travelling -X). Six pixels right of the centre,
+    // uv.x = 13/16: the normal leans 13/16 right, and the coverage there is
+    // 0.336, so the premultiplied red is 0.8125 * 0.336 = 0.273. Seven pixels
+    // left (the same 13/16, the other way) the normal leans away: nothing, under coverage alone.
+    const Frame from_right = render(effect, 1U, ortho, {}, sun(Vec3{-1.0F, 0.0F, 0.0F}));
+    const Pixel right = from_right.at(38U, 32U);
+    const Pixel left = from_right.at(25U, 32U);
+    AJFX_CHECK(right.r >= 66 && right.r <= 73 && right.a >= 83 && right.a <= 88);
+    AJFX_CHECK(left.r <= 2 && left.a >= 83 && left.a <= 88);
+    // The centre pixel is 1/32 unit right of the particle, so its normal
+    // leans 1/16 right, square to the light but for that: 1/16 of it.
+    AJFX_CHECK(from_right.at(32U, 32U).r >= 13 && from_right.at(32U, 32U).r <= 19);
+    // Wrapped all the way, the light reaches round the terminator at half
+    // strength: the far side is lit now, still less than the near side.
+    Effect wrapped = effect;
+    wrapped.emitters[0].renderer.wrap = 1.0F;
+    const Frame wrap = render(wrapped, 1U, ortho, {}, sun(Vec3{-1.0F, 0.0F, 0.0F}));
+    AJFX_CHECK(wrap.at(25U, 32U).r >= 20 && wrap.at(25U, 32U).r < wrap.at(38U, 32U).r);
+    // The hemisphere alone, grey sky and black ground, taken at `ambient`:
+    // the front faces sideways to it and takes half the sky (0.25), and the
+    // centre pixel's slight lean right (a quarter of the sky) and up (all
+    // of it) adds a little: 0.265 of white, under 0.992 coverage.
+    Effect ambient = effect;
+    ambient.emitters[0].renderer.ambient = 1.0F;
+    const gpu::SceneLight hemisphere{.color = Vec3{}, .sky = Vec3{0.5F, 0.5F, 0.5F}, .ground = Vec3{}};
+    const Pixel under_sky = render(ambient, 1U, ortho, {}, hemisphere).at(32U, 32U);
+    AJFX_CHECK(under_sky.r >= 64 && under_sky.r <= 70 && under_sky.a >= 251);
+    // Unlit particles ignore the light altogether.
+    const Effect unlit = lit_still(SpriteRenderer{.blend = BlendMode::Alpha});
+    AJFX_CHECK(render(unlit, 1U, ortho, {}, sun(Vec3{-1.0F, 0.0F, 0.0F})).at(32U, 32U).r >= 251);
+}
+
+// Six-way maps, one cell each: `right` takes light from the right only (and
+// `behind` from behind only), opaque everywhere.
+TextureSet six_way_maps() {
+    std::vector<std::uint8_t> right;
+    std::vector<std::uint8_t> behind;
+    for (std::uint32_t i = 0U; i < 16U; ++i) {
+        right.insert(right.end(), {255, 0, 0, 255});
+        behind.insert(behind.end(), {0, 0, 255, 255});
+    }
+    return TextureSet{{"right", make_texture(4U, 4U, right, ColorSpace::Linear).value()},
+                      {"behind", make_texture(4U, 4U, behind, ColorSpace::Linear).value()}};
+}
+
+void six_way_maps_weigh_the_light_by_their_texels() {
+    const Effect effect = lit_still(SpriteRenderer{.blend = BlendMode::Alpha, .texture = "right",
+                                                   .lighting = Lighting::SixWay, .lightmap = "behind",
+                                                   .wrap = 0.0F, .ambient = 0.0F});
+    // Light from the right: the first map's red channel takes all of it,
+    // and the maps are light, not colour, so the white particle stays white.
+    const Pixel lit = render(effect, 1U, ortho, six_way_maps(), sun(Vec3{-1.0F, 0.0F, 0.0F})).at(32U, 32U);
+    AJFX_CHECK(lit.r >= 251 && lit.g >= 251 && lit.b >= 251 && lit.a >= 251);
+    // From the left: neither map takes it; covered but dark.
+    const Pixel dark = render(effect, 1U, ortho, six_way_maps(), sun(Vec3{1.0F, 0.0F, 0.0F})).at(32U, 32U);
+    AJFX_CHECK(dark.r <= 2 && dark.a >= 251);
+    // From behind the sprite (travelling towards the camera): the second
+    // map's blue channel.
+    const Pixel back = render(effect, 1U, ortho, six_way_maps(), sun(Vec3{0.0F, 0.0F, 1.0F})).at(32U, 32U);
+    AJFX_CHECK(back.r >= 251 && back.a >= 251);
+    // A six-way emitter whose second map is missing is refused by name.
+    TextureSet half = six_way_maps();
+    half.erase("behind");
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    const Result<gpu::ParticleRenderer> missing =
+        gpu::ParticleRenderer::create(*g_device, effect, kernels, half, gpu::TextureFormat::Rgba8Unorm);
+    AJFX_CHECK(!missing.ok() && missing.error().code == ErrorCode::MissingTexture &&
+               missing.error().message.find("'behind'") != std::string::npos);
+}
+
+// A grid two units each way about the origin (8 cells of a quarter unit),
+// drawn as smoke of `extinction` and `albedo`, and a still red sprite half
+// a unit across in front of it when `with_sprite`.
+Effect slab(float extinction, float albedo, bool with_sprite) {
+    EffectBuilder builder{"slab"};
+    builder.volume(Volume{.name = "smoke",
+                          .origin = Vec3{-1.0F, -1.0F, -1.0F},
+                          .cell_size = 0.25F,
+                          .nx = 8U,
+                          .ny = 8U,
+                          .nz = 8U,
+                          .extinction = extinction,
+                          .albedo = albedo,
+                          .color = Vec3{1.0F, 0.5F, 0.25F}});
+    if (with_sprite) {
+        builder.emitter("dot")
+            .spawn(SpawnBurst{.count = 1U})
+            .init(Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.0F, 0.0F, 1.5F}})
+            .init(InitColor{.a = Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = Color{1.0F, 0.0F, 0.0F, 1.0F}})
+            .init(InitSize{.min = 0.5F, .max = 0.5F})
+            .renderer(SpriteRenderer{.blend = BlendMode::Alpha});
+    }
+    return builder.build().value();
+}
+
+// Draws `effect` with its grid filled with a uniform `density`, under
+// `light`, without stepping.
+Frame render_slab(const Effect& effect, float density, const gpu::SceneLight& light) {
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    gpu::GpuSimulation simulation = gpu::GpuSimulation::create(*g_device, effect, kernels).value();
+    gpu::ParticleRenderer renderer =
+        gpu::ParticleRenderer::create(*g_device, effect, kernels, TextureSet{}, gpu::TextureFormat::Rgba8Unorm).value();
+    gpu::ParticleSorter sorter = gpu::ParticleSorter::create(*g_device, effect, kernels).value();
+    VolumeState cells;
+    cells.nx = cells.ny = cells.nz = 8U;
+    cells.density.assign(512U, density);
+    cells.temperature.assign(512U, 0.0F);
+    cells.velocity.assign(512U, Vec3{});
+    simulation.write_volume(0U, cells);
+    if (!effect.emitters.empty()) {
+        simulation.advance_to(1U);
+    }
+    const gpu::Texture target =
+        g_device->create_render_target(size, size, gpu::TextureFormat::Rgba8Unorm, "test target").value();
+    const std::array<float, 4> clear{0.0F, 0.0F, 0.0F, 0.0F};
+    renderer.render(simulation, sorter, ortho, target, &clear, light);
+    Frame frame{g_device->read_texture(target).value()};
+    g_device->destroy_texture(target);
+    return frame;
+}
+
+void volumes_raymarch_a_slab_of_smoke() {
+    // A uniform slab two units deep of density 0.6 at extinction 1.5: the
+    // light through it is exp(-1.8) = 0.165, so it covers 0.835 of the pixel
+    // whatever the step count, as every step through uniform smoke takes the
+    // same share. The light travels with the view (down -Z) from the near
+    // face; the single scattering towards the camera is the march's own sum,
+    // in 64 steps of ds along the ray, each lit through 8 steps of its own
+    // back to the face, which for uniform smoke is exactly exp(-1.5 * 0.6 *
+    // t) at depth t.
+    const float density = 0.6F;
+    const float extinction = 1.5F;
+    const float albedo = 0.8F;
+    const double sigma = static_cast<double>(density) * extinction;
+    const double ds = 2.0 / 64.0;
+    const double through = std::exp(-sigma * ds);
+    double transmittance = 1.0;
+    double scattered = 0.0;
+    for (int k = 0; k < 64; ++k) {
+        const double t = (k + 0.5) * ds;
+        scattered += transmittance * (1.0 - through) * albedo * std::exp(-sigma * t);
+        transmittance *= through;
+    }
+    const auto expect = [](int value, double wanted, int slack) {
+        const int rounded = static_cast<int>(std::floor(wanted * 255.0 + 0.5));
+        return value >= rounded - slack && value <= rounded + slack;
+    };
+    const Frame lit = render_slab(slab(extinction, albedo, false), density, sun(Vec3{0.0F, 0.0F, -1.0F}));
+    const Pixel centre = lit.at(32U, 32U);
+    AJFX_CHECK(expect(centre.a, 1.0 - std::exp(-1.8), 2));
+    AJFX_CHECK(expect(centre.a, 1.0 - transmittance, 2));
+    // The colour tints what is scattered: red takes all, green half, blue a
+    // quarter of it.
+    AJFX_CHECK(expect(centre.r, scattered, 3));
+    AJFX_CHECK(expect(centre.g, scattered * 0.5, 3));
+    AJFX_CHECK(expect(centre.b, scattered * 0.25, 3));
+    // The closed form of that sum, with the midpoint rule's small error.
+    AJFX_CHECK(std::fabs(scattered - albedo * 0.5 * (1.0 - std::exp(-2.0 * sigma * 2.0))) < 0.01);
+    // Every pixel in the slab's square reads the same; outside it nothing.
+    AJFX_CHECK(lit.at(20U, 44U).a == centre.a && lit.at(44U, 20U).r == centre.r);
+    AJFX_CHECK(lit.at(14U, 32U).a == 0 && lit.at(32U, 49U).a == 0 && lit.at(0U, 0U).a == 0);
+    // Lit from behind (the light travelling towards the camera) the far
+    // samples are brightest and most hidden: darker than lit from the front.
+    const Pixel from_behind = render_slab(slab(extinction, albedo, false), density, sun(Vec3{0.0F, 0.0F, 1.0F})).at(32U, 32U);
+    AJFX_CHECK(from_behind.a == centre.a && from_behind.r < centre.r - 20);
+    // Absorption alone: the same cover and no light scattered.
+    const Pixel dark = render_slab(slab(extinction, 0.0F, false), density, sun(Vec3{0.0F, 0.0F, -1.0F})).at(32U, 32U);
+    AJFX_CHECK(expect(dark.a, 1.0 - std::exp(-1.8), 2) && dark.r == 0 && dark.g == 0);
+    // Twice the density, twice the depth of smoke.
+    const Pixel thick = render_slab(slab(extinction, 0.0F, false), 2.0F * density, sun(Vec3{0.0F, 0.0F, -1.0F})).at(32U, 32U);
+    AJFX_CHECK(expect(thick.a, 1.0 - std::exp(-3.6), 2));
+    // An empty grid draws nothing at all.
+    AJFX_CHECK(render_slab(slab(extinction, albedo, false), 0.0F, sun(Vec3{0.0F, 0.0F, -1.0F})).lit() == 0U);
+    // The particles draw over the smoke: the red disc in front covers it at
+    // its centre, and the smoke shows beside it.
+    const Frame over = render_slab(slab(extinction, albedo, true), density, sun(Vec3{0.0F, 0.0F, -1.0F}));
+    AJFX_CHECK(over.at(32U, 32U).r >= 250 && over.at(32U, 32U).g <= 2 && over.at(32U, 32U).a >= 254);
+    AJFX_CHECK(over.at(44U, 20U).r == centre.r && over.at(44U, 20U).a == centre.a);
+    // Frame after frame, the same frame.
+    AJFX_CHECK(render_slab(slab(extinction, albedo, true), density, sun(Vec3{0.0F, 0.0F, -1.0F})).bytes() ==
+               over.bytes());
+}
+
 void frames_are_reproducible() {
     const gpu::Camera camera =
         gpu::Camera::look_at(Vec3{0.0F, 1.5F, 6.0F}, Vec3{0.0F, 1.5F, 0.0F}, Vec3{0.0F, 1.0F, 0.0F}, 1.0F, 1.0F,
@@ -465,6 +677,9 @@ int main() {
         {"mesh_particles_draw_their_mesh", mesh_particles_draw_their_mesh},
         {"tumbling_meshes_turn_by_their_orientation", tumbling_meshes_turn_by_their_orientation},
         {"mesh_particles_draw_back_to_front", mesh_particles_draw_back_to_front},
+        {"lit_sprites_take_the_light_from_its_side", lit_sprites_take_the_light_from_its_side},
+        {"six_way_maps_weigh_the_light_by_their_texels", six_way_maps_weigh_the_light_by_their_texels},
+        {"volumes_raymarch_a_slab_of_smoke", volumes_raymarch_a_slab_of_smoke},
         {"frames_are_reproducible", frames_are_reproducible},
     };
     const int result = ajfx::test::run(cases);

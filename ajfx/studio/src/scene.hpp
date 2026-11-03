@@ -146,21 +146,24 @@ struct SceneItem final {
     friend bool operator==(const SceneItem &, const SceneItem &) = default;
 };
 
-// One rule binding an object to a particle system: particles born where the
-// object hits something, or shed behind it while it moves. It lives on the
-// scene, is shown from either endpoint, and is stored once.
-enum class RelationKind { EmitOnHit, TrailFrom };
+// One rule feeding a particle system: particles born where an object hits
+// something, shed behind it while it moves, or shed behind another particle
+// system's particles while they move. It lives on the scene, is shown from
+// either endpoint, and is stored once.
+enum class RelationKind { EmitOnHit, TrailFrom, TrailFromSystem };
 struct Relationship final {
     std::uint32_t uid{};
     RelationKind kind{RelationKind::EmitOnHit};
-    std::uint32_t object{}; // 0 is every object
+    // The source: an object (0 is every object), or for Trail from system
+    // the particle system whose particles are trailed. Never `system`.
+    std::uint32_t object{};
     std::uint32_t system{};
     float hardness{1.0F};  // Emit on hit: softer hits make none, m/s
     float per_hit{2.0F};   // Emit on hit: born at every hit
     float per_speed{3.0F}; // Emit on hit: more per m/s of the hit; Trail: per m/s, each second
     float spread{70.0F};   // Emit on hit: scatter around the bounce, degrees
-    float min_speed{0.5F}; // Trail: slower objects shed none, m/s
-    float rate{0.0F};      // Trail: per second while moving, whatever the speed
+    float min_speed{0.5F}; // Trails: slower objects or particles shed none, m/s
+    float rate{0.0F};      // Trails: per second while moving, whatever the speed
     bool pieces{false};    // Trail: only the pieces a broken object became
     std::uint32_t seed{0U};
     friend bool operator==(const Relationship &, const Relationship &) = default;
@@ -194,17 +197,21 @@ enum class Purpose : std::uint8_t;
 [[nodiscard]] std::uint32_t add_particle_system(Document &document);
 [[nodiscard]] std::uint32_t add_group(Document &document);
 [[nodiscard]] std::uint32_t add_force(Document &document, ForceKind kind);
-// Binds an object (0 for every object) to a particle system.
+// Binds a source to a particle system: an object (0 for every object), or
+// for Trail from system another particle system. 0 when the endpoints are
+// not what the kind takes, or a system would feed itself.
 [[nodiscard]] std::uint32_t add_relationship(Document &document, RelationKind kind, std::uint32_t object,
                                              std::uint32_t system);
 bool remove_relationship(Document &document, std::uint32_t uid);
-// A particle system that lives only on a rule from `object`: no source of
-// its own, so nothing plays until the object hits or moves. Returns the
-// system, named after the object.
+// A particle system that lives only on a rule from `object` (an object, or
+// for Trail from system a particle system): no source of its own, so nothing
+// plays until the source hits or moves. Returns the system, named after the
+// source.
 [[nodiscard]] std::uint32_t add_bound_system(Document &document, RelationKind kind, std::uint32_t object);
 // Whether a rule can ever fire: hits and trails come from Dynamic objects,
 // so a rule on a Static or Animated one, or on every object when none is
-// Dynamic, is born nothing.
+// Dynamic, is born nothing; a trail from a system that does not simulate is
+// born nothing.
 [[nodiscard]] bool relationship_active(const Scene &scene, const Relationship &relationship);
 [[nodiscard]] std::string_view relation_name(RelationKind kind);
 inline constexpr std::size_t max_relationships = 256U;

@@ -212,6 +212,22 @@ Result<bool> check_textures(const Effect& effect, const TextureSet& textures) {
                                                        " flipbook, more cells than texture " +
                                                        quoted(sprite.texture) + " has texels"};
         }
+        if (sprite.lighting != Lighting::SixWay) {
+            continue;
+        }
+        // The six-way pair share one grid, so the second map must be the
+        // first's size: a cell then reads the same texel from both.
+        const auto lightmap = textures.find(sprite.lightmap);
+        if (lightmap == textures.end()) {
+            return Error{ErrorCode::MissingTexture,
+                         where + " uses lightmap " + quoted(sprite.lightmap) + ", which the package does not hold"};
+        }
+        if (lightmap->second.width != found->second.width || lightmap->second.height != found->second.height) {
+            return Error{ErrorCode::InvalidEffect, where + " has lightmap " + quoted(sprite.lightmap) + " of " +
+                                                       std::to_string(lightmap->second.width) + "x" +
+                                                       std::to_string(lightmap->second.height) +
+                                                       ", not the size of texture " + quoted(sprite.texture)};
+        }
     }
     return true;
 }
@@ -223,21 +239,22 @@ Result<TextureSet> read_package_textures(std::span<const std::uint8_t> package, 
     }
     TextureSet textures;
     for (const Emitter& emitter : effect.emitters) {
-        const std::string& name = emitter.renderer.texture;
-        if (name.empty() || textures.contains(name)) {
-            continue;
+        for (const std::string& name : {emitter.renderer.texture, emitter.renderer.lightmap}) {
+            if (name.empty() || textures.contains(name)) {
+                continue;
+            }
+            const std::string entry_name = std::string{texture_prefix} + name;
+            const auto entry = std::find_if(entries.value().begin(), entries.value().end(),
+                                            [&](const PackageEntry& e) { return e.name == entry_name; });
+            if (entry == entries.value().end()) {
+                continue; // check_textures names the emitter
+            }
+            Result<TextureData> texture = read_texture(entry->data);
+            if (!texture) {
+                return Error{texture.error().code, quoted(entry_name) + ": " + texture.error().message};
+            }
+            textures.emplace(name, std::move(texture).value());
         }
-        const std::string entry_name = std::string{texture_prefix} + name;
-        const auto entry = std::find_if(entries.value().begin(), entries.value().end(),
-                                        [&](const PackageEntry& e) { return e.name == entry_name; });
-        if (entry == entries.value().end()) {
-            continue; // check_textures names the emitter
-        }
-        Result<TextureData> texture = read_texture(entry->data);
-        if (!texture) {
-            return Error{texture.error().code, quoted(entry_name) + ": " + texture.error().message};
-        }
-        textures.emplace(name, std::move(texture).value());
     }
     if (Result<bool> checked = check_textures(effect, textures); !checked) {
         return checked.error();

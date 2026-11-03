@@ -285,8 +285,15 @@ Uid add_relationship(Document &document, RelationKind kind, Uid object, Uid syst
     }
     const SceneItem *target = document.scene->item(system);
     const SceneItem *source = object == 0U ? nullptr : document.scene->item(object);
-    if (target == nullptr || !std::holds_alternative<ParticleSystem>(target->data) ||
-        (object != 0U && (source == nullptr || !std::holds_alternative<Object>(source->data)))) {
+    if (target == nullptr || !std::holds_alternative<ParticleSystem>(target->data)) {
+        return 0U;
+    }
+    if (kind == RelationKind::TrailFromSystem) {
+        // Another system's particles, never its own.
+        if (source == nullptr || object == system || !std::holds_alternative<ParticleSystem>(source->data)) {
+            return 0U;
+        }
+    } else if (object != 0U && (source == nullptr || !std::holds_alternative<Object>(source->data))) {
         return 0U;
     }
     const Uid uid = reserve(document);
@@ -294,7 +301,7 @@ Uid add_relationship(Document &document, RelationKind kind, Uid object, Uid syst
         return 0U;
     }
     Relationship relationship{.uid = uid, .kind = kind, .object = object, .system = system};
-    if (kind == RelationKind::TrailFrom) {
+    if (kind != RelationKind::EmitOnHit) {
         relationship.per_speed = 10.0F;
     }
     document.scene->relationships.push_back(relationship);
@@ -302,7 +309,9 @@ Uid add_relationship(Document &document, RelationKind kind, Uid object, Uid syst
 }
 Uid add_bound_system(Document &document, RelationKind kind, Uid object) {
     const SceneItem *source = document.scene ? document.scene->item(object) : nullptr;
-    if (source == nullptr || !std::holds_alternative<Object>(source->data)) {
+    const bool from_system = kind == RelationKind::TrailFromSystem;
+    if (source == nullptr || (from_system ? !std::holds_alternative<ParticleSystem>(source->data)
+                                          : !std::holds_alternative<Object>(source->data))) {
         return 0U;
     }
     const std::string name = source->name + (kind == RelationKind::EmitOnHit ? " hits" : " trail");
@@ -315,7 +324,7 @@ Uid add_bound_system(Document &document, RelationKind kind, Uid object) {
     auto &particles = std::get<ParticleSystem>(item->data);
     particles.sources.clear();
     particles.radius = {0.0F, 0.0F};
-    if (kind == RelationKind::TrailFrom) {
+    if (kind != RelationKind::EmitOnHit) {
         particles.speed = {0.0F, 0.2F};
         particles.lifetime = {0.8F, 1.6F};
     } else {
@@ -339,6 +348,10 @@ bool relationship_active(const Scene &scene, const Relationship &relationship) {
         const auto *object = std::get_if<Object>(&item.data);
         return object != nullptr && item.simulate && object->motion == ObjectMotion::Dynamic;
     };
+    if (relationship.kind == RelationKind::TrailFromSystem) {
+        const SceneItem *source = scene.item(relationship.object);
+        return source != nullptr && source->simulate && std::holds_alternative<ParticleSystem>(source->data);
+    }
     if (relationship.object != 0U) {
         const SceneItem *object = scene.item(relationship.object);
         return object != nullptr && dynamic(*object);
@@ -346,7 +359,15 @@ bool relationship_active(const Scene &scene, const Relationship &relationship) {
     return std::any_of(scene.items.begin(), scene.items.end(), dynamic);
 }
 std::string_view relation_name(RelationKind kind) {
-    return kind == RelationKind::EmitOnHit ? "Emit on hit" : "Trail";
+    switch (kind) {
+    case RelationKind::EmitOnHit:
+        return "Emit on hit";
+    case RelationKind::TrailFrom:
+        return "Trail";
+    case RelationKind::TrailFromSystem:
+        return "Trail from system";
+    }
+    return "Relationship";
 }
 Uid add_source(Document &document, Uid uid, SourceMode mode) {
     SceneItem *item = document.scene ? document.scene->item(uid) : nullptr;
@@ -612,13 +633,45 @@ std::string validate_scene(const Document &document, bool for_playback) {
             return where + "its particle system is missing";
         }
         const SceneItem *object = r.object == 0U ? nullptr : scene.item(r.object);
-        if (r.object != 0U && (object == nullptr || !std::holds_alternative<Object>(object->data))) {
+        if (r.kind == RelationKind::TrailFromSystem) {
+            if (object == nullptr || !std::holds_alternative<ParticleSystem>(object->data)) {
+                return where + "its source system is missing";
+            }
+            if (r.object == r.system) {
+                return where + "a system cannot trail itself";
+            }
+        } else if (r.object != 0U && (object == nullptr || !std::holds_alternative<Object>(object->data))) {
             return where + "its object is missing";
         }
         if (!within(r.hardness, 0.0F, 10000.0F) || !within(r.per_hit, 0.0F, 100000.0F) ||
             !within(r.per_speed, 0.0F, 100000.0F) || !within(r.spread, 0.0F, 180.0F) ||
             !within(r.min_speed, 0.0F, 10000.0F) || !within(r.rate, 0.0F, 100000.0F) || r.seed > 1000000U) {
             return where + "a value is outside its supported range";
+        }
+    }
+    // Systems trailing one another in a ring could never agree which steps
+    // first: the runtime refuses the ring, so the scene names it.
+    for (const Relationship &start : scene.relationships) {
+        if (start.kind != RelationKind::TrailFromSystem) {
+            continue;
+        }
+        std::vector<Uid> seen{start.system};
+        Uid at = start.object;
+        while (at != 0U && std::find(seen.begin(), seen.end(), at) == seen.end()) {
+            seen.push_back(at);
+            Uid next = 0U;
+            for (const Relationship &r : scene.relationships) {
+                if (r.kind == RelationKind::TrailFromSystem && r.system == at) {
+                    next = r.object;
+                    break;
+                }
+            }
+            at = next;
+        }
+        if (at != 0U) {
+            const SceneItem *item = scene.item(at);
+            return "Relationship Trail from system: " + (item ? item->name : std::string{"a system"}) +
+                   " trails a system that trails it, round in a ring";
         }
     }
     return {};
@@ -934,7 +987,7 @@ Document lower_scene(const Document &document) {
                                                   {"per_speed", number(r->per_speed)},
                                                   {"spread", number(r->spread)},
                                                   {"seed", seed}}));
-                } else {
+                } else if (r->kind == RelationKind::TrailFrom) {
                     layer.blocks.push_back(block(r->uid, "trail",
                                                  {{"solid", solid},
                                                   {"pieces", toggle(r->pieces)},
@@ -942,6 +995,22 @@ Document lower_scene(const Document &document) {
                                                   {"min_speed", number(r->min_speed)},
                                                   {"rate", number(r->rate)},
                                                   {"seed", seed}}));
+                } else {
+                    // Shed behind another system's particles: the runtime
+                    // module itself, naming that system's layer emitter.
+                    // The scene's scale turns metres into the effect's units
+                    // as the trail block's compiler does; the cap is the
+                    // trail block's default, and is what the system's room
+                    // is proved against.
+                    Block shed = raw_block(r->uid, RawModule{SpawnModule{SpawnFromParticles{
+                                                        .emitter = "item_" + std::to_string(r->object),
+                                                        .min_speed = r->min_speed * document.scale,
+                                                        .rate = r->rate,
+                                                        .per_speed = r->per_speed / document.scale,
+                                                        .max_per_step = 64U,
+                                                        .inherit = 0.0F}}});
+                    shed.set("seed", seed);
+                    layer.blocks.push_back(std::move(shed));
                 }
             }
         }

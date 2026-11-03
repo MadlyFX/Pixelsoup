@@ -1025,6 +1025,28 @@ private:
                 place_init(SlotRotation, block.uid, InitRotation{.id = id(block, 1U)});
             }
         }
+        // The scene's light on it. Six-way maps need a picture from a file
+        // and its second map; without both, the particles are lit plainly.
+        const std::string lighting = choice_of(block, "lighting");
+        r.lighting = Lighting::Unlit;
+        r.lightmap.clear();
+        if (material != "trail" && lighting == "lit") {
+            r.lighting = Lighting::Lit;
+        } else if (material != "trail" && material != "model" && lighting == "six_way") {
+            const std::string map = choice_of(block, "texture") == "file" && !r.texture.empty()
+                                        ? file_of(block, "lightmap_file")
+                                        : std::string{};
+            if (!map.empty()) {
+                r.lighting = Lighting::SixWay;
+                r.lightmap = request(AssetRequest::Kind::Texture, block, map);
+            } else {
+                r.lighting = Lighting::Lit;
+            }
+        }
+        r.curvature = std::clamp(number_of(block, "curvature"), 0.0F, 1.0F);
+        r.wrap = std::clamp(number_of(block, "wrap"), 0.0F, 1.0F);
+        r.ambient = std::max(number_of(block, "ambient"), 0.0F);
+        r.shadowed = toggle_of(block, "shadowed");
         // What the host multiplies the layer by as it draws it.
         const Value tint = get(block, "tint");
         r.tint = color_input(block, "tint", Color{tint.x, tint.y, tint.z, 1.0F});
@@ -1143,7 +1165,9 @@ private:
             return;
         }
         RawModule module = *block.raw;
-        set_raw_id(module, module_id(block.uid, 1U));
+        // A raw block with a seed value deals its particles other values,
+        // as a typed block's seed does; without one its id is the plain one.
+        set_raw_id(module, id(block, 1U));
         if (const auto* spawn = std::get_if<SpawnModule>(&module)) {
             spawn_.push_back(Placed{0, ModuleLine{block.uid, RawModule{*spawn}}});
         } else if (const auto* init = std::get_if<InitModule>(&module)) {

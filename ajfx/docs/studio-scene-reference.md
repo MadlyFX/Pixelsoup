@@ -106,25 +106,34 @@ Convex hull collider as the box of the object's longest side, without its
 rotation. Animated objects are not met by particles yet. Switching the
 collision off lets particles pass through everything.
 
-A **relationship** is one rule on the scene binding an object (or every
-object) to a particle system, stored once and shown from either endpoint and
-under Scene settings: `Crate / Hit -> Dust / Emit` has particles born where
-the object hits something (hits from, per hit, per m/s, spread), and
-`Crate / Moving -> Smoke / Trail` sheds them behind it while it moves (per
-m/s, moving from, base amount, broken pieces only). Each rule has a seed.
-**Add relationship** on a particle system offers the Dynamic objects, the
-rest listed but not takeable, and on a Dynamic object the particle systems;
-an object that is not Dynamic has no button. A system fed by a rule needs no source of its
-own, and its last source can be removed; a persistent population cannot be
-fed by one. A Dynamic object's inspector offers **New system born of its
-hits** and **New system trailing it**: one edit that creates a particle
-system with no source and the rule that feeds it, so nothing plays until
-the object hits or moves. Hits and trails come
-from Dynamic objects: a rule on a Static or Animated object, or on every
-object when none is Dynamic, is marked as born nothing. Removing either endpoint
+A **relationship** is one rule on the scene feeding a particle system from
+an object (or every object) or from another particle system, stored once
+and shown from either endpoint and under Scene settings: `Crate / Hit ->
+Dust / Emit` has particles born where the object hits something (hits from,
+per hit, per m/s, spread), `Crate / Moving -> Smoke / Trail` sheds them
+behind it while it moves (per m/s, moving from, base amount, broken pieces
+only), and `Embers / Moving -> Smoke / Trail` sheds them behind another
+system's particles while those move (per m/s, moving from, base amount),
+each puff born along the step's stretch of the particle's path. Each rule
+has a seed. **Add relationship** on a particle system offers the Dynamic
+objects, the rest listed but not takeable, and under **Trail from system**
+the other particle systems; on a Dynamic object it offers the particle
+systems, and an object that is not Dynamic has no button. A system fed by a
+rule needs no source of its own, and its last source can be removed; a
+persistent population cannot be fed by one. A Dynamic object's inspector
+offers **New system born of its hits** and **New system trailing it**, and a
+particle system's **New system trailing its particles**: one edit that
+creates a particle system with no source and the rule that feeds it, so
+nothing plays until the source hits or moves. Hits and trails come from
+Dynamic objects: a rule on a Static or Animated object, or on every object
+when none is Dynamic, is marked as born nothing, as is a trail from a system
+that is switched off. A system cannot trail itself, and systems trailing one
+another round in a ring are refused: the system trailed steps first, so the
+puffs sit where this frame left its particles. Removing either endpoint
 removes the rule rather than re-aiming it at everything. Rules lower into
-the system in identity order and reach the runtime's contact and body
-spawners. Fracture, time and threshold events are not relationships yet.
+the system in identity order and reach the runtime's contact, body and
+particle spawners. Fracture, time and threshold events are not relationships
+yet.
 
 At the foot of the viewport a **HUD** says what the frame costs and what
 the scene is: GPU time and the cache's state, particles (the most alive at

@@ -114,6 +114,21 @@ void structural_problems_are_refused_with_the_place_named() {
         .update(RigidBody{})
         .renderer(SpriteRenderer{.facing = Facing::Velocity, .geometry = Geometry::Mesh, .mesh = "chip"});
     AJFX_CHECK(fails_with(aimed.build(), ErrorCode::InvalidEffect, "no velocity facing"));
+
+    // Lighting: a lightmap belongs to six-way lighting, which lights sprites
+    // with a texture; a ribbon has no frame to light in; curvature is 0 to 1.
+    EffectBuilder stray_map = valid_builder();
+    stray_map.emitter("puff").renderer(SpriteRenderer{.lighting = Lighting::Lit, .lightmap = "other"});
+    AJFX_CHECK(fails_with(stray_map.build(), ErrorCode::InvalidEffect, "'lightmap' is only for six-way"));
+    EffectBuilder bare_six_way = valid_builder();
+    bare_six_way.emitter("puff").renderer(SpriteRenderer{.lighting = Lighting::SixWay});
+    AJFX_CHECK(fails_with(bare_six_way.build(), ErrorCode::InvalidEffect, "six-way maps need a texture"));
+    EffectBuilder lit_ribbon = valid_builder();
+    lit_ribbon.emitter("trail").renderer(SpriteRenderer{.geometry = Geometry::Ribbon, .lighting = Lighting::Lit});
+    AJFX_CHECK(fails_with(lit_ribbon.build(), ErrorCode::InvalidEffect, "a ribbon is unlit"));
+    EffectBuilder too_round = valid_builder();
+    too_round.emitter("puff").renderer(SpriteRenderer{.lighting = Lighting::Lit, .curvature = 2.0F});
+    AJFX_CHECK(fails_with(too_round.build(), ErrorCode::InvalidEffect, "'curvature' must be 0 to 1"));
 }
 
 void budget_uses_the_top_of_each_bound_range() {

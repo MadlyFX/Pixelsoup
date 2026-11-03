@@ -5591,6 +5591,19 @@ bool SceneRenderer::render(
     // Directional lights are packed before local lights; the first authored
     // directional light therefore has the stable packed index zero.
     scene_constants.counts[3U] = 0U;
+    // What lit particles light by: the same records, hemisphere, exposure
+    // and cascades the lit pass reads, so they sit with the surfaces.
+    ParticleLighting particle_lighting{};
+    particle_lighting.lights = &light_buffer_;
+    particle_lighting.light_count = scene_constants.counts[0U];
+    std::copy_n(scene_constants.sky_ambient, 4U, particle_lighting.sky_ambient.begin());
+    std::copy_n(scene_constants.ground_exposure, 4U, particle_lighting.ground_exposure.begin());
+    particle_lighting.cascade_count = cascade_count;
+    for (core::u32 cascade = 0U; cascade < cascade_count; ++cascade) {
+        particle_lighting.cascades[cascade] = &cascade_target(cascade);
+        particle_lighting.cascade_view_projection[cascade] = cascade_view_projection[cascade];
+        particle_lighting.cascade_texel_depth[cascade] = cascade_texel_depth[cascade];
+    }
 
     const rhi::StorageBuffer* const vertex_bindings[]{
         &geometry_->buffer(GeometryStream::Vertices), &geometry_->buffer(GeometryStream::Indices), &instance_buffer_,
@@ -6385,6 +6398,7 @@ bool SceneRenderer::render(
     }
     ParticleTargets particle_targets{};
     particle_targets.raster_viewport = raster_viewport;
+    particle_targets.lighting = &particle_lighting;
     // The velocity target holds this frame's motion only where the auxiliary
     // pass ran: Advanced, and not a reflection capture.
     const bool scene_motion = mode_ == SceneRendererMode::AdvancedLinear && !options.reflection_pass;

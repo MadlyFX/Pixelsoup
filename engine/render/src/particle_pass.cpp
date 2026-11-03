@@ -5,12 +5,16 @@
 #include <mediaserver/shaders/particle_sprite_vert_dxil.h>
 #include <mediaserver/shaders/particle_lights_comp_dxil.h>
 #include <mediaserver/shaders/particle_velocity_frag_dxil.h>
+#include <mediaserver/shaders/particle_volume_frag_dxil.h>
+#include <mediaserver/shaders/particle_volume_vert_dxil.h>
 #endif
 
 #include <ajfx/rigid.hpp>
 
 #include <algorithm>
 #include <array>
+#include <map>
+#include <string>
 #include <bit>
 #include <cstring>
 #include <limits>
@@ -22,6 +26,10 @@ namespace mediaserver::render {
 namespace {
 
 constexpr core::u32 absent = 0xffffffffU;
+
+// Fragment textures a sprite draw binds: the texture, the scene depth, the
+// six-way lightmap and four shadow cascades (particle_sprite_shade.hlsli).
+constexpr core::u32 sprite_texture_slots = 7U;
 
 // Matches the ParticleView constant buffer in particle_sprite.vert.hlsl.
 struct ViewConstants final {
@@ -50,8 +58,52 @@ struct ViewConstants final {
     std::array<float, 4U> motion{}; // x: seconds back, y: 1 when valid, z: soft distance
     std::array<float, 4U> depth_terms{}; // projection (2,2), (2,3), (3,2), (3,3)
     std::array<float, 4U> draw_tint{1.0F, 1.0F, 1.0F, 1.0F};
+    // The scene's light, for lit emitters (see ParticleLighting).
+    std::array<float, 4U> sky_ambient{};     // rgb sky, a: ambient strength
+    std::array<float, 4U> ground_exposure{}; // rgb ground, a: exposure
+    std::array<float, 4U> look{};            // curvature, wrap, ambient, shadow bias in texels
+    // x: lights in the light buffer. y: shadow cascades. z: the emitter's
+    // lighting (0 unlit, 1 lit, 2 six-way). w: 1 when it takes shadows.
+    std::array<core::u32, 4U> lighting{};
+    std::array<std::array<float, 16U>, 4U> shadow_view_projection{};
+    std::array<float, 4U> shadow_texel_depth{};
 };
-static_assert(sizeof(ViewConstants) == 416U);
+static_assert(sizeof(ViewConstants) == 752U);
+
+// Matches ParticleVolumeView in particle_volume.vert.hlsl.
+struct VolumeViewConstants final {
+    std::array<float, 16U> view_projection{};
+    std::array<float, 16U> world{};
+    std::array<float, 4U> box_origin{};
+    std::array<float, 4U> box_size{};
+};
+static_assert(sizeof(VolumeViewConstants) == 160U);
+
+// Matches ParticleVolume in particle_volume.frag.hlsl.
+struct VolumeConstants final {
+    std::array<float, 16U> world{};
+    std::array<float, 16U> inverse{};
+    std::array<float, 4U> eye{};            // w: 1 perspective, 0 orthographic
+    std::array<float, 4U> camera_forward{};
+    std::array<float, 4U> depth_terms{};
+    std::array<float, 4U> grid_origin{};    // xyz origin, w cell size
+    std::array<core::u32, 4U> grid_cells{}; // xyz cells, w first density word
+    std::array<float, 4U> march{};          // extinction, albedo, steps, light steps
+    std::array<float, 4U> color{};
+    std::array<float, 4U> sky_ambient{};
+    std::array<float, 4U> ground_exposure{};
+    std::array<core::u32, 4U> lighting{};   // lights, cascades, shadowed
+    std::array<std::array<float, 16U>, 4U> shadow_view_projection{};
+    std::array<float, 4U> shadow_texel_depth{};
+    std::array<float, 4U> shadow_bias{};
+};
+static_assert(sizeof(VolumeConstants) == 576U);
+
+// Steps the volume raymarch takes along a view ray, and from each of them
+// towards the light: the reference renderer's counts, so the two draw the
+// same smoke, and fixed, so every node draws the same frame.
+constexpr float volume_ray_steps = 64.0F;
+constexpr float volume_light_steps = 8.0F;
 
 // ViewConstants::flags.
 constexpr core::u32 flag_textured = 1U;
@@ -61,6 +113,7 @@ constexpr core::u32 flag_sorted = 8U;
 constexpr core::u32 flag_soft = 16U;
 constexpr core::u32 flag_ribbon = 32U;
 constexpr core::u32 flag_mesh = 64U;
+constexpr core::u32 flag_additive = 128U;
 
 // A prop's record, laid out for the sprite vertex stage to pull exactly as it
 // pulls a particle's: a prop is drawn through the mesh-particle path, so a
@@ -117,8 +170,10 @@ struct ParticleInstance::State final {
         bool landed{};
     };
     std::vector<Upload> textures;
-    // Each emitter's index in `textures`, if it has one.
+    // Each emitter's index in `textures`, if it has one, and its six-way
+    // lightmap's.
     std::vector<std::optional<std::size_t>> emitter_texture;
+    std::vector<std::optional<std::size_t>> emitter_lightmap;
     // Each emitter's drawing order from the last draw, for its motion.
     std::vector<ajfx::gpu::Buffer> orders;
     // One package mesh on the GPU: its vertices interleaved as the sprite
@@ -266,6 +321,9 @@ struct ParticlePass::State final {
     rhi::GraphicsPipeline mesh;
     // Sprite motion into the scene's velocity target.
     rhi::GraphicsPipeline velocity;
+    // Grid volumes, raymarched over the scene; tests no depth itself (the
+    // march stops at the scene's depth) and writes none.
+    rhi::GraphicsPipeline volume;
     // Particle lights into the scene's particle light buffer.
     rhi::ComputePipeline lights;
     // Bound for emitters without a texture, which never sample it.
@@ -312,15 +370,18 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     vertex.format = rhi::ShaderFormat::Dxil;
     vertex.bytecode = std::span<const core::u8>{reinterpret_cast<const core::u8*>(mediaserver_particle_sprite_vert_dxil),
                                                 sizeof(mediaserver_particle_sprite_vert_dxil)};
-    vertex.storage_buffer_count = 5U;
+    // The records, order, counters, mesh vertices and indices, and the
+    // scene's lights.
+    vertex.storage_buffer_count = 6U;
     vertex.uniform_buffer_count = 1U;
     rhi::ShaderDesc fragment{};
     fragment.stage = rhi::ShaderStage::Fragment;
     fragment.format = rhi::ShaderFormat::Dxil;
     fragment.bytecode = std::span<const core::u8>{reinterpret_cast<const core::u8*>(mediaserver_particle_sprite_frag_dxil),
                                                   sizeof(mediaserver_particle_sprite_frag_dxil)};
-    // The texture, and the scene depth soft particles fade against.
-    fragment.sampler_count = 2U;
+    // The texture, the scene depth soft particles fade against, the six-way
+    // lightmap and the four shadow cascades.
+    fragment.sampler_count = sprite_texture_slots;
     // Tested against the scene, never written: a particle is not a surface
     // anything behind it should be hidden by.
     rhi::DepthState depth{};
@@ -348,7 +409,35 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     light_kernel.writable_buffer_count = 1U;
     light_kernel.uniform_buffer_count = 1U;
     auto lights = device.create_compute_pipeline(light_kernel);
-    if (!blended || !additive || !velocity || !mesh || !lights) {
+    // The grid volumes' box and raymarch: the fragment stage binds the
+    // sprite's seven texture slots (the scene depth and the cascades among
+    // them), then the grid's cells and the scene's lights.
+    rhi::ShaderDesc volume_vertex{};
+    volume_vertex.stage = rhi::ShaderStage::Vertex;
+    volume_vertex.format = rhi::ShaderFormat::Dxil;
+    volume_vertex.bytecode = std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(mediaserver_particle_volume_vert_dxil),
+        sizeof(mediaserver_particle_volume_vert_dxil)};
+    volume_vertex.uniform_buffer_count = 1U;
+    rhi::ShaderDesc volume_fragment{};
+    volume_fragment.stage = rhi::ShaderStage::Fragment;
+    volume_fragment.format = rhi::ShaderFormat::Dxil;
+    volume_fragment.bytecode = std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(mediaserver_particle_volume_frag_dxil),
+        sizeof(mediaserver_particle_volume_frag_dxil)};
+    volume_fragment.sampler_count = sprite_texture_slots;
+    volume_fragment.storage_buffer_count = 2U;
+    volume_fragment.uniform_buffer_count = 1U;
+    // Depth-bound but untested: the march stops at the scene's depth itself,
+    // where a test of the box's back face would hide smoke in front of a
+    // surface behind it. Never written.
+    rhi::DepthState untested{};
+    untested.enabled = true;
+    untested.write = false;
+    untested.test = false;
+    auto volume = device.create_pipeline(volume_vertex, volume_fragment, color_format,
+                                         rhi::ColorBlend::PremultipliedNormal, untested);
+    if (!blended || !additive || !velocity || !mesh || !lights || !volume) {
         return Result::failure(failure(ParticleErrorCode::Unsupported, "the particle sprite pipelines could not be made"));
     }
     state->blended = std::move(blended).value();
@@ -356,6 +445,7 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     state->velocity = std::move(velocity).value();
     state->mesh = std::move(mesh).value();
     state->lights = std::move(lights).value();
+    state->volume = std::move(volume).value();
     rhi::TextureDesc blank{};
     blank.width = 1U;
     blank.height = 1U;
@@ -578,33 +668,42 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
         }
         group.records = created.value();
     }
-    // Textures are made now and filled by later advances.
-    for (const ajfx::Emitter& emitter : effect.emitters) {
-        std::optional<std::size_t> index;
-        if (!emitter.renderer.texture.empty()) {
-            const ajfx::TextureData& data = textures.find(emitter.renderer.texture)->second;
-            for (std::size_t e = 0U; e < effect.emitters.size() && !index; ++e) {
-                if (state->emitter_texture.size() > e && state->emitter_texture[e] &&
-                    effect.emitters[e].renderer.texture == emitter.renderer.texture) {
-                    index = state->emitter_texture[e];
-                }
-            }
-            if (!index) {
-                rhi::TextureDesc desc{};
-                desc.width = data.width;
-                desc.height = data.height;
-                desc.sampled = true;
-                desc.mip_levels = static_cast<core::u32>(data.mips.size());
-                auto texture = s.device->create_texture(desc);
-                if (!texture) {
-                    return Result::failure(failure(ParticleErrorCode::DeviceFailure,
-                                                   "texture '" + emitter.renderer.texture + "' could not be made"));
-                }
-                index = state->textures.size();
-                state->textures.push_back({std::move(texture).value(), data});
-            }
+    // Textures are made now and filled by later advances, one per name.
+    std::map<std::string, std::size_t, std::less<>> texture_index;
+    const auto texture_slot = [&](const std::string& name) -> core::Result<std::optional<std::size_t>, ParticleError> {
+        using Slot = core::Result<std::optional<std::size_t>, ParticleError>;
+        if (name.empty()) {
+            return Slot::success(std::nullopt);
         }
-        state->emitter_texture.push_back(index);
+        if (const auto found = texture_index.find(name); found != texture_index.end()) {
+            return Slot::success(found->second);
+        }
+        const ajfx::TextureData& data = textures.find(name)->second;
+        rhi::TextureDesc desc{};
+        desc.width = data.width;
+        desc.height = data.height;
+        desc.sampled = true;
+        desc.mip_levels = static_cast<core::u32>(data.mips.size());
+        auto texture = s.device->create_texture(desc);
+        if (!texture) {
+            return Slot::failure(failure(ParticleErrorCode::DeviceFailure, "texture '" + name + "' could not be made"));
+        }
+        const std::size_t index = state->textures.size();
+        state->textures.push_back({std::move(texture).value(), data});
+        texture_index.emplace(name, index);
+        return Slot::success(index);
+    };
+    for (const ajfx::Emitter& emitter : effect.emitters) {
+        auto texture = texture_slot(emitter.renderer.texture);
+        if (!texture) {
+            return Result::failure(std::move(texture).error());
+        }
+        auto lightmap = texture_slot(emitter.renderer.lightmap);
+        if (!lightmap) {
+            return Result::failure(std::move(lightmap).error());
+        }
+        state->emitter_texture.push_back(texture.value());
+        state->emitter_lightmap.push_back(lightmap.value());
     }
     return Result::success(ParticleInstance{std::move(state)});
 }
@@ -910,6 +1009,38 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
     // How reversed device depth maps back to distance, for soft particles.
     constants.depth_terms = {view.projection.at(2U, 2U), view.projection.at(2U, 3U), view.projection.at(3U, 2U),
                              view.projection.at(3U, 3U)};
+    // The scene's light. Without one, no lights and no cascades: the vertex
+    // stage then lights from the camera.
+    const ParticleLighting* lighting = targets.lighting;
+    const rhi::StorageBuffer* scene_lights = nullptr;
+    std::array<const rhi::Texture*, scene::max_shadow_cascades> cascades{};
+    if (lighting != nullptr) {
+        scene_lights = lighting->lights;
+        constants.sky_ambient = lighting->sky_ambient;
+        constants.ground_exposure = lighting->ground_exposure;
+        constants.lighting[0] = scene_lights != nullptr ? lighting->light_count : 0U;
+        constants.lighting[1] = std::min<core::u32>(lighting->cascade_count, scene::max_shadow_cascades);
+        for (core::u32 c = 0U; c < constants.lighting[1]; ++c) {
+            if (lighting->cascades[c] == nullptr) {
+                constants.lighting[1] = c;
+                break;
+            }
+            cascades[c] = lighting->cascades[c];
+            constants.shadow_view_projection[c] = lighting->cascade_view_projection[c].m;
+            constants.shadow_texel_depth[c] = lighting->cascade_texel_depth[c];
+        }
+    }
+    const float shadow_bias = lighting != nullptr ? lighting->shadow_bias_texels : 0.0F;
+    const auto sampled_textures = [&](const rhi::Texture* texture, const rhi::Texture* scene_depth,
+                                      const rhi::Texture* lightmap) {
+        std::array<rhi::SampledTexture, sprite_texture_slots> set{};
+        const rhi::Texture* textures[sprite_texture_slots] = {texture, scene_depth, lightmap, cascades[0], cascades[1],
+                                                               cascades[2], cascades[3]};
+        for (std::size_t t = 0U; t < sprite_texture_slots; ++t) {
+            set[t] = rhi::SampledTexture{textures[t] != nullptr ? textures[t] : &*s.blank, &*s.sampler};
+        }
+        return set;
+    };
 
     bool first = true;
     // The props first. A prop is authored, solid, lit geometry that stands in
@@ -933,8 +1064,7 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         prop.motion = {targets.motion_valid ? targets.motion_seconds : 0.0F,
                        targets.motion_valid ? 1.0F : 0.0F, 0.0F, 0.0F};
         prop.flags = flag_mesh;
-        const std::array<rhi::SampledTexture, 2U> untextured{rhi::SampledTexture{&*s.blank, &*s.sampler},
-                                                             rhi::SampledTexture{&*s.blank, &*s.sampler}};
+        const std::array<rhi::SampledTexture, sprite_texture_slots> untextured = sampled_textures(nullptr, nullptr, nullptr);
         for (const ParticleInstance::State::PropGroup& group : i.props) {
             const ParticleInstance::State::MeshUpload& uploaded = i.mesh_uploads[group.upload];
             const rhi::StorageBuffer* poses = s.particles->buffer(group.records);
@@ -944,7 +1074,7 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
                 s.note("a prop's buffers are missing");
                 return false;
             }
-            const rhi::StorageBuffer* vertex_buffers[] = {poses, poses, poses, vertices, indices};
+            const rhi::StorageBuffer* vertex_buffers[] = {poses, poses, poses, vertices, indices, poses};
             const std::array<rhi::DrawBatch, 1U> batches{
                 rhi::DrawBatch{uploaded.index_count, static_cast<core::u32>(group.props.size())}};
             rhi::PulledDraw draw{};
@@ -960,6 +1090,80 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
             rhi::Texture& target = motion ? *targets.velocity : *targets.color;
             if (!commands.draw_pulled(target, targets.clear, *targets.depth, targets.depth_clear, draw)) {
                 s.note(motion ? "a prop motion draw was refused" : "a prop draw was refused");
+                return false;
+            }
+            first = false;
+        }
+    }
+    // The grid volumes next, raymarched, so the particles draw over the
+    // smoke as they do in the reference renderer. A volume writes no motion:
+    // smoke drifts within its box, which does not move.
+    if (!motion && !i.effect.volumes.empty()) {
+        VolumeConstants volume{};
+        volume.world = object_to_world.m;
+        volume.inverse = scene::invert_affine(object_to_world).m;
+        // The eye from the view matrix (its rows are the camera's axes, its
+        // last column where the origin lands): eye = -R^T t. A projection
+        // whose w depends on depth fans its rays from the eye; one that does
+        // not runs them along the forward axis.
+        for (core::u32 column = 0U; column < 3U; ++column) {
+            float eye = 0.0F;
+            for (core::u32 row = 0U; row < 3U; ++row) {
+                eye -= view.view.at(row, column) * view.view.at(row, 3U);
+            }
+            volume.eye[column] = eye;
+        }
+        volume.eye[3] = view.projection.at(3U, 2U) != 0.0F ? 1.0F : 0.0F;
+        volume.camera_forward = constants.camera_forward;
+        volume.depth_terms = constants.depth_terms;
+        volume.march = {0.0F, 0.0F, volume_ray_steps, volume_light_steps};
+        volume.sky_ambient = constants.sky_ambient;
+        volume.ground_exposure = constants.ground_exposure;
+        volume.lighting = {constants.lighting[0], constants.lighting[1], 1U, 0U};
+        volume.shadow_view_projection = constants.shadow_view_projection;
+        volume.shadow_texel_depth = constants.shadow_texel_depth;
+        volume.shadow_bias = {shadow_bias, 0.0F, 0.0F, 0.0F};
+        VolumeViewConstants box{};
+        box.view_projection = view.view_projection.m;
+        box.world = object_to_world.m;
+        const std::array<rhi::SampledTexture, sprite_texture_slots> sampled =
+            sampled_textures(nullptr, targets.scene_depth, nullptr);
+        for (std::size_t v = 0U; v < i.effect.volumes.size(); ++v) {
+            const ajfx::Volume& grid = i.effect.volumes[v];
+            const ajfx::gpu::VolumeBuffers cells = i.simulation->volume_buffers(v);
+            const rhi::StorageBuffer* buffer = s.particles->buffer(cells.buffer);
+            if (buffer == nullptr) {
+                s.note("a grid volume's cells are missing");
+                return false;
+            }
+            volume.grid_origin = {cells.origin.x, cells.origin.y, cells.origin.z, cells.cell_size};
+            volume.grid_cells = {cells.nx, cells.ny, cells.nz, cells.cells_at};
+            volume.march[0] = grid.extinction;
+            volume.march[1] = grid.albedo;
+            volume.color = {grid.color.x, grid.color.y, grid.color.z, 1.0F};
+            box.box_origin = {cells.origin.x, cells.origin.y, cells.origin.z, 0.0F};
+            box.box_size = {static_cast<float>(cells.nx) * cells.cell_size,
+                            static_cast<float>(cells.ny) * cells.cell_size,
+                            static_cast<float>(cells.nz) * cells.cell_size, 0.0F};
+            // The scene's lights, or the cells standing in where there are
+            // none (the count says not to read them).
+            const rhi::StorageBuffer* fragment_buffers[] = {buffer,
+                                                            scene_lights != nullptr ? scene_lights : buffer};
+            const std::array<rhi::DrawBatch, 1U> batches{rhi::DrawBatch{36U, 1U}};
+            rhi::PulledDraw draw{};
+            draw.pipeline = &s.volume;
+            draw.fragment_buffers = fragment_buffers;
+            draw.vertex_uniform = std::span<const core::u8>{reinterpret_cast<const core::u8*>(&box), sizeof(box)};
+            draw.fragment_uniform =
+                std::span<const core::u8>{reinterpret_cast<const core::u8*>(&volume), sizeof(volume)};
+            draw.fragment_textures = sampled;
+            draw.batches = batches;
+            draw.load = !first || targets.load;
+            draw.store_depth = true;
+            draw.viewport = targets.viewport;
+            draw.raster_viewport = targets.raster_viewport;
+            if (!commands.draw_pulled(*targets.color, targets.clear, *targets.depth, targets.depth_clear, draw)) {
+                s.note("a grid volume draw was refused");
                 return false;
             }
             first = false;
@@ -992,10 +1196,15 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         constants.motion = {targets.motion_valid ? targets.motion_seconds : 0.0F, targets.motion_valid ? 1.0F : 0.0F,
                             soft ? sprite.soft_distance : 0.0F, 0.0F};
         const std::optional<std::size_t> texture = i.emitter_texture[e];
+        const std::optional<std::size_t> lightmap = i.emitter_lightmap[e];
         constants.flags = (texture ? flag_textured : 0U) | (sprite.flipbook_blend ? flag_blend_cells : 0U) |
                           (texture && i.textures[*texture].data.color_space == ajfx::ColorSpace::Srgb ? flag_srgb : 0U) |
                           (soft ? flag_soft : 0U) | (sprite.geometry == ajfx::Geometry::Ribbon ? flag_ribbon : 0U) |
-                          (sprite.geometry == ajfx::Geometry::Mesh ? flag_mesh : 0U);
+                          (sprite.geometry == ajfx::Geometry::Mesh ? flag_mesh : 0U) |
+                          (sprite.blend == ajfx::BlendMode::Additive ? flag_additive : 0U);
+        constants.look = {sprite.curvature, sprite.wrap, sprite.ambient, shadow_bias};
+        constants.lighting[2] = static_cast<core::u32>(sprite.lighting);
+        constants.lighting[3] = sprite.shadowed && sprite.lighting != ajfx::Lighting::Unlit ? 1U : 0U;
         const rhi::StorageBuffer* order = i.orders[e].valid() ? s.particles->buffer(i.orders[e]) : records;
         if (order == nullptr) {
             s.note("an emitter's sort order is missing");
@@ -1011,9 +1220,12 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         }
         const std::span<const core::u8> emitter_uniform{reinterpret_cast<const core::u8*>(&constants),
                                                         sizeof(constants)};
-        const std::array<rhi::SampledTexture, 2U> sampled{
-            rhi::SampledTexture{texture ? &i.textures[*texture].texture : &*s.blank, &*s.sampler},
-            rhi::SampledTexture{soft ? targets.scene_depth : &*s.blank, &*s.sampler}};
+        const std::array<rhi::SampledTexture, sprite_texture_slots> sampled =
+            sampled_textures(texture ? &i.textures[*texture].texture : nullptr, soft ? targets.scene_depth : nullptr,
+                             lightmap ? &i.textures[*lightmap].texture : nullptr);
+        // The scene's lights ride in the sixth vertex slot; with none, the
+        // records stand in and the count says not to read them.
+        const rhi::StorageBuffer* lights = scene_lights != nullptr ? scene_lights : records;
 
         const std::optional<ParticleInstance::State::Mesh>& mesh = i.meshes[e];
         // An emitter whose body kinds name models of their own draws a group
@@ -1037,7 +1249,7 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
                     s.note("a mesh group's buffers are missing");
                     return false;
                 }
-                const rhi::StorageBuffer* group_buffers[] = {records, ordered, counters, vertices, indices};
+                const rhi::StorageBuffer* group_buffers[] = {records, ordered, counters, vertices, indices, lights};
                 const std::array<rhi::DrawBatch, 1U> group_batches{rhi::DrawBatch{model.index_count, group.count}};
                 // The kind's own size scale is this draw's, so each group
                 // carries the emitter's constants with its own scale in them.
@@ -1075,7 +1287,7 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
             s.note("an emitter's mesh buffers are missing");
             return false;
         }
-        const rhi::StorageBuffer* vertex_buffers[] = {records, order, counters, mesh_vertices, mesh_indices};
+        const rhi::StorageBuffer* vertex_buffers[] = {records, order, counters, mesh_vertices, mesh_indices, lights};
         // The counts come from the simulation; this batch only carries them.
         const std::array<rhi::DrawBatch, 1U> batches{rhi::DrawBatch{6U, 1U}};
         rhi::PulledDraw draw{};

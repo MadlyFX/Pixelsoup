@@ -6,6 +6,13 @@
 // an untextured one is a soft disc. A ribbon emitter draws instead one strip
 // through its live particles in birth order: instance i is the segment from
 // particle i to particle i + 1.
+//
+// Lighting (SpriteRenderer::lighting): light reaches a particle through six
+// directions of its own frame (right, left, up, down, towards the camera,
+// away from it). The vertex stage sums what the scene's light gives each
+// direction, the pixel stage weighs them by a normal (lit: rounded from the
+// quad, or the mesh's own) or by six-way lightmaps. The reference scene is
+// one directional light and a sky/ground hemisphere, in sprite_camera.
 
 cbuffer AjfxSprite : register(b0, space1) {
     uint sprite_stride;
@@ -21,14 +28,17 @@ cbuffer AjfxSprite : register(b0, space1) {
     uint sprite_age;
     uint sprite_lifetime;
     uint sprite_flipbook;      // columns in the low 16 bits, rows in the high
-    uint sprite_flags;         // 1: textured, 2: cross-fade flipbook cells
+    uint sprite_flags;         // 1: textured, 2: cross-fade flipbook cells; bits 4-5 lighting
+                               // (0 unlit, 1 lit, 2 six-way); bits 8 up the emitter's index
     uint sprite_geometry;      // 0 sprites, 1 one ribbon through the particles, 2 a mesh each
     uint sprite_orientation;   // a mesh particle's quaternion, when it has one
 };
 
 RWByteAddressBuffer sprite_particles : register(u0);
 // view_projection as four rows (clip = M * position), then the camera's
-// right, up and forward axes, each padded to four floats.
+// right, up and forward axes, each padded to four floats; then the scene's
+// light: the direction it travels, its colour, the sky colour and the
+// ground colour, each padded to four floats.
 RWByteAddressBuffer sprite_camera : register(u1);
 // Drawing order from the depth sort, when sprite_sorted is set.
 RWByteAddressBuffer sprite_order : register(u2);
@@ -48,7 +58,11 @@ RWByteAddressBuffer sprite_models : register(u6);
 // triangle list's indices.
 RWByteAddressBuffer sprite_mesh_vertices : register(u4);
 RWByteAddressBuffer sprite_mesh_indices : register(u5);
+// Each emitter's look, four floats: curvature, wrap, ambient, unused.
+RWByteAddressBuffer sprite_looks : register(u7);
 Texture2D<float4> sprite_texture : register(t0);
+// The second six-way map: light from the left, from below and from behind.
+Texture2D<float4> sprite_lightmap : register(t1);
 SamplerState sprite_sampler : register(s0);
 
 static const uint sprite_absent = 0xffffffffu;
@@ -62,8 +76,44 @@ struct SpriteVertex {
     float2 uv : TEXCOORD0;      // the quad's corner, -1 to 1
     float4 cells : TEXCOORD1;   // this flipbook cell's texture coordinates, then the next's
     float blend : TEXCOORD2;    // how far into the next cell
+    // Light arriving from the particle's right, left, up, down, front
+    // (towards the camera) and behind; zero when unlit.
+    float3 radiance[6] : TEXCOORD3;
+    // A mesh vertex's normal in the sprite frame; a sprite rounds its own.
+    float3 normal : TEXCOORD9;
     float4 color : COLOR0;
 };
+
+float4 sprite_camera_row(uint row) {
+    return asfloat(sprite_camera.Load4(row * 16u));
+}
+
+uint sprite_lighting() {
+    return (sprite_flags >> 4u) & 3u;
+}
+
+float3 sprite_look() {
+    return asfloat(sprite_looks.Load3((sprite_flags >> 8u) * 16u));
+}
+
+// What the scene's light gives each of the six directions of a frame with
+// axes `right`, `up` and `front` (towards the camera): the directional light
+// wrapped past the terminator by `wrap`, and the hemisphere by `ambient`.
+void sprite_radiance(float3 right, float3 up, float3 front, out float3 radiance[6]) {
+    const float3 look = sprite_look();
+    const float wrap = look.y;
+    const float ambient = look.z;
+    const float3 to_light = -normalize(sprite_camera_row(7u).xyz);
+    const float3 color = sprite_camera_row(8u).xyz;
+    const float3 sky = sprite_camera_row(9u).xyz;
+    const float3 ground = sprite_camera_row(10u).xyz;
+    const float3 directions[6] = {right, -right, up, -up, front, -front};
+    [unroll] for (uint i = 0u; i < 6u; ++i) {
+        const float facing = dot(to_light, directions[i]);
+        radiance[i] = color * saturate((facing + wrap) / (1.0f + wrap)) +
+                      lerp(ground, sky, directions[i].y * 0.5f + 0.5f) * ambient;
+    }
+}
 
 // The flipbook cells a particle shows: its life split evenly over the
 // cells, left to right, top to bottom. Age is simulation state, so every
@@ -86,10 +136,6 @@ void sprite_flipbook_cells(uint base, float2 corner, out float4 cells, out float
     blend = (sprite_flags & 2u) != 0u ? saturate(at - whole) : 0.0f;
 }
 
-float4 sprite_camera_row(uint row) {
-    return asfloat(sprite_camera.Load4(row * 16u));
-}
-
 float3 sprite_particle_position(uint record) {
     return asfloat(sprite_particles.Load3(record * sprite_stride + sprite_position));
 }
@@ -99,15 +145,10 @@ float3 sprite_particle_position(uint record) {
 // at that end, as the camera sees it; the last instance has no next particle
 // and draws nothing.
 SpriteVertex sprite_ribbon_vertex(uint vertex, uint instance) {
-    SpriteVertex output;
+    SpriteVertex output = (SpriteVertex)0;
     uint alive = sprite_counters.Load(0u);
     float2 corner = sprite_corners[vertex];
     if (instance + 1u >= alive) {
-        output.position = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        output.uv = float2(0.0f, 0.0f);
-        output.cells = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        output.blend = 0.0f;
-        output.color = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return output;
     }
     uint end = instance + (corner.x > 0.0f ? 1u : 0u);
@@ -155,12 +196,7 @@ SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
     float kind_scale = asfloat(sprite_models.Load(16u + kind * 28u));
     float4 kind_tint = asfloat(sprite_models.Load4(20u + kind * 28u));
     if (vertex >= index_count) {
-        SpriteVertex folded;
-        folded.position = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        folded.uv = float2(0.0f, 0.0f);
-        folded.cells = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        folded.blend = 0.0f;
-        folded.color = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        SpriteVertex folded = (SpriteVertex)0;
         return folded;
     }
     float3 position = asfloat(sprite_particles.Load3(base + sprite_position));
@@ -207,15 +243,27 @@ SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
     }
     float4 world = float4(position + (ax * local.x + ay * local.y + az * local.z) * (size * kind_scale), 1.0f);
     float3 n = normalize(ax * normal.x + ay * normal.y + az * normal.z);
-    float shade = 0.35f + 0.65f * saturate(dot(n, -sprite_camera_row(6u).xyz));
-    SpriteVertex output;
+    SpriteVertex output = (SpriteVertex)0;
     output.position = float4(dot(sprite_camera_row(0u), world), dot(sprite_camera_row(1u), world),
                              dot(sprite_camera_row(2u), world), dot(sprite_camera_row(3u), world));
     // Solid (no disc), textured by the mesh's own coordinates.
     output.uv = float2(0.0f, 0.0f);
     output.cells = uv.xyxy;
     output.blend = 0.0f;
-    output.color = float4(color.rgb * shade, color.a);
+    if (sprite_lighting() != 0u) {
+        // Lit by the scene through its own normal, taken into the camera's
+        // frame, where the pixel stage weighs the six directions.
+        const float3 right = sprite_camera_row(4u).xyz;
+        const float3 up = sprite_camera_row(5u).xyz;
+        const float3 front = -sprite_camera_row(6u).xyz;
+        sprite_radiance(right, up, front, output.radiance);
+        output.normal = float3(dot(n, right), dot(n, up), dot(n, front));
+        output.color = color;
+    } else {
+        // Unlit meshes keep a light at the camera, so their shape reads.
+        float shade = 0.35f + 0.65f * saturate(dot(n, -sprite_camera_row(6u).xyz));
+        output.color = float4(color.rgb * shade, color.a);
+    }
     return output;
 }
 
@@ -260,21 +308,67 @@ SpriteVertex sprite_vertex(uint vertex : SV_VertexID, uint instance : SV_Instanc
 
     float2 corner = sprite_corners[vertex];
     float4 world = float4(position + right * (corner.x * extent.x) + up * (corner.y * extent.y), 1.0f);
-    SpriteVertex output;
+    SpriteVertex output = (SpriteVertex)0;
     output.position = float4(dot(sprite_camera_row(0u), world), dot(sprite_camera_row(1u), world),
                              dot(sprite_camera_row(2u), world), dot(sprite_camera_row(3u), world));
     output.uv = corner;
     sprite_flipbook_cells(base, corner, output.cells, output.blend);
+    if (sprite_lighting() != 0u) {
+        // The frame the quad was built in, turned with it, so the rounded
+        // normal and the six-way maps follow the picture.
+        sprite_radiance(normalize(right), normalize(up), -forward, output.radiance);
+    }
     output.color = color;
     return output;
 }
 
-// The texture times the particle colour, or a soft disc. Output is
-// premultiplied for the backend's blend equations.
+// The light a pixel of a lit particle receives: the six directions weighed
+// by a normal (a sprite's, rounded from its corner by the look's curvature;
+// a mesh's own) or by the six-way maps' texels. One for an unlit particle.
+float3 sprite_light(SpriteVertex input) {
+    const uint mode = sprite_lighting();
+    if (mode == 0u) {
+        return float3(1.0f, 1.0f, 1.0f);
+    }
+    float weights[6];
+    if (mode == 2u) {
+        const float3 a = lerp(sprite_texture.Sample(sprite_sampler, input.cells.xy),
+                              sprite_texture.Sample(sprite_sampler, input.cells.zw), input.blend).rgb;
+        const float3 b = lerp(sprite_lightmap.Sample(sprite_sampler, input.cells.xy),
+                              sprite_lightmap.Sample(sprite_sampler, input.cells.zw), input.blend).rgb;
+        weights[0] = a.r; weights[1] = b.r;
+        weights[2] = a.g; weights[3] = b.g;
+        weights[4] = a.b; weights[5] = b.b;
+    } else {
+        float3 n;
+        if (sprite_geometry == 2u) {
+            n = normalize(input.normal);
+        } else {
+            const float2 turned = input.uv * sprite_look().x;
+            n = normalize(float3(turned, sqrt(saturate(1.0f - dot(turned, turned)))));
+        }
+        weights[0] = max(n.x, 0.0f); weights[1] = max(-n.x, 0.0f);
+        weights[2] = max(n.y, 0.0f); weights[3] = max(-n.y, 0.0f);
+        weights[4] = max(n.z, 0.0f); weights[5] = max(-n.z, 0.0f);
+    }
+    float3 light = float3(0.0f, 0.0f, 0.0f);
+    [unroll] for (uint i = 0u; i < 6u; ++i) {
+        light += weights[i] * input.radiance[i];
+    }
+    return light;
+}
+
+// The texture times the particle colour, or a soft disc, times the light
+// the particle receives. Output is premultiplied for the backend's blend
+// equations. Six-way maps are light, not colour: only their alpha covers.
 float4 sprite_pixel(SpriteVertex input) : SV_Target {
+    input.color.rgb *= sprite_light(input);
     if ((sprite_flags & 1u) != 0u) {
         float4 texel = lerp(sprite_texture.Sample(sprite_sampler, input.cells.xy),
                             sprite_texture.Sample(sprite_sampler, input.cells.zw), input.blend);
+        if (sprite_lighting() == 2u) {
+            texel.rgb = float3(1.0f, 1.0f, 1.0f);
+        }
         if (sprite_premultiplied != 0u) {
             return input.color * float4(texel.rgb * texel.a, texel.a);
         }

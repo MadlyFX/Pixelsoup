@@ -46,7 +46,7 @@ namespace ajfx {
 
 // Version of the saved simulation state (write_state) this library reads and
 // writes.
-inline constexpr std::uint32_t state_format_version = 2U;
+inline constexpr std::uint32_t state_format_version = 3U;
 // Version of the cache file this library reads and writes.
 inline constexpr std::uint32_t cache_format_version = 2U;
 
@@ -61,8 +61,9 @@ inline constexpr std::uint32_t cache_format_version = 2U;
 // geometry and mesh), the effect's simulation rate, the declarations of the
 // bake-time parameters it reads, the contents of the meshes and fields it
 // names (found in `meshes` and `fields`) and, for an emitter that collides
-// with another's bodies or bears particles from them (SpawnFromContacts,
-// SpawnFromBodies), that emitter's digest too. Its looks -- texture,
+// with another's bodies, bears particles from them (SpawnFromContacts,
+// SpawnFromBodies) or sheds from its particles (SpawnFromParticles), that
+// emitter's digest too. Its looks -- texture,
 // blending, lights, draw inputs -- are not in it, nor is any other emitter.
 [[nodiscard]] std::uint64_t emitter_digest(const Effect& effect, std::size_t index, const MeshSet& meshes = {},
                                            const FieldSet& fields = {});

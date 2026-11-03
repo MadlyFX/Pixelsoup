@@ -23,6 +23,16 @@ implemented behavior and limitations, and the
 The scene architecture is not yet complete: continuous population coupling,
 cache-backed preview and captured actions are pending.
 
+Studio's planned direction is an independent professional creative application,
+with its own visual identity, workspace and interaction model. Matching the
+media server's UI or using its framework is not a requirement. The
+[Studio design](../docs/studio-ui-architecture.md#product-direction-and-quality-bar)
+defines that direction; the
+[delivery plan](../next-steps-plan.md#workspace-and-application-design)
+puts workflow and workspace prototypes before the UI technology decision.
+The renderer, toolkit and build instructions below describe today's application;
+no replacement framework has been selected or implemented.
+
 ## How a scene compiles
 
 A scene is lowered to the block compiler's layers (`lower_scene`), one per

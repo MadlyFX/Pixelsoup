@@ -300,6 +300,7 @@ const std::vector<RawKindDef>& raw_kinds() {
         {SpawnBurst::kind, "Spawn burst", "spawn", make_module<SpawnModule, SpawnBurst>},
         {SpawnFromContacts::kind, "Spawn from contacts", "spawn", make_module<SpawnModule, SpawnFromContacts>},
         {SpawnFromBodies::kind, "Spawn from bodies", "spawn", make_module<SpawnModule, SpawnFromBodies>},
+        {SpawnFromParticles::kind, "Spawn from particles", "spawn", make_module<SpawnModule, SpawnFromParticles>},
         {Lifetime::kind, "Lifetime", "init", make_module<InitModule, Lifetime>},
         {ShapeLocation::kind, "Shape location", "init", make_module<InitModule, ShapeLocation>},
         {Velocity::kind, "Velocity", "init", make_module<InitModule, Velocity>},

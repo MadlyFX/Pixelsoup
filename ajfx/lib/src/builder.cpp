@@ -97,6 +97,11 @@ EffectBuilder& EffectBuilder::blast(Blast blast) {
     return *this;
 }
 
+EffectBuilder& EffectBuilder::volume(Volume volume) {
+    effect_.volumes.push_back(std::move(volume));
+    return *this;
+}
+
 EmitterBuilder& EffectBuilder::emitter(std::string name) {
     for (EmitterBuilder& emitter : emitters_) {
         if (emitter.emitter().name == name) {

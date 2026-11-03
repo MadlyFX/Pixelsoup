@@ -270,7 +270,55 @@ struct SpawnFromBodies final {
     friend bool operator==(const SpawnFromBodies&, const SpawnFromBodies&) = default;
 };
 
-using SpawnModule = std::variant<SpawnRate, SpawnBurst, SpawnPile, SpawnFromContacts, SpawnFromBodies>;
+// Particles shed by another emitter's moving particles: smoke trailing an
+// ember, sparks off a comet. `emitter` names a plain particle emitter (one
+// with rigid physics has bodies, which SpawnFromBodies sheds from); every
+// step each of its live particles, in its own order, that is in the
+// `particles` scope (its sources are the named emitter's; it has no kinds)
+// and moves at `min_speed` or faster sheds particles.
+// - **How many:** `rate` plus `per_speed` for every unit a second of the
+//   particle's speed, per second, rounded up or down by a hash of the
+//   particle and the step, so a still particle sheds nothing and a fast one
+//   a dense trail. At most `max_per_step` a step in all, taking particles
+//   in order.
+// - **Where:** along the step's stretch of the particle's path, each at the
+//   age it reached by the end of the step, so a trail is continuous at any
+//   speed.
+// - **How they start:** with `inherit` of the particle's velocity, then set
+//   up by the init modules as any newborn (a ShapeLocation offsets, a
+//   Velocity adds). A particle emitter only.
+// - **Order:** the named emitter steps before this one, so what it sheds
+//   from is where this step left the particles, newborns included. An
+//   emitter may not shed from itself, and a chain of emitters shedding from
+//   one another may not close (validation refuses both). Within a step these
+//   births come after every other spawn module's, in stack order among
+//   themselves.
+struct SpawnFromParticles final {
+    static constexpr std::string_view kind = "spawn_from_particles";
+    ModuleId id{};
+    std::string emitter;
+    float min_speed{0.5F};
+    float rate{0.0F};
+    float per_speed{10.0F};
+    std::uint32_t max_per_step{64U};
+    float inherit{0.0F};
+    Scope particles;
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("emitter", self.emitter);
+        visit("min_speed", self.min_speed);
+        visit("rate", self.rate);
+        visit("per_speed", self.per_speed);
+        visit("max_per_step", self.max_per_step);
+        visit("inherit", self.inherit);
+        visit("particles", self.particles);
+    }
+    friend bool operator==(const SpawnFromParticles&, const SpawnFromParticles&) = default;
+};
+
+using SpawnModule =
+    std::variant<SpawnRate, SpawnBurst, SpawnPile, SpawnFromContacts, SpawnFromBodies, SpawnFromParticles>;
 
 // The body kind a spawn module's newborns are: its `body`, or 0 for a module
 // that has none (it bears particles, not bodies).
@@ -499,10 +547,11 @@ struct CurveKey final {
 // ---------------------------------------------------------------- update
 //
 // Forces (gravity, drag, curl noise, vortex, attractor, converge, shockwave,
-// wake) change
+// wake, volume advect) change
 // velocity and run first, in stack order. Position is then integrated. Turning (rigid
-// body), constraints (the colliders) and appearance (colour and size over
-// life) run after, in stack order.
+// body), constraints (the colliders), deposits into grid volumes (volume
+// source) and appearance (colour and size over life) run after, in stack
+// order.
 //
 // Every force acts on each particle times a factor picked for that particle
 // between `scale_min` and `scale_max`, once, so it keeps it for life: some
@@ -586,6 +635,94 @@ struct Blast final {
 // Blasts one effect may list.
 inline constexpr std::size_t max_blasts = 64U;
 
+// A grid volume: a dense box of cells the effect lists (Effect::volumes,
+// EffectBuilder::volume) that particles feed (VolumeSource) and are carried
+// by (VolumeAdvect). It is an Eulerian smoke grid, stepped once per
+// simulation step, holding per cell a density, a temperature and a velocity,
+// all three collocated at the cell's centre (no staggered faces). The grid
+// stands at `origin` and spans nx by ny by nz cells of `cell_size`.
+// - **Each step, in this order:** the step's deposits are injected;
+//   buoyancy lifts by `buoyancy` times the temperature and sinks by `weight`
+//   times the density (along +Y and -Y); vorticity confinement of
+//   `vorticity` (0 is off) sharpens the eddies; velocity and both scalars
+//   are advected semi-Lagrangially by the velocity; the velocity is made
+//   divergence-free by `pressure_iterations` Jacobi iterations from zero
+//   pressure (walls all round); then each field loses its dissipation of
+//   itself per second (as Drag loses velocity: divided by 1 + k dt).
+// - **Exact:** the arithmetic is fixed, and the GPU kernels run it
+//   operation for operation as the CPU reference does, so a grid stepped on
+//   either is the same grid, and a seek lands on the grid stepping would
+//   have reached. Deposits are summed as fixed-point integers (see
+//   VolumeSource), so their sum does not depend on the order particles are
+//   taken in.
+// - **Budget:** at most max_volume_size cells along any axis and
+//   max_volume_cells in all, refused with the memory a larger grid would
+//   need. The pressure solve is bounded by max_volume_pressure_iterations.
+// - **Drawn:** the reference renderer raymarches the density under the
+//   scene's light: `extinction` is how much light a unit of density takes
+//   per unit of length, `albedo` the share of it scattered towards the
+//   camera, in `color`. The simulation never reads those three.
+struct Volume final {
+    std::string name;
+    Vec3 origin{};
+    float cell_size{0.1F};
+    std::uint32_t nx{16U};
+    std::uint32_t ny{16U};
+    std::uint32_t nz{16U};
+    float buoyancy{1.0F};
+    float weight{0.0F};
+    float vorticity{0.0F};
+    std::uint32_t pressure_iterations{20U};
+    float density_dissipation{0.0F};
+    float temperature_dissipation{0.0F};
+    float velocity_dissipation{0.0F};
+    float extinction{1.0F};
+    float albedo{0.8F};
+    Vec3 color{1.0F, 1.0F, 1.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("name", self.name);
+        visit("origin", self.origin);
+        visit("cell_size", self.cell_size);
+        visit("nx", self.nx);
+        visit("ny", self.ny);
+        visit("nz", self.nz);
+        visit("buoyancy", self.buoyancy);
+        visit("weight", self.weight);
+        visit("vorticity", self.vorticity);
+        visit("pressure_iterations", self.pressure_iterations);
+        visit("density_dissipation", self.density_dissipation);
+        visit("temperature_dissipation", self.temperature_dissipation);
+        visit("velocity_dissipation", self.velocity_dissipation);
+        visit("extinction", self.extinction);
+        visit("albedo", self.albedo);
+        visit("color", self.color);
+    }
+    friend bool operator==(const Volume&, const Volume&) = default;
+};
+
+// Volumes one effect may list, cells along one axis of a grid, cells in one
+// grid in all (a grid's state is 20 bytes a cell on the CPU; the GPU keeps
+// about five times that for its working buffers), and Jacobi iterations one
+// pressure solve may take.
+inline constexpr std::size_t max_volumes = 16U;
+inline constexpr std::uint32_t max_volume_size = 256U;
+inline constexpr std::uint64_t max_volume_cells = 1ULL << 20U;
+inline constexpr std::uint32_t max_volume_pressure_iterations = 256U;
+
+// How many cells a grid has.
+[[nodiscard]] constexpr std::uint64_t volume_cells(const Volume& volume) noexcept {
+    return std::uint64_t{volume.nx} * volume.ny * volume.nz;
+}
+
+// A deposit is quantised to this before it is summed: deposits are added as
+// 64-bit fixed-point integers (one unit is 2^-20), so the sum over a cell's
+// particles is exact and the same whatever order they are taken in, on the
+// CPU and the GPU alike. A particle may deposit up to 2047 units of anything
+// in one step; more is clamped.
+inline constexpr float volume_deposit_quantum = 1.0F / 1048576.0F;
+
 // What a blast does to whatever stands at `at`: the way it is thrown (out
 // from the centre; straight up at the centre itself) and the speed it is
 // given there. Nothing beyond the radius.
@@ -654,6 +791,61 @@ struct CurlNoise final {
         visit("scale_max", self.scale_max);
     }
     friend bool operator==(const CurlNoise&, const CurlNoise&) = default;
+};
+
+// Carries the emitter's particles along with a grid volume's velocity
+// (Effect::volumes, named by `volume`): smoke riding the air it heated,
+// embers drawn up a plume. Each step a particle inside the grid takes
+// `strength` times the step (at most all) of the way to the velocity the grid
+// samples trilinearly at it, times its own factor between `scale_min` and
+// `scale_max`, as every force takes one. Outside the grid nothing acts. A
+// force, so it runs before integration; it reads the grid as the step began,
+// before this step's deposits move it.
+struct VolumeAdvect final {
+    static constexpr std::string_view kind = "volume_advect";
+    ModuleId id{};
+    std::string volume;
+    FloatInput strength{10.0F};
+    FloatInput scale_min{1.0F};
+    FloatInput scale_max{1.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("volume", self.volume);
+        visit("strength", self.strength);
+        visit("scale_min", self.scale_min);
+        visit("scale_max", self.scale_max);
+    }
+    friend bool operator==(const VolumeAdvect&, const VolumeAdvect&) = default;
+};
+
+// Feeds a grid volume (Effect::volumes, named by `volume`) from the emitter's
+// particles: each step every particle inside the grid deposits, into the
+// cell it is in, `density` and `temperature` per second, and `velocity` of
+// its own velocity per second as momentum, all three times `over_life` at
+// its age. Runs after integration, in stack order, from where the step left
+// the particle; the grid takes the step's deposits when it steps, after
+// every emitter. Each deposit is quantised (volume_deposit_quantum) and the
+// cell's deposits are summed as integers, so the sum is exact and does not
+// depend on the order the particles are taken in.
+struct VolumeSource final {
+    static constexpr std::string_view kind = "volume_source";
+    ModuleId id{};
+    std::string volume;
+    FloatInput density{1.0F};
+    FloatInput temperature{0.0F};
+    FloatInput velocity{0.0F};
+    std::vector<CurveKey> over_life{{0.0F, 1.0F}, {1.0F, 1.0F}};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("volume", self.volume);
+        visit("density", self.density);
+        visit("temperature", self.temperature);
+        visit("velocity", self.velocity);
+        visit("over_life", self.over_life);
+    }
+    friend bool operator==(const VolumeSource&, const VolumeSource&) = default;
 };
 
 // Acceleration around an axis through `center`, counter-clockwise looking
@@ -1360,7 +1552,8 @@ struct Heat final {
 
 using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, Converge, PlaneCollision,
                                   SphereCollision, BoxCollision, SdfCollision, BodyCollision, ColorOverLife,
-                                  SizeOverLife, RigidBody, RigidPhysics, Break, Glue, Shockwave, Heat, Wake>;
+                                  SizeOverLife, RigidBody, RigidPhysics, Break, Glue, Shockwave, Heat, Wake,
+                                  VolumeAdvect, VolumeSource>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
@@ -1375,7 +1568,8 @@ using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, C
     return !is_collision(module) && !std::holds_alternative<ColorOverLife>(module) &&
            !std::holds_alternative<SizeOverLife>(module) && !std::holds_alternative<RigidBody>(module) &&
            !std::holds_alternative<RigidPhysics>(module) && !std::holds_alternative<Break>(module) &&
-           !std::holds_alternative<Glue>(module) && !std::holds_alternative<Heat>(module);
+           !std::holds_alternative<Glue>(module) && !std::holds_alternative<Heat>(module) &&
+           !std::holds_alternative<VolumeSource>(module);
 }
 
 // ---------------------------------------------------------------- render
@@ -1402,6 +1596,26 @@ enum class Geometry {
     Sprites,
     Ribbon,
     Mesh,
+};
+
+// How the scene's light reaches an emitter's particles. The sprite's frame
+// is its own: +X right, +Y up, +Z towards the camera.
+enum class Lighting {
+    // The particle's colour as it is: glows, sparks, anything emissive.
+    Unlit,
+    // Lit by the scene's lights as a rounded surface: a sprite takes a
+    // normal that turns from facing the camera at its centre towards its
+    // edge by `curvature`, a mesh keeps its own normals. Light arrives
+    // through six directions (right, left, up, down, front, behind), the
+    // same basis six-way maps use, so the two match in a mixed effect.
+    Lit,
+    // Lit through six-way lightmaps, for smoke and clouds rendered offline:
+    // `texture` holds in RGB how much light each texel takes from the
+    // right, from above and from the front (the camera), and `lightmap`
+    // holds the same from the left, from below and from behind. The
+    // texture's alpha is the coverage; the lightmap's alpha is unused.
+    // Both share the flipbook grid. Sprites only.
+    SixWay,
 };
 
 // How a host should draw the emitter's particles. The CPU reference only
@@ -1433,6 +1647,23 @@ struct SpriteRenderer final {
     // coordinates and is shaded by a light at the camera.
     Geometry geometry{Geometry::Sprites};
     std::string mesh;
+    // The scene's light on the particles (see Lighting). A lit particle is
+    // its colour times the light it receives: with `Lit`, through a normal
+    // that turns from the camera at the centre to `curvature` of the way
+    // round a sphere at the edge (0 flat, 1 a full sphere); `wrap` carries
+    // light past the terminator so a thin puff lit from behind still glows
+    // at its rim (0 stops there, 1 reaches all the way round, at half
+    // strength where the light is square to it); `ambient` scales
+    // the sky and ground hemisphere light it takes; with `shadowed` it
+    // takes the scene's directional shadows. Unlit ignores them all. A host
+    // without a lit scene draws a lit particle under one light at the
+    // camera, as the reference renderer does under its own light.
+    Lighting lighting{Lighting::Unlit};
+    std::string lightmap;
+    float curvature{0.6F};
+    float wrap{0.25F};
+    float ambient{1.0F};
+    bool shadowed{true};
     // Particle lights: point lights in the host's lit scene, carried by some
     // of the emitter's particles. A particle carries one for its whole life
     // or not at all: every light_spacing()-th particle by birth does, so that
@@ -1475,6 +1706,12 @@ struct SpriteRenderer final {
         visit("soft_distance", self.soft_distance);
         visit("geometry", self.geometry);
         visit("mesh", self.mesh);
+        visit("lighting", self.lighting);
+        visit("lightmap", self.lightmap);
+        visit("curvature", self.curvature);
+        visit("wrap", self.wrap);
+        visit("ambient", self.ambient);
+        visit("shadowed", self.shadowed);
         visit("light_count", self.light_count);
         visit("light_intensity_min", self.light_intensity_min);
         visit("light_intensity_max", self.light_intensity_max);
@@ -1506,6 +1743,10 @@ struct EnumNames<BlendMode> {
 template <>
 struct EnumNames<Facing> {
     static constexpr std::string_view names[] = {"camera", "velocity"};
+};
+template <>
+struct EnumNames<Lighting> {
+    static constexpr std::string_view names[] = {"unlit", "lit", "six_way"};
 };
 template <>
 struct EnumNames<Geometry> {

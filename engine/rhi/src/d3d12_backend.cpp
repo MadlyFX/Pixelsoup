@@ -2307,9 +2307,9 @@ core::Result<void*, RhiError> d3d12_create_pipeline(
     desc.DepthStencilState.DepthEnable = depth.enabled;
     desc.DepthStencilState.DepthWriteMask = depth.write
         ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
-    desc.DepthStencilState.DepthFunc = depth.greater
-        ? D3D12_COMPARISON_FUNC_GREATER_EQUAL
-        : D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    desc.DepthStencilState.DepthFunc = !depth.test ? D3D12_COMPARISON_FUNC_ALWAYS
+        : depth.greater ? D3D12_COMPARISON_FUNC_GREATER_EQUAL
+                        : D3D12_COMPARISON_FUNC_LESS_EQUAL;
     desc.DepthStencilState.StencilEnable = FALSE;
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     desc.NumRenderTargets = static_cast<UINT>(target_formats.size());

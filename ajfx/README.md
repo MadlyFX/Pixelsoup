@@ -19,7 +19,8 @@ on nothing there.
 | Runtime | [`lib/`](lib/README.md) | The C++20 library: effect model, CPU reference simulator, `.ajfx` packages, GPU runtime, D3D12 reference backend, rigid physics on Jolt, and the `ajfx_viewer` and `ajfx_player` samples |
 | ajfx Studio | [`studio/`](studio/README.md) | A viewport-centered scene workspace with typed objects, particle systems and shared deterministic physics; packages export as `.ajfx` |
 | Current scene architecture | [`docs/studio-scene-reference.md`](docs/studio-scene-reference.md) | Implemented behavior, validation and current boundaries |
-| Remaining work | [`next-steps-plan.md`](next-steps-plan.md) | The rest of the scene sandbox and its acceptance criteria |
+| Studio design | [`docs/studio-ui-architecture.md`](docs/studio-ui-architecture.md) | Independent product direction, professional workspace and scene authoring model |
+| Remaining work | [`next-steps-plan.md`](next-steps-plan.md) | Workspace design and UI technology decision, then the rest of the scene sandbox |
 
 A `.ajfx` package carries everything an effect needs: emitters and module
 stacks, textures, meshes and distance fields, published parameters, and

@@ -485,6 +485,52 @@ void own_pictures_and_models_go_into_the_package() {
     CHECK(emitter_of(waiting, layer_named(document, "Debris")).renderer.mesh == "slab");
 }
 
+// The Appearance block's light choice reaches the renderer: lit by the
+// scene with its look, six-way maps when a picture from a file has its
+// second map (and plainly lit until it does), and a trail glows whatever
+// it says.
+void the_scenes_light_reaches_the_renderer() {
+    Document document = recipe("explosion");
+    Layer& sparks = document.layers[0];
+    Block& look = block_of(sparks, "appearance");
+    look.set("material", choice("smoke"));
+    look.set("lighting", choice("lit"));
+    look.set("curvature", number(0.3F));
+    look.set("wrap", number(0.7F));
+    look.set("ambient", number(1.5F));
+    look.set("shadowed", toggle(false));
+    {
+        const Compiled compiled = compile(document, Purpose::Export);
+        CHECK(compiled.error.empty());
+        const ajfx::SpriteRenderer& r = emitter_of(compiled, sparks).renderer;
+        CHECK(r.lighting == ajfx::Lighting::Lit && r.lightmap.empty());
+        CHECK(near(r.curvature, 0.3F) && near(r.wrap, 0.7F) && near(r.ambient, 1.5F) && !r.shadowed);
+    }
+    // Six-way maps: the picture from a file and its second map.
+    look.set("lighting", choice("six_way"));
+    look.set("texture", choice("file"));
+    look.set("texture_file", choice("C:/art/puff_rtf.png"));
+    look.set("lightmap_file", choice("C:/art/puff_lbb.png"));
+    {
+        const Compiled compiled = compile(document, Purpose::Export);
+        CHECK(compiled.error.empty() && compiled.requests.size() == 2U);
+        const ajfx::SpriteRenderer& r = emitter_of(compiled, sparks).renderer;
+        CHECK(r.lighting == ajfx::Lighting::SixWay);
+        CHECK(!r.texture.empty() && !r.lightmap.empty() && r.texture != r.lightmap);
+        CHECK(compiled.requests[1].path == "C:/art/puff_lbb.png" && compiled.requests[1].entry == r.lightmap);
+    }
+    // Without the second map, or with a library picture, plainly lit.
+    look.set("lightmap_file", choice(""));
+    CHECK(emitter_of(compile(document, Purpose::Export), sparks).renderer.lighting == ajfx::Lighting::Lit);
+    look.set("lightmap_file", choice("C:/art/puff_lbb.png"));
+    look.set("texture", choice("smoke"));
+    CHECK(emitter_of(compile(document, Purpose::Export), sparks).renderer.lighting == ajfx::Lighting::Lit);
+    // A trail glows.
+    look.set("material", choice("trail"));
+    look.set("lighting", choice("lit"));
+    CHECK(emitter_of(compile(document, Purpose::Export), sparks).renderer.lighting == ajfx::Lighting::Unlit);
+}
+
 void model_colliders_bake_to_distance_fields() {
     const ImportedMesh cube = unit_cube();
     CHECK(closed_mesh(cube));
@@ -568,6 +614,7 @@ void add_compile_tests(std::vector<studio_test::Case>& cases) {
     cases.push_back({"flipbook_cells_fade_out_at_their_edges", flipbook_cells_fade_out_at_their_edges});
     cases.push_back({"the_loop_is_as_long_as_the_effect_plays", the_loop_is_as_long_as_the_effect_plays});
     cases.push_back({"own_pictures_and_models_go_into_the_package", own_pictures_and_models_go_into_the_package});
+    cases.push_back({"the_scenes_light_reaches_the_renderer", the_scenes_light_reaches_the_renderer});
     cases.push_back({"model_colliders_bake_to_distance_fields", model_colliders_bake_to_distance_fields});
 }
 

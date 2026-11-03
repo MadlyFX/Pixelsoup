@@ -345,6 +345,113 @@ void checkpoints_and_reset_reproduce_the_timeline() {
     AJFX_CHECK(bytes(simulation) == straight);
 }
 
+
+// Embers slowed by drag and the smoke they shed while they move: the trail is
+// worked out on the GPU from the embers' records, and must bear the same
+// particles as the reference, which works it out on the CPU. The smoke also
+// has a loose rate, so CPU-scheduled and GPU-shed births share one step.
+Effect embers_and_smoke(bool smoke_first) {
+    EffectBuilder builder{"embers"};
+    const auto embers = [&builder]() {
+        builder.emitter("embers")
+            .capacity(64U)
+            .seed(2U)
+            .spawn(SpawnBurst{.time = 0.0F, .count = 24U})
+            .spawn(SpawnRate{.rate = 6.0F})
+            .init(Lifetime{.min = 6.0F, .max = 6.0F})
+            .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 1.0F, 0.0F}, .radius_min = 0.0F,
+                                .radius_max = 0.2F})
+            .init(Velocity{.direction = Vec3{0.0F, 1.0F, 0.0F}, .speed_min = 3.0F, .speed_max = 4.0F, .spread = 30.0F})
+            .init(InitSize{.min = 0.05F, .max = 0.05F})
+            .update(Drag{.coefficient = 2.0F});
+    };
+    const auto smoke = [&builder]() {
+        builder.emitter("smoke")
+            .capacity(8192U)
+            .seed(7U)
+            .spawn(SpawnRate{.rate = 30.0F})
+            .spawn(SpawnFromParticles{.emitter = "embers", .min_speed = 0.5F, .per_speed = 20.0F, .max_per_step = 64U,
+                                      .inherit = 0.3F})
+            .init(Lifetime{.min = 2.0F, .max = 2.0F})
+            .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 1.0F, 0.0F}, .radius_min = 0.3F,
+                                .radius_max = 0.3F, .only = Scope{.sources = {0U}}})
+            .init(InitSize{.min = 0.1F, .max = 0.1F})
+            .update(Gravity{.acceleration = Vec3{0.0F, 0.3F, 0.0F}});
+    };
+    if (smoke_first) {
+        smoke();
+        embers();
+    } else {
+        embers();
+        smoke();
+    }
+    return builder.build().value();
+}
+
+void trails_shed_the_same_particles_on_the_gpu() {
+    for (const bool smoke_first : {false, true}) {
+        const Effect effect = embers_and_smoke(smoke_first);
+        const std::size_t smoke = smoke_first ? 0U : 1U;
+        gpu::GpuSimulation gpu = make_gpu(effect, 5U);
+        Simulation cpu = make_cpu(effect, 5U);
+        std::uint64_t shed = 0U;
+        for (const std::uint64_t tick : {1U, 2U, 40U, 90U, 200U}) {
+            gpu.advance_to(tick);
+            cpu.advance_to(tick);
+            const EmitterState g = read(gpu, smoke);
+            const EmitterState& c = cpu.emitter(smoke);
+            // Born alike exactly: the same count, the same spawn indices in
+            // the same order, the same ages, the same counts per source.
+            AJFX_CHECK(g.alive() == c.alive() && g.spawned == c.spawned && g.refused == c.refused);
+            AJFX_CHECK(g.spawn_index == c.spawn_index);
+            AJFX_CHECK(g.spawn_counts == c.spawn_counts);
+            std::size_t apart = 0U;
+            std::size_t trailing = 0U;
+            for (std::size_t i = 0U; i < g.alive(); ++i) {
+                trailing += spawn_source(g.spawn_index[i]) == 1U ? 1U : 0U;
+                const Vec3 d = g.position[i] - c.position[i];
+                const Vec3 dv = g.velocity[i] - c.velocity[i];
+                if (std::fabs(g.age[i] - c.age[i]) > 1.0e-6F || std::sqrt(dot(d, d)) > 1.0e-4F ||
+                    std::sqrt(dot(dv, dv)) > 1.0e-4F) {
+                    ++apart;
+                }
+            }
+            std::cout << "  step " << tick << (smoke_first ? " (smoke listed first)" : "") << ": " << c.alive()
+                      << " alive, " << trailing << " trailing, " << apart << " apart from the reference\n";
+            AJFX_CHECK(apart == 0U);
+            shed = std::max(shed, c.spawn_counts[1]);
+        }
+        AJFX_CHECK(shed > 100U);
+        AJFX_CHECK(read(gpu, 1U - smoke).alive() > 24U);
+    }
+}
+
+void trails_rerun_and_restore_bit_identically_on_the_gpu() {
+    const Effect effect = embers_and_smoke(false);
+    gpu::GpuSimulation a = make_gpu(effect, 1U);
+    gpu::GpuSimulation b = make_gpu(effect, 1U);
+    a.advance_to(100U);
+    b.advance_to(100U);
+    Result<gpu::GpuCheckpoint> checkpoint = a.save();
+    AJFX_CHECK(checkpoint.ok());
+    a.advance_to(180U);
+    b.advance_to(180U);
+    const std::vector<std::uint8_t> straight = bytes(a, 1U);
+    AJFX_CHECK(!straight.empty() && straight == bytes(b, 1U));
+    const EmitterState at_180 = read(a, 1U);
+    // Back to the checkpoint and on again: the shed counts come back with it.
+    a.restore(checkpoint.value());
+    AJFX_CHECK(a.tick() == 100U);
+    a.advance_to(180U);
+    AJFX_CHECK(bytes(a, 1U) == straight);
+    const EmitterState again = read(a, 1U);
+    AJFX_CHECK(again.spawned == at_180.spawned && again.spawn_counts == at_180.spawn_counts);
+    a.reset();
+    AJFX_CHECK(read(a, 1U).alive() == 0U && read(a, 1U).spawned == 0U);
+    a.advance_to(180U);
+    AJFX_CHECK(bytes(a, 1U) == straight);
+}
+
 void compaction_spans_many_blocks() {
     // Tens of thousands of particles with scattered lifetimes: deaths land in
     // every 4096-particle block, and survivors must keep birth order.
@@ -558,6 +665,136 @@ void shockwaves_match_the_reference() {
     AJFX_CHECK(bytes(a) == straight);
 }
 
+// A fire feeding a grid of air with smoke, heat and a little of its rise,
+// and motes above it carried by the air: the volume tests' plume. Every
+// module is one the GPU reproduces to the bit (boxes, straight velocities,
+// flat curves), so with the confinement off the grids may be compared
+// exactly; with it on, its square roots round as the GPU rounds them.
+Effect plume(float vorticity) {
+    EffectBuilder builder{"plume"};
+    builder.volume(Volume{.name = "air",
+                          .origin = Vec3{-1.0F, 0.0F, -1.0F},
+                          .cell_size = 0.125F,
+                          .nx = 16U,
+                          .ny = 24U,
+                          .nz = 16U,
+                          .buoyancy = 2.0F,
+                          .weight = 0.1F,
+                          .vorticity = vorticity,
+                          .pressure_iterations = 12U,
+                          .density_dissipation = 0.2F,
+                          .temperature_dissipation = 0.5F,
+                          .velocity_dissipation = 0.1F});
+    builder.emitter("fire")
+        .capacity(2000U)
+        .seed(3U)
+        .spawn(SpawnRate{.rate = 300.0F})
+        .init(Lifetime{.min = 0.4F, .max = 0.8F})
+        .init(ShapeLocation{.shape = Shape::Box, .center = Vec3{0.0F, 0.2F, 0.0F}, .size = Vec3{0.5F, 0.1F, 0.5F}})
+        .init(Velocity{.direction = Vec3{0.0F, 1.0F, 0.0F}, .speed_min = 0.5F, .speed_max = 1.0F})
+        .update(VolumeSource{.volume = "air", .density = 4.0F, .temperature = 3.0F, .velocity = 0.5F});
+    builder.emitter("motes")
+        .capacity(512U)
+        .seed(5U)
+        .spawn(SpawnBurst{.count = 256U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Box, .center = Vec3{0.0F, 1.5F, 0.0F}, .size = Vec3{1.6F, 1.0F, 1.6F}})
+        .update(VolumeAdvect{.volume = "air", .strength = 6.0F, .scale_min = 0.5F, .scale_max = 1.5F});
+    return builder.build().value();
+}
+
+VolumeState read_grid(gpu::GpuSimulation& simulation, std::size_t volume = 0U) {
+    Result<VolumeState> grid = simulation.read_volume(volume);
+    if (!grid) {
+        std::cout << grid.error().message << '\n';
+    }
+    AJFX_CHECK(grid.ok());
+    return std::move(grid).value();
+}
+
+// The share of a grid's cells whose every value is within the tolerance.
+float compare_grid(const VolumeState& cpu, const VolumeState& gpu, float tolerance) {
+    AJFX_CHECK(cpu.cells() == gpu.cells() && cpu.nx == gpu.nx && cpu.ny == gpu.ny && cpu.nz == gpu.nz);
+    std::size_t within = 0U;
+    for (std::size_t c = 0U; c < cpu.cells(); ++c) {
+        within += close(cpu.density[c], gpu.density[c], tolerance) &&
+                          close(cpu.temperature[c], gpu.temperature[c], tolerance) &&
+                          close(cpu.velocity[c], gpu.velocity[c], tolerance)
+                      ? 1U
+                      : 0U;
+    }
+    return cpu.cells() == 0U ? 1.0F : static_cast<float>(within) / static_cast<float>(cpu.cells());
+}
+
+void grid_volumes_match_the_reference_exactly() {
+    const Effect effect = plume(0.0F);
+    Simulation cpu = make_cpu(effect, 2U);
+    gpu::GpuSimulation gpu = make_gpu(effect, 2U);
+    for (const std::uint64_t tick : {1U, 30U, 90U, 150U}) {
+        cpu.advance_to(tick);
+        gpu.advance_to(tick);
+        const VolumeState grid = read_grid(gpu);
+        // Bit for bit: the deposits are integer sums, and the step has no
+        // operation the GPU rounds differently.
+        AJFX_CHECK(grid == cpu.volume(0));
+        for (std::size_t e = 0U; e < 2U; ++e) {
+            AJFX_CHECK(compare(cpu.emitter(e), read(gpu, e), 1.0e-3F) == 1.0F);
+        }
+    }
+    float smoke = 0.0F;
+    for (const float d : cpu.volume(0).density) {
+        smoke += d;
+    }
+    AJFX_CHECK(smoke > 1.0F);
+}
+
+void stirred_grid_volumes_match_the_reference_within_tolerance() {
+    const Effect effect = plume(0.6F);
+    Simulation cpu = make_cpu(effect, 2U);
+    gpu::GpuSimulation gpu = make_gpu(effect, 2U);
+    cpu.advance_to(120U);
+    gpu.advance_to(120U);
+    const float within = compare_grid(cpu.volume(0), read_grid(gpu), 1.0e-2F);
+    const float motes = compare(cpu.emitter(1), read(gpu, 1U), 1.0e-2F);
+    std::cout << "  stirred plume: " << within * 100.0F << "% of cells and " << motes * 100.0F
+              << "% of motes within tolerance\n";
+    AJFX_CHECK(within >= 0.98F && motes >= 0.98F);
+}
+
+void grid_volumes_rerun_and_restore_bit_identically() {
+    const Effect effect = plume(0.6F);
+    gpu::GpuSimulation a = make_gpu(effect, 4U);
+    gpu::GpuSimulation b = make_gpu(effect, 4U);
+    a.advance_to(60U);
+    b.advance_to(60U);
+    Result<gpu::GpuCheckpoint> checkpoint = a.save();
+    AJFX_CHECK(checkpoint.ok());
+    a.advance_to(130U);
+    b.advance_to(130U);
+    const VolumeState straight = read_grid(a);
+    AJFX_CHECK(straight == read_grid(b));
+    const std::vector<std::uint8_t> motes = bytes(a, 1U);
+    AJFX_CHECK(!motes.empty() && motes == bytes(b, 1U));
+    // Back to the checkpoint and on again: the grid comes back with it.
+    a.restore(checkpoint.value());
+    AJFX_CHECK(a.tick() == 60U && read_grid(a) != straight);
+    a.advance_to(130U);
+    AJFX_CHECK(read_grid(a) == straight && bytes(a, 1U) == motes);
+    // Reset empties it, and the run from there is the same run.
+    a.reset();
+    const VolumeState empty = read_grid(a);
+    for (const float d : empty.density) {
+        AJFX_CHECK(d == 0.0F);
+    }
+    a.advance_to(130U);
+    AJFX_CHECK(read_grid(a) == straight && bytes(a, 1U) == motes);
+    // A grid a host writes is what the next step carries on from.
+    VolumeState written = empty;
+    written.density[0] = 0.75F;
+    a.write_volume(0U, written);
+    AJFX_CHECK(read_grid(a).density[0] == 0.75F);
+}
+
 int main() {
     // Hardware first, then WARP. AJFX_TEST_WARP=1 forces WARP;
     // AJFX_TEST_DEBUG_LAYER=1 fails any flush the debug layer objects to.
@@ -587,12 +824,18 @@ int main() {
          rolling_turbulence_matches_the_reference_within_tolerance},
         {"reruns_are_bit_identical", reruns_are_bit_identical},
         {"checkpoints_and_reset_reproduce_the_timeline", checkpoints_and_reset_reproduce_the_timeline},
+        {"trails_shed_the_same_particles_on_the_gpu", trails_shed_the_same_particles_on_the_gpu},
+        {"trails_rerun_and_restore_bit_identically_on_the_gpu", trails_rerun_and_restore_bit_identically_on_the_gpu},
         {"compaction_spans_many_blocks", compaction_spans_many_blocks},
         {"buffers_expose_the_live_particles", buffers_expose_the_live_particles},
         {"depth_sort_orders_far_to_near_at_block_edges", depth_sort_orders_far_to_near_at_block_edges},
         {"equal_depths_keep_birth_order", equal_depths_keep_birth_order},
         {"sorting_is_reproducible_and_seek_invariant", sorting_is_reproducible_and_seek_invariant},
         {"only_order_dependent_emitters_sort", only_order_dependent_emitters_sort},
+        {"grid_volumes_match_the_reference_exactly", grid_volumes_match_the_reference_exactly},
+        {"stirred_grid_volumes_match_the_reference_within_tolerance",
+         stirred_grid_volumes_match_the_reference_within_tolerance},
+        {"grid_volumes_rerun_and_restore_bit_identically", grid_volumes_rerun_and_restore_bit_identically},
     };
     const int result = ajfx::test::run(cases);
     g_compiler.reset();

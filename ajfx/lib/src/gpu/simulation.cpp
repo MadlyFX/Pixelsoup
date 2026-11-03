@@ -5,6 +5,7 @@
 #include <ajfx/random.hpp>
 
 #include "../step_inputs.hpp"
+#include "../volume.hpp"
 #include "pack.hpp"
 
 #include <algorithm>
@@ -25,10 +26,32 @@ constexpr std::uint32_t group_size = 256U;
 constexpr std::uint32_t block_size = 4096U;
 constexpr std::uint32_t max_groups_x = 65535U;
 constexpr std::uint64_t counters_bytes = 16U; // alive, compacted, refused, unused
-constexpr std::uint64_t args_bytes = 40U;     // particle groups, block groups, draw
+constexpr std::uint64_t args_bytes = 56U;     // particle groups, block groups, draw, spawn groups
 constexpr std::uint64_t particle_args = 0U;
 constexpr std::uint64_t block_args = 12U;
 constexpr std::uint64_t draw_args = 24U;
+// Spawn groups, written by the shed kernel for an emitter that sheds from
+// particles: only then is the step's birth count known on the GPU alone.
+constexpr std::uint64_t shed_args = 40U;
+
+// One grid volume's region of the volumes buffer, in 32-bit words
+// (shaders/ajfx_volume.hlsl): two cell buffers of five floats a cell, ten
+// words of deposits a cell, then the step's scratch (curl, its size, the
+// divergence and two pressures).
+constexpr std::uint64_t volume_region_words(std::uint64_t cells) {
+    return 27U * cells;
+}
+constexpr std::uint64_t volume_grid_words(std::uint64_t cells) {
+    return 5U * cells;
+}
+
+// One grid volume on the GPU: where its region starts, and which of its two
+// cell buffers holds the grid now.
+struct VolumeGpu final {
+    detail::VolumeStep step;
+    std::uint32_t base{0U};
+    std::uint32_t current{0U};
+};
 
 struct EmitterGpu final {
     Buffer particles[2];
@@ -40,6 +63,12 @@ struct EmitterGpu final {
     Buffer args;
     Pipeline update;
     Pipeline spawn;
+    // Shedding from other emitters' particles (SpawnFromParticles): the
+    // kernel that works those births out, the spawn slots it serves in stack
+    // order, and what it keeps between steps (detail::shed_state_words).
+    Pipeline shed;
+    std::vector<std::uint32_t> shed_slots;
+    Buffer shed_state;
     // The distance fields its colliders use, one after another, and where
     // each starts; the floats wait here until the first step writes them.
     // After them, the bodies its BodyCollision and Wake modules meet, written
@@ -82,16 +111,27 @@ struct GpuCheckpoint::Data final {
         std::uint64_t spawned{0U};
         std::vector<double> rate_carry;
         std::vector<std::uint64_t> spawn_counts;
+        // Invalid for an emitter that sheds from no particles.
+        Buffer shed_state;
     };
     std::vector<Emitter> emitters;
     // The rigid physics emitters' CPU simulation, solver state included.
     std::optional<SimulationState> rigid;
+    // The grid volumes' whole buffer, and which cell buffer each was in.
+    Buffer volumes;
+    std::vector<std::uint32_t> volume_current;
 
     ~Data() {
         for (const Emitter& emitter : emitters) {
             device->destroy_buffer(emitter.particles);
             device->destroy_buffer(emitter.counters);
             device->destroy_buffer(emitter.args);
+            if (emitter.shed_state.valid()) {
+                device->destroy_buffer(emitter.shed_state);
+            }
+        }
+        if (volumes.valid()) {
+            device->destroy_buffer(volumes);
         }
     }
 };
@@ -118,6 +158,9 @@ struct GpuSimulation::State final {
     Pipeline scatter;
     Pipeline finalize;
     std::vector<EmitterGpu> emitters;
+    // The order the emitters step in (step_order), the same as the CPU
+    // reference's: an emitter shedding from another's particles after it.
+    std::vector<std::size_t> order;
     std::vector<ParameterValue> values;
     std::vector<float> scratch;
     std::vector<std::uint32_t> spawn_indices;
@@ -133,6 +176,14 @@ struct GpuSimulation::State final {
     // are written.
     bool body_broadphase{true};
     std::vector<float> body_floats;
+    // The grid volumes: one buffer holding every grid's region
+    // (volume_region_words), the grids in Effect::volumes order, and the
+    // kernels that step them (volume_kernel_names).
+    Buffer volumes;
+    std::uint64_t volume_words{0U};
+    std::vector<VolumeGpu> grids;
+    Pipeline volume_kernels[volume_kernel_count];
+    std::vector<float> volume_floats;
 
     ~State() {
         if (device == nullptr) {
@@ -141,13 +192,22 @@ struct GpuSimulation::State final {
         for (const Pipeline pipeline : {scan_blocks, scan_totals, scatter, finalize}) {
             device->destroy_pipeline(pipeline);
         }
+        for (const Pipeline pipeline : volume_kernels) {
+            if (pipeline.valid()) {
+                device->destroy_pipeline(pipeline);
+            }
+        }
+        if (volumes.valid()) {
+            device->destroy_buffer(volumes);
+        }
         for (const EmitterGpu& e : emitters) {
             for (const Buffer buffer : {e.particles[0], e.particles[1], e.counters, e.flags, e.offsets, e.blocks,
-                                        e.data, e.args, e.fields}) {
+                                        e.data, e.args, e.fields, e.shed_state}) {
                 device->destroy_buffer(buffer);
             }
             device->destroy_pipeline(e.update);
             device->destroy_pipeline(e.spawn);
+            device->destroy_pipeline(e.shed);
         }
     }
 
@@ -161,6 +221,8 @@ struct GpuSimulation::State final {
         d.constants[4] = e.seed;
         d.constants[5] = std::bit_cast<std::uint32_t>(dt);
         d.constants[6] = e.module_floats;
+        d.constants[7] = static_cast<std::uint32_t>(tick);
+        d.constants[8] = static_cast<std::uint32_t>(tick >> 32U);
         d.buffers = {e.particles[current], e.particles[1U - current], e.counters, e.flags, e.offsets, e.blocks, e.data,
                      Buffer{}};
         return d;
@@ -226,6 +288,85 @@ struct GpuSimulation::State final {
         const std::uint8_t zeros[args_bytes]{};
         device->write_buffer(e.counters, 0U, std::span{zeros, counters_bytes});
         device->write_buffer(e.args, 0U, std::span{zeros, args_bytes});
+        if (e.shed_state.valid()) {
+            const std::vector<std::uint8_t> none(4U * (2U + e.shed_slots.size()), 0U);
+            device->write_buffer(e.shed_state, 0U, none);
+        }
+    }
+
+    // Empties every grid, its deposits and its scratch: a step from here
+    // starts as the reference starts.
+    void zero_volumes() {
+        if (!volumes.valid()) {
+            return;
+        }
+        constexpr std::uint64_t chunk = 1U << 20U;
+        const std::vector<std::uint8_t> zeros(static_cast<std::size_t>(std::min(volume_words * 4U, chunk)), 0U);
+        for (std::uint64_t at = 0U; at < volume_words * 4U; at += chunk) {
+            device->write_buffer(volumes, at, std::span{zeros.data(), static_cast<std::size_t>(std::min(chunk, volume_words * 4U - at))});
+        }
+        for (VolumeGpu& grid : grids) {
+            grid.current = 0U;
+        }
+    }
+
+    // Where each grid is this step, for the emitters' module data.
+    [[nodiscard]] detail::VolumeLayouts volume_layouts() const {
+        detail::VolumeLayouts layouts;
+        for (std::size_t i = 0U; i < grids.size(); ++i) {
+            const VolumeGpu& grid = grids[i];
+            layouts.emplace(effect.volumes[i].name,
+                            detail::VolumeLayout{
+                                static_cast<std::uint32_t>(grid.base + grid.current * volume_grid_words(grid.step.cells)),
+                                static_cast<std::uint32_t>(grid.base + 2U * volume_grid_words(grid.step.cells))});
+        }
+        return layouts;
+    }
+
+    // One pass of a grid's step, over every cell.
+    void dispatch_volume(const VolumeGpu& grid, std::size_t kernel, std::uint32_t parity) const {
+        const detail::VolumeStep& g = grid.step;
+        Dispatch d;
+        d.pipeline = volume_kernels[kernel];
+        d.constants = {g.nx,
+                       g.ny,
+                       g.nz,
+                       g.cells,
+                       std::bit_cast<std::uint32_t>(g.buoyancy_dt),
+                       std::bit_cast<std::uint32_t>(g.weight_dt),
+                       std::bit_cast<std::uint32_t>(g.confinement),
+                       std::bit_cast<std::uint32_t>(g.inv_two_cells),
+                       std::bit_cast<std::uint32_t>(g.cell_squared),
+                       std::bit_cast<std::uint32_t>(g.advect_scale),
+                       std::bit_cast<std::uint32_t>(g.keep_density),
+                       std::bit_cast<std::uint32_t>(g.keep_temperature),
+                       std::bit_cast<std::uint32_t>(g.keep_velocity),
+                       grid.base,
+                       grid.current,
+                       parity};
+        d.buffers[0] = volumes;
+        d.groups_x = (g.cells + group_size - 1U) / group_size;
+        device->dispatch(d);
+        device->barrier();
+    }
+
+    // The grid's step, as step_volume takes it: inject, confinement where it
+    // is on, advect, then the pressure, then the gradient off.
+    void step_volume(VolumeGpu& grid) {
+        dispatch_volume(grid, 0U, 0U);
+        if (grid.step.confinement > 0.0F) {
+            dispatch_volume(grid, 1U, 0U);
+            dispatch_volume(grid, 2U, 0U);
+        }
+        dispatch_volume(grid, 3U, 0U);
+        dispatch_volume(grid, 4U, 0U);
+        std::uint32_t from = 0U;
+        for (std::uint32_t iteration = 0U; iteration < grid.step.pressure_iterations; ++iteration) {
+            dispatch_volume(grid, 5U, from);
+            from = 1U - from;
+        }
+        dispatch_volume(grid, 6U, from);
+        grid.current = 1U - grid.current;
     }
 };
 
@@ -325,6 +466,34 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
         }
     }
 
+    // The grid volumes: one region each in one buffer, and the kernels that
+    // step them.
+    if (!effect.volumes.empty()) {
+        std::uint64_t words = 0U;
+        for (const Volume& volume : effect.volumes) {
+            VolumeGpu grid;
+            grid.step = detail::volume_step(volume, state->dt);
+            grid.base = static_cast<std::uint32_t>(words);
+            words += volume_region_words(grid.step.cells);
+            state->grids.push_back(grid);
+        }
+        state->volume_words = words;
+        Result<Buffer> buffer = device.create_buffer(words * 4U, "ajfx " + effect.name + " volumes");
+        if (!buffer) {
+            return device_error("creating the volumes buffer", buffer.error());
+        }
+        state->volumes = buffer.value();
+        for (std::size_t k = 0U; k < volume_kernel_count; ++k) {
+            if (kernels.volume[k].empty()) {
+                return Error{ErrorCode::GpuUnavailable, "the kernel set has no grid volume kernels"};
+            }
+            if (std::optional<Error> error =
+                    pipeline(kernels.volume[k], "ajfx " + std::string{volume_kernel_names[k]}, state->volume_kernels[k])) {
+                return *std::move(error);
+            }
+        }
+    }
+
     state->emitters.resize(effect.emitters.size());
     for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
         const Emitter& emitter = effect.emitters[i];
@@ -341,6 +510,20 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
         }
         if (std::optional<Error> error = pipeline(kernels.emitters[i].spawn, name + " spawn", e.spawn)) {
             return *std::move(error);
+        }
+        e.shed_slots = detail::shedding_slots(emitter);
+        if (!e.shed_slots.empty()) {
+            if (kernels.emitters[i].shed.empty()) {
+                return Error{ErrorCode::GpuUnavailable, "the kernel set has no shed kernel for emitter " + emitter.name};
+            }
+            if (std::optional<Error> error = pipeline(kernels.emitters[i].shed, name + " shed", e.shed)) {
+                return *std::move(error);
+            }
+            Result<Buffer> buffer = device.create_buffer(4U * detail::shed_state_words(emitter), name + " shed state");
+            if (!buffer) {
+                return device_error("creating " + name + " shed state", buffer.error());
+            }
+            e.shed_state = buffer.value();
         }
 
         e.field_layout.fields = &state->fields;
@@ -401,6 +584,7 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
             *out = buffer.value();
         }
     }
+    state->order = step_order(effect);
     state->effect = std::move(effect);
     state->rigid = std::move(rigid);
     state->rigid_index = std::move(rigid_index);
@@ -518,7 +702,8 @@ void GpuSimulation::State::record(const ParameterProvider* parameters, const Rig
             }
         }
     }
-    for (std::size_t i = 0U; i < s.emitters.size(); ++i) {
+    const detail::VolumeLayouts volume_layouts = s.volume_layouts();
+    for (const std::size_t i : s.order) {
         const Emitter& emitter = s.effect.emitters[i];
         EmitterGpu& e = s.emitters[i];
         if (s.rigid_index[i]) {
@@ -564,8 +749,9 @@ void GpuSimulation::State::record(const ParameterProvider* parameters, const Rig
 
         // This step's module data, then one age per birth.
         s.scratch.clear();
-        detail::pack_emitter(emitter, detail::PackContext{in, s.dt, start, &e.field_layout, &bodies, s.tick},
-                             s.scratch);
+        detail::pack_emitter(
+            emitter, detail::PackContext{in, s.dt, start, &e.field_layout, &bodies, s.tick, &volume_layouts},
+            s.scratch);
         std::uint32_t births = 0U;
         s.spawn_indices.clear();
         s.origins.clear();
@@ -604,9 +790,38 @@ void GpuSimulation::State::record(const ParameterProvider* parameters, const Rig
             const std::uint64_t at = (static_cast<std::uint64_t>(e.module_floats) + 2U * emitter.capacity) * 4U;
             device->write_buffer(e.data, at, bytes_of(std::span<const float>{s.origins}));
         }
+        // The births shed from other emitters' particles, after those: one
+        // dispatch per shedding module, in stack order, each reading the
+        // emitter it names where this step left it (it stepped earlier, by
+        // step_order) and appending to the step's births. The last also
+        // sizes the spawn dispatch.
+        for (std::size_t k = 0U; k < e.shed_slots.size(); ++k) {
+            const auto& module = std::get<SpawnFromParticles>(emitter.spawn[e.shed_slots[k]]);
+            const EmitterGpu* source = nullptr;
+            for (std::size_t other = 0U; other < s.emitters.size(); ++other) {
+                if (s.effect.emitters[other].name == module.emitter) {
+                    source = &s.emitters[other];
+                    break;
+                }
+            }
+            if (source == nullptr) {
+                continue;
+            }
+            Dispatch shedding = s.dispatch(e, e.shed, births);
+            shedding.constants[9] = static_cast<std::uint32_t>(k);
+            shedding.buffers = {source->particles[1U - s.current], source->counters, e.counters, e.shed_state,
+                                e.offsets, e.blocks, e.data, e.args};
+            device->dispatch(shedding);
+            device->barrier();
+        }
 
         Dispatch update = s.dispatch(e, e.update, births);
         update.buffers[7] = e.fields;
+        // The grids it feeds and follows, where the update kernel never
+        // touches the bookkeeping kernels' offsets.
+        if (s.volumes.valid() && uses_volumes(emitter)) {
+            update.buffers[4] = s.volumes;
+        }
         update.indirect = e.args;
         update.indirect_offset = particle_args;
         device->dispatch(update);
@@ -627,7 +842,14 @@ void GpuSimulation::State::record(const ParameterProvider* parameters, const Rig
         device->dispatch(scattering);
         device->barrier();
 
-        if (births > 0U) {
+        if (!e.shed_slots.empty()) {
+            // Only the GPU knows how many were shed: the shed kernel sized it.
+            Dispatch spawn = s.dispatch(e, e.spawn, births);
+            spawn.indirect = e.args;
+            spawn.indirect_offset = shed_args;
+            device->dispatch(spawn);
+            device->barrier();
+        } else if (births > 0U) {
             const std::uint32_t groups = (std::min(births, emitter.capacity) + group_size - 1U) / group_size;
             Dispatch spawn = s.dispatch(e, e.spawn, births);
             spawn.groups_x = std::min(groups, max_groups_x);
@@ -642,6 +864,10 @@ void GpuSimulation::State::record(const ParameterProvider* parameters, const Rig
         device->barrier();
 
         e.spawned += births;
+    }
+    // Then every grid, in the effect's order, as the reference steps them.
+    for (VolumeGpu& grid : s.grids) {
+        s.step_volume(grid);
     }
     s.current = 1U - s.current;
     ++s.tick;
@@ -666,8 +892,74 @@ void GpuSimulation::reset(const ParameterProvider* parameters) {
         std::fill(e.spawn_counts.begin(), e.spawn_counts.end(), 0U);
         s.zero_counters(e);
     }
+    s.zero_volumes();
     s.device->barrier();
     write_inline_rigid();
+}
+
+VolumeBuffers GpuSimulation::volume_buffers(std::size_t volume) const {
+    const State& s = *state_;
+    VolumeBuffers out;
+    if (volume >= s.grids.size()) {
+        return out;
+    }
+    const VolumeGpu& grid = s.grids[volume];
+    out.buffer = s.volumes;
+    out.cells_at = static_cast<std::uint32_t>(grid.base + grid.current * volume_grid_words(grid.step.cells));
+    out.nx = grid.step.nx;
+    out.ny = grid.step.ny;
+    out.nz = grid.step.nz;
+    out.origin = grid.step.origin;
+    out.cell_size = s.effect.volumes[volume].cell_size;
+    return out;
+}
+
+void GpuSimulation::write_volume(std::size_t volume, const VolumeState& cells) {
+    State& s = *state_;
+    if (volume >= s.grids.size()) {
+        return;
+    }
+    const VolumeGpu& grid = s.grids[volume];
+    const std::uint32_t n = grid.step.cells;
+    if (cells.density.size() != n || cells.temperature.size() != n || cells.velocity.size() != n) {
+        return;
+    }
+    s.volume_floats.clear();
+    s.volume_floats.reserve(static_cast<std::size_t>(volume_grid_words(n)));
+    s.volume_floats.insert(s.volume_floats.end(), cells.density.begin(), cells.density.end());
+    s.volume_floats.insert(s.volume_floats.end(), cells.temperature.begin(), cells.temperature.end());
+    for (const Vec3& v : cells.velocity) {
+        s.volume_floats.insert(s.volume_floats.end(), {v.x, v.y, v.z});
+    }
+    s.device->write_buffer(s.volumes, (grid.base + grid.current * volume_grid_words(n)) * 4U,
+                           bytes_of(std::span<const float>{s.volume_floats}));
+    s.device->barrier();
+}
+
+Result<VolumeState> GpuSimulation::read_volume(std::size_t volume) {
+    const State& s = *state_;
+    if (volume >= s.grids.size()) {
+        return Error{ErrorCode::InvalidEffect, "the effect has no volume " + std::to_string(volume)};
+    }
+    const VolumeGpu& grid = s.grids[volume];
+    const std::uint32_t n = grid.step.cells;
+    Result<std::vector<std::uint8_t>> bytes =
+        s.device->read_buffer(s.volumes, (grid.base + grid.current * volume_grid_words(n)) * 4U, volume_grid_words(n) * 4U);
+    if (!bytes) {
+        return bytes.error();
+    }
+    VolumeState out;
+    out.nx = grid.step.nx;
+    out.ny = grid.step.ny;
+    out.nz = grid.step.nz;
+    out.density.resize(n);
+    out.temperature.resize(n);
+    out.velocity.resize(n);
+    const std::uint8_t* at = bytes.value().data();
+    std::memcpy(out.density.data(), at, n * 4U);
+    std::memcpy(out.temperature.data(), at + n * 4U, n * 4U);
+    std::memcpy(out.velocity.data(), at + 2U * n * 4U, n * 12U);
+    return out;
 }
 
 void GpuSimulation::write_inline_rigid() {
@@ -764,6 +1056,23 @@ Result<EmitterState> GpuSimulation::read_emitter(std::size_t emitter) {
     out.refused = words[2];
     out.rate_carry = e.rate_carry;
     out.spawn_counts = e.spawn_counts;
+    if (e.shed_state.valid()) {
+        // What the shed kernel counted: its births so far and each shedding
+        // slot's count, which the CPU-side counts know nothing of.
+        Result<std::vector<std::uint8_t>> shed =
+            state_->device->read_buffer(e.shed_state, 0U, 4U * (2U + e.shed_slots.size()));
+        if (!shed) {
+            return shed.error();
+        }
+        std::vector<std::uint32_t> state(2U + e.shed_slots.size());
+        std::memcpy(state.data(), shed.value().data(), state.size() * 4U);
+        out.spawned += static_cast<std::uint64_t>(state[0]) | (static_cast<std::uint64_t>(state[1]) << 32U);
+        for (std::size_t k = 0U; k < e.shed_slots.size(); ++k) {
+            if (e.shed_slots[k] < out.spawn_counts.size()) {
+                out.spawn_counts[e.shed_slots[k]] = state[2U + k];
+            }
+        }
+    }
     return out;
 }
 
@@ -785,6 +1094,22 @@ Result<GpuCheckpoint> GpuSimulation::allocate_checkpoint() {
             }
             *out = buffer.value();
         }
+        if (e.shed_state.valid()) {
+            Result<Buffer> buffer =
+                s.device->create_buffer(4U * (2U + e.shed_slots.size()), "ajfx checkpoint shed state");
+            if (!buffer) {
+                return device_error("creating a checkpoint", buffer.error());
+            }
+            saved.shed_state = buffer.value();
+        }
+    }
+    if (s.volumes.valid()) {
+        Result<Buffer> buffer = s.device->create_buffer(s.volume_words * 4U, "ajfx checkpoint volumes");
+        if (!buffer) {
+            return device_error("creating a checkpoint", buffer.error());
+        }
+        data->volumes = buffer.value();
+        data->volume_current.resize(s.grids.size());
     }
     return GpuCheckpoint{std::move(data)};
 }
@@ -816,6 +1141,15 @@ void GpuSimulation::save_into(GpuCheckpoint& checkpoint) {
         s.device->copy_buffer(saved.particles, 0U, e.particles[s.current], 0U, record_bytes);
         s.device->copy_buffer(saved.counters, 0U, e.counters, 0U, counters_bytes);
         s.device->copy_buffer(saved.args, 0U, e.args, 0U, args_bytes);
+        if (e.shed_state.valid() && saved.shed_state.valid()) {
+            s.device->copy_buffer(saved.shed_state, 0U, e.shed_state, 0U, 4U * (2U + e.shed_slots.size()));
+        }
+    }
+    if (s.volumes.valid() && data.volumes.valid()) {
+        s.device->copy_buffer(data.volumes, 0U, s.volumes, 0U, s.volume_words * 4U);
+        for (std::size_t i = 0U; i < s.grids.size() && i < data.volume_current.size(); ++i) {
+            data.volume_current[i] = s.grids[i].current;
+        }
     }
 }
 
@@ -838,6 +1172,15 @@ void GpuSimulation::restore(const GpuCheckpoint& checkpoint) {
         s.device->copy_buffer(e.particles[s.current], 0U, saved.particles, 0U, record_bytes);
         s.device->copy_buffer(e.counters, 0U, saved.counters, 0U, counters_bytes);
         s.device->copy_buffer(e.args, 0U, saved.args, 0U, args_bytes);
+        if (e.shed_state.valid() && saved.shed_state.valid()) {
+            s.device->copy_buffer(e.shed_state, 0U, saved.shed_state, 0U, 4U * (2U + e.shed_slots.size()));
+        }
+    }
+    if (s.volumes.valid() && data.volumes.valid()) {
+        s.device->copy_buffer(s.volumes, 0U, data.volumes, 0U, s.volume_words * 4U);
+        for (std::size_t i = 0U; i < s.grids.size() && i < data.volume_current.size(); ++i) {
+            s.grids[i].current = data.volume_current[i];
+        }
     }
     s.device->barrier();
 }

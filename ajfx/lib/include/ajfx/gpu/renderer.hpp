@@ -18,6 +18,11 @@
 // Emitters that sort (see sort.hpp) draw back to front along the camera's
 // forward axis; the rest in birth order. Hosts with their own renderer read
 // EmitterBuffers and sort with a ParticleSorter themselves.
+//
+// The effect's grid volumes (Volume) are drawn first, each raymarched in a
+// fixed number of steps under the scene's one directional light, absorbing
+// by the density and scattering towards the camera; the particles draw over
+// them. Hosts read VolumeBuffers and march themselves.
 namespace ajfx::gpu {
 
 struct Camera final {
@@ -34,8 +39,21 @@ struct Camera final {
     [[nodiscard]] static Camera look_at(Vec3 eye, Vec3 target, Vec3 world_up, float vertical_fov, float aspect,
                                         float near_plane, float far_plane);
     // An orthographic camera looking down -Z, showing `half_width` and
-    // `half_height` either side of `center`.
+    // `half_height` either side of `center`, from z = 1000 to z = -1000.
     [[nodiscard]] static Camera orthographic(Vec3 center, float half_width, float half_height);
+};
+
+// The light the reference renderer draws lit emitters under
+// (SpriteRenderer::lighting): one directional light and a sky/ground
+// hemisphere. A host lights from its own scene instead.
+struct SceneLight final {
+    // The way the light travels.
+    Vec3 direction{0.0F, -1.0F, 0.0F};
+    Vec3 color{1.0F, 1.0F, 1.0F};
+    // The hemisphere: what a direction facing straight up and straight down
+    // receives, blended between for the rest.
+    Vec3 sky{0.2F, 0.2F, 0.2F};
+    Vec3 ground{0.05F, 0.05F, 0.05F};
 };
 
 class ParticleRenderer final {
@@ -57,11 +75,12 @@ public:
     ~ParticleRenderer();
 
     // Records drawing the simulation's current particles into `target`,
-    // clearing it first when `clear_color` is given. The simulation runs the
-    // effect the renderer was made for, and `sorter` was made for it too.
-    // Call after stepping; nothing runs until the device is flushed.
+    // clearing it first when `clear_color` is given, lit emitters under
+    // `light`. The simulation runs the effect the renderer was made for, and
+    // `sorter` was made for it too. Call after stepping; nothing runs until
+    // the device is flushed.
     void render(const GpuSimulation& simulation, ParticleSorter& sorter, const Camera& camera, Texture target,
-                const std::array<float, 4>* clear_color = nullptr);
+                const std::array<float, 4>* clear_color = nullptr, const SceneLight& light = SceneLight{});
 
 private:
     struct State;

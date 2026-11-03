@@ -8,6 +8,7 @@
 #include "noise.hpp"
 #include "gpu/pack.hpp"
 #include "step_inputs.hpp"
+#include "volume.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +23,15 @@
 #include <variant>
 
 namespace ajfx {
+
+// One grid volume's step: its constants for this step's length, the deposits
+// the emitters make into it before it steps, and its scratch buffers.
+struct Simulation::VolumeWork final {
+    detail::VolumeStep step;
+    detail::VolumeDeposits deposits;
+    detail::VolumeScratch scratch;
+};
+
 namespace {
 
 // Size of a particle with no size module, in world units.
@@ -128,6 +138,10 @@ struct Step final {
     std::optional<BodyResponse> rigid{};
     // The step being taken, which a blast goes off in or not.
     std::uint64_t tick{0U};
+    // The grid volumes as the step began (what VolumeAdvect reads) and
+    // their work, where VolumeSource deposits; in Effect::volumes order.
+    const std::vector<VolumeState>* volumes{nullptr};
+    std::vector<Simulation::VolumeWork>* volume_work{nullptr};
 };
 
 // ------------------------------------------------------------ init modules
@@ -406,7 +420,53 @@ void apply(const Shockwave& m, Step& step) {
     }
 }
 
+// Carries particles with the grid's velocity (VolumeAdvect), as
+// ajfx_volume_advect does on the GPU: each takes at most all of the way to
+// the velocity the grid holds at it.
+void apply(const VolumeAdvect& m, Step& step) {
+    const std::optional<std::size_t> index = volume_index(step.in.effect, m.volume);
+    if (!index || step.volumes == nullptr || step.volume_work == nullptr) {
+        return;
+    }
+    const detail::VolumeStep& grid = (*step.volume_work)[*index].step;
+    const VolumeState& state = (*step.volumes)[*index];
+    const float rate = step.in(m.strength) * step.dt;
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const std::optional<Vec3> carried = detail::sample_volume_velocity(grid, state, step.s.position[i]);
+        if (!carried) {
+            continue;
+        }
+        const float t = std::min(rate * force_scale(m, step, i), 1.0F);
+        const Vec3 v = step.s.velocity[i];
+        step.s.velocity[i] = v + (*carried - v) * t;
+    }
+}
+
 // ------------------------------------------------------------ constraints and appearance
+
+// Deposits into the grid's cells (VolumeSource), as ajfx_volume_source does
+// on the GPU: each particle in the grid adds its amounts, quantised, to the
+// sums of the cell it is in.
+void apply(const VolumeSource& m, Step& step) {
+    const std::optional<std::size_t> index = volume_index(step.in.effect, m.volume);
+    if (!index || step.volume_work == nullptr) {
+        return;
+    }
+    Simulation::VolumeWork& work = (*step.volume_work)[*index];
+    const float density = step.in(m.density) * step.dt;
+    const float temperature = step.in(m.temperature) * step.dt;
+    const float velocity = step.in(m.velocity) * step.dt;
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const std::optional<std::uint32_t> cell = detail::volume_cell(work.step, step.s.position[i]);
+        if (!cell) {
+            continue;
+        }
+        const float over_life = sample(m.over_life, normalized_age(step.s, i));
+        const Vec3 v = step.s.velocity[i];
+        detail::deposit(work.deposits, *cell, density * over_life, temperature * over_life,
+                        Vec3{v.x * (velocity * over_life), v.y * (velocity * over_life), v.z * (velocity * over_life)});
+    }
+}
 
 // A rigid particle meets a collider as a ball (see RigidBody).
 void respond_rigid(Step& step, std::size_t i, float distance, Vec3 n, float restitution, float slide, bool kill) {
@@ -1380,8 +1440,14 @@ Simulation::Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fiel
     : effect_{std::move(effect)},
       instance_seed_{instance_seed},
       step_seconds_{1.0F / static_cast<float>(effect_.simulation_rate)},
+      order_{step_order(effect_)},
       fields_{std::move(fields)} {
     rigid_.resize(effect_.emitters.size());
+    volume_work_.resize(effect_.volumes.size());
+    for (std::size_t i = 0U; i < effect_.volumes.size(); ++i) {
+        volume_work_[i].step = detail::volume_step(effect_.volumes[i], step_seconds_);
+        volume_work_[i].deposits.sums.assign(static_cast<std::size_t>(volume_work_[i].step.cells) * 5U, 0);
+    }
     has_piles_ = std::any_of(effect_.emitters.begin(), effect_.emitters.end(), [](const Emitter& emitter) {
         return std::any_of(emitter.spawn.begin(), emitter.spawn.end(),
                            [](const SpawnModule& m) { return std::holds_alternative<SpawnPile>(m); });
@@ -1419,6 +1485,17 @@ Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed
     if (cache != nullptr) {
         for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
             if (cache->mode(i) != CacheMode::Live) {
+                // A cache keeps an emitter's particles, not what they fed a
+                // grid: the grid would go unfed where the cache plays.
+                for (const UpdateModule& module : effect.emitters[i].update) {
+                    if (const auto* source = std::get_if<VolumeSource>(&module)) {
+                        return Error{ErrorCode::StaleCache,
+                                     "emitter " + quoted(effect.emitters[i].name) + " module " +
+                                         quoted(VolumeSource::kind) + " feeds volume " + quoted(source->volume) +
+                                         ", and the cache holds the emitter; a cache keeps particles, not what "
+                                         "they deposit, so leave this emitter live"};
+                    }
+                }
                 continue;
             }
             for (const SpawnModule& module : effect.emitters[i].spawn) {
@@ -1430,14 +1507,17 @@ Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed
                 } else if (const auto* bodies = std::get_if<SpawnFromBodies>(&module)) {
                     named = &bodies->emitter;
                     kind = SpawnFromBodies::kind;
+                } else if (const auto* shed = std::get_if<SpawnFromParticles>(&module)) {
+                    named = &shed->emitter;
+                    kind = SpawnFromParticles::kind;
                 }
                 for (std::size_t other = 0U; named != nullptr && other < effect.emitters.size(); ++other) {
                     if (effect.emitters[other].name == *named && cache->mode(other) != CacheMode::Live) {
                         return Error{ErrorCode::StaleCache,
                                      "emitter " + quoted(effect.emitters[i].name) + " module " + quoted(kind) +
                                          " field 'emitter' bears particles from " + quoted(*named) +
-                                         ", which the cache holds; a cache keeps bodies, not their contacts or "
-                                         "speeds, so cache this emitter too or leave that one live"};
+                                         ", which the cache holds; a cache keeps bodies and particles, not their "
+                                         "contacts or speeds, so cache this emitter too or leave that one live"};
                     }
                 }
             }
@@ -1613,6 +1693,11 @@ void Simulation::start(std::span<const ParameterValue> values) {
     for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
         state_.emitters[i].rate_carry.assign(detail::rate_module_count(effect_.emitters[i]), 0.0);
         state_.emitters[i].spawn_counts.assign(detail::spawn_count_slots(effect_.emitters[i]), 0U);
+    }
+    state_.volumes.clear();
+    for (std::size_t i = 0U; i < effect_.volumes.size(); ++i) {
+        state_.volumes.push_back(detail::empty_volume(effect_.volumes[i]));
+        volume_work_[i].deposits.clear();
     }
     rebuild_worlds();
     for (RigidEmitter& r : rigid_) {
@@ -1799,6 +1884,23 @@ std::uint32_t Simulation::contacts_dropped(std::size_t index) const {
 
 void Simulation::restore(const SimulationState& state) {
     state_ = state;
+    // A state from another effect's grids, or none, starts them empty: the
+    // step needs grids of the volumes' own sizes.
+    if (state_.volumes.size() != effect_.volumes.size()) {
+        state_.volumes.clear();
+    }
+    for (std::size_t i = 0U; i < effect_.volumes.size(); ++i) {
+        const detail::VolumeStep& grid = volume_work_[i].step;
+        if (i >= state_.volumes.size()) {
+            state_.volumes.push_back(detail::empty_volume(effect_.volumes[i]));
+        } else if (state_.volumes[i].nx != grid.nx || state_.volumes[i].ny != grid.ny ||
+                   state_.volumes[i].nz != grid.nz || state_.volumes[i].density.size() != grid.cells ||
+                   state_.volumes[i].temperature.size() != grid.cells ||
+                   state_.volumes[i].velocity.size() != grid.cells) {
+            state_.volumes[i] = detail::empty_volume(effect_.volumes[i]);
+        }
+        volume_work_[i].deposits.clear();
+    }
     rebuild_worlds();
     for (RigidEmitter& r : rigid_) {
         r.read.clear();
@@ -1823,27 +1925,31 @@ void Simulation::step(const ParameterProvider* parameters) {
     if (has_piles_ && state_.tick == 0U && values_ != pile_values_) {
         start(values_);
     }
-    // Rigid physics emitters step first, all of them, then the rest. A
-    // particle that meets a body has to meet it where this step left it, and
-    // which emitters those are must not depend on the order they happen to
-    // be listed in: so the order is this one, fixed, declared and the same
-    // on every node, rather than "whatever is listed before me". Rigid
-    // emitters cannot meet each other's bodies (check_rigid_physics refuses
-    // a collider there), so the order within the first pass settles nothing
-    // and is simply the effect's own.
-    for (const bool rigid : {true, false}) {
-        for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
-            if ((rigid_physics(effect_.emitters[i]) != nullptr) != rigid) {
-                continue;
-            }
-            // A cached emitter is read where it would have been stepped, so a
-            // live emitter meets its bodies where this step left them.
-            if (cached(i)) {
-                cache_->advance(i, state_.tick + 1U, state_.emitters[i]);
-            } else {
-                step_emitter(i, values_);
-            }
+    // Rigid physics emitters step first, all of them, then the rest, each
+    // after the emitters it sheds particles from (step_order). A particle
+    // that meets a body has to meet it where this step left it, one shed by
+    // a particle where this step left that particle, and which emitters
+    // those are must not depend on the order they happen to be listed in: so
+    // the order is this one, fixed, declared and the same on every node,
+    // rather than "whatever is listed before me". Rigid emitters cannot meet
+    // each other's bodies (check_rigid_physics refuses a collider there), so
+    // the order within the first pass settles nothing and is simply the
+    // effect's own.
+    for (const std::size_t i : order_) {
+        // A cached emitter is read where it would have been stepped, so a
+        // live emitter meets its bodies where this step left them.
+        if (cached(i)) {
+            cache_->advance(i, state_.tick + 1U, state_.emitters[i]);
+        } else {
+            step_emitter(i, values_);
         }
+    }
+    // Then every grid, in the effect's order, on what this step deposited:
+    // the particles read the grids as the step began, so this order is the
+    // GPU's too.
+    for (std::size_t i = 0U; i < volume_work_.size(); ++i) {
+        detail::step_volume(volume_work_[i].step, volume_work_[i].deposits, state_.volumes[i],
+                            volume_work_[i].scratch);
     }
     ++state_.tick;
     solver_state_stale_ = solver_state_stale_ || std::any_of(rigid_.begin(), rigid_.end(), [](const RigidEmitter& r) {
@@ -1871,6 +1977,8 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
               0U,
               &fields_};
     step.tick = state_.tick;
+    step.volumes = &state_.volumes;
+    step.volume_work = &volume_work_;
     if (s.spawn_counts.size() != detail::spawn_count_slots(emitter)) {
         s.spawn_counts.resize(detail::spawn_count_slots(emitter), 0U);
     }
@@ -2014,6 +2122,21 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
             break;
         }
     }
+    // The particles the spawn modules shed from, as the emitters named (which
+    // have stepped, step_order) left them.
+    detail::ParticleSources shed_from;
+    for (const SpawnModule& module : emitter.spawn) {
+        const auto* shed = std::get_if<SpawnFromParticles>(&module);
+        if (shed == nullptr || shed_from.contains(shed->emitter)) {
+            continue;
+        }
+        for (std::size_t other = 0U; other < effect_.emitters.size(); ++other) {
+            if (other != index && effect_.emitters[other].name == shed->emitter) {
+                shed_from.emplace(shed->emitter, &state_.emitters[other]);
+                break;
+            }
+        }
+    }
 
     // Births, each with the age it has reached by the end of the step, and
     // where a contact or a body puts it, if one does.
@@ -2033,7 +2156,7 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
         }
         ++s.spawned;
     };
-    const detail::BirthContext context{state_.tick, step.random.seed, step.dt, &sources};
+    const detail::BirthContext context{state_.tick, step.random.seed, step.dt, &sources, &shed_from};
     detail::for_each_birth(emitter, step.in, s.rate_carry, s.spawn_counts, step.start, step.end, rate, context,
                            birth);
 

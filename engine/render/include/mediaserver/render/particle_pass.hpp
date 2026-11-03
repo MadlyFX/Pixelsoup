@@ -5,6 +5,7 @@
 #include <mediaserver/render/particle_device.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/canvas.hpp>
+#include <mediaserver/scene/scene.hpp>
 #include <mediaserver/scene/math.hpp>
 
 #include <ajfx/effect.hpp>
@@ -42,6 +43,14 @@
 // Alpha-blended emitters draw back to front: each draw sorts them along the
 // camera's forward axis (ajfx::gpu::ParticleSorter), which every node shares,
 // so slices agree on the order as they do on the particles.
+//
+// An effect's grid volumes (ajfx::Volume, smoke the particles feed) simulate
+// through the same device and draw before the emitters: each grid's box is
+// rasterised in world space and every pixel of it marches the view ray
+// through the cells in a fixed number of steps, lit by the scene's first
+// directional light, its shadow cascades and the hemisphere, stopping at the
+// scene's depth. Rays come from the camera's eye and forward axis, never from
+// the slice's projection, so slices agree. Volumes write no motion.
 //
 // Rigid physics emitters (debris that piles, a heap that collapses) run in a
 // physics engine on the CPU, which costs too much to step or checkpoint while
@@ -126,6 +135,34 @@ private:
     std::unique_ptr<State> state_;
 };
 
+// The scene's light for lit emitters (ajfx::Lighting), gathered by the scene
+// renderer each frame: its light records, its ambient hemisphere and the
+// directional shadow cascades it drew. Lit particles sum the lights per
+// particle and sample the cascades per pixel; unlit emitters never read it.
+// Without one (`ParticleTargets::lighting` null) a lit emitter is drawn under
+// one white light at the camera, as a reference viewer without a scene would.
+struct ParticleLighting final {
+    // light.hlsli records, `light_count` of them, as the scene's lit pass
+    // reads them.
+    const rhi::StorageBuffer* lights{};
+    core::u32 light_count{};
+    // rgb: the sky half of the ambient hemisphere; a: overall ambient strength.
+    std::array<float, 4U> sky_ambient{};
+    // rgb: the ground half; a: the exposure the scene applies to what it
+    // lights, so a lit particle sits with the surfaces around it.
+    std::array<float, 4U> ground_exposure{1.0F, 1.0F, 1.0F, 1.0F};
+    // Directional shadow cascades drawn this frame, nearest first; zero when
+    // none were. Each is a reversed-depth map with its light projection and
+    // the depth of one of its texels.
+    core::u32 cascade_count{};
+    std::array<const rhi::Texture*, scene::max_shadow_cascades> cascades{};
+    std::array<scene::Mat4, scene::max_shadow_cascades> cascade_view_projection{};
+    std::array<float, scene::max_shadow_cascades> cascade_texel_depth{};
+    // Shadow bias in texels. A sprite has no receiver plane to lean on, so
+    // it takes a constant few.
+    float shadow_bias_texels{3.0F};
+};
+
 // Where a pass draws. Colour and depth must match in size. With `load` the
 // targets keep what the scene drew; otherwise they are cleared first.
 struct ParticleTargets final {
@@ -152,6 +189,8 @@ struct ParticleTargets final {
     scene::Mat4 previous_view_projection{};
     float motion_seconds{};
     bool motion_valid{};
+    // The scene's light for lit emitters; null lights them from the camera.
+    const ParticleLighting* lighting{};
 };
 
 class ParticlePass final {
