@@ -223,6 +223,60 @@ void dragging_an_objects_handle_moves_the_object() {
     CHECK(ajfx::studio::compile(document, ajfx::studio::Purpose::Preview).effect);
 }
 
+// A position typed into the inspector stays. The app draws the inspector and
+// then the viewport, whose handles drag a copy lowered from the scene as the
+// last frame left it; the item takes that copy back only while a handle is
+// held, or the stale copy would put the old position straight back.
+void a_typed_position_survives_the_viewport() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    ajfx::studio::SceneView view;
+    Document document = ajfx::studio::empty_scene();
+    const auto uid = ajfx::studio::add_object(document);
+    auto object = [&]() -> ajfx::studio::Object& {
+        return std::get<ajfx::studio::Object>(document.scene->item(uid)->data);
+    };
+    object().position = {2, 3, 4};
+    view.select(uid);
+    const Document lowered_before = ajfx::studio::lower_scene(document);
+    Document lowered = lowered_before;
+    const ajfx::studio::GuideOptions options{.focus = ajfx::studio::handle_block(document, uid), .layer = uid};
+    const gui::Rect stage{0.0F, 0.0F, 780.0F, 600.0F};
+    const ajfx::studio::StageCamera camera{
+        ajfx::studio::CameraPose{.eye = ajfx::Vec3{0.0F, 3.0F, 6.0F}, .target = ajfx::Vec3{0.0F, 0.25F, 0.0F}}, stage};
+    ajfx::studio::HandleDrags drags;
+    int adopted = 0;
+    const auto frame = [&](float x, float y, bool down, std::string_view text = {}, bool enter = false) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        input.add_text(text);
+        if (enter) { input.add_key(gui::Key::Enter); }
+        ctx.new_frame();
+        view.draw_inspector(ctx, gui::Rect{800, 0, 450, 1400}, document, {});
+        const bool was_dragging = drags.dragging();
+        drags.draw(ctx, stage, camera, lowered, ajfx::studio::build_guides(lowered, options));
+        if ((was_dragging || drags.dragging()) && ajfx::studio::adopt_handle_edit(document, lowered, uid)) {
+            ++adopted;
+        }
+        ctx.draw_overlays(gui::Rect{0, 0, 1280, 1440});
+    };
+    frame(960, 205, false); frame(960, 205, true); frame(960, 205, false);
+    frame(960, 205, false, "-6.5");
+    frame(960, 205, false, {}, true);
+    frame(960, 205, false);
+    CHECK(object().position == ajfx::Vec3{-6.5F, 3, 4});
+    CHECK(adopted == 0);
+    // The copy the viewport held through that frame still says X is 2: taking
+    // it back regardless is what undid the typed value.
+    CHECK(lowered == lowered_before);
+    Document unguarded = document;
+    CHECK(ajfx::studio::adopt_handle_edit(unguarded, lowered, uid));
+    CHECK(std::get<ajfx::studio::Object>(unguarded.scene->item(uid)->data).position.x == 2.0F);
+}
+
 void scene_multi_edit_preserves_untouched_vector_axes() {
     for (bool night : {false, true}) {
         for (float scale : {1.0F, 1.25F, 1.5F}) {
@@ -388,6 +442,7 @@ int main() {
         void (*run)();
     };
     const Case cases[] = {
+        {"a_typed_position_survives_the_viewport", a_typed_position_survives_the_viewport},
         {"scene_multi_edit_preserves_untouched_vector_axes", scene_multi_edit_preserves_untouched_vector_axes},
         {"a_narrow_inspector_gives_each_axis_its_own_row", a_narrow_inspector_gives_each_axis_its_own_row},
         {"scene_color_picker_is_one_live_gesture", scene_color_picker_is_one_live_gesture},

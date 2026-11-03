@@ -43,9 +43,10 @@ class StageOverlay final {
 public:
     // Draws over `view` and handles drags of the guides' handles, writing
     // their controls into `document`. Call before the camera takes the
-    // pointer, so a press on a handle is the handle's.
-    void draw(gui::UiContext& ctx, const gui::Rect& view, const Orbit& orbit, Document& document,
-              const OverlayInputs& inputs);
+    // pointer, so a press on a handle is the handle's. True on a frame a
+    // handle was held: only then does `document` hold an edit to take back.
+    [[nodiscard]] bool draw(gui::UiContext& ctx, const gui::Rect& view, const Orbit& orbit, Document& document,
+                            const OverlayInputs& inputs);
     // A handle is being dragged: the edit is one gesture, for undo.
     [[nodiscard]] bool dragging() const noexcept { return handles_.dragging(); }
 

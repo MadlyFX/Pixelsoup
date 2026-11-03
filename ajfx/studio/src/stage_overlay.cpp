@@ -34,8 +34,9 @@ CameraPose camera_pose(const Orbit& orbit) {
                       .field_of_view = preview_field_of_view};
 }
 
-void StageOverlay::draw(gui::UiContext& ctx, const gui::Rect& view, const Orbit& orbit, Document& document,
+bool StageOverlay::draw(gui::UiContext& ctx, const gui::Rect& view, const Orbit& orbit, Document& document,
                         const OverlayInputs& inputs) {
+    const bool was_dragging = handles_.dragging();
     const StageCamera camera{camera_pose(orbit), view};
     gui::UiDrawList& list = ctx.draw_list();
     list.push_clip(view.x, view.y, view.width, view.height);
@@ -53,9 +54,10 @@ void StageOverlay::draw(gui::UiContext& ctx, const gui::Rect& view, const Orbit&
     list.pop_clip();
     if (inputs.show_handles && inputs.guides != nullptr) {
         handles_.draw(ctx, view, camera, document, *inputs.guides);
-    } else {
-        handles_.reset();
+        return was_dragging || handles_.dragging();
     }
+    handles_.reset();
+    return false;
 }
 
 void StageOverlay::draw_paths(gui::UiContext& ctx, const StageCamera& camera, const OverlayInputs& inputs) {

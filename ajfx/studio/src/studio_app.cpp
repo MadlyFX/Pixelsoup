@@ -995,16 +995,21 @@ private:
             guide_options.bounds = std::pair{analysis_->bounds.minimum, analysis_->bounds.maximum};
         }
         // The handles drag the lowered copy; the item takes back what moved.
+        // Only while a handle is held: the copy is lowered from the scene as
+        // the last frame left it, so taking it back otherwise would undo an
+        // edit typed into the inspector this frame.
         const GuideSet guides = build_guides(scene_guides_, guide_options);
-        overlay_.draw(ctx_, view, orbit_, scene_guides_,
-                      OverlayInputs{.guides = &guides,
-                                    .analysis = analysis_ ? &*analysis_ : nullptr,
-                                    .show_guides = show_guides_,
-                                    .show_handles = show_handles_,
-                                    .show_paths = show_paths_,
-                                    .layer = working,
-                                    .frame = frame_});
-        static_cast<void>(adopt_handle_edit(document_, scene_guides_, working));
+        const bool handle_held = overlay_.draw(ctx_, view, orbit_, scene_guides_,
+                                               OverlayInputs{.guides = &guides,
+                                                             .analysis = analysis_ ? &*analysis_ : nullptr,
+                                                             .show_guides = show_guides_,
+                                                             .show_handles = show_handles_,
+                                                             .show_paths = show_paths_,
+                                                             .layer = working,
+                                                             .frame = frame_});
+        if (handle_held) {
+            static_cast<void>(adopt_handle_edit(document_, scene_guides_, working));
+        }
         ctx_.draw_list().add_corner_mask(view.x, view.y, view.width, view.height, theme.radius, theme.panel);
 
         // What the picture is, and anything holding it.
