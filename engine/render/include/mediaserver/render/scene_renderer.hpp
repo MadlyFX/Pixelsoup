@@ -262,7 +262,6 @@ struct RenderStats final {
     core::u64 upload_bytes{};
     core::u32 area_lights{}, area_shadow_requests{};
     bool ltc_ready{};
-    core::u64 ltc_generation{};
     core::u32 ies_ready{}, ies_pending{}, ies_failed{}, ies_refused{};
     IesError ies_error{IesError::None};
     // Particle effects drawn this view, and the ones holding readiness back:

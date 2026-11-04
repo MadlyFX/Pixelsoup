@@ -229,8 +229,8 @@ std::vector<PageVolume> page_volumes(const Document& document, float scale) {
     return volumes;
 }
 
-Compiled compile(const Document& document, Purpose purpose) {
-    if (document.scene) { return compile_scene(document, purpose); }
+Compiled compile(const Document& document, Purpose purpose, std::uint32_t live) {
+    if (document.scene) { return compile_scene(document, purpose, live); }
     Compiled compiled;
     Effect effect;
     effect.name = document.name.empty() ? std::string{"effect"} : document.name;

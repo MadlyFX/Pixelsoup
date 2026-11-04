@@ -1251,7 +1251,171 @@ void smoke_grids_are_fed_and_ridden_by_systems() {
     CHECK(validate_scene(document).find("its smoke grid is missing") != std::string::npos);
 }
 
+// The live values a preview hands its placement, by the package's parameter
+// order: what the renderer does with a placement's parameters.
+class LiveValues final : public ajfx::ParameterProvider {
+public:
+    LiveValues(const ajfx::Effect &effect, const std::vector<LiveParameter> &live) {
+        for (const LiveParameter &value : live) {
+            for (std::size_t i = 0U; i < effect.parameters.size(); ++i) {
+                if (effect.parameters[i].name == value.name) {
+                    values_.emplace_back(i, value.value);
+                }
+            }
+        }
+    }
+    void values_at(std::uint64_t, std::span<ajfx::ParameterValue> values) const override {
+        for (const auto &[index, value] : values_) {
+            values[index] = value;
+        }
+    }
+    [[nodiscard]] std::size_t size() const { return values_.size(); }
+
+private:
+    std::vector<std::pair<std::size_t, ajfx::ParameterValue>> values_;
+};
+
+std::size_t emitter_named(const ajfx::Effect &effect, Uid item) {
+    const std::string name = "item_" + std::to_string(item);
+    for (std::size_t e = 0U; e < effect.emitters.size(); ++e) {
+        if (effect.emitters[e].name == name) {
+            return e;
+        }
+    }
+    throw std::runtime_error{"no emitter " + name};
+}
+
+bool same_particles(const ajfx::EmitterState &a, const ajfx::EmitterState &b) {
+    return a.alive() == b.alive() && a.position == b.position && a.velocity == b.velocity;
+}
+
+// A preview built with a system live reads its Motion values from the
+// placement: given the values as an edit leaves them, it plays exactly as a
+// preview built after the edit, so dragging one needs no new package. Any
+// other change does.
+void live_values_play_as_a_rebuilt_preview() {
+    Document document = new_scene();
+    const Uid sparks = add_particle_system(document);
+    {
+        auto &system = std::get<ParticleSystem>(document.scene->item(sparks)->data);
+        system.sources.clear();
+        system.lifetime = {2.0F, 2.0F};
+        system.speed = {1.0F, 3.0F};
+        system.spread = 20.0F;
+        system.radius = {0.0F, 0.2F};
+        system.collide = true;
+    }
+    CHECK(add_source(document, sparks, SourceMode::Burst) != 0U);
+    std::get<ParticleSystem>(document.scene->item(sparks)->data).sources.back().count = 200U;
+    CHECK(add_behavior(document, sparks, BehaviorKind::Drag) != 0U);
+    CHECK(add_behavior(document, sparks, BehaviorKind::Vortex) != 0U);
+    CHECK(validate_scene(document).empty());
+
+    const Compiled live = compile(document, Purpose::Preview, sparks);
+    CHECK(live.effect && live.error.empty());
+    const std::vector<LiveParameter> before = live_parameters(document, sparks);
+    // speed, spread, radius, gravity and two behaviors in two halves, and a direction.
+    CHECK(before.size() == 13U);
+    for (const LiveParameter &value : before) {
+        CHECK(std::any_of(live.effect->parameters.begin(), live.effect->parameters.end(),
+                          [&](const ajfx::ParameterDesc &p) { return p.name == value.name; }));
+    }
+
+    Document edited = document;
+    {
+        auto &system = std::get<ParticleSystem>(edited.scene->item(sparks)->data);
+        system.speed = {0.5F, 4.0F};
+        system.spread = 35.0F;
+        system.direction = {1.0F, 2.0F, 0.0F};
+        system.radius = {0.1F, 0.3F};
+        system.gravity = 0.4F;
+        system.motion[0].strength = {0.5F, 0.8F};
+        system.motion[1].strength = {2.0F, 3.0F};
+    }
+    CHECK(same_but_live(document, edited, sparks));
+    Document longer = edited;
+    std::get<ParticleSystem>(longer.scene->item(sparks)->data).lifetime = {2.5F, 2.5F};
+    CHECK(!same_but_live(document, longer, sparks));
+    CHECK(!same_but_live(document, edited, document.scene->items.front().uid));
+
+    const Compiled rebuilt = compile(edited, Purpose::Preview);
+    CHECK(rebuilt.effect && rebuilt.error.empty());
+    const LiveValues values{*live.effect, live_parameters(edited, sparks)};
+    CHECK(values.size() == before.size());
+    auto solver = ajfx::rigid::make_jolt_solver();
+    ajfx::Simulation played = simulation(live, solver.get());
+    ajfx::Simulation reference = simulation(rebuilt, solver.get());
+    played.reset(&values);
+    played.advance_to(90U, &values);
+    reference.advance_to(90U);
+    const ajfx::EmitterState &moved = played.emitter(emitter_named(*live.effect, sparks));
+    CHECK(moved.alive() == 200U);
+    CHECK(same_particles(moved, reference.emitter(emitter_named(*rebuilt.effect, sparks))));
+    // And the values the package was built with are its defaults: without
+    // any, it plays as the scene it was built of.
+    ajfx::Simulation unedited = simulation(live, solver.get());
+    ajfx::Simulation original = simulation(compile(document, Purpose::Preview), solver.get());
+    unedited.advance_to(90U);
+    original.advance_to(90U);
+    CHECK(same_particles(unedited.emitter(emitter_named(*live.effect, sparks)),
+                         original.emitter(emitter_named(*live.effect, sparks))));
+    CHECK(!same_particles(unedited.emitter(emitter_named(*live.effect, sparks)), moved));
+}
+
+// The selected system's paths are traced first from focus_scene: the scene
+// without the systems it is not born of. Its particles there do exactly what
+// they do in the whole scene.
+void a_focus_scene_moves_its_system_as_the_whole_scene_does() {
+    Document document = new_scene();
+    const Uid sparks = add_particle_system(document);
+    {
+        auto &system = std::get<ParticleSystem>(document.scene->item(sparks)->data);
+        system.sources.clear();
+        system.lifetime = {3.0F, 3.0F};
+        system.speed = {2.0F, 4.0F};
+        system.spread = 25.0F;
+        system.collide = true;
+    }
+    CHECK(add_source(document, sparks, SourceMode::Burst) != 0U);
+    const Uid smoke = add_particle_system(document);
+    {
+        auto &system = std::get<ParticleSystem>(document.scene->item(smoke)->data);
+        system.sources.clear();
+        system.lifetime = {1.0F, 1.5F};
+        system.speed = {0.0F, 0.3F};
+    }
+    CHECK(add_relationship(document, RelationKind::TrailFromSystem, sparks, smoke) != 0U);
+    const Uid dust = add_particle_system(document);
+    CHECK(validate_scene(document).empty());
+
+    const Document smoke_alone = focus_scene(document, smoke);
+    CHECK(smoke_alone.scene->item(smoke)->simulate && smoke_alone.scene->item(sparks)->simulate);
+    CHECK(!smoke_alone.scene->item(dust)->simulate);
+    CHECK(smoke_alone.scene->items.front().simulate); // the ground stays
+    const Document sparks_alone = focus_scene(document, sparks);
+    CHECK(!sparks_alone.scene->item(smoke)->simulate && !sparks_alone.scene->item(dust)->simulate);
+
+    auto solver = ajfx::rigid::make_jolt_solver();
+    const Compiled whole = compile(document, Purpose::Preview);
+    CHECK(whole.effect && whole.error.empty());
+    ajfx::Simulation everything = simulation(whole, solver.get());
+    everything.advance_to(150U);
+    for (const auto &[focus, alone] : {std::pair{smoke, smoke_alone}, std::pair{sparks, sparks_alone}}) {
+        const Compiled part = compile(alone, Purpose::Preview);
+        CHECK(part.effect && part.error.empty());
+        CHECK(part.effect->emitters.size() < whole.effect->emitters.size());
+        ajfx::Simulation run = simulation(part, solver.get());
+        run.advance_to(150U);
+        const ajfx::EmitterState &mine = run.emitter(emitter_named(*part.effect, focus));
+        CHECK(mine.alive() > 0U);
+        CHECK(same_particles(mine, everything.emitter(emitter_named(*whole.effect, focus))));
+    }
+}
+
 void add_scene_tests(std::vector<studio_test::Case> &cases) {
+    cases.push_back({"live_values_play_as_a_rebuilt_preview", live_values_play_as_a_rebuilt_preview});
+    cases.push_back({"a_focus_scene_moves_its_system_as_the_whole_scene_does",
+                     a_focus_scene_moves_its_system_as_the_whole_scene_does});
     cases.push_back({"smoke_grids_are_fed_and_ridden_by_systems", smoke_grids_are_fed_and_ridden_by_systems});
     cases.push_back({"a_bound_system_is_born_only_of_its_object", a_bound_system_is_born_only_of_its_object});
     cases.push_back({"particles_meet_static_objects", particles_meet_static_objects});

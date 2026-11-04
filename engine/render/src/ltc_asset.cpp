@@ -14,7 +14,7 @@ bool LtcAsset::create(rhi::Device& device) {
     buffer_ = std::move(result).value();
     return true;
 }
-bool LtcAsset::prepare(rhi::CommandList& commands, core::u64 generation) noexcept {
+bool LtcAsset::prepare(rhi::CommandList& commands) noexcept {
     upload_bytes_ = 0;
     if (recording_) {
         const auto outcome = recording_.outcome();
@@ -22,12 +22,11 @@ bool LtcAsset::prepare(rhi::CommandList& commands, core::u64 generation) noexcep
             uploaded_ = false;
         if (outcome != rhi::CommandRecordingOutcome::Pending) recording_ = {};
     }
-    if (uploaded_ && generation_ == generation) return true;
+    if (uploaded_) return true;
     uploaded_ = false;
     const auto token = commands.recording_token();
     const auto bytes = std::span<const core::u8>{reinterpret_cast<const core::u8*>(tables.data()), sizeof(tables)};
     if (!token || !commands.upload(buffer_, bytes)) return false;
-    generation_ = generation;
     recording_ = token;
     uploaded_ = true;
     upload_bytes_ = bytes.size();

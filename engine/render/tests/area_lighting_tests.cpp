@@ -162,18 +162,32 @@ void gpu_contract(rhi::Device& device) {
     s.point_lights[0].radius=0.8F; const auto large=draw(full.value(),whole);
     CHECK(pixel(large,128,64,32)>pixel(small,128,64,32)*2); slices(large); CHECK(large==draw(full.value(),whole));
     s.point_lights[0].direction={1,0,0}; CHECK(large==draw(full.value(),whole));
+    // A new asset generation draws the same picture in a recording whose
+    // upload space other work has nearly used up, as a newly loaded effect's
+    // does: the immutable table is not sent again, so it cannot be refused.
+    {
+        auto filler=device.create_geometry_buffer(1U<<20); CHECK(filler);
+        const std::vector<core::u8> bytes(1U<<20,0x5A);
+        s.asset_refresh_generation=7;
+        auto cmd=acquire(device);
+        while(cmd.upload_space()>(1U<<20)+(96U<<10)) CHECK(cmd.upload_range(filler.value(),0,bytes));
+        const auto rest=cmd.upload_space()-(96U<<10);
+        CHECK(cmd.upload_range(filler.value(),0,std::span{bytes}.first(static_cast<std::size_t>(rest))));
+        CHECK(cmd.upload_space()<render::ltc_table_entries*sizeof(scene::Vec4));
+        CHECK(full.value().render(cmd,s,whole)); CHECK(full.value().stats().ltc_ready);
+        CHECK(readback(device,std::move(cmd),full.value().target(),8)==large);
+        s.asset_refresh_generation=0;
+    }
     s.point_lights[0].casts_shadow=true; CHECK(draw(full.value(),whole)==large); CHECK(full.value().stats().area_shadow_requests==1 && !full.value().stats().assets.ready);
     // A canceled first recording must retry the immutable table upload.
     auto fresh=render::SceneRenderer::create(device,128,64,limits(),render::SceneRendererMode::AdvancedLinear); CHECK(fresh);
     {auto canceled=acquire(device); CHECK(fresh.value().render(canceled,s,whole));}
     CHECK(draw(fresh.value(),whole)==large);
     render::LtcAsset asset; CHECK(asset.create(device));
-    auto prepare=[&](core::u64 generation) {auto cmd=acquire(device); CHECK(asset.prepare(cmd,generation)); auto done=device.submit(std::move(cmd)); CHECK(done && done.value().wait());};
-    prepare(17); CHECK(asset.upload_bytes()==131072 && asset.generation()==17);
-    prepare(17); CHECK(asset.upload_bytes()==0);
-    {auto canceled=acquire(device); CHECK(asset.prepare(canceled,29));}
-    prepare(29); CHECK(asset.upload_bytes()==131072 && asset.generation()==29);
-    prepare(29); CHECK(asset.upload_bytes()==0);
+    auto prepare=[&]() {auto cmd=acquire(device); CHECK(asset.prepare(cmd)); auto done=device.submit(std::move(cmd)); CHECK(done && done.value().wait());};
+    {auto canceled=acquire(device); CHECK(asset.prepare(canceled)); CHECK(asset.upload_bytes()==131072);}
+    prepare(); CHECK(asset.upload_bytes()==131072);
+    prepare(); CHECK(asset.upload_bytes()==0);
     // Fog consumes finite emitters, including the rectangle's emission side.
     s.instances.clear(); s.point_lights[0].kind=scene::LocalLightKind::Rectangle;
     s.point_lights[0].casts_shadow=false; s.point_lights[0].direction={0,0,1};
@@ -198,6 +212,6 @@ int main() {
         photometry_and_identity(); std::cout<<"[pass] area units, dimensions, orientation, identities and fit tables\n";
         if (!rhi::Device::available(rhi::BackendKind::D3d12)) return 77;
         rhi::DeviceConfig config; config.backend=rhi::BackendKind::D3d12; auto device=rhi::Device::create(config); CHECK(device);
-        gpu_contract(device.value()); std::cout<<"[pass] LTC diffuse reference, rough rectangle reflection, roll, sides, sphere, seams and generation retries\n";
+        gpu_contract(device.value()); std::cout<<"[pass] LTC diffuse reference, rough rectangle reflection, roll, sides, sphere, seams and one table upload across generations\n";
     } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

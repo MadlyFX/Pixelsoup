@@ -286,6 +286,8 @@ private:
         playing_ = false;
         looping_ = false;
         submit(window_.time_seconds());
+        // A CPU run of the scene this one replaced may still finish.
+        analysis_from_ = revision_;
     }
 
     bool open_path(const std::filesystem::path& path) {
@@ -531,11 +533,48 @@ private:
 
     // ------------------------------------------------------- the builder
 
+    // The selected particle system: the one whose Motion values a package
+    // reads live, and whose paths are traced first.
+    [[nodiscard]] Uid selected_system() const {
+        const Uid selected = scene_view_.selected();
+        const SceneItem* item = document_.scene ? document_.scene->item(selected) : nullptr;
+        return item != nullptr && std::holds_alternative<ParticleSystem>(item->data) ? selected : 0U;
+    }
+
     void submit(double now) {
         ++revision_;
-        builder_.submit(document_, revision_, path_.parent_path());
+        const Uid system = selected_system();
+        builder_.submit(document_, revision_, path_.parent_path(), system, system);
         submitted_.set(document_, changes_.value());
+        submitted_live_ = system;
+        ++submit_serial_;
+        analysed_.set(document_, changes_.value());
         last_submit_ = now;
+        last_analysis_ = now;
+    }
+
+    // An edit the package already shows through its live values still
+    // moves the paths and bounds: only the CPU run is asked for.
+    void submit_analysis(double now) {
+        ++revision_;
+        builder_.submit_analysis(document_, revision_, path_.parent_path(), selected_system());
+        analysed_.set(document_, changes_.value());
+        last_analysis_ = now;
+    }
+
+    // Whether the preview shows the page as it is: its package was built of
+    // it, or differs from it only in values it reads live. Worked out once a
+    // change.
+    [[nodiscard]] bool preview_current(std::uint64_t at) {
+        if (!submitted_.differs(document_, at)) {
+            return true;
+        }
+        if (live_checked_at_ != at || live_checked_serial_ != submit_serial_) {
+            live_checked_at_ = at;
+            live_checked_serial_ = submit_serial_;
+            live_only_ = submitted_live_ != 0U && same_but_live(submitted_.copy(), document_, submitted_live_);
+        }
+        return live_only_;
     }
 
     void take_results(double now) {
@@ -547,6 +586,7 @@ private:
                 outlines_[path] = std::move(outline);
             }
             if (built->written) {
+                package_live_ = built->live;
                 ++package_generation_;
                 settled_frames_ = 0U;
                 has_package_ = true;
@@ -555,7 +595,17 @@ private:
                 has_package_ = false;
             }
         }
-        if (std::optional<Analysis> analysis = builder_.take_analysis()) {
+        std::optional<Analysis> analysis = builder_.take_analysis();
+        if (analysis && analysis->revision >= analysis_from_ && analysis->focus != 0U) {
+            // A quick run of one system: its paths, ahead of the whole run.
+            if (analysis->traced && analysis_) {
+                std::erase_if(analysis_->paths,
+                              [&](const ParticlePath& path) { return path.layer == analysis->focus; });
+                for (ParticlePath& path : analysis->paths) {
+                    analysis_->paths.push_back(std::move(path));
+                }
+            }
+        } else if (analysis && analysis->revision >= analysis_from_) {
             analysis_ = std::move(analysis);
             // The estimate reads its peaks.
             bake_status_dirty_ = true;
@@ -607,17 +657,28 @@ private:
             ++bake_serial_;
             bake_status_dirty_ = false;
         }
+        const bool current = preview_current(at);
+        preview_shows_page_ = current;
         bake_when_settled(now, at, compile_behind);
         if (preview_ && !preview_->status().waiting && has_package_) {
             ++settled_frames_;
         }
-        if (submitted_.differs(document_, at)) {
-            const bool live = scene_view_.gesture_live() || ctx_.pointer_down() || overlay_.dragging();
+        const bool held = scene_view_.gesture_live() || ctx_.pointer_down() || overlay_.dragging();
+        if (current && analysed_.differs(document_, at) && now - last_analysis_ >= submit_interval) {
+            submit_analysis(now);
+        }
+        // A newly selected system is made live once nothing is held, so the
+        // next drag of one of its values needs no package.
+        const Uid system = selected_system();
+        if (current && !held && system != 0U && system != submitted_live_ && !builder_.busy()) {
+            submit(now);
+        }
+        if (!current) {
             // While a value is dragged, the next package waits for the preview
             // to have taken in the last; the gesture's end always sends one.
             const bool settled = !builder_.busy() && (settled_frames_ >= settle_frames || !preview_ ||
                                                       now - last_submit_ >= settle_timeout);
-            if (!live || (now - last_submit_ >= submit_interval && settled)) {
+            if (!held || (now - last_submit_ >= submit_interval && settled)) {
                 submit(now);
             }
         }
@@ -640,7 +701,7 @@ private:
         const bool held = scene_view_.gesture_live() || ctx_.pointer_down() || overlay_.dragging();
         const bool settled = !compile_behind && !bake_status_dirty_ && !bake_status_for_.differs(document_, at) &&
                              now - change_time_ >= auto_bake_delay && !held && !builder_.busy() &&
-                             !submitted_.differs(document_, at) && builder_.bake_progress() < 0.0;
+                             preview_shows_page_ && builder_.bake_progress() < 0.0;
         if (!settled || auto_baked_for_ == at || compiled_.solids.emitter.empty() || !bake_status_.any_baked ||
             bake_status_.current) {
             return;
@@ -885,7 +946,7 @@ private:
             state = "Cannot build";
             tone = theme.warning;
             tip = build_error_;
-        } else if (builder_.busy() || submitted_.differs(document_, changes_.value())) {
+        } else if (builder_.busy() || !preview_shows_page_) {
             state = "Updating";
             tone = theme.caution;
             tip = "Building the preview from your latest change.";
@@ -1015,15 +1076,18 @@ private:
         ctx_.draw_list().add_corner_mask(view.x, view.y, view.width, view.height, theme.radius, theme.panel);
 
         // What the picture is, and anything holding it.
+        // A held picture is the last complete one, so what held it is not
+        // said until the hold runs out.
         std::string note = "Initial setup";
         gui::UiColor note_tone = theme.text_muted;
+        const bool held = preview_ && preview_->status().held;
         if (!preview_error_.empty()) {
             note = preview_error_;
             note_tone = theme.warning;
-        } else if (preview_ && !preview_->status().issue.empty()) {
+        } else if (preview_ && !held && !preview_->status().issue.empty()) {
             note = preview_->status().issue;
             note_tone = theme.warning;
-        } else if (preview_ && preview_->status().waiting) {
+        } else if (preview_ && !held && preview_->status().waiting) {
             note = "Loading the effect";
             note_tone = theme.caution;
         } else if (!has_package_ && compiled_.effect) {
@@ -1240,6 +1304,16 @@ private:
         frame.frame = static_cast<std::uint64_t>(frame_);
         frame.revision = package_generation_;
         frame.paused = !playing_;
+        if (has_package_ && package_live_ != 0U) {
+            for (const LiveParameter& live : live_parameters(document_, package_live_)) {
+                for (std::uint32_t c = 0U; c < live.components; ++c) {
+                    ms::scene::ParticleParameter parameter;
+                    parameter.key = live.name + "." + std::to_string(c);
+                    parameter.base = live.value[c];
+                    frame.parameters.push_back(std::move(parameter));
+                }
+            }
+        }
         auto acquired = device.acquire_commands();
         if (!acquired) {
             return last_picture_;
@@ -1438,6 +1512,19 @@ private:
     PageRevision changes_;
     PageMark saved_;
     PageMark submitted_;
+    // The system the last package sent reads live, and the one the package
+    // written last reads live.
+    Uid submitted_live_{0U};
+    Uid package_live_{0U};
+    // The page as the CPU run was last asked for, and when.
+    PageMark analysed_;
+    double last_analysis_{0.0};
+    // preview_current's answer, kept for the change it was worked out for.
+    bool preview_shows_page_{true};
+    bool live_only_{false};
+    std::uint64_t live_checked_at_{0U};
+    std::uint64_t live_checked_serial_{0U};
+    std::uint64_t submit_serial_{0U};
     PageMark compiled_for_;
     PageMark history_head_;
     Compiled compiled_;
@@ -1452,6 +1539,8 @@ private:
     std::size_t history_index_{0U};
     std::filesystem::path path_;
     std::uint64_t revision_{0U};
+    // The first revision of the scene now open, whose CPU runs it shows.
+    std::uint64_t analysis_from_{0U};
     double last_submit_{0.0};
     std::string build_error_;
     double kernel_ms_{0.0};

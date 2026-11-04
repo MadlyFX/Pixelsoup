@@ -68,6 +68,9 @@ struct PreviewStatus final {
     bool drawing{false};
     // Loading the package, or catching up with the playhead.
     bool waiting{false};
+    // The picture returned is the last complete one, held while this frame
+    // waits or fails: a moment's catching up never shows as a gap.
+    bool held{false};
     std::string issue;
 };
 
@@ -76,7 +79,9 @@ public:
     [[nodiscard]] static std::unique_ptr<Preview> create(ms::rhi::Device& device, std::string& error);
 
     // Records the frame into `commands` and returns the picture to show, or
-    // null when nothing could be drawn (the status says why).
+    // null when nothing could be drawn (the status says why). A frame that
+    // waits on the effect, or fails, briefly returns the last complete
+    // picture instead, as a wall holds its last frame.
     [[nodiscard]] const ms::rhi::Texture* render(ms::rhi::CommandList& commands, const PreviewFrame& frame);
     [[nodiscard]] const PreviewStatus& status() const noexcept { return status_; }
 
@@ -89,6 +94,10 @@ private:
     ms::render::CompositorSceneExecutor executor_;
     ms::render::OutputTransform display_;
     PreviewStatus status_;
+    // The display target holds a complete picture of this size, and how many
+    // frames in a row it has been shown in place of an incomplete one.
+    bool complete_shown_{false};
+    std::uint32_t held_frames_{0U};
 };
 
 } // namespace ajfx::studio

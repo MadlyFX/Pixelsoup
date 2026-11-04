@@ -1,5 +1,7 @@
 #include <ajfx/rigid_runner.hpp>
 
+#include <ajfx/cache.hpp>
+
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
@@ -22,6 +24,8 @@ struct RigidRunner::Job final {
     MeshSet meshes;
     // What the whole effect reads of each of the part's emitters' contacts.
     std::vector<std::optional<float>> contact_floors;
+    // Whether any of the part's emitters reads a parameter.
+    bool reads_any_parameter{false};
 
     // Under Shared::mutex.
     std::uint64_t wanted{0U};
@@ -302,6 +306,8 @@ std::unique_ptr<RigidTrack> RigidRunner::track(const Effect& effect, std::uint32
         }
     }
     job->emitters = effect.emitters.size();
+    job->reads_any_parameter = std::any_of(job->part.emitters.begin(), job->part.emitters.end(),
+                                        [&](const Emitter& emitter) { return reads_parameters(effect, emitter); });
     job->seed = instance_seed;
     job->meshes = std::move(meshes);
     job->parameters = std::move(parameters);
@@ -357,8 +363,11 @@ void RigidTrack::set_parameters(std::shared_ptr<const ParameterProvider> paramet
     {
         const std::lock_guard lock{shared_->mutex};
         job_->parameters = std::move(parameters);
-        ++job_->generation;
-        job_->frames.clear();
+        // Bodies that read no parameter have the same past under any.
+        if (job_->reads_any_parameter) {
+            ++job_->generation;
+            job_->frames.clear();
+        }
     }
     shared_->wake.notify_all();
 }
