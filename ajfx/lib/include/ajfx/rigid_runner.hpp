@@ -104,7 +104,8 @@ public:
     // from: ticks before it are let go.
     [[nodiscard]] std::shared_ptr<const RigidFrame> frame(std::uint64_t tick);
     // Follow `parameters` from now on. What the runner holds describes the
-    // old parameters' past, so it is dropped and worked out again.
+    // old parameters' past, so it is dropped and worked out again, unless the
+    // track's emitters read no parameter: then their past is the same.
     void set_parameters(std::shared_ptr<const ParameterProvider> parameters);
     // Why the runner could not build this track's worlds, once it has tried.
     [[nodiscard]] std::optional<Error> error() const;

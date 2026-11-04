@@ -4105,8 +4105,7 @@ bool SceneRenderer::render(
     // frame lights from are the ones its own recording produced.
     const auto& complete_scene = options.residency_scene ? *options.residency_scene : scene;
     stats_.assets = {scene::asset_set_digest(complete_scene), true, 0};
-    stats_.ltc_ready = ltc_asset_.prepare(commands, authored_asset_generation_);
-    stats_.ltc_generation = ltc_asset_.generation();
+    stats_.ltc_ready = ltc_asset_.prepare(commands);
     stats_.upload_bytes += ltc_asset_.upload_bytes();
     if (!stats_.ltc_ready) {
         stats_.assets.ready = false;

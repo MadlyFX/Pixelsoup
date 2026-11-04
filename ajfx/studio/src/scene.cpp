@@ -882,7 +882,142 @@ Uid first_target(const Scene &scene, const SceneItem &item) {
 }
 } // namespace
 
-Document lower_scene(const Document &document) {
+namespace {
+
+// A behavior's strength control and the range validate_behavior allows it.
+struct BehaviorStrength final {
+    const char *control;
+    float low;
+    float high;
+};
+BehaviorStrength behavior_strength(BehaviorKind kind) {
+    switch (kind) {
+    case BehaviorKind::Drag: return {"amount", 0.0F, 100.0F};
+    case BehaviorKind::Turbulence: return {"strength", 0.0F, 100.0F};
+    case BehaviorKind::Vortex:
+    case BehaviorKind::Attract: return {"strength", -1000.0F, 1000.0F};
+    case BehaviorKind::Wind:
+    case BehaviorKind::DrawIn: return {"strength", 0.0F, 1000.0F};
+    }
+    return {"strength", 0.0F, 1000.0F};
+}
+
+std::string live_name(Uid system, const char *what) { return "live" + std::to_string(system) + "_" + what; }
+std::string behavior_parameter(Uid system, const MotionBehavior &b) {
+    return live_name(system, "m") + std::to_string(b.uid);
+}
+
+Vec3 unit_or_up(Vec3 v) {
+    const float n = std::sqrt(dot(v, v));
+    return n > 1e-6F ? Vec3{v.x / n, v.y / n, v.z / n} : Vec3{0.0F, 1.0F, 0.0F};
+}
+
+// Publishes the system's live controls on the blocks lower_scene made of it.
+// The ranges are the inspector's, so a value it allows is never clamped.
+void publish_live(Layer &layer, const SceneItem &item, const ParticleSystem &system) {
+    const auto on = [&](Uid uid, const char *control, std::string name, float low, float high) {
+        for (Block &b : layer.blocks) {
+            if (b.uid == uid) {
+                b.publish(Published{control, std::move(name), low, high});
+            }
+        }
+    };
+    on(item.uid + 6U, "speed", live_name(item.uid, "speed"), 0.0F, 10000.0F);
+    on(item.uid + 6U, "spread", live_name(item.uid, "spread"), 0.0F, 180.0F);
+    on(item.uid + 6U, "custom", live_name(item.uid, "direction"), -1.0F, 1.0F);
+    on(item.uid + 7U, "size", live_name(item.uid, "radius"), 0.0F, 1000.0F);
+    on(item.uid + 8U, "strength", live_name(item.uid, "gravity"), 0.0F, 10.0F);
+    for (const MotionBehavior &b : system.motion) {
+        if (b.enabled) {
+            const BehaviorStrength strength = behavior_strength(b.kind);
+            on(b.uid, strength.control, behavior_parameter(item.uid, b), strength.low, strength.high);
+        }
+    }
+    // The preview simulates. Holding bake-time values where they are set is
+    // for the cache, which an export takes.
+    layer.baked = false;
+}
+
+} // namespace
+
+std::vector<LiveParameter> live_parameters(const Document &document, Uid system) {
+    std::vector<LiveParameter> out;
+    const SceneItem *item = document.scene ? document.scene->item(system) : nullptr;
+    const auto *particles = item ? std::get_if<ParticleSystem>(&item->data) : nullptr;
+    if (particles == nullptr) {
+        return out;
+    }
+    const float s = document.scale;
+    const auto range = [&](const std::string &name, float low, float high) {
+        out.push_back({name + "_min", {low, 0.0F, 0.0F, 0.0F}});
+        out.push_back({name + "_max", {high, 0.0F, 0.0F, 0.0F}});
+    };
+    range(live_name(system, "speed"), particles->speed.min * s, particles->speed.max * s);
+    range(live_name(system, "spread"), 0.0F, std::clamp(particles->spread, 0.0F, 180.0F));
+    const Vec3 direction = unit_or_up(particles->direction);
+    out.push_back({live_name(system, "direction"), {direction.x, direction.y, direction.z, 0.0F}, 3U});
+    range(live_name(system, "radius"), particles->radius.min * s, particles->radius.max * s);
+    range(live_name(system, "gravity"), particles->gravity, particles->gravity);
+    for (const MotionBehavior &b : particles->motion) {
+        if (b.enabled) {
+            range(behavior_parameter(system, b), b.strength.min, b.strength.max);
+        }
+    }
+    return out;
+}
+
+bool same_but_live(const Document &a, const Document &b, Uid system) {
+    if (!a.scene || !b.scene) {
+        return false;
+    }
+    const SceneItem *from = a.scene->item(system);
+    const SceneItem *to = b.scene->item(system);
+    const auto *kept = from ? std::get_if<ParticleSystem>(&from->data) : nullptr;
+    if (kept == nullptr || to == nullptr || !std::holds_alternative<ParticleSystem>(to->data)) {
+        return false;
+    }
+    // b with the live values of a is a when nothing else differs.
+    Document copy = b;
+    auto &moved = std::get<ParticleSystem>(copy.scene->item(system)->data);
+    if (moved.motion.size() != kept->motion.size()) {
+        return false;
+    }
+    moved.speed = kept->speed;
+    moved.spread = kept->spread;
+    moved.direction = kept->direction;
+    moved.radius = kept->radius;
+    moved.gravity = kept->gravity;
+    for (std::size_t k = 0U; k < moved.motion.size(); ++k) {
+        moved.motion[k].strength = kept->motion[k].strength;
+    }
+    return copy == a;
+}
+
+Document focus_scene(const Document &document, Uid system) {
+    Document out = document;
+    if (!out.scene) {
+        return out;
+    }
+    std::set<Uid> kept{system};
+    for (bool grew = true; grew;) {
+        grew = false;
+        for (const Relationship &r : out.scene->relationships) {
+            const SceneItem *source = out.scene->item(r.object);
+            if (kept.contains(r.system) && source != nullptr &&
+                std::holds_alternative<ParticleSystem>(source->data) && kept.insert(r.object).second) {
+                grew = true;
+            }
+        }
+    }
+    for (SceneItem &item : out.scene->items) {
+        if (std::holds_alternative<ParticleSystem>(item.data) && !kept.contains(item.uid)) {
+            item.simulate = false;
+        }
+    }
+    return out;
+}
+
+Document lower_scene(const Document &document, Uid live) {
     if (!document.scene) {
         return document;
     }
@@ -1239,6 +1374,11 @@ Document lower_scene(const Document &document) {
                 }
             }
         }
+        if (item->uid == live) {
+            if (const auto *system = std::get_if<ParticleSystem>(&item->data)) {
+                publish_live(layer, *item, *system);
+            }
+        }
         out.layers.push_back(std::move(layer));
     }
     if (host != 0U) {
@@ -1312,13 +1452,13 @@ bool same_scene_motion(const Document &a, const Document &b) {
     return true;
 }
 
-Compiled compile_scene(const Document &document, Purpose purpose) {
+Compiled compile_scene(const Document &document, Purpose purpose, Uid live) {
     if (const std::string error = validate_scene(document); !error.empty()) {
         Compiled failed;
         failed.error = error;
         return failed;
     }
-    Compiled out = compile(lower_scene(document), purpose);
+    Compiled out = compile(lower_scene(document, live), purpose);
     if (!out.error.empty()) {
         for (const LayerReport &report : out.layers) {
             if (!report.error.empty()) {

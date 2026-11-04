@@ -98,6 +98,20 @@ if(AJFX_BUILD_STUDIO_APP)
         ajfx_set_options(ajfx_studio_ui_tests)
         add_test(NAME ajfx.studio_ui COMMAND ajfx_studio_ui_tests)
         set_target_properties(ajfx_studio_ui_tests PROPERTIES FOLDER "ajfx/tests")
+
+        # The preview's builder, with the kernel compiler and CPU reference:
+        # builds keep pace while the CPU run of an earlier one finishes.
+        add_executable(ajfx_studio_builder_tests tests/package_builder_tests.cpp src/package_builder.cpp)
+        target_link_libraries(ajfx_studio_builder_tests PRIVATE
+            ajfx_studio_core
+            ajfx::d3d12
+            ajfx::rigid
+            MediaServer::Render
+        )
+        ajfx_set_options(ajfx_studio_builder_tests)
+        ajfx_copy_dxc(ajfx_studio_builder_tests)
+        add_test(NAME ajfx.studio_builder COMMAND ajfx_studio_builder_tests)
+        set_target_properties(ajfx_studio_builder_tests PROPERTIES FOLDER "ajfx/tests")
     endif()
 endif()
 

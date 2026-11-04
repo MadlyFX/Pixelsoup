@@ -1,6 +1,7 @@
 #include "check.hpp"
 
 #include <ajfx/builder.hpp>
+#include <ajfx/cache.hpp>
 #include <ajfx/fracture.hpp>
 #include <ajfx/mesh.hpp>
 #include <ajfx/presets.hpp>
@@ -862,6 +863,36 @@ void runner_matches_the_simulation() {
     auto fine = std::make_shared<Grain>(0.16F);
     track->set_parameters(fine);
     check_at(100U, fine.get());
+}
+
+// Parameters only the particles read leave the bodies' past as it was: a
+// track keeps what it has worked out when they change, rather than working
+// it all out again while the particles wait on it.
+void runner_keeps_bodies_that_read_no_parameter() {
+    Effect effect = mixed();
+    for (InitModule& module : effect.emitters[1].init) {
+        if (auto* size = std::get_if<InitSize>(&module)) {
+            size->max = 0.3F;
+        }
+    }
+    for (InitModule& module : effect.emitters[0].init) {
+        if (auto* lifetime = std::get_if<Lifetime>(&module)) {
+            lifetime->min = 0.1F;
+            lifetime->max = bind("grain");
+        }
+    }
+    AJFX_CHECK(validate(effect).ok());
+    AJFX_CHECK(reads_parameters(effect, effect.emitters[0]) && !reads_parameters(effect, effect.emitters[1]));
+    RigidRunner runner{*g_solver, RigidRunnerOptions{.lead = 20U}};
+    std::unique_ptr<RigidTrack> track = runner.track(effect, 3U, {}, std::make_shared<Grain>(0.2F));
+    (void)track->frame(40U);
+    runner.wait_idle();
+    const std::shared_ptr<const RigidFrame> before = track->frame(40U);
+    AJFX_CHECK(before != nullptr);
+    track->set_parameters(std::make_shared<Grain>(0.35F));
+    AJFX_CHECK(track->frame(40U) == before);
+    AJFX_CHECK(track->frame(41U) != nullptr);
+    AJFX_CHECK(!track->error());
 }
 
 void runner_keeps_serving_beside_a_failed_track() {
@@ -2235,6 +2266,7 @@ int main() {
         {"piles_seek_and_follow_their_parameters", piles_seek_and_follow_their_parameters},
         {"piles_need_rigid_physics_and_room", piles_need_rigid_physics_and_room},
         {"runner_matches_the_simulation", runner_matches_the_simulation},
+        {"runner_keeps_bodies_that_read_no_parameter", runner_keeps_bodies_that_read_no_parameter},
         {"runner_keeps_serving_beside_a_failed_track", runner_keeps_serving_beside_a_failed_track},
         {"balls_rest_inside_a_hollow_prop", balls_rest_inside_a_hollow_prop},
         {"a_driven_prop_tips_what_it_holds", a_driven_prop_tips_what_it_holds},

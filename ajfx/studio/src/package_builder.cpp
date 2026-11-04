@@ -3,6 +3,7 @@
 #include "catalog.hpp"
 #include "document_io.hpp"
 #include "library.hpp"
+#include "scene.hpp"
 #include "user_assets.hpp"
 
 #include <mediaserver/render/image_decode.hpp>
@@ -178,7 +179,7 @@ private:
 
 PackageBuilder::PackageBuilder(std::filesystem::path preview_package, std::uint32_t instance_seed, bool analyse)
     : preview_path_{std::move(preview_package)}, instance_seed_{instance_seed}, analyse_{analyse},
-      worker_{[this] { run(); }} {}
+      worker_{[this] { run(); }}, analyst_{[this] { run_analyses(); }} {}
 
 PackageBuilder::~PackageBuilder() {
     {
@@ -187,16 +188,37 @@ PackageBuilder::~PackageBuilder() {
         // A bake under way stops at its next step rather than holding the
         // close up until it is done.
         cancel_bake_.store(true);
+        stop_analysis_.store(true);
     }
     wake_.notify_all();
+    analysis_wake_.notify_all();
     worker_.join();
+    analyst_.join();
 }
 
-void PackageBuilder::submit(Document document, std::uint64_t revision, std::filesystem::path base) {
+void PackageBuilder::submit(Document document, std::uint64_t revision, std::filesystem::path base, Uid live,
+                            Uid focus) {
     {
         std::lock_guard lock{mutex_};
-        pending_ = Request{std::move(document), revision, std::move(base)};
+        pending_ = Request{std::move(document), revision, std::move(base), live, focus, true};
         newest_revision_.store(revision);
+    }
+    wake_.notify_all();
+}
+
+void PackageBuilder::submit_analysis(Document document, std::uint64_t revision, std::filesystem::path base,
+                                     Uid focus) {
+    {
+        std::lock_guard lock{mutex_};
+        // A package still queued is built all the same, of this newer page,
+        // and keeps the system it was to read live.
+        const bool package = pending_ && pending_->package;
+        const Uid live = package ? pending_->live : 0U;
+        pending_ = Request{std::move(document), revision, std::move(base), live, focus, package};
+        // A package being written now is still the newest one.
+        if (package) {
+            newest_revision_.store(revision);
+        }
     }
     wake_.notify_all();
 }
@@ -295,15 +317,34 @@ void PackageBuilder::run() {
             working_ = true;
         }
         if (request) {
-            BuildResult result = build(*request);
-            const Compiled compiled = result.compiled;
-            const bool written = result.written;
-            {
+            Compiled compiled;
+            bool ready = false;
+            if (request->package) {
+                BuildResult result = build(*request);
+                compiled = result.compiled;
+                ready = result.written;
                 std::lock_guard lock{mutex_};
                 built_ = std::move(result);
+            } else {
+                std::string issue;
+                compiled = prepare(request->document, request->base, issue, nullptr);
+                ready = issue.empty() || !request->document.scene;
             }
-            if (written && compiled.effect && analyse_) {
-                analyse(*request, compiled);
+            if (ready && compiled.effect && analyse_) {
+                std::optional<Compiled> focus;
+                if (request->focus != 0U) {
+                    std::string issue;
+                    Compiled alone = prepare(focus_scene(request->document, request->focus), request->base, issue, nullptr);
+                    if (alone.effect && issue.empty()) {
+                        focus = std::move(alone);
+                    }
+                }
+                {
+                    std::lock_guard lock{mutex_};
+                    pending_analysis_ = AnalysisRequest{std::move(*request), std::move(compiled), std::move(focus)};
+                    analysis_waiting_.store(true);
+                }
+                analysis_wake_.notify_all();
             }
         } else if (export_request) {
             ExportResult result = export_package(*export_request);
@@ -318,6 +359,40 @@ void PackageBuilder::run() {
         std::lock_guard lock{mutex_};
         working_ = false;
     }
+}
+
+void PackageBuilder::run_analyses() {
+    while (true) {
+        std::optional<AnalysisRequest> taken;
+        {
+            std::unique_lock lock{mutex_};
+            analysis_wake_.wait(lock, [&] { return stopping_ || pending_analysis_; });
+            if (stopping_) {
+                return;
+            }
+            taken = std::move(pending_analysis_);
+            pending_analysis_.reset();
+            analysis_waiting_.store(false);
+        }
+        // Both runs cover the whole scene's loop, so the focus run's paths
+        // are the very ones the whole run traces.
+        const std::uint64_t steps = static_cast<std::uint64_t>(
+            std::ceil(std::clamp(loop_seconds(taken->request.document, taken->compiled), 0.5F, 30.0F) *
+                      static_cast<float>(taken->compiled.effect->simulation_rate)));
+        if (taken->focus) {
+            analyse(taken->request, *taken->focus, steps, taken->request.focus, false);
+        }
+        analyse(taken->request, taken->compiled, steps, 0U, taken->focus.has_value());
+    }
+}
+
+Compiled PackageBuilder::prepare(const Document& document, const std::filesystem::path& base, std::string& issue,
+                                 std::map<std::string, std::vector<Vec3>, std::less<>>* outlines, Uid live) {
+    Compiled compiled = compile(document, Purpose::Preview, live);
+    if (compiled.effect) {
+        resolve_assets(compiled, base, issue, outlines);
+    }
+    return compiled;
 }
 
 const PackageBuilder::Model& PackageBuilder::model_at(const std::filesystem::path& path) {
@@ -457,11 +532,11 @@ std::optional<gpu::KernelSet> PackageBuilder::kernels_for(const Effect& effect, 
 BuildResult PackageBuilder::build(const Request& request) {
     BuildResult result;
     result.revision = request.revision;
-    result.compiled = compile(request.document, Purpose::Preview);
+    result.live = request.live;
+    result.compiled = prepare(request.document, request.base, result.asset_issue, &result.outlines, request.live);
     if (!result.compiled.effect) {
         return result;
     }
-    resolve_assets(result.compiled, request.base, result.asset_issue, &result.outlines);
     if (request.document.scene && !result.asset_issue.empty()) {
         result.error = result.asset_issue;
         return result;
@@ -501,7 +576,8 @@ BuildResult PackageBuilder::build(const Request& request) {
     return result;
 }
 
-void PackageBuilder::analyse(const Request& request, const Compiled& compiled) {
+void PackageBuilder::analyse(const Request& request, const Compiled& compiled, std::uint64_t steps, Uid focus,
+                             bool yield) {
     std::uint64_t capacity = 0U;
     for (const Emitter& emitter : compiled.effect->emitters) {
         capacity += emitter.capacity;
@@ -509,30 +585,29 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled) {
     if (capacity > analysis_particle_limit) {
         Analysis untraced;
         untraced.revision = request.revision;
+        untraced.focus = focus;
         untraced.traced = false;
         std::lock_guard lock{mutex_};
         analysed_ = std::move(untraced);
         return;
     }
-    if (has_rigid_physics(*compiled.effect) && !rigid_) {
-        rigid_ = rigid::make_jolt_solver();
+    if (has_rigid_physics(*compiled.effect) && !analysis_rigid_) {
+        analysis_rigid_ = rigid::make_jolt_solver();
     }
     Result<Simulation> created = Simulation::create(
         *compiled.effect, instance_seed_,
-        SimulationOptions{.fields = compiled.fields, .meshes = compiled.meshes, .rigid = rigid_.get()});
+        SimulationOptions{.fields = compiled.fields, .meshes = compiled.meshes, .rigid = analysis_rigid_.get()});
     if (!created) {
         return;
     }
     Simulation& simulation = created.value();
-    const std::uint64_t steps = static_cast<std::uint64_t>(
-        std::ceil(std::clamp(loop_seconds(request.document, compiled), 0.5F, 30.0F) *
-                  static_cast<float>(compiled.effect->simulation_rate)));
     Analysis analysis;
     analysis.revision = request.revision;
+    analysis.focus = focus;
     // Each layer that plays, by the emitter it plays in and its scope there.
     std::vector<PathTracer> tracers;
     for (const LayerReport& report : compiled.layers) {
-        if (!report.included) {
+        if (!report.included || (focus != 0U && report.layer != focus)) {
             continue;
         }
         for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
@@ -557,8 +632,10 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled) {
     std::uint64_t radius_count = 0U;
     std::uint64_t most_alive = 0U;
     for (std::uint64_t step = 0U; step < steps; ++step) {
-        if (newest_revision_.load() != request.revision) {
-            return; // edited again: this answer would be stale
+        // A newer edit does not stop the run: during a drag every run would
+        // be stopped and the paths would never follow it.
+        if (stop_analysis_.load() || (yield && analysis_waiting_.load())) {
+            return;
         }
         simulation.step();
         std::uint64_t alive = 0U;

@@ -17,6 +17,10 @@ constexpr float two_pi = 6.28318530718F;
 constexpr float field_of_view = preview_field_of_view;
 // History keys for the stage props, apart from any effect.
 constexpr std::uint64_t prop_identity = 0x414A'4658'5354'0000ULL;
+// How many frames in a row the last complete picture may stand in for ones
+// that wait or fail: long enough to cover a new package catching up with the
+// playhead, short enough that a lasting problem still shows.
+constexpr std::uint32_t hold_limit = 30U;
 
 std::string_view describe(render::RenderError error) {
     switch (error) {
@@ -278,12 +282,22 @@ const rhi::Texture* Preview::render(rhi::CommandList& commands, const PreviewFra
     if (executor_.width() != frame.width || executor_.height() != frame.height) {
         // Targets change size only between frames the GPU has finished.
         device_->wait_idle();
+        complete_shown_ = false;
         if (!executor_.resize(*device_, frame.width, frame.height) ||
             !display_.resize(*device_, frame.width, frame.height)) {
             status_.issue = "The preview could not be resized: out of GPU memory";
             return nullptr;
         }
     }
+    // The last complete picture stands in, for a while, for one that is not.
+    const auto hold = [this]() -> const rhi::Texture* {
+        if (!complete_shown_ || held_frames_ >= hold_limit) {
+            return nullptr;
+        }
+        ++held_frames_;
+        status_.held = true;
+        return &display_.target();
+    };
     const scene::Scene stage = scene_for(frame);
     const render::CompositorSceneResult rendered = executor_.execute(commands, stage, scene::whole(stage.canvas));
     if (!rendered) {
@@ -300,7 +314,18 @@ const rhi::Texture* Preview::render(rhi::CommandList& commands, const PreviewFra
             reason = passes.motion_blur_reason;
         }
         status_.issue = "The preview could not draw: " + std::string{reason};
-        return nullptr;
+        return hold();
+    }
+    const render::RenderStats& stats = executor_.renderer_passes().geometry;
+    status_.drawing = stats.particles_drawn != 0U;
+    status_.waiting = stats.particles_pending != 0U || stats.particles_behind != 0U;
+    if (stats.particles_failed != 0U || stats.particles_unsupported != 0U) {
+        status_.issue = stats.particle_issue.empty() ? std::string{"The renderer refused the effect"} : stats.particle_issue;
+    }
+    if (status_.waiting && status_.issue.empty()) {
+        if (const rhi::Texture* held = hold()) {
+            return held;
+        }
     }
     // The display transform has no file of its own here, so nothing it reads
     // changes with the effect's package. Keyed to the package's generation,
@@ -309,14 +334,11 @@ const rhi::Texture* Preview::render(rhi::CommandList& commands, const PreviewFra
     if (!display_.render(commands, *rendered.value(), scene::CanvasRect{0U, 0U, frame.width, frame.height},
                          executor_.scene_linear_output())) {
         status_.issue = "The preview could not reach the screen";
+        complete_shown_ = false;
         return nullptr;
     }
-    const render::RenderStats& stats = executor_.renderer_passes().geometry;
-    status_.drawing = stats.particles_drawn != 0U;
-    status_.waiting = stats.particles_pending != 0U || stats.particles_behind != 0U;
-    if (stats.particles_failed != 0U || stats.particles_unsupported != 0U) {
-        status_.issue = stats.particle_issue.empty() ? std::string{"The renderer refused the effect"} : stats.particle_issue;
-    }
+    complete_shown_ = !status_.waiting;
+    held_frames_ = 0U;
     return &display_.target();
 }
 

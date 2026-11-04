@@ -656,6 +656,12 @@ private:
                              : direction == "side"   ? Vec3{1.0F, 0.0F, 0.0F}
                              : direction == "custom" ? normalized(to_vec3(get(block, "custom")), up)
                                                      : up;
+        if (direction == "custom") {
+            if (const Published* published = publication(block, "custom")) {
+                velocity.direction = declare(published->name, ParameterType::Vec3, to_value(velocity.direction.value),
+                                             published->low, published->high, control_timing(block.kind, "custom"));
+            }
+        }
         std::tie(velocity.speed_min, velocity.speed_max) = range_input(block, "speed", speed.x * s, speed.y * s, s);
         if (direction == "out") {
             velocity.spread = 180.0F;

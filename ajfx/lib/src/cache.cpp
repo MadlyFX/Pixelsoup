@@ -1240,6 +1240,12 @@ struct Slice final {
 
 } // namespace
 
+bool reads_parameters(const Effect& effect, const Emitter& emitter) {
+    std::vector<bool> read(effect.parameters.size(), false);
+    mark_reads(effect, emitter, read);
+    return std::find(read.begin(), read.end(), true) != read.end();
+}
+
 namespace {
 
 // The emitters whose bodies or contacts emitter `index` bears particles

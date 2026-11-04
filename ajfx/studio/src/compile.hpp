@@ -268,7 +268,8 @@ struct Compiled final {
     [[nodiscard]] std::uint32_t total_capacity() const;
 };
 
-[[nodiscard]] Compiled compile(const Document& document, Purpose purpose);
+// `live` is a scene's particle system to compile live (compile_scene).
+[[nodiscard]] Compiled compile(const Document& document, Purpose purpose, std::uint32_t live = 0U);
 
 // Makes the cuts `compiled` asks for, which needs the models they cut: the
 // caller reads those into `compiled.meshes` first, so this runs after the

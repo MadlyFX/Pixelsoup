@@ -304,8 +304,33 @@ bool group_item(Document &document, std::uint32_t uid, std::uint32_t parent);
 [[nodiscard]] std::string validate_scene(const Document &document, bool for_playback = true);
 [[nodiscard]] bool same_scene_motion(const Document &a, const Document &b);
 // Internal compiler IR only. Never saved, edited or cached as authored state.
-[[nodiscard]] Document lower_scene(const Document &document);
-[[nodiscard]] Compiled compile_scene(const Document &document, Purpose purpose);
+// `live` names a particle system whose Motion controls (live_parameters)
+// are lowered as published parameters, for a preview; 0 for none.
+[[nodiscard]] Document lower_scene(const Document &document, std::uint32_t live = 0U);
+[[nodiscard]] Compiled compile_scene(const Document &document, Purpose purpose, std::uint32_t live = 0U);
+
+// A preview compiled with a live system reads that system's Motion values --
+// speed, spread, direction, radius, gravity share and each behavior's
+// strength -- from its placement's parameters rather than from the package.
+// Changing one is then a new parameter value, which the renderer takes the
+// next frame, instead of a new package. By the parameter's name, in the
+// units the runtime takes.
+struct LiveParameter final {
+    std::string name;
+    ParameterValue value{};
+    std::uint32_t components{1U};
+};
+[[nodiscard]] std::vector<LiveParameter> live_parameters(const Document &document, std::uint32_t system);
+// Whether `a` and `b` are the same scene but for `system`'s live values: a
+// preview built of one with `system` live shows the other through
+// live_parameters alone.
+[[nodiscard]] bool same_but_live(const Document &a, const Document &b, std::uint32_t system);
+// The scene as `system` alone needs it to play: every other particle system
+// is left out unless the system's particles are born of it (a trail rule, or
+// one feeding that). Objects, forces and grids stay. The system's own
+// particles do exactly what they do in the whole scene, so its paths can be
+// traced from this far sooner.
+[[nodiscard]] Document focus_scene(const Document &document, std::uint32_t system);
 // The block of `lowered` that viewport handles drag for an item: its Object,
 // or its particle system's spawn shape. 0 for a group.
 [[nodiscard]] std::uint32_t handle_block(const Document &document, std::uint32_t item);

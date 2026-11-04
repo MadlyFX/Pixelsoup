@@ -67,6 +67,9 @@ inline constexpr std::uint32_t cache_format_version = 2U;
 // blending, lights, draw inputs -- are not in it, nor is any other emitter.
 [[nodiscard]] std::uint64_t emitter_digest(const Effect& effect, std::size_t index, const MeshSet& meshes = {},
                                            const FieldSet& fields = {});
+// Whether `emitter`'s simulation reads any of the effect's parameters: a
+// module input bound to one. Draw inputs are not simulation.
+[[nodiscard]] bool reads_parameters(const Effect& effect, const Emitter& emitter);
 // Every emitter's digest and every bake-time parameter's declaration
 // together: what a whole-state checkpoint is a pure function of, beside the
 // values.

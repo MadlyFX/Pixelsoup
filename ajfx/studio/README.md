@@ -116,10 +116,22 @@ is dragged, a new package goes at most every 0.12 s, once the worker is idle
 and the preview has drawn the last for a few frames (or 0.75 s has passed).
 Letting go always sends the final value.
 
+**Live values.** The package reads the selected particle system's Motion
+values (speed, spread, direction, radius, gravity share and each behavior's
+strength) from the preview's placement as published parameters
+(`live_parameters`), so an edit of only those sends no package: the renderer
+restarts the effect with the new values on the next frame. Any other edit
+builds a package as above. Selecting another system builds one package that
+reads that system live. A frame still catching up with the playhead, or that
+fails, shows the last complete picture for up to half a second instead.
+
 **Framing and paths.** The worker also runs each new effect on the CPU
-reference, with the preview placement's own instance seed. That shows where
-its particles and bodies go, for framing the camera, picking with a click and
-the particle paths.
+reference, on a thread of its own, with the preview placement's own instance
+seed. That shows where its particles and bodies go, for framing the camera,
+picking with a click and the particle paths. The selected system's paths come
+first, from a run of it without the systems it is not born of
+(`focus_scene`), then the whole scene's run, which a newer edit replaces
+while one is being dragged. A live-value edit asks for these runs alone.
 
 ## Baking and export
 
