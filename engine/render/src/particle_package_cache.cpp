@@ -2,6 +2,7 @@
 
 #include <ajfx/package.hpp>
 
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <utility>
@@ -10,8 +11,7 @@
 namespace mediaserver::render {
 namespace {
 
-core::u64 fnv1a(const std::vector<std::uint8_t>& bytes) {
-    core::u64 hash = 0xcbf29ce484222325ULL;
+core::u64 fnv1a(const std::vector<std::uint8_t>& bytes, core::u64 hash = 0xcbf29ce484222325ULL) {
     for (const std::uint8_t byte : bytes) {
         hash = (hash ^ byte) * 0x100000001b3ULL;
     }
@@ -50,16 +50,39 @@ Loaded load(const std::string& source, ajfx::gpu::ShaderFormat format) {
         return {nullptr, meshes.error().message};
     }
     auto package = std::make_shared<ParticlePackage>();
+    package->identity = fnv1a(bytes);
+    const std::string cache_source = particle_cache_path(source);
+    std::error_code missing;
+    if (std::filesystem::is_regular_file(cache_source, missing)) {
+        std::ifstream cache_stream{cache_source, std::ios::binary};
+        if (!cache_stream) {
+            return {nullptr, "the particle cache '" + cache_source + "' cannot be read"};
+        }
+        std::vector<std::uint8_t> cache_bytes{std::istreambuf_iterator<char>{cache_stream}, {}};
+        package->identity = fnv1a(cache_bytes, package->identity);
+        ajfx::Result<ajfx::Cache> cache =
+            ajfx::Cache::open_as_baked(std::move(cache_bytes), effect.value(), meshes.value(), fields.value());
+        if (!cache) {
+            return {nullptr, "the particle cache beside '" + source + "' does not play: " + cache.error().message +
+                                 "; bake and export it again, or remove it to simulate the effect live"};
+        }
+        package->cache = std::make_shared<const ajfx::Cache>(std::move(cache).value());
+    }
     package->effect = std::move(effect).value();
     package->kernels = std::move(kernels).value();
     package->textures = std::move(textures).value();
     package->fields = std::move(fields).value();
     package->meshes = std::move(meshes).value();
-    package->identity = fnv1a(bytes);
     return {std::move(package), {}};
 }
 
 } // namespace
+
+std::string particle_cache_path(const std::string& package_source) {
+    std::filesystem::path path{package_source};
+    path.replace_extension(".ajfxcache");
+    return path.string();
+}
 
 ParticlePackageCache::ParticlePackageCache(ajfx::gpu::ShaderFormat format, ParticlePackageCacheConfig config)
     : format_{format}, config_{config} {}

@@ -1480,6 +1480,97 @@ std::uint64_t whole_actions_digest(const Effect& effect, const ActionProvider* p
     return hash;
 }
 
+// The actions `provider` holds for `effect`'s emitters at ticks 0 to
+// frames - 1: all a bake of that many steps reads, and so all it is of. A
+// cache keeps these, keyed and stored, so acts after its last step neither
+// make it stale nor travel with it. None without a provider.
+std::shared_ptr<const ActionList> held_actions(const Effect& effect, const ActionProvider* provider,
+                                               std::uint64_t frames) {
+    if (provider == nullptr) {
+        return nullptr;
+    }
+    auto held = std::make_shared<ActionList>();
+    for (const Emitter& emitter : effect.emitters) {
+        for (std::uint64_t tick = 0U; tick < frames; ++tick) {
+            for (const Action& action : provider->actions_at(emitter.name, tick)) {
+                held->add(emitter.name, action);
+            }
+        }
+    }
+    return held;
+}
+
+constexpr std::size_t action_record_bytes = 125U;
+
+void write_action(Writer& w, const Action& a) {
+    w.u8(static_cast<std::uint8_t>(a.kind));
+    w.u64(a.tick);
+    w.u32(a.serial);
+    w.u32(a.body);
+    w.vec3(a.position);
+    w.quat(a.orientation);
+    w.vec3(a.velocity);
+    w.vec3(a.angular_velocity);
+    w.f32(a.size);
+    w.u64(a.release);
+    w.u32(a.target);
+    w.vec3(a.push);
+    w.vec3(a.twist);
+    w.f32(a.gain);
+    w.f32(a.max_speed);
+    w.f32(a.radius);
+    w.f32(a.power);
+}
+
+bool read_action(Reader& r, Action& a) {
+    const std::uint8_t kind = r.u8();
+    if (kind > static_cast<std::uint8_t>(ActionKind::Blast)) {
+        return false;
+    }
+    a.kind = static_cast<ActionKind>(kind);
+    a.tick = r.u64();
+    a.serial = r.u32();
+    a.body = r.u32();
+    a.position = r.vec3();
+    a.orientation = r.quat();
+    a.velocity = r.vec3();
+    a.angular_velocity = r.vec3();
+    a.size = r.f32();
+    a.release = r.u64();
+    a.target = r.u32();
+    a.push = r.vec3();
+    a.twist = r.vec3();
+    a.gain = r.f32();
+    a.max_speed = r.f32();
+    a.radius = r.f32();
+    a.power = r.f32();
+    return r.ok();
+}
+
+// The performance a cache holds: each emitter given actions, by name, with
+// its actions in tick order.
+void write_performance(Writer& w, const Effect& effect, const ActionList* held) {
+    std::uint32_t given = 0U;
+    for (const Emitter& emitter : effect.emitters) {
+        given += held != nullptr && !held->actions(emitter.name).empty() ? 1U : 0U;
+    }
+    w.u32(given);
+    if (given == 0U) {
+        return;
+    }
+    for (const Emitter& emitter : effect.emitters) {
+        const std::span<const Action> actions = held->actions(emitter.name);
+        if (actions.empty()) {
+            continue;
+        }
+        w.str(emitter.name);
+        w.u32(static_cast<std::uint32_t>(actions.size()));
+        for (const Action& action : actions) {
+            write_action(w, action);
+        }
+    }
+}
+
 std::uint64_t simulation_digest(const Effect& effect, const MeshSet& meshes, const FieldSet& fields) {
     Effect declared;
     declared.name = "effect";
@@ -1598,6 +1689,9 @@ struct Cache::Data final {
     // emitters.
     Effect effect;
     CacheIdentity identity;
+    // The performance it was baked with (none when it was baked with no
+    // actions), as the steps it holds read it.
+    std::shared_ptr<const ActionList> performance = std::make_shared<ActionList>();
     std::uint64_t frames{0U};
     std::uint64_t keyframe_interval{0U};
     float position_step{0.0F};
@@ -1642,6 +1736,9 @@ Cache::~Cache() = default;
 
 const CacheIdentity& Cache::identity() const noexcept {
     return data_->identity;
+}
+const std::shared_ptr<const ActionList>& Cache::performance() const noexcept {
+    return data_->performance;
 }
 const Effect& Cache::effect() const noexcept {
     return data_->effect;
@@ -1744,6 +1841,18 @@ std::optional<SimulationState> Cache::checkpoint_before(std::uint64_t tick) cons
 Result<Cache> Cache::open(std::vector<std::uint8_t> bytes, const Effect& effect, std::uint32_t instance_seed,
                           std::span<const ParameterValue> values, const MeshSet& meshes, const FieldSet& fields,
                           const ActionProvider* actions) {
+    return open_impl(std::move(bytes), effect, instance_seed, values, meshes, fields, actions, false);
+}
+
+Result<Cache> Cache::open_as_baked(std::vector<std::uint8_t> bytes, const Effect& effect, const MeshSet& meshes,
+                                   const FieldSet& fields) {
+    return open_impl(std::move(bytes), effect, std::nullopt, {}, meshes, fields, nullptr, true);
+}
+
+Result<Cache> Cache::open_impl(std::vector<std::uint8_t> bytes, const Effect& effect,
+                               std::optional<std::uint32_t> seed, std::span<const ParameterValue> values,
+                               const MeshSet& meshes, const FieldSet& fields, const ActionProvider* given,
+                               bool as_baked) {
     if (bytes.size() < sizeof(cache_magic) + 4U + 8U ||
         !std::equal(std::begin(cache_magic), std::end(cache_magic), bytes.begin())) {
         return malformed("is not an ajfx cache");
@@ -1791,9 +1900,33 @@ Result<Cache> Cache::open(std::vector<std::uint8_t> bytes, const Effect& effect,
             component = r.f32();
         }
     }
+    const std::uint32_t performed = r.u32();
+    if (!r.fits(performed, 8U)) {
+        return malformed("the cache's performance is truncated");
+    }
+    {
+        auto stored = std::make_shared<ActionList>();
+        for (std::uint32_t i = 0U; i < performed; ++i) {
+            const std::string emitter = r.str();
+            const std::uint32_t count = r.u32();
+            if (!r.fits(count, action_record_bytes)) {
+                return malformed("the cache's performance is truncated");
+            }
+            for (std::uint32_t k = 0U; k < count; ++k) {
+                Action action;
+                if (!read_action(r, action)) {
+                    return malformed("the cache's performance is malformed");
+                }
+                stored->add(emitter, action);
+            }
+        }
+        data->performance = std::move(stored);
+    }
     if (!r.ok()) {
         return malformed("the cache's identity is truncated");
     }
+    // Played as baked, it is placed with the seed it was baked with.
+    const std::uint32_t instance_seed = seed.value_or(identity.instance_seed);
     if (std::optional<std::string> why =
             origin_difference(identity, CacheIdentity{instance_seed, effect.simulation_rate, {}, {}})) {
         return Error{ErrorCode::StaleCache, "the cache does not belong to this effect: " + *why};
@@ -1905,7 +2038,26 @@ Result<Cache> Cache::open(std::vector<std::uint8_t> bytes, const Effect& effect,
                                                     quoted(layer.name) + ", which it holds, is not in the effect"};
         }
     }
-    // What it was baked from and with, against what it is to be played with.
+    // What it was baked from and with, against what it is to be played with:
+    // the actions given, as far as the cache's steps read them, or played
+    // as baked, its own.
+    const std::shared_ptr<const ActionList> held =
+        as_baked ? data->performance : held_actions(effect, given, data->frames);
+    const ActionProvider* const actions = held.get();
+    // Played as baked, the bake-time parameters it holds take the values it
+    // was baked at; the rest keep their defaults.
+    std::vector<ParameterValue> baked_values;
+    if (as_baked) {
+        baked_values = complete(effect, {});
+        for (const BakeValue& baked : identity.bake) {
+            for (std::size_t p = 0U; p < effect.parameters.size(); ++p) {
+                if (effect.parameters[p].name == baked.name) {
+                    baked_values[p] = baked.value;
+                }
+            }
+        }
+        values = baked_values;
+    }
     const CacheIdentity expected = cache_identity(effect, modes, instance_seed, values, meshes, fields, actions);
     if (std::optional<std::string> why = emitter_difference(identity, expected)) {
         return Error{ErrorCode::StaleCache, "the cache does not belong to this effect: " + *why};
@@ -1961,7 +2113,9 @@ Result<Baked> bake(const Effect& effect, std::uint32_t instance_seed, Simulation
         return Error{ErrorCode::InvalidEffect, "a bake needs one mode per emitter"};
     }
     const std::vector<ParameterValue> baked_values = complete(effect, settings.values);
-    const ActionProvider* const actions = settings.actions.get();
+    const std::shared_ptr<const ActionList> performance =
+        held_actions(effect, settings.actions.get(), settings.frames);
+    const ActionProvider* const actions = performance.get();
     const CacheIdentity pinned =
         cache_identity(effect, modes, instance_seed, baked_values, options.meshes, options.fields, actions);
     const std::uint64_t whole =
@@ -2217,6 +2371,7 @@ Result<Baked> bake(const Effect& effect, std::uint32_t instance_seed, Simulation
             w.f32(component);
         }
     }
+    write_performance(w, effect, performance.get());
     w.u64(whole);
     w.u64(settings.frames);
     w.u64(settings.keyframe_interval);

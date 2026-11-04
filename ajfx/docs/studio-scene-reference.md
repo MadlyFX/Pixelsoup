@@ -384,11 +384,38 @@ Bake covers the selected capture range. Scene export requires a matching,
 current cache for every baked unit and refuses missing assets and unsupported
 state. The cache is written successfully before publishing the package. A bake
 replays the performance and is keyed by it (`CacheIdentity`'s action
-digest): a cache opens only with the acts it was baked with, and a drop or
-deletion since makes it stale.
-The current viewport still simulates: a green cache band means the cache is
-available, not that the viewport is reading it. Cache-backed preview and host
-cache adoption still need their own end-to-end integration.
+digest): a cache opens only with the acts it was baked with, as far as its
+steps read them, so a drop or deletion inside the capture range makes it
+stale and one after it does not.
+
+Delivery (`delivery.*`) is one path for the window's export and
+`ajfx-studio-cli deliver`: it writes the package, checks the cache against
+the scene's performance, then reads the package back and opens the cache
+against it exactly as the media server will (`Cache::open_as_baked`), and
+only then writes `name.ajfx` and `name.ajfxcache` side by side (removing a
+stale cache left beside a package that now bakes nothing). The cache carries
+the instance seed it was baked with and the performance, so the media
+server plays the performance wherever the effect is placed; it reads the
+cached layers rather than simulating them, and refuses a cache that no
+longer belongs, with the reason, in readiness. `ajfx-studio-cli replay`
+plays a delivered package from its cache as a node does on a seek and
+compares it with the scene played live: bodies agree bit for bit, a cached
+particle layer within its position quantum.
+
+`export_gltf.*` writes the performance as glTF 2.0 from the cache, not from
+a second bake: a node per body with its translation and rotation at every
+simulation step and a STEP scale that shows it from birth to death (glTF
+holds the first and last pose around them), a broken body as a group of the
+whole and its pieces (a piece is the body born on the step the whole left,
+nearest it), props as nodes of their own, animated only when they move, and
+one material per colour. Particle layers are not written; Alembic or USD
+would carry them. A Blender import of the wall scene stands where the cache
+has every body at the steps checked.
+
+The viewport still simulates: a green cache band means the cache is current,
+not that the viewport is reading it. Playing the cache in the viewport is
+the host's cached path above, which the window does not yet hand its bake
+to.
 
 ## Remaining boundaries
 

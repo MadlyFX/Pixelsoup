@@ -356,8 +356,10 @@ take it away, paint particles in. Actions are inputs like parameter values:
   before it and work the rest out again. With `RigidTrack::set_lead(0)` a
   playing host appends at ticks not yet stepped and nothing is thrown away.
 - A cache is keyed by the actions its emitters were baked with
-  (`BakeSettings::actions`, `CachedEmitter::actions`): another performance
-  is a stale cache.
+  (`BakeSettings::actions`, `CachedEmitter::actions`), as far as its steps
+  read them: another performance is a stale cache, while an act after its
+  last step is not part of it. The cache stores those actions, so it plays
+  without them (`Cache::open_as_baked`, `Cache::performance`).
 
 ## Caching
 
@@ -393,6 +395,12 @@ A simulation can be worked out once and played back (`include/ajfx/cache.hpp`):
   emitters are not in it, so editing them keeps a cache. `Cache::open`
   refuses one that does not belong (`StaleCache`) and says why: another
   seed, a changed or missing emitter, another value of a parameter it read.
+- **As baked.** A cache (format 4) also stores the performance it was baked
+  with, at the steps it holds. `Cache::open_as_baked` opens it with its own
+  instance seed, performance and bake-time values, which is what a host that
+  has none of them does: a delivered effect plays as it was performed
+  wherever it is placed. It still refuses a cache whose cached emitters
+  changed or whose rate differs.
 - **Playback.** `SimulationOptions::cache` plays a `Cache`. Cached emitters
   are read where they would be stepped, so a cached rigid emitter needs no
   solver, and live emitters meet its bodies exactly where they met the
@@ -404,8 +412,16 @@ A simulation can be worked out once and played back (`include/ajfx/cache.hpp`):
   it: it is taken per placement seed and per bake-time value, re-taken
   without re-exporting, and taken by Studio or a farm alike, none of which
   should change the package's hash.
-- `GpuSimulation` does not play caches itself: under external rigid hosting
-  a host hands it cached bodies (`Cache::emitter_at`) as it would a runner's.
+- **On the GPU.** `GpuSimulation` does not read caches itself. Created with
+  `SimulationOptions::cache` under `RigidHosting::Host`, it treats every
+  emitter the cache holds as hosted: each step writes the frame's state of
+  it instead of stepping it, and steps the live emitters beside it.
+  `RigidRunner::track` given the cache makes those frames on the runner's
+  thread by reading the cache (a frame at a time going forwards, from the
+  nearest keyframe on a jump), so a seek is a read; every rigid emitter must
+  be cached (`RigidTrack::error` names one that is not). The live emitters
+  agree with the CPU reference playing the same cache
+  (`a_cache_plays_on_the_gpu_from_a_cached_track`).
 
 ## Running on the GPU
 

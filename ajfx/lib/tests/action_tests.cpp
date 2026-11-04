@@ -613,6 +613,124 @@ void a_cache_is_keyed_by_its_performance() {
     AJFX_CHECK(back.emitters[0].held_until == std::vector<std::uint64_t>{0U, 40U});
 }
 
+// What a delivered effect plays with: the cache holds the performance it
+// was baked with, as far as its steps read it, and the seed, so a host that
+// has neither plays it as it was performed.
+void a_cache_carries_its_performance_and_seed() {
+    const Effect effect = stage();
+    const std::shared_ptr<ActionList> list = performance();
+    // An act after the bake's last step: the cache is not of it.
+    auto longer = std::make_shared<ActionList>(*list);
+    longer->add("boxes", push_at(300U, box_index(1U), Vec3{0.0F, 5.0F, 0.0F}));
+    BakeSettings settings;
+    settings.frames = 240U;
+    settings.actions = longer;
+    SimulationOptions options;
+    options.rigid = g_solver.get();
+    const Baked baked = must(bake(effect, 77U, options, settings));
+
+    // Opened as baked: its own seed, and the acts its steps read, the late
+    // one left out.
+    auto cache = std::make_shared<const Cache>(must(Cache::open_as_baked(baked.bytes, effect)));
+    AJFX_CHECK(cache->identity().instance_seed == 77U);
+    AJFX_CHECK(cache->performance()->size() == list->size());
+    AJFX_CHECK(cache->performance()->digest("boxes") == list->digest("boxes"));
+    AJFX_CHECK(cache->performance()->actions("boxes").back().tick == 200U);
+
+    // Its performance steps the effect as the original does.
+    Simulation straight = must(Simulation::create(effect, 77U, SimulationOptions{.rigid = g_solver.get()}));
+    straight.reset(nullptr, list.get());
+    straight.advance_to(239U, nullptr, list.get());
+    Simulation played = must(Simulation::create(effect, 77U, SimulationOptions{.rigid = g_solver.get(), .cache = cache}));
+    played.reset(nullptr, cache->performance().get());
+    played.advance_to(239U, nullptr, cache->performance().get());
+    AJFX_CHECK(played.emitter(0).position == straight.emitter(0).position);
+    AJFX_CHECK(played.emitter(0).spawn_index == straight.emitter(0).spawn_index);
+
+    // Studio's check opens it with the whole performance: the late act does
+    // not make it stale, an act inside its steps does, and so does another
+    // seed.
+    AJFX_CHECK(Cache::open(baked.bytes, effect, 77U, {}, {}, {}, longer.get()).ok());
+    AJFX_CHECK(Cache::open(baked.bytes, effect, 77U, {}, {}, {}, list.get()).ok());
+    auto inside = std::make_shared<ActionList>(*list);
+    inside->add("boxes", push_at(239U, box_index(1U), Vec3{0.0F, 5.0F, 0.0F}));
+    const Result<Cache> stale = Cache::open(baked.bytes, effect, 77U, {}, {}, {}, inside.get());
+    AJFX_CHECK(!stale.ok() && stale.error().code == ErrorCode::StaleCache);
+    const Result<Cache> moved = Cache::open(baked.bytes, effect, 5U, {}, {}, {}, list.get());
+    AJFX_CHECK(!moved.ok() && moved.error().code == ErrorCode::StaleCache);
+
+    // Played as baked against an effect whose bodies changed: refused, with
+    // the emitter named.
+    Effect heavier = effect;
+    std::get<RigidPhysics>(heavier.emitters[0].update[1]).density *= 2.0F;
+    const Result<Cache> changed = Cache::open_as_baked(baked.bytes, heavier);
+    AJFX_CHECK(!changed.ok() && changed.error().code == ErrorCode::StaleCache);
+    AJFX_CHECK(changed.error().message.find("boxes") != std::string::npos);
+
+    // A cache baked with no performance carries none.
+    BakeSettings quiet = settings;
+    quiet.actions = nullptr;
+    quiet.frames = 30U;
+    const Cache bare = must(Cache::open_as_baked(must(bake(effect, 3U, options, quiet)).bytes, effect));
+    AJFX_CHECK(bare.performance() != nullptr && bare.performance()->empty());
+    AJFX_CHECK(bare.identity().instance_seed == 3U);
+}
+
+// A runner track given a cache steps nothing: each frame is what the cache
+// holds at its tick, bodies and the particle layers born of them, whatever
+// order the ticks are asked in.
+void a_cached_track_reads_what_the_cache_holds() {
+    Effect effect = stage();
+    EffectBuilder builder{"stage"};
+    builder.emitter("boxes").capacity(4U).update(RigidPhysics{});
+    builder.emitter("smoke")
+        .capacity(4096U)
+        .seed(13U)
+        .spawn(SpawnFromBodies{.emitter = "boxes", .min_speed = 0.3F, .per_speed = 20.0F, .max_per_step = 8U})
+        .init(Lifetime{.min = 1.0F, .max = 1.5F})
+        .init(InitSize{.min = 0.05F, .max = 0.1F})
+        .update(Gravity{.acceleration = Vec3{0.0F, 0.5F, 0.0F}});
+    effect.emitters.push_back(must(builder.build()).emitters[1]);
+    must(validate(effect));
+    const std::shared_ptr<ActionList> list = performance();
+    BakeSettings settings;
+    settings.frames = 240U;
+    settings.actions = list;
+    const Baked baked = must(bake(effect, 9U, SimulationOptions{.rigid = g_solver.get()}, settings));
+    auto cache = std::make_shared<const Cache>(must(Cache::open_as_baked(baked.bytes, effect)));
+    AJFX_CHECK(cache->mode(0U) == CacheMode::Rigid && cache->mode(1U) == CacheMode::Particles);
+
+    RigidRunner runner{*g_solver, RigidRunnerOptions{.lead = 4U, .turn = 3U}};
+    std::unique_ptr<RigidTrack> track = runner.track(effect, 9U, {}, nullptr, cache->performance(), cache);
+    const auto frame_at = [&](std::uint64_t tick) {
+        std::shared_ptr<const RigidFrame> frame = track->frame(tick);
+        while (!frame) {
+            AJFX_CHECK(!track->error().has_value());
+            runner.wait_idle();
+            frame = track->frame(tick);
+        }
+        return frame;
+    };
+    std::size_t smoke = 0U;
+    for (const std::uint64_t tick : {0U, 1U, 2U, 100U, 101U, 150U, 30U, 31U, 239U, 400U}) {
+        const std::shared_ptr<const RigidFrame> frame = frame_at(tick);
+        AJFX_CHECK(frame->tick == tick);
+        AJFX_CHECK(same_particles(frame->emitters[0], cache->emitter_at(0U, tick)));
+        AJFX_CHECK(same_particles(frame->emitters[1], cache->emitter_at(1U, tick)));
+        smoke = std::max(smoke, frame->emitters[1].alive());
+    }
+    std::cout << "  up to " << smoke << " puffs of smoke read from the cache\n";
+    AJFX_CHECK(smoke > 0U);
+
+    // A rigid layer the cache leaves live cannot be read from it.
+    const Baked live = must(bake(effect, 9U, SimulationOptions{.rigid = g_solver.get()},
+                                 BakeSettings{.frames = 10U, .modes = {CacheMode::Live, CacheMode::Live},
+                                              .actions = list}));
+    auto none = std::make_shared<const Cache>(must(Cache::open_as_baked(live.bytes, effect)));
+    std::unique_ptr<RigidTrack> refused = runner.track(effect, 9U, {}, nullptr, nullptr, none);
+    AJFX_CHECK(refused->error().has_value() && refused->error()->message.find("boxes") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
@@ -633,6 +751,8 @@ int main() {
         {"painted_particles_start_where_their_actions_say", painted_particles_start_where_their_actions_say},
         {"the_runner_revises_from_the_tick_that_changed", the_runner_revises_from_the_tick_that_changed},
         {"a_cache_is_keyed_by_its_performance", a_cache_is_keyed_by_its_performance},
+        {"a_cache_carries_its_performance_and_seed", a_cache_carries_its_performance_and_seed},
+        {"a_cached_track_reads_what_the_cache_holds", a_cached_track_reads_what_the_cache_holds},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

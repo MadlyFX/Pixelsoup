@@ -26,6 +26,11 @@ struct RigidRunner::Job final {
     std::vector<std::optional<float>> contact_floors;
     // Whether any of the part's emitters reads a parameter.
     bool reads_any_parameter{false};
+    // Played from a cache rather than simulated: each frame is what the
+    // cache holds of every emitter it caches, and nothing is stepped.
+    std::shared_ptr<const Cache> cache;
+    // Which of the whole effect's emitters the cache holds.
+    std::vector<std::size_t> cached;
 
     // Under Shared::mutex.
     std::uint64_t wanted{0U};
@@ -48,6 +53,10 @@ struct RigidRunner::Job final {
     std::optional<Simulation> simulation;
     std::optional<std::uint64_t> built; // the generation `simulation` follows
     std::vector<SimulationState> checkpoints;
+    // A cached track's emitters as decoded at `decoded_tick`, to move on
+    // from a frame at a time (Cache::advance).
+    std::vector<EmitterState> decoded;
+    std::optional<std::uint64_t> decoded_tick;
 };
 
 struct RigidRunner::Shared final {
@@ -101,6 +110,8 @@ struct RigidRunner::Shared final {
     };
     [[nodiscard]] std::optional<Error> turn(Job& job, const Turn& take,
                                             std::vector<std::shared_ptr<const RigidFrame>>& produced) const;
+    // A cached track's turn: reads rather than steps.
+    void read_turn(Job& job, const Turn& take, std::vector<std::shared_ptr<const RigidFrame>>& produced) const;
 };
 
 namespace {
@@ -139,8 +150,46 @@ EmitterState particles_of(const EmitterState& s) {
 
 } // namespace
 
+void RigidRunner::Shared::read_turn(Job& job, const Turn& take,
+                                    std::vector<std::shared_ptr<const RigidFrame>>& produced) const {
+    const Cache& cache = *job.cache;
+    const std::uint64_t horizon = take.wanted + take.lead;
+    // Bodies a frame at a time are cheap; a particle layer is decoded from
+    // its keyframe on a jump and moved on a frame at a time after that.
+    const std::uint32_t most = std::max(options.turn, 1U) * 8U;
+    if (job.decoded.size() != job.emitters) {
+        job.decoded.assign(job.emitters, EmitterState{});
+        job.decoded_tick.reset();
+    }
+    std::uint32_t n = 0U;
+    for (std::uint64_t tick = take.from; tick <= horizon && n < most; ++tick, ++n) {
+        const bool onward = job.decoded_tick && *job.decoded_tick + 1U == tick;
+        for (const std::size_t e : job.cached) {
+            if (onward) {
+                cache.advance(e, tick, job.decoded[e]);
+            } else {
+                job.decoded[e] = cache.emitter_at(e, tick);
+            }
+        }
+        job.decoded_tick = tick;
+        auto frame = std::make_shared<RigidFrame>();
+        frame->tick = tick;
+        frame->emitters.resize(job.emitters);
+        frame->contacts.resize(job.emitters);
+        frame->contacts_dropped.resize(job.emitters, 0U);
+        for (const std::size_t e : job.cached) {
+            frame->emitters[e] = job.decoded[e];
+        }
+        produced.push_back(std::move(frame));
+    }
+}
+
 std::optional<Error> RigidRunner::Shared::turn(Job& job, const Turn& take,
                                                std::vector<std::shared_ptr<const RigidFrame>>& produced) const {
+    if (job.cache) {
+        read_turn(job, take, produced);
+        return std::nullopt;
+    }
     const std::uint64_t from = take.from;
     const std::uint64_t wanted = take.wanted;
     const std::uint64_t generation = take.generation;
@@ -337,7 +386,8 @@ RigidRunner::~RigidRunner() {
 
 std::unique_ptr<RigidTrack> RigidRunner::track(const Effect& effect, std::uint32_t instance_seed, MeshSet meshes,
                                                std::shared_ptr<const ParameterProvider> parameters,
-                                               std::shared_ptr<const ActionProvider> actions) {
+                                               std::shared_ptr<const ActionProvider> actions,
+                                               std::shared_ptr<const Cache> cache) {
     auto job = std::make_shared<Job>();
     job->part = rigid_physics_part(effect);
     for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
@@ -353,6 +403,21 @@ std::unique_ptr<RigidTrack> RigidRunner::track(const Effect& effect, std::uint32
     job->meshes = std::move(meshes);
     job->parameters = std::move(parameters);
     job->actions = std::move(actions);
+    if (cache) {
+        // Every rigid physics emitter is read from it, so the track needs no
+        // solver; one it plays live would need the bodies it does not hold.
+        for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+            if (cache->mode(i) != CacheMode::Live) {
+                job->cached.push_back(i);
+            } else if (rigid_physics(effect.emitters[i]) != nullptr && !job->error) {
+                job->error = Error{ErrorCode::StaleCache, "the cache leaves the rigid physics of emitter '" +
+                                                              effect.emitters[i].name +
+                                                              "' live: a cached track plays only cached bodies, "
+                                                              "so bake them too"};
+            }
+        }
+        job->cache = std::move(cache);
+    }
     {
         const std::lock_guard lock{shared_->mutex};
         if (!shared_->stopping) {

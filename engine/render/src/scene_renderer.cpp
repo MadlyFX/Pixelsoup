@@ -3764,7 +3764,12 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
             continue;
         }
         ParticleSlot& slot = particle_slots_[effect.source_node];
-        const core::u32 seed = scene::particle_instance_seed(effect);
+        // A package delivered with its cache plays as it was baked: with the
+        // seed it was baked with, whatever the placement would derive, so
+        // every placement and every node plays the performance itself.
+        const core::u32 seed = observed.package->cache != nullptr
+                                   ? observed.package->cache->identity().instance_seed
+                                   : scene::particle_instance_seed(effect);
         // A new package or seed starts a new instance; the old one keeps
         // drawing until retirement has room for it.
         if ((slot.package != observed.package || slot.seed != seed) && retire(slot)) {
@@ -3782,7 +3787,7 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
             instanced = true;
             auto created = particle_pass_->create_instance(slot.package->effect, slot.package->kernels,
                                                            slot.package->textures, slot.package->fields,
-                                                           slot.package->meshes, seed);
+                                                           slot.package->meshes, seed, slot.package->cache);
             if (!created) {
                 slot.error = std::move(created).error().message;
                 refuse(stats_.particles_failed, slot.error);

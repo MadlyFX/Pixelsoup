@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ajfx/actions.hpp>
 #include <ajfx/effect.hpp>
 #include <ajfx/field.hpp>
 #include <ajfx/mesh.hpp>
@@ -48,7 +49,7 @@ namespace ajfx {
 // writes.
 inline constexpr std::uint32_t state_format_version = 4U;
 // Version of the cache file this library reads and writes.
-inline constexpr std::uint32_t cache_format_version = 3U;
+inline constexpr std::uint32_t cache_format_version = 4U;
 
 // The whole state as bytes: deterministic, so equal states give equal bytes.
 [[nodiscard]] std::vector<std::uint8_t> write_state(const SimulationState& state);
@@ -271,16 +272,32 @@ public:
     // Its whole-state checkpoints are used only where the effect is the one
     // baked in every emitter, live ones too; otherwise seeks step from the
     // start as they would without a cache.
+    //
+    // `actions` are compared as far as the cache's steps read them (ticks 0
+    // to frames() - 1): acts after its last step do not make it stale.
     [[nodiscard]] static Result<Cache> open(std::vector<std::uint8_t> bytes, const Effect& effect,
                                             std::uint32_t instance_seed, std::span<const ParameterValue> values = {},
                                             const MeshSet& meshes = {}, const FieldSet& fields = {},
                                             const ActionProvider* actions = nullptr);
+
+    // Opens a cache to play as it was baked: placed with the instance seed
+    // it was baked with, the performance it holds (performance()) and the
+    // bake-time parameter values it holds, which is what a host that has
+    // none of them does. A delivered effect's seed, actions and bake-time
+    // values travel in its cache, so it plays as it was performed wherever it
+    // is placed. Refuses as open does: a cached emitter that has changed or
+    // is gone, or another simulation rate.
+    [[nodiscard]] static Result<Cache> open_as_baked(std::vector<std::uint8_t> bytes, const Effect& effect,
+                                                     const MeshSet& meshes = {}, const FieldSet& fields = {});
 
     Cache(Cache&&) noexcept;
     Cache& operator=(Cache&&) noexcept;
     ~Cache();
 
     [[nodiscard]] const CacheIdentity& identity() const noexcept;
+    // The actions it was baked with, at the steps it holds (empty for
+    // none): what its live emitters are to be stepped with beside it.
+    [[nodiscard]] const std::shared_ptr<const ActionList>& performance() const noexcept;
     [[nodiscard]] const Effect& effect() const noexcept;
     // Steps held: ticks 0 to frames() - 1.
     [[nodiscard]] std::uint64_t frames() const noexcept;
@@ -308,6 +325,11 @@ public:
 
 private:
     explicit Cache(std::unique_ptr<Data> data);
+    [[nodiscard]] static Result<Cache> open_impl(std::vector<std::uint8_t> bytes, const Effect& effect,
+                                                 std::optional<std::uint32_t> seed,
+                                                 std::span<const ParameterValue> values, const MeshSet& meshes,
+                                                 const FieldSet& fields, const ActionProvider* actions,
+                                                 bool as_baked);
     std::unique_ptr<Data> data_;
 };
 

@@ -351,6 +351,17 @@ and holding readiness while it catches up. Its kernels run on the RHI through
 ajfx's own D3D12 device on the same GPU. Particles need the Advanced renderer;
 Basic refuses a started effect with the reason.
 
+A package delivered with its cache (`name.ajfx` beside `name.ajfxcache`, as
+ajfx Studio delivers a performed scene) is read with it on the package worker
+and opened as baked (`ajfx::Cache::open_as_baked`). The instance then takes
+the cache's instance seed rather than the placement's, plays the performance
+the cache holds (scene actions are ignored for it), and reads the cached
+emitters on the pass's rigid runner instead of simulating them, so a node's
+seek is a read; live emitters step beside them as they did when baked. A
+cache that does not belong to its package (a changed layer, another effect,
+another version) fails the package, and the reason reaches readiness as the
+particle issue; removing the cache plays the effect live.
+
 - **Drawing.** Sprites face along the camera's axes with the slice's
   projection, depth-tested without depth writes; blended mesh particles write
   depth. Alpha-blended emitters sort along the camera's forward axis taken

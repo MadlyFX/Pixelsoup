@@ -4,15 +4,27 @@
 // the viewport uses (hands.hpp, performance.hpp), and the result is played
 // on the CPU and checked to replay bit for bit, so what a performance does
 // can be built and proved before there is a button for it.
+//
+// Delivery too: the performance baked into a cache, written beside its
+// package as the media server plays it, replayed from that cache and
+// compared with the scene, and written as animated glTF for DCC tools.
 
+#include "bake.hpp"
+#include "delivery.hpp"
 #include "document_io.hpp"
+#include "export_gltf.hpp"
 #include "hands.hpp"
 #include "performance.hpp"
 #include "scene.hpp"
 #include "stage.hpp"
 #include "timeline.hpp"
 
+#include <ajfx/cache.hpp>
+#include <ajfx/package.hpp>
 #include <ajfx/rigid.hpp>
+#if defined(AJFX_STUDIO_CLI_KERNELS)
+#include <ajfx/d3d12.hpp>
+#endif
 
 #include <algorithm>
 #include <charconv>
@@ -21,9 +33,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -49,8 +63,22 @@ constexpr const char* usage =
     "  ajfx-studio-cli <scene> run <script>   Does the hands a script lists, in order.\n"
     "  ajfx-studio-cli <scene> do <command...>  Does one hand, as a script line.\n"
     "\n"
+    "Delivery:\n"
+    "  ajfx-studio-cli <scene> bake <out.ajfxcache>\n"
+    "      Bakes the scene's baked layers (its solid world and what it bears) with its\n"
+    "      performance and seed, for the scene's loop: the cache a delivery carries.\n"
+    "  ajfx-studio-cli <scene> deliver <out.ajfx> [--cache <file>]\n"
+    "      Writes the package and its cache beside it (<out>.ajfxcache), checked as the\n"
+    "      media server checks them. Bakes first unless given a cache.\n"
+    "  ajfx-studio-cli <scene> replay <package.ajfx> <step> [<step> ...]\n"
+    "      Plays a delivered package from its cache, as the wall does on a seek to each\n"
+    "      step, and compares it with the scene played live: bodies bit for bit.\n"
+    "  ajfx-studio-cli <scene> gltf <out.gltf> [--cache <file>] [--frames <n>]\n"
+    "      Writes the performance's bodies as animated glTF (and <out>.bin), from the\n"
+    "      cache. Bakes first unless given a cache.\n"
+    "\n"
     "Options: --out <file> writes the acted scene there rather than over the scene;\n"
-    "         --seed <n> plays with that instance seed (default 0).\n"
+    "         --seed <n> plays and bakes with that instance seed (default 0).\n"
     "\n"
     "Script lines (# starts a comment; points are x,y,z in metres; steps are\n"
     "simulation steps, 60 a second; a body is object:<uid>[:<count>] or drop:<serial>):\n"
@@ -440,6 +468,198 @@ void print_play(const Session& session, std::uint64_t tick) {
     say(std::string{"digest "} + digest);
 }
 
+// ------------------------------------------------------------------ delivery
+
+std::string hex(std::uint64_t value) {
+    char text[32];
+    std::snprintf(text, sizeof text, "%016llx", static_cast<unsigned long long>(value));
+    return text;
+}
+
+std::vector<std::uint8_t> read_bytes(const std::filesystem::path& path) {
+    std::string error;
+    std::optional<std::vector<std::uint8_t>> bytes = read_file(path, error);
+    if (!bytes) {
+        fail(error);
+    }
+    return std::move(*bytes);
+}
+
+void write_bytes(const std::filesystem::path& path, std::span<const std::uint8_t> bytes) {
+    std::string error;
+    if (!write_file(path, bytes, error)) {
+        fail(error);
+    }
+}
+
+// The scene's bake, made now or read from a file given with --cache.
+BakeRecord bake_of(const Session& session, const std::optional<std::filesystem::path>& cache_file) {
+    const Compiled& compiled = *session.prepared.compiled;
+    if (cache_file) {
+        BakeRecord record;
+        record.page = session.document;
+        record.bytes = read_bytes(*cache_file);
+        Result<Cache> opened = Cache::open_as_baked(record.bytes, *compiled.effect, compiled.meshes, compiled.fields);
+        if (!opened) {
+            fail(cache_file->string() + ": " + opened.error().message);
+        }
+        record.instance_seed = opened.value().identity().instance_seed;
+        record.frames = opened.value().frames();
+        record.report = opened.value().report();
+        return record;
+    }
+    int shown = -1;
+    Result<BakeRecord> baked = bake_page(session.document, compiled, session.seed, session.solver.get(),
+                                         [&shown](double share) {
+                                             const int tenth = static_cast<int>(share * 10.0);
+                                             if (tenth != shown) {
+                                                 shown = tenth;
+                                                 std::cerr << "baking " << tenth * 10 << "%\r";
+                                             }
+                                             return true;
+                                         });
+    std::cerr << "            \r";
+    if (!baked) {
+        fail("not baked: " + baked.error().message);
+    }
+    return std::move(baked).value();
+}
+
+void print_bake(const Effect& effect, const BakeRecord& record) {
+    say("baked " + std::to_string(record.frames) + " steps with seed " + std::to_string(record.instance_seed) +
+        ": " + bytes_text(record.bytes.size()) +
+        (record.seconds > 0.0 ? " in " + std::to_string(record.seconds).substr(0U, 5U) + " s" : std::string{}));
+    for (const CacheLayer& layer : record.report.layers) {
+        if (layer.mode == CacheMode::Live) {
+            say("  " + layer.emitter + ": live");
+            continue;
+        }
+        say("  " + layer.emitter + ": " + std::string{cache_mode_name(layer.mode)} + ", up to " +
+            std::to_string(layer.peak_count) + (layer.mode == CacheMode::Rigid ? " bodies, " : " particles, ") +
+            bytes_text(layer.bytes));
+    }
+    std::size_t acted = 0U;
+    for (const CachedEmitter& emitter : record.report.identity.emitters) {
+        acted += emitter.actions != 0U ? 1U : 0U;
+    }
+    say("  performance " + std::string{acted != 0U ? "held" : "none"} + ", " +
+        std::to_string(effect.emitters.size()) + " layers in the effect");
+}
+
+gpu::KernelSet kernels_of(const Effect& effect) {
+#if defined(AJFX_STUDIO_CLI_KERNELS)
+    Result<std::unique_ptr<gpu::ShaderCompiler>> compiler = d3d12::create_shader_compiler();
+    if (!compiler) {
+        fail("the shader compiler is not available: " + compiler.error().message);
+    }
+    Result<gpu::KernelSet> kernels = gpu::compile_kernels(effect, *compiler.value());
+    if (!kernels) {
+        fail("the kernels do not compile: " + kernels.error().message);
+    }
+    return std::move(kernels).value();
+#else
+    static_cast<void>(effect);
+    fail("this build has no shader compiler, so it cannot write a package");
+#endif
+}
+
+// One emitter of a delivered package played from its cache, against the
+// scene played live: the same particles, and how far apart.
+struct Compared final {
+    bool same{true};
+    float apart{0.0F};
+};
+
+Compared compare(const EmitterState& delivered, const EmitterState& live, CacheMode mode) {
+    Compared out;
+    if (delivered.alive() != live.alive() || delivered.spawn_index != live.spawn_index) {
+        out.same = false;
+        out.apart = std::numeric_limits<float>::infinity();
+        return out;
+    }
+    for (std::size_t i = 0U; i < live.alive(); ++i) {
+        const Vec3 d = delivered.position[i] - live.position[i];
+        out.apart = std::max(out.apart, std::sqrt(dot(d, d)));
+    }
+    if (mode != CacheMode::Particles) {
+        // Bodies are cached exactly, and what steps live beside them meets
+        // exactly those bodies.
+        out.same = delivered.position == live.position && delivered.orientation == live.orientation;
+    }
+    return out;
+}
+
+int replay(const Session& session, const std::filesystem::path& package_path, std::span<const std::string> steps) {
+    const std::vector<std::uint8_t> package = read_bytes(package_path);
+    Result<Effect> effect = read_package(package);
+    if (!effect) {
+        fail(package_path.string() + ": " + effect.error().message);
+    }
+    Result<MeshSet> meshes = read_package_meshes(package, effect.value());
+    Result<FieldSet> fields = read_package_fields(package, effect.value());
+    if (!meshes || !fields) {
+        fail(package_path.string() + ": " + (!meshes ? meshes.error().message : fields.error().message));
+    }
+    const std::filesystem::path cache_path = cache_path_for(package_path);
+    std::error_code missing;
+    if (!std::filesystem::is_regular_file(cache_path, missing)) {
+        fail("no cache beside the package (" + cache_path.string() + "): the wall would simulate it live");
+    }
+    // As the media server opens it: as baked, from the package's own effect.
+    Result<Cache> opened = Cache::open_as_baked(read_bytes(cache_path), effect.value(), meshes.value(), fields.value());
+    if (!opened) {
+        say("REFUSED: the media server would not play this cache: " + opened.error().message);
+        return 1;
+    }
+    auto cache = std::make_shared<const Cache>(std::move(opened).value());
+    const std::uint32_t seed = cache->identity().instance_seed;
+    say("cache: " + std::to_string(cache->frames()) + " steps, seed " + std::to_string(seed) + ", " +
+        std::to_string(cache->performance()->size()) + " actions");
+    const ActionProvider* const performance = cache->performance().get();
+    bool all_same = true;
+    for (const std::string& text : steps) {
+        const std::uint64_t step = to_u64(text);
+        // Seeking straight to the step, as a node does.
+        Simulation delivered = [&] {
+            Result<Simulation> made = Simulation::create(effect.value(), seed,
+                                                         SimulationOptions{.fields = fields.value(),
+                                                                           .meshes = meshes.value(),
+                                                                           .rigid = session.solver.get(),
+                                                                           .cache = cache});
+            if (!made) {
+                fail(made.error().message);
+            }
+            return std::move(made).value();
+        }();
+        delivered.reset(nullptr, performance);
+        delivered.advance_to(step, nullptr, performance);
+        // The scene, played live with the cache's seed.
+        const Played live = play_scene(session.document, session.prepared, session.solver.get(), seed, step);
+        if (!live.error.empty()) {
+            fail(live.error);
+        }
+        std::string line = "step " + std::to_string(step) + ":";
+        for (std::size_t e = 0U; e < effect.value().emitters.size(); ++e) {
+            const CacheMode mode = cache->mode(e);
+            const Compared c = compare(delivered.emitter(e), live.simulation->emitter(e), mode);
+            all_same = all_same && c.same;
+            char apart[32];
+            std::snprintf(apart, sizeof apart, "%.2g", static_cast<double>(c.apart));
+            line += " " + effect.value().emitters[e].name + " (" + std::string{cache_mode_name(mode)} + ") " +
+                    std::to_string(delivered.emitter(e).alive()) +
+                    (c.same ? (mode == CacheMode::Particles ? std::string{" within "} + apart : std::string{" same"})
+                            : std::string{" DIFFERENT, "} + apart + " apart");
+        }
+        say(line);
+    }
+    if (!all_same) {
+        say("DIFFERENT: the delivered package does not play the scene's performance");
+        return 1;
+    }
+    say("identical: the delivered package plays the performance, bodies bit for bit");
+    return 0;
+}
+
 Document make_scene(std::string_view kind) {
     Document document = new_scene();
     if (kind == "empty") {
@@ -510,11 +730,17 @@ Document read_scene(const std::filesystem::path& path) {
 
 int run(std::vector<std::string> args) {
     std::optional<std::filesystem::path> out;
+    std::optional<std::filesystem::path> cache_file;
+    std::uint64_t frames = 0U;
     std::uint32_t seed = 0U;
     std::vector<std::string> rest;
     for (std::size_t i = 0U; i < args.size(); ++i) {
         if (args[i] == "--out" && i + 1U < args.size()) {
             out = args[++i];
+        } else if (args[i] == "--cache" && i + 1U < args.size()) {
+            cache_file = args[++i];
+        } else if (args[i] == "--frames" && i + 1U < args.size()) {
+            frames = to_u64(args[++i]);
         } else if (args[i] == "--seed" && i + 1U < args.size()) {
             seed = to_u32(args[++i]);
         } else if (args[i] == "--help" || args[i] == "-h") {
@@ -615,6 +841,78 @@ int run(std::vector<std::string> args) {
             return 1;
         }
         say("identical: replays and the reopened scene agree bit for bit");
+        return 0;
+    }
+    if (command == "bake" && rest.size() >= 3U) {
+        const BakeRecord record = bake_of(session, std::nullopt);
+        write_bytes(rest[2], record.bytes);
+        print_bake(*session.prepared.compiled->effect, record);
+        say("wrote " + rest[2]);
+        return 0;
+    }
+    if (command == "deliver" && rest.size() >= 3U) {
+        const Compiled& compiled = *session.prepared.compiled;
+        const BakeRecord record = bake_of(session, cache_file);
+        if (!cache_file) {
+            print_bake(*compiled.effect, record);
+        }
+        const gpu::KernelSet kernels = kernels_of(*compiled.effect);
+        Result<Delivery> delivery = deliver(session.document, compiled, kernels, &record);
+        if (!delivery) {
+            fail("not delivered: " + delivery.error().message);
+        }
+        std::string error;
+        if (!write_delivery(delivery.value(), rest[2], error)) {
+            fail(error);
+        }
+        say("wrote " + rest[2] + " (" + bytes_text(delivery.value().package.size()) + ")" +
+            (delivery.value().played
+                 ? " and " + cache_path_for(rest[2]).filename().string() + " (" +
+                       bytes_text(delivery.value().cache.size()) + "), which the media server plays with seed " +
+                       std::to_string(delivery.value().played->identity().instance_seed)
+                 : std::string{", nothing baked"}));
+        return 0;
+    }
+    if (command == "replay" && rest.size() >= 4U) {
+        return replay(session, rest[2], std::span{rest}.subspan(3U));
+    }
+    if (command == "gltf" && rest.size() >= 3U) {
+        const Compiled& compiled = *session.prepared.compiled;
+        const BakeRecord record = bake_of(session, cache_file);
+        Result<Cache> cache = Cache::open_as_baked(record.bytes, *compiled.effect, compiled.meshes, compiled.fields);
+        if (!cache) {
+            fail(cache.error().message);
+        }
+        const std::filesystem::path gltf_path = rest[2];
+        GltfOptions options;
+        options.frames = frames;
+        options.scene = gltf_path.stem().string();
+        const Prepared& prepared = session.prepared;
+        options.name = [&](std::size_t, std::uint32_t spawn) -> std::string {
+            const std::optional<BodyRef> ref = body_ref(prepared.targets, spawn);
+            if (!ref) {
+                return {};
+            }
+            if (ref->drop != 0U) {
+                return "drop " + std::to_string(ref->drop);
+            }
+            const SceneItem* item = session.document.scene->item(ref->object);
+            return (item != nullptr && !item->name.empty() ? item->name : "object " + std::to_string(ref->object)) +
+                   " " + std::to_string(ref->count + 1U);
+        };
+        const GltfFile file =
+            gltf_from_cache(*compiled.effect, cache.value(), compiled.meshes, options, gltf_path.stem().string() + ".bin");
+        if (!file.error.empty()) {
+            fail(file.error);
+        }
+        std::string error;
+        if (!write_gltf(file, gltf_path, error)) {
+            fail(error);
+        }
+        say("wrote " + gltf_path.string() + ": " + std::to_string(file.bodies) + " bodies (" + std::to_string(file.pieces) +
+            " pieces of broken things), " + std::to_string(file.props) + " props, " + std::to_string(file.frames) +
+            " steps at " + std::to_string(compiled.effect->simulation_rate) + " a second, " +
+            bytes_text(file.bin.size()) + " of animation and models");
         return 0;
     }
     if (command == "run" || command == "do") {

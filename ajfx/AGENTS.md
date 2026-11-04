@@ -21,6 +21,7 @@ Search with `rg`; the `CMakeLists.txt` files locate tests.
 | Studio core: scene lowering, block catalog and compiler (layer IR), bake | `studio/src` (`ajfx_studio_core`) |
 | Scene ownership, metadata and persistence | `studio/src/scene.*`, `scene_properties.*`, `scene_io.*` |
 | Scene tree and selected-item inspector | `studio/src/scene_view.*`, `docs/studio-scene-reference.md` |
+| Performance hands, delivery (package + cache) and glTF export, and the CLI that drives them | `studio/src/hands.*`, `delivery.*`, `export_gltf.*`, `cli.cpp` |
 | Studio application: window, preview, worker | `studio/src/studio_app.*`, `preview.*`, `package_builder.*`, `stage_overlay.*` |
 | Dear ImGui layer and the panels drawn with it | `studio/src/imgui_layer.*`, `stage_panel.*` |
 | The stage and its setup tools (place, jitter, settle, reset) | `studio/src/stage.*`, `performance.*` |

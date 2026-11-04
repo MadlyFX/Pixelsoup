@@ -2,6 +2,7 @@
 
 #include <mediaserver/core/types.hpp>
 
+#include <ajfx/cache.hpp>
 #include <ajfx/effect.hpp>
 #include <ajfx/gpu/kernels.hpp>
 #include <ajfx/field.hpp>
@@ -25,6 +26,14 @@
 // Only a package's precompiled kernels are used: the media server compiles
 // no shaders at runtime, so a package without kernels for this device, or
 // with kernels from a different ajfx, fails with that reason.
+//
+// A cache beside the package (`effect.ajfx` and `effect.ajfxcache`, as
+// Studio exports them) is read with it and opened as it was baked: its
+// cached emitters are played rather than simulated, with the instance seed,
+// performance and bake-time values it was baked with. A cache that does not
+// belong to the package (another effect, a changed layer, another version)
+// fails the package with the reason, rather than playing it as something it
+// is not.
 namespace mediaserver::render {
 
 struct ParticlePackage final {
@@ -35,10 +44,17 @@ struct ParticlePackage final {
     ajfx::TextureSet textures;
     ajfx::FieldSet fields;
     ajfx::MeshSet meshes;
-    // FNV-1a of the file's bytes: a different package at the same path is a
-    // different effect, and the renderer rebuilds its instances.
+    // The cache beside it, opened as baked, if there is one.
+    std::shared_ptr<const ajfx::Cache> cache;
+    // FNV-1a of the file's bytes, and its cache's: a different package or
+    // cache at the same path is a different effect, and the renderer
+    // rebuilds its instances.
     core::u64 identity{};
 };
+
+// Where a package's cache is looked for: beside it, `.ajfxcache` for its
+// extension.
+[[nodiscard]] std::string particle_cache_path(const std::string& package_source);
 
 enum class ParticlePackageState : core::u8 {
     Pending,

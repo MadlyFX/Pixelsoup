@@ -3,7 +3,10 @@
 #include <ajfx/builder.hpp>
 #include <ajfx/d3d12.hpp>
 #include <ajfx/presets.hpp>
+#include <ajfx/cache.hpp>
+#include <ajfx/package.hpp>
 #include <ajfx/rigid.hpp>
+#include <mediaserver/render/particle_package_cache.hpp>
 
 #include <algorithm>
 #include <array>
@@ -11,6 +14,8 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -2262,6 +2267,182 @@ void devices_without_particles_are_refused() {
 
 } // namespace
 
+// A performed stage as Studio delivers it: stones dropped in by actions, smoke
+// shed by them as they fall, and drizzle that bounces off them, live. The
+// cache holds the stones and the smoke; the drizzle steps beside them.
+[[nodiscard]] ajfx::Effect performed_stage() {
+    ajfx::EffectBuilder builder{"performed"};
+    builder.emitter("stones")
+        .capacity(32U)
+        .seed(7U)
+        .spawn(ajfx::SpawnActions{.max_per_step = 4U, .max_alive = 16U})
+        .init(ajfx::Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ajfx::InitSize{.min = 0.2F, .max = 0.3F})
+        .update(ajfx::Gravity{})
+        .update(ajfx::RigidPhysics{.shape = ajfx::RigidShape::Sphere, .friction = 0.7F})
+        .update(ajfx::PlaneCollision{.friction = 0.8F});
+    builder.emitter("smoke")
+        .capacity(2048U)
+        .seed(13U)
+        .spawn(ajfx::SpawnFromBodies{.emitter = "stones", .min_speed = 0.3F, .per_speed = 20.0F,
+                                     .max_per_step = 8U})
+        .init(ajfx::Lifetime{.min = 1.0F, .max = 1.5F})
+        .init(ajfx::InitSize{.min = 0.05F, .max = 0.1F})
+        .update(ajfx::Gravity{.acceleration = ajfx::Vec3{0.0F, 0.5F, 0.0F}});
+    builder.emitter("drizzle")
+        .capacity(1024U)
+        .seed(17U)
+        .spawn(ajfx::SpawnRate{.rate = 60.0F})
+        .init(ajfx::Lifetime{.min = 2.0F, .max = 2.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Box, .center = ajfx::Vec3{0.0F, 3.0F, 0.0F},
+                                  .size = ajfx::Vec3{2.0F, 0.0F, 2.0F}})
+        .init(ajfx::InitSize{.min = 0.03F, .max = 0.03F})
+        .update(ajfx::Gravity{})
+        .update(ajfx::BodyCollision{.emitter = "stones", .restitution = 0.3F, .friction = 0.5F})
+        .update(ajfx::PlaneCollision{.friction = 0.8F});
+    return builder.build().value();
+}
+
+[[nodiscard]] std::shared_ptr<ajfx::ActionList> stage_performance() {
+    auto list = std::make_shared<ajfx::ActionList>();
+    for (std::uint32_t i = 0U; i < 6U; ++i) {
+        ajfx::Action drop;
+        drop.tick = 12U * i;
+        drop.serial = i + 1U;
+        drop.position = ajfx::Vec3{0.3F * static_cast<float>(i) - 0.75F, 2.5F, 0.1F * static_cast<float>(i)};
+        drop.velocity = ajfx::Vec3{0.0F, -1.0F, 0.0F};
+        list->add("stones", drop);
+    }
+    return list;
+}
+
+// A performance played from its cache on the wall: the instance takes the
+// cache's seed and performance, reads the stones and smoke on the runner's
+// thread, steps the drizzle beside them, and lands on what the CPU
+// reference plays from the same cache, at a seek forward and one back.
+void a_cache_plays_its_performance_at_a_seek() {
+    render::ParticleSettings settings;
+    settings.rigid_lead = 12U;
+    render::ParticlePass pass = make_pass(settings);
+    const ajfx::Effect effect = performed_stage();
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+    ajfx::BakeSettings bake;
+    bake.frames = 300U;
+    bake.actions = stage_performance();
+    const ajfx::Baked baked = ajfx::bake(effect, 41U, ajfx::SimulationOptions{.rigid = solver.get()}, bake).value();
+    auto cache = std::make_shared<const ajfx::Cache>(ajfx::Cache::open_as_baked(baked.bytes, effect).value());
+    PASS_CHECK(cache->mode(0U) == ajfx::CacheMode::Rigid && cache->mode(1U) == ajfx::CacheMode::Particles &&
+               cache->mode(2U) == ajfx::CacheMode::Live);
+
+    const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    // Another seed than the cache's is refused: the cache is of its own.
+    PASS_CHECK(!pass.create_instance(effect, kernels, ajfx::presets::textures(), {}, {}, 3U, cache));
+    auto created = pass.create_instance(effect, kernels, ajfx::presets::textures(), {}, {}, 41U, cache);
+    PASS_CHECK(created);
+    render::ParticleInstance instance = std::move(created).value();
+    // The scene's own actions do not replace the cache's performance.
+    pass.revise(instance, std::make_shared<ajfx::ActionList>(), 0U);
+
+    const auto reach = [&](core::u64 frame) {
+        for (int held = 0;; ++held) {
+            PASS_CHECK(held < 5000);
+            auto acquired = g_device->acquire_commands();
+            PASS_CHECK(acquired);
+            rhi::CommandList commands = std::move(acquired).value();
+            const bool reached = pass.advance(commands, instance, frame, 24U, 1U);
+            auto submitted = g_device->submit(std::move(commands));
+            PASS_CHECK(submitted);
+            PASS_CHECK(std::move(submitted).value().wait());
+            PASS_CHECK(!pass.take_error());
+            if (reached) {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    };
+    const auto matches = [&](core::u64 step) {
+        ajfx::Simulation reference =
+            ajfx::Simulation::create(effect, 41U, ajfx::SimulationOptions{.cache = cache}).value();
+        reference.reset(nullptr, cache->performance().get());
+        reference.advance_to(step, nullptr, cache->performance().get());
+        const ajfx::EmitterState stones = instance.simulation().read_emitter(0U).value();
+        const ajfx::EmitterState smoke = instance.simulation().read_emitter(1U).value();
+        const ajfx::EmitterState drizzle = instance.simulation().read_emitter(2U).value();
+        PASS_CHECK(stones.alive() == reference.emitter(0U).alive() && stones.alive() >= 3U &&
+                   stones.position == reference.emitter(0U).position &&
+                   stones.orientation == reference.emitter(0U).orientation);
+        PASS_CHECK(smoke.alive() == reference.emitter(1U).alive() &&
+                   smoke.spawn_index == reference.emitter(1U).spawn_index &&
+                   smoke.position == reference.emitter(1U).position);
+        PASS_CHECK(drizzle.alive() == reference.emitter(2U).alive() &&
+                   drizzle.spawn_index == reference.emitter(2U).spawn_index);
+        float apart = 0.0F;
+        for (std::size_t p = 0U; p < drizzle.alive(); ++p) {
+            const ajfx::Vec3 d = drizzle.position[p] - reference.emitter(2U).position[p];
+            apart = std::max(apart, std::sqrt(ajfx::dot(d, d)));
+        }
+        PASS_CHECK(apart < 1.0e-3F);
+        std::cout << "  step " << step << ": " << smoke.alive() << " puffs, " << drizzle.alive()
+                  << " drops within " << apart << " of the reference\n";
+    };
+    // A seek well into the performance, then back to one before most drops.
+    reach(80U);
+    PASS_CHECK(instance.step() == 200U);
+    matches(200U);
+    reach(12U);
+    PASS_CHECK(instance.step() == 30U);
+    matches(30U);
+}
+
+// The package loader reads a cache beside a package and opens it as it was
+// baked; a cache of something else fails the package with the reason.
+void a_cache_beside_its_package_is_read_with_it() {
+    const ajfx::Effect effect = performed_stage();
+    const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() / "ms_particle_cache_test";
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    const std::filesystem::path package = directory / "stage.ajfx";
+    const auto write = [](const std::filesystem::path& path, const std::vector<std::uint8_t>& bytes) {
+        std::ofstream out{path, std::ios::binary | std::ios::trunc};
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        PASS_CHECK(out.good());
+    };
+    write(package, ajfx::write_package(effect, ajfx::gpu::kernel_package_entries(effect, kernels)).value());
+    PASS_CHECK(render::particle_cache_path(package.string()) == (directory / "stage.ajfxcache").string());
+
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+    ajfx::BakeSettings bake;
+    bake.frames = 60U;
+    bake.actions = stage_performance();
+    write(directory / "stage.ajfxcache",
+          ajfx::bake(effect, 41U, ajfx::SimulationOptions{.rigid = solver.get()}, bake).value().bytes);
+
+    render::ParticlePackageCache packages{ajfx::gpu::ShaderFormat::Dxil};
+    static_cast<void>(packages.observe(package.string(), 1U));
+    packages.wait_idle();
+    const render::ParticlePackageObservation ready = packages.observe(package.string(), 1U);
+    PASS_CHECK(ready.state == render::ParticlePackageState::Ready && ready.package != nullptr);
+    PASS_CHECK(ready.package->cache != nullptr && ready.package->cache->identity().instance_seed == 41U);
+    // Sixty steps read the drops before tick 60: five of the six.
+    PASS_CHECK(ready.package->cache->performance()->size() == 5U);
+
+    // A cache baked from another effect: its stones bounce differently.
+    ajfx::Effect other = effect;
+    std::get<ajfx::RigidPhysics>(other.emitters[0].update[1]).restitution = 0.9F;
+    write(directory / "stage.ajfxcache",
+          ajfx::bake(other, 41U, ajfx::SimulationOptions{.rigid = solver.get()}, bake).value().bytes);
+    render::ParticlePackageCache fresh{ajfx::gpu::ShaderFormat::Dxil};
+    static_cast<void>(fresh.observe(package.string(), 1U));
+    fresh.wait_idle();
+    const render::ParticlePackageObservation stale = fresh.observe(package.string(), 1U);
+    std::cout << "  " << stale.error << '\n';
+    PASS_CHECK(stale.state == render::ParticlePackageState::Failed && stale.package == nullptr);
+    PASS_CHECK(stale.error.find("does not play") != std::string::npos &&
+               stale.error.find("stones") != std::string::npos);
+    std::filesystem::remove_all(directory);
+}
+
 int main() {
     if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
         std::cout << "skipped: no D3D12 device\n";
@@ -2318,6 +2499,8 @@ int main() {
         {"props_draw_where_they_stand", props_draw_where_they_stand},
         {"props_write_their_motion", props_write_their_motion},
         {"particles_meet_the_runners_bodies", particles_meet_the_runners_bodies},
+        {"a_cache_plays_its_performance_at_a_seek", a_cache_plays_its_performance_at_a_seek},
+        {"a_cache_beside_its_package_is_read_with_it", a_cache_beside_its_package_is_read_with_it},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},
     };
     int failures = 0;

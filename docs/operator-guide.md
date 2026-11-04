@@ -1073,7 +1073,14 @@ until it has caught up with the playhead. Effects with solid pieces that
 knock into each other and pile up (debris, a heap of rocks that collapses)
 work their physics out on a thread of their own, a moment ahead of the
 playhead. After a jump the effect holds until that thread has caught up, as
-any effect does. Effects play only in the Advanced renderer.
+any effect does. A package exported with its cache beside it (the
+`.ajfxcache` file of the same name, which ajfx Studio writes for a performed
+scene) plays the performance exactly as it was recorded: the effect's own
+seed and actions travel in the cache, so every placement and every node
+plays the same bodies, and a jump is read from the cache rather than worked
+out again. If the cache no longer matches the package, the effect does not
+play and Program says why; export both again, or delete the cache to
+simulate the effect instead. Effects play only in the Advanced renderer.
 In Basic, the Stage and Program status say so, and Program is not ready
 while an effect is due to play. After you export a package again in place,
 **Rescan Sources** makes every renderer read it again. Each keeps drawing the

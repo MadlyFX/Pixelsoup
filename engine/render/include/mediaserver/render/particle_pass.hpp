@@ -235,12 +235,17 @@ public:
     // depth, so they hide their own far side as solid geometry does. Meshes
     // are uploaded once per name, so emitters and props that draw the same
     // model share one pair of buffers.
-    [[nodiscard]] core::Result<ParticleInstance, ParticleError> create_instance(const ajfx::Effect& effect,
-                                                                               const ajfx::gpu::KernelSet& kernels,
-                                                                               const ajfx::TextureSet& textures,
-                                                                               const ajfx::FieldSet& fields,
-                                                                               const ajfx::MeshSet& meshes,
-                                                                               core::u32 seed);
+    //
+    // With `cache` (opened for `effect`, as its package holds it), the
+    // emitters it caches are read from it on the pass's rigid runner rather
+    // than simulated, so a seek is a read; the live emitters step beside
+    // them with the cache's performance. `seed` must then be the cache's
+    // (Cache::identity), which it was opened with; revise is ignored, since
+    // the performance is the cache's.
+    [[nodiscard]] core::Result<ParticleInstance, ParticleError> create_instance(
+        const ajfx::Effect& effect, const ajfx::gpu::KernelSet& kernels, const ajfx::TextureSet& textures,
+        const ajfx::FieldSet& fields, const ajfx::MeshSet& meshes, core::u32 seed,
+        std::shared_ptr<const ajfx::Cache> cache = nullptr);
 
     // Records simulating `instance` to the step for `show_frame` at
     // rate_num / rate_den frames a second, within the step budget, and returns

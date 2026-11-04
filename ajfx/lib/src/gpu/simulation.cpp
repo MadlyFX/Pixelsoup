@@ -174,6 +174,9 @@ struct GpuSimulation::State final {
     // index among them (none for the rest).
     std::optional<Simulation> rigid;
     std::vector<std::optional<std::size_t>> rigid_index;
+    // The particle emitters a cache holds (SimulationOptions::cache, hosted
+    // rigid physics): written from the host's frames, never stepped here.
+    std::vector<bool> cached;
     // The slowest contact the effect reads of each emitter (contact_floor).
     std::vector<std::optional<float>> floors;
     std::vector<std::uint8_t> records;
@@ -406,13 +409,20 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
             rigid_index[i] = rigid_count++;
         }
     }
-    // Playing a cache on the GPU is a host's to wire: under External hosting
-    // it hands cached bodies in as it would a runner's (Cache::emitter_at).
+    // Playing a cache on the GPU is a host's to wire: under Host hosting it
+    // hands every cached emitter in with each step's frame, bodies and
+    // particles alike, as a runner given the cache does (RigidRunner::track).
     // Inline, this simulation would quietly simulate what was cached.
     if (options.cache != nullptr && hosting == RigidHosting::Inline) {
         return Error{ErrorCode::InvalidEffect,
                      "GpuSimulation does not play caches itself; host rigid physics externally and supply the "
                      "cache's frames, or play the cache with the CPU Simulation"};
+    }
+    std::vector<bool> cached(effect.emitters.size(), false);
+    if (options.cache != nullptr) {
+        for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+            cached[i] = !rigid_index[i] && options.cache->mode(i) != CacheMode::Live;
+        }
     }
     std::vector<std::optional<float>> floors(effect.emitters.size());
     std::vector<std::optional<float>> part_floors;
@@ -593,6 +603,7 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
     state->effect = std::move(effect);
     state->rigid = std::move(rigid);
     state->rigid_index = std::move(rigid_index);
+    state->cached = std::move(cached);
     state->floors = std::move(floors);
     GpuSimulation simulation{std::move(state)};
     // Inline piles stand from step 0; the buffers need them before any step.
@@ -712,8 +723,11 @@ void GpuSimulation::State::record(const ParameterProvider* parameters, const Rig
     for (const std::size_t i : s.order) {
         const Emitter& emitter = s.effect.emitters[i];
         EmitterGpu& e = s.emitters[i];
-        if (s.rigid_index[i]) {
-            if (const EmitterState* particles = rigid_particles(i)) {
+        if (s.rigid_index[i] || s.cached[i]) {
+            const EmitterState* particles = s.rigid_index[i] ? rigid_particles(i)
+                                            : hosted != nullptr && i < hosted->emitters.size() ? &hosted->emitters[i]
+                                                                                              : nullptr;
+            if (particles != nullptr) {
                 s.upload(e, *particles, 1U - s.current);
                 e.spawned = particles->spawned;
                 e.rate_carry = particles->rate_carry;
@@ -1006,7 +1020,7 @@ void GpuSimulation::write_inline_rigid() {
 
 void GpuSimulation::write_rigid(std::size_t emitter, const EmitterState& particles) {
     State& s = *state_;
-    if (s.rigid || emitter >= s.emitters.size() || !s.rigid_index[emitter]) {
+    if (s.rigid || emitter >= s.emitters.size() || (!s.rigid_index[emitter] && !s.cached[emitter])) {
         return;
     }
     EmitterGpu& e = s.emitters[emitter];

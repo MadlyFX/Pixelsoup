@@ -135,6 +135,12 @@ public:
     // particles, as the host's simulation of it has them at this tick, into
     // the buffers drawing reads. Steps and restores leave those buffers
     // stale, so write each such emitter after them and before drawing.
+    //
+    // Created with a cache (SimulationOptions::cache, Host hosting), the
+    // particle emitters the cache holds are hosted too: each step writes the
+    // frame's state of them rather than stepping them, and write_rigid
+    // writes them as it writes bodies. The host's frames carry them
+    // (RigidRunner::track given the cache does).
     void write_rigid(std::size_t emitter, const EmitterState& particles);
 
     // Buffers for drawing. They swap every step; ask again after stepping.

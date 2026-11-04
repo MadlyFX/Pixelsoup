@@ -240,6 +240,31 @@ a script's lines in order and `do` one line, writing the scene back (or to
 `push`, `pull`, `poke`, `blast`, `grab`, `delete`, `remove`, `retime`,
 `rerecord` and `clear`.
 
+Delivery is driven from the command line too:
+
+```powershell
+ajfx-studio-cli wall.ajfxstudio deliver wall.ajfx
+```
+
+```powershell
+ajfx-studio-cli wall.ajfxstudio replay wall.ajfx 0 95 140 359
+```
+
+```powershell
+ajfx-studio-cli wall.ajfxstudio gltf wall.gltf --cache wall.ajfxcache
+```
+
+`bake <out.ajfxcache>` bakes the scene's baked layers with its performance
+and `--seed` for its loop. `deliver <out.ajfx>` bakes (or takes `--cache`),
+compiles the kernels and writes the package with its cache beside it, after
+opening the cache against the written package as the media server will.
+`replay <package> <step...>` plays a delivered package from its cache, seeking
+straight to each step as a node does, and compares it with the scene played
+live (bodies bit for bit; it fails otherwise, or when the host would refuse
+the cache). `gltf <out.gltf>` writes the bodies as animated glTF with a
+`.bin` beside it (`--frames` to shorten it). Writing a package needs the
+shader compiler, so `deliver` is only in builds with the D3D12 backend.
+
 ## Building and testing
 
 The headless core and `ajfx.studio` build with ajfx's own presets (see

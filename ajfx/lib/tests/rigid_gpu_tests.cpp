@@ -4,6 +4,7 @@
 #include "check.hpp"
 
 #include <ajfx/builder.hpp>
+#include <ajfx/cache.hpp>
 #include <ajfx/d3d12.hpp>
 #include <ajfx/gpu/renderer.hpp>
 #include <ajfx/gpu/simulation.hpp>
@@ -489,6 +490,53 @@ void hosted_steps_bear_particles_from_the_runners_frames() {
     AJFX_CHECK(cpu.emitter(1U).spawned > 0U);
 }
 
+// A host playing a cache on the GPU: the runner reads the cached emitters'
+// frames (bodies, and the sparks and smoke born of them), the GPU writes
+// them rather than stepping them and steps the live emitter beside them, all
+// as the CPU reference plays the same cache, and again after a seek back.
+void a_cache_plays_on_the_gpu_from_a_cached_track() {
+    const Effect effect = sparks_and_smoke();
+    const Baked baked =
+        bake(effect, 5U, SimulationOptions{.rigid = g_solver.get()}, BakeSettings{.frames = 150U}).value();
+    auto cache = std::make_shared<const Cache>(Cache::open_as_baked(baked.bytes, effect).value());
+    AJFX_CHECK(cache->mode(0U) == CacheMode::Rigid && cache->mode(1U) == CacheMode::Particles &&
+               cache->mode(2U) == CacheMode::Particles && cache->mode(3U) == CacheMode::Live);
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    gpu::GpuSimulation gpu = gpu::GpuSimulation::create(*g_device, effect, kernels, 5U,
+                                                        SimulationOptions{.cache = cache}, gpu::RigidHosting::Host)
+                                 .value();
+    RigidRunner runner{*g_solver};
+    std::unique_ptr<RigidTrack> track = runner.track(effect, 5U, {}, nullptr, nullptr, cache);
+    const auto play_to = [&](std::uint64_t tick) {
+        while (gpu.tick() < tick) {
+            std::shared_ptr<const RigidFrame> frame = track->frame(gpu.tick() + 1U);
+            while (!frame) {
+                AJFX_CHECK(!track->error().has_value());
+                runner.wait_idle();
+                frame = track->frame(gpu.tick() + 1U);
+            }
+            gpu.step(nullptr, *frame);
+        }
+    };
+    const auto check_at = [&](std::uint64_t tick) {
+        Simulation cpu = Simulation::create(effect, 5U, SimulationOptions{.cache = cache}).value();
+        cpu.advance_to(tick);
+        AJFX_CHECK(same(gpu.read_emitter(0U).value(), cpu.emitter(0U)));
+        for (const std::size_t emitter : {1U, 2U, 3U}) {
+            const std::size_t apart = apart_from(gpu.read_emitter(emitter).value(), cpu.emitter(emitter));
+            std::cout << "  step " << tick << ", " << effect.emitters[emitter].name << ": "
+                      << cpu.emitter(emitter).alive() << " alive, " << apart << " apart from the reference\n";
+            AJFX_CHECK(apart == 0U);
+        }
+        return cpu.emitter(1U).alive();
+    };
+    play_to(120U);
+    AJFX_CHECK(check_at(120U) > 0U);
+    gpu.reset();
+    play_to(60U);
+    check_at(60U);
+}
+
 void contact_spawns_rerun_exactly_on_the_gpu() {
     const Effect effect = sparks_and_smoke();
     gpu::GpuSimulation a = make_gpu(effect);
@@ -677,6 +725,7 @@ int main() {
          contacts_and_bodies_bear_the_same_particles_on_the_gpu},
         {"hosted_steps_bear_particles_from_the_runners_frames", hosted_steps_bear_particles_from_the_runners_frames},
         {"contact_spawns_rerun_exactly_on_the_gpu", contact_spawns_rerun_exactly_on_the_gpu},
+        {"a_cache_plays_on_the_gpu_from_a_cached_track", a_cache_plays_on_the_gpu_from_a_cached_track},
         {"the_gpu_grid_meets_what_every_body_in_turn_meets", the_gpu_grid_meets_what_every_body_in_turn_meets},
         {"the_gpu_grid_cost", the_gpu_grid_cost},
     };

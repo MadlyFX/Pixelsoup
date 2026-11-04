@@ -9,6 +9,7 @@
 #include <mediaserver/shaders/particle_volume_vert_dxil.h>
 #endif
 
+#include <ajfx/cache.hpp>
 #include <ajfx/rigid.hpp>
 
 #include <algorithm>
@@ -162,6 +163,11 @@ struct ParticleInstance::State final {
     // since the last advance: a simulation past it goes back.
     std::shared_ptr<const ajfx::ActionProvider> actions;
     std::optional<core::u64> revised;
+    // The cache it plays (create_instance), and which emitters the runner's
+    // frames carry: the rigid physics ones and, with a cache, every one it
+    // holds.
+    std::shared_ptr<const ajfx::Cache> cache;
+    std::vector<bool> hosted;
     std::optional<ajfx::gpu::ParticleSorter> sorter;
     // One per texture name, staged a recording's upload space at a time;
     // the texels (not the size or colour space) are dropped once they have
@@ -480,7 +486,8 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
                                                                            const ajfx::TextureSet& textures,
                                                                            const ajfx::FieldSet& fields,
                                                                            const ajfx::MeshSet& meshes,
-                                                                           core::u32 seed) {
+                                                                           core::u32 seed,
+                                                                           std::shared_ptr<const ajfx::Cache> cache) {
     using Result = core::Result<ParticleInstance, ParticleError>;
     State& s = *state_;
     if (ajfx::Result<bool> checked = ajfx::check_textures(effect, textures); !checked) {
@@ -492,10 +499,15 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
     if (ajfx::Result<bool> checked = ajfx::check_meshes(effect, meshes); !checked) {
         return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
     }
-    // Rigid physics emitters are stepped by the pass's runner, not inline.
-    const bool rigid = ajfx::has_rigid_physics(effect);
+    // Rigid physics emitters are stepped by the pass's runner, not inline,
+    // and a cache's emitters are read by it.
+    if (cache != nullptr && seed != cache->identity().instance_seed) {
+        return Result::failure(failure(ParticleErrorCode::InvalidEffect,
+                                       "a cached instance takes the seed its cache was baked with"));
+    }
+    const bool rigid = ajfx::has_rigid_physics(effect) || (cache != nullptr && cache->caches_anything());
     ajfx::Result<ajfx::gpu::GpuSimulation> simulation = ajfx::gpu::GpuSimulation::create(
-        *s.particles, effect, kernels, seed, ajfx::SimulationOptions{.fields = fields},
+        *s.particles, effect, kernels, seed, ajfx::SimulationOptions{.fields = fields, .cache = cache},
         rigid ? ajfx::gpu::RigidHosting::Host : ajfx::gpu::RigidHosting::Inline);
     if (!simulation) {
         const ajfx::ErrorCode code = simulation.error().code;
@@ -531,8 +543,21 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
                                                           .checkpoint_interval = s.settings.checkpoint_interval,
                                                           .checkpoint_count = s.settings.checkpoint_count});
         }
-        state->rigid = s.rigid_runner->track(effect, seed, meshes);
+        state->rigid = s.rigid_runner->track(effect, seed, meshes, nullptr,
+                                             cache != nullptr ? cache->performance() : nullptr, cache);
+        if (std::optional<ajfx::Error> refused = state->rigid->error()) {
+            return Result::failure(failure(ParticleErrorCode::InvalidEffect, refused->message));
+        }
     }
+    state->hosted.resize(effect.emitters.size());
+    for (std::size_t e = 0U; e < effect.emitters.size(); ++e) {
+        state->hosted[e] = ajfx::rigid_physics(effect.emitters[e]) != nullptr ||
+                           (cache != nullptr && cache->mode(e) != ajfx::CacheMode::Live);
+    }
+    if (cache != nullptr) {
+        state->actions = cache->performance();
+    }
+    state->cache = std::move(cache);
     // Buffers for one package mesh, shared by everything that names it: the
     // emitters that draw it and the props shaped by it. check_meshes above
     // has already refused an effect naming a mesh the package does not hold.
@@ -868,7 +893,7 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
             // particles already.
             if (frame != reached) {
                 for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
-                    if (ajfx::rigid_physics(i.effect.emitters[e]) != nullptr) {
+                    if (i.hosted[e]) {
                         simulation.write_rigid(e, frame->emitters[e]);
                     }
                 }
@@ -971,6 +996,10 @@ void ParticlePass::restart(ParticleInstance& instance,
 void ParticlePass::revise(ParticleInstance& instance, std::shared_ptr<const ajfx::ActionProvider> actions,
                           core::u64 from) noexcept {
     ParticleInstance::State& i = *instance.state_;
+    // A cache plays the performance it was baked with.
+    if (i.cache != nullptr) {
+        return;
+    }
     // A checkpoint at tick t holds what the steps before t made, which read
     // the actions before t: one at `from` still stands.
     for (std::optional<core::u64>& saved : i.saved) {
@@ -987,7 +1016,8 @@ void ParticlePass::revise(ParticleInstance& instance, std::shared_ptr<const ajfx
 }
 
 core::u32 ParticlePass::rigid_lead(const ParticleInstance& instance) const noexcept {
-    return instance.state_->actions ? state_->settings.acting_rigid_lead : state_->settings.rigid_lead;
+    return instance.state_->actions && instance.state_->cache == nullptr ? state_->settings.acting_rigid_lead
+                                                                        : state_->settings.rigid_lead;
 }
 
 bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, const scene::ViewMatrices& view,

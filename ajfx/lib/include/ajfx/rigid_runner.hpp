@@ -59,6 +59,7 @@ struct RigidFrame final {
 };
 
 class RigidTrack;
+class Cache;
 
 class RigidRunner final {
 public:
@@ -77,9 +78,18 @@ public:
     // callable from the runner's thread. Its worlds are built on that thread
     // when a tick is first asked for; a failure there is reported by
     // RigidTrack::error.
+    //
+    // Given `cache` (opened for `effect`), the track simulates nothing: each
+    // frame holds what the cache holds of every emitter it caches at that
+    // tick -- bodies and particle layers alike, without contacts, which the
+    // emitters born of them are cached with -- read ahead on the runner's
+    // thread, so a seek is a read rather than a resimulation. Every rigid
+    // physics emitter must be cached; RigidTrack::error says which is not.
+    // Parameters and actions do not change what it reads.
     [[nodiscard]] std::unique_ptr<RigidTrack> track(const Effect& effect, std::uint32_t instance_seed, MeshSet meshes,
                                                     std::shared_ptr<const ParameterProvider> parameters = nullptr,
-                                                    std::shared_ptr<const ActionProvider> actions = nullptr);
+                                                    std::shared_ptr<const ActionProvider> actions = nullptr,
+                                                    std::shared_ptr<const Cache> cache = nullptr);
 
     // Blocks until every track has the tick it last asked for and its lead
     // (or has failed). For tests and tools.

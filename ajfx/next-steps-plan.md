@@ -37,12 +37,19 @@ in [the design](docs/studio-ui-architecture.md#delivery-sequence-and-acceptance)
    in the core and `ajfx-studio-cli`, with both sandbox scenes replayed bit
    for bit headless; still to come are their viewport tools (brush cursor,
    grab under the pointer with the wheel for depth, timeline bars dragged in
-   the window, a "re-record from here" confirmation), a Setup mode at tick 0
-   that freezes settled bodies as the stage, and exporting a performance to
-   glTF.
+   the window, a "re-record from here" confirmation) and a Setup mode at tick
+   0 that freezes settled bodies as the stage. Delivery is in the core and
+   the command line: the cache carries its seed and performance, the media
+   server plays a package's cache beside it (refusing a stale one in
+   readiness), `replay` proves a delivered package against the scene at a
+   seek, and the performance exports to glTF from the cache. Still to come:
+   the viewport playing its current bake through that cached path, the
+   transport's cache band switching it, and the same check on a remote
+   node's wall.
 5. Finish scene controls, target/resource reporting, dependency-aware assembly
-   export and export review. Verify the shipping host's cache consumption
-   before describing sidecar delivery as host cache playback.
+   export and export review. Host cache playback is verified on the renderer's
+   tests and headless replay; qualify it in a running show on a node, and
+   stream large caches rather than read them whole on the package worker.
 6. Run the affected area checks during implementation and the full Debug and
    Release root qualification before merging. Include workspace usability and
    measured responsiveness results; no improvement is claimed without evidence.

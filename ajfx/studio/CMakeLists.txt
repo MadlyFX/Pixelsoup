@@ -39,6 +39,8 @@ add_library(ajfx_studio_core STATIC
     src/performance.cpp
     src/stage.cpp
     src/hands.cpp
+    src/delivery.cpp
+    src/export_gltf.cpp
 )
 target_include_directories(ajfx_studio_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -52,6 +54,12 @@ set_target_properties(ajfx_studio_core PROPERTIES FOLDER "ajfx")
 if(TARGET ajfx::rigid)
     add_executable(ajfx-studio-cli src/cli.cpp)
     target_link_libraries(ajfx-studio-cli PRIVATE ajfx_studio_core ajfx::rigid)
+    if(TARGET ajfx::d3d12)
+        # Delivering a package needs its kernels, compiled with DXC.
+        target_link_libraries(ajfx-studio-cli PRIVATE ajfx::d3d12)
+        target_compile_definitions(ajfx-studio-cli PRIVATE AJFX_STUDIO_CLI_KERNELS=1)
+        ajfx_copy_dxc(ajfx-studio-cli)
+    endif()
     ajfx_set_options(ajfx-studio-cli)
     set_target_properties(ajfx-studio-cli PROPERTIES FOLDER "ajfx")
 endif()
@@ -163,6 +171,7 @@ if(BUILD_TESTING)
         tests/performance_tests.cpp
         tests/stage_tests.cpp
         tests/hands_tests.cpp
+        tests/delivery_tests.cpp
         tests/fixtures/recipes.cpp
         tests/fixtures/blast.cpp
     )

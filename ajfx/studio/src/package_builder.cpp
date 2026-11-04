@@ -1,6 +1,7 @@
 #include "package_builder.hpp"
 
 #include "catalog.hpp"
+#include "delivery.hpp"
 #include "document_io.hpp"
 #include "library.hpp"
 #include "performance.hpp"
@@ -759,16 +760,32 @@ ExportResult PackageBuilder::export_package(const ExportRequest& request) {
     }
     const std::vector<CacheMode> modes = bake_modes(request.document, compiled);
     const bool any_baked = std::any_of(modes.begin(), modes.end(), [](CacheMode mode) { return mode != CacheMode::Live; });
-    if (request.document.scene && any_baked) {
-        if (!request.bake) { result.message = "Not exported: required scene cache is missing or out of date. Bake the capture range first."; return result; }
-        const auto fits = Cache::open(request.bake->bytes, *compiled.effect, request.bake->instance_seed, {}, compiled.meshes, compiled.fields);
-        if (!fits) { result.message = "Not exported: " + fits.error().message + ". Bake again."; return result; }
-    }
     std::string error;
     double milliseconds = 0.0;
     std::optional<gpu::KernelSet> kernels = kernels_for(*compiled.effect, error, milliseconds);
     if (!kernels) {
         result.message = "Not exported: " + error;
+        return result;
+    }
+    // A scene is delivered with its performance's cache, checked as the
+    // media server checks it (delivery.hpp).
+    if (request.document.scene) {
+        Result<Delivery> delivery = deliver(request.document, compiled, *kernels, request.bake.get());
+        if (!delivery) {
+            result.message = "Not exported. " + delivery.error().message;
+            return result;
+        }
+        if (!write_delivery(delivery.value(), request.path, error)) {
+            result.message = "Not exported: " + error;
+            return result;
+        }
+        result.ok = true;
+        result.message = "Exported " + request.path.filename().string() + " (" +
+                         bytes_text(delivery.value().package.size()) + ")";
+        if (delivery.value().played) {
+            result.message += " with its cache, " + cache_path_for(request.path).filename().string() + " (" +
+                              bytes_text(delivery.value().cache.size()) + ")";
+        }
         return result;
     }
     std::vector<PackageEntry> extra = gpu::kernel_package_entries(*compiled.effect, *kernels);
@@ -780,14 +797,6 @@ ExportResult PackageBuilder::export_package(const ExportRequest& request) {
         result.message = "Not exported: " + bytes.error().message;
         return result;
     }
-    if (request.document.scene && any_baked) {
-        std::filesystem::path cache_path = request.path;
-        cache_path.replace_extension(".ajfxcache");
-        if (!write_file(cache_path, request.bake->bytes, error)) {
-            result.message = "Not exported: required cache could not be written: " + error;
-            return result;
-        }
-    }
     if (!write_file(request.path, bytes.value(), error)) {
         result.message = "Not exported: " + error;
         return result;
@@ -795,10 +804,6 @@ ExportResult PackageBuilder::export_package(const ExportRequest& request) {
     result.ok = true;
     result.message = "Exported " + request.path.filename().string() + " (" +
                      std::to_string((bytes.value().size() + 1023U) / 1024U) + " KB)";
-    if (request.document.scene) {
-        if (any_baked) { result.message += " with its verified cache"; }
-        return result;
-    }
     // The cache goes beside it, if it is this page's: opening it against the
     // exported effect is the very check a host will make.
     if (request.bake) {
