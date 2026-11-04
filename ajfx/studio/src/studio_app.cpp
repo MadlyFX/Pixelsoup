@@ -212,12 +212,9 @@ public:
 
         // Whatever drew edited the scene in place; this is the one look at it
         // each frame, and what follows asks the number it leaves.
+        // A motion edit keeps the playhead and playback: the new package
+        // simulates again from the initial setup up to the playhead.
         changes_.observe(document_);
-        if (scene_motion_for_ != changes_.value()) {
-            if (!same_scene_motion(scene_motion_, document_)) { frame_ = 0.0; playing_ = false; }
-            scene_motion_ = document_;
-            scene_motion_for_ = changes_.value();
-        }
         shortcuts();
         record_history();
         follow_document(now);
@@ -269,7 +266,6 @@ private:
 
     void replace_document(Document document, std::filesystem::path path) {
         document_ = std::move(document);
-        scene_motion_ = document_;
         path_ = std::move(path);
         const std::uint64_t at = changes_.touch(document_);
         saved_.set(document_, at);
@@ -1051,7 +1047,7 @@ private:
         const gui::Rect note_rect{view.x + 10.0F, view.y + 10.0F, note_w, 24.0F};
         ctx_.rounded(note_rect, gui::fade(theme.background, 0.7F), note_rect.height * 0.5F);
         ctx_.label(gui::Rect{note_rect.x + 12.0F, note_rect.y, note_rect.width - 16.0F, note_rect.height}, note, note_tone);
-        ctx_.tooltip(note_rect, "Motion edits pause and restart from the initial setup. Color edits preserve motion caches. Preview is simulating; cache playback is not connected yet.");
+        ctx_.tooltip(note_rect, "Motion edits simulate again from the initial setup up to the playhead. Color edits preserve motion caches. Preview is simulating; cache playback is not connected yet.");
 
         // View tools, top right.
         const gui::Rect frame_button{view.right() - 38.0F, view.y + 8.0F, 30.0F, 30.0F};
@@ -1408,8 +1404,6 @@ private:
     float scene_inspector_split_{0.66F};
     Document scene_guides_;
     std::uint64_t scene_guides_for_{};
-    Document scene_motion_;
-    std::uint64_t scene_motion_for_{};
     StageOverlay overlay_;
     SessionState session_;
     bool show_guides_{true};

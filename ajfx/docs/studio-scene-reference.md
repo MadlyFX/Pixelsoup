@@ -161,8 +161,9 @@ before the list scrolls. There are no keyframe tracks for other values.
 Scene settings own gravity, angular damping and sleep policy. The fixed
 simulation step is 60 Hz. The capture range controls bake/export duration;
 non-looping scene playback can continue beyond it. Looping is an explicit
-transport choice. The current editing policy is **Initial setup**: motion
-edits pause and restart, while visual edits preserve motion-cache validity.
+transport choice. The current editing policy is **Initial setup**: a motion
+edit keeps the playhead and playback and simulates again from the initial
+setup up to the playhead, while visual edits preserve motion-cache validity.
 Record actions and checkpoint adoption are not implemented.
 
 ## Ownership, determinism and delivery
