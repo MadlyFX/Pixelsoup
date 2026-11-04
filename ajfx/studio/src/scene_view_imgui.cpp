@@ -1,6 +1,7 @@
 #include "scene_view.hpp"
 
 #include "im_controls.hpp"
+#include "performance.hpp"
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
@@ -243,21 +244,15 @@ void SceneView::im_settings(Document& document) {
     }
     im::heading("Performance");
     const Performance& performance = scene.performance;
-    const std::size_t drops = static_cast<std::size_t>(std::count_if(
-        performance.acts.begin(), performance.acts.end(), [](const Act& act) { return act.kind == ActKind::Drop; }));
-    const std::size_t deletions = performance.acts.size() - drops;
-    ImGui::TextDisabled("%s", performance.acts.empty()
-                                  ? "Nothing yet: drop things while it plays"
-                                  : (std::to_string(drops) + (drops == 1U ? " drop, " : " drops, ") +
-                                     std::to_string(deletions) + (deletions == 1U ? " deletion" : " deletions"))
-                                        .c_str());
+    ImGui::TextDisabled("%s", performance.acts.empty() ? "Nothing yet: drop things while it plays"
+                                                       : performance_summary(performance).c_str());
     if (!performance.acts.empty()) {
         ImGui::SameLine();
         if (ImGui::SmallButton("Clear")) {
             scene.performance.acts.clear();
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Clear the performance: take away every drop and deletion");
+            ImGui::SetTooltip("Clear the performance: take away everything done while it played");
         }
     }
     im::heading("Preview");

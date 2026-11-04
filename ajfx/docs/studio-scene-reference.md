@@ -104,6 +104,58 @@ and red for a deletion; dragging one moves it, and a click picks it so
 Delete takes it away (a drop takes its deletions with it). Undo covers
 acts as it covers edits. Removing an object removes its acts.
 
+### Hands: paint, grab, poke and blast
+
+The performance also holds what hands do to the running scene. These are
+implemented in the core (`studio/src/hands.*`, `performance.*`) and driven
+from the command line (`ajfx-studio-cli`, see the
+[Studio README](../studio/README.md#the-command-line)); the viewport has no
+buttons for them yet.
+
+- **Paint** lays copies of a Dynamic object down with a brush: each dab
+  puts `count` copies (1 to 16, what the world bears in a step) over a disc
+  of the brush's radius across the surface touched, gathered to the middle
+  by its falloff, starting half their size and a little lift above it. Each
+  copy has a serial of its own (a dab holds `count` in a row), and where it
+  lands and how it is turned are drawn from that serial alone: *Realistic*
+  stands it up along the surface and turns it about it, *Random* turns it
+  any way, *Locked* keeps the object's turn. A dab with no room left in its
+  step goes in the next step that has room; one past Most dropped at once is
+  refused. One stroke is many dabs, named by its first dab's serial.
+- **Erase**, **Push** and **Pull** are the brush on what is already there:
+  every body whose middle is under it at that step is taken away, or pushed
+  out from the brush's middle (drawn in, for Pull) along the surface at the
+  brush's strength, less towards the edge by its falloff. They are recorded
+  as deletions and pushes of those bodies.
+- **Grab** takes hold of a body where the pointer pressed it and carries it
+  across a plane facing the camera through that point, deeper or nearer
+  with the wheel. It is one act holding the point the body's middle is
+  steered to at every step it is held (`ajfx::ActionKind::Steer`, 10 per
+  second gain, 20 m/s at most); between samples it is steered along the
+  line between them. Letting go is the last sample: the body flies on with
+  the speed the hand gave it, so a swing throws it.
+- **Poke** pushes the body under the pointer along the pointer's way; off its
+  middle the push spins it as it would a ball.
+- **Blast** throws every body within its reach out from where it is set off,
+  its power at the middle falling to nothing at the edge, and breaks first
+  the ones thrown at least as hard as their impact threshold (an object's
+  break sets its blast threshold to its impact threshold). Loose props are
+  thrown too (`ajfx::ActionKind::Blast`).
+- **Re-record from here** (`rerecord_from`) takes away every act from a step
+  on and lets go of any grab still holding then; nothing before it changes,
+  serials included.
+
+On the timeline a grab is a bar on its body's object's track over the steps
+it held, a stroke a bar from its first dab to its last on the painted
+object's track, a push a diamond there, and blasts are diamonds on a
+**Blasts** track after the rest. Moving a marker (`set_marker_time`) moves
+its act whole (a stroke's dabs keep their spacing), and taking it away
+(`remove_marker_act`) takes a stroke whole; a dab takes the acts on what it
+made with it. The timeline panel draws these markers, but dragging the new
+bars there has not been checked in the window yet. A hand that goes on holding
+replays nothing: the performance differs only from the step after its last
+sample (`first_difference`).
+
 Ctrl-click tree rows to extend a selection. Common inspector values apply to
 the selection in one undoable gesture; `*` marks mixed values. Each property
 has its own reset. The Group control changes organization, never transform
@@ -270,8 +322,9 @@ Under the transport, the **timeline** shows a track for every item with
 time in it and nothing for the rest: an object's release and, when
 Animated, its move as a bar from its start for its duration; a particle
 system's sources, Initial at 0, Continuous as a bar across the range, Burst
-at its time; a blast at the moment it goes off; its object's drops and
-deletions (see the performance above). Points are diamonds and
+at its time; a blast at the moment it goes off; its object's drops,
+deletions, pushes, grabs and paint strokes, and blasts set off by hand on a
+track of their own (see the performance and hands above). Points are diamonds and
 spans bars, lined up under the scrub bar with the playhead running through
 them. Dragging a release, burst, blast or move writes that one authored
 value, and dragging a move's end sets its duration; Initial and Continuous
@@ -294,10 +347,14 @@ The authored scene is `Document::scene`. `scene.hpp` defines typed owners;
 resets, storage and motion invalidation. New scene files use
 `ajfx-studio-scene`, schema 2 (schema 1 lacked the Motion stack and drivers
 and is refused). The performance is the root key `performance`
-(`next_serial` and `acts`, each a drop or a deletion with its serial and
-step; a drop that Settle or Jitter moved also keeps the `home` and `home_turn`
-it was put at); a scene saved without one opens with none, and acts out of order or
-with a serial not yet handed out are refused. Readers refuse unknown, duplicate, malformed
+(`next_serial` and `acts`, each a drop, delete, push, grab, paint or blast
+with its serial and step; a drop that Settle or Jitter moved also keeps the
+`home` and `home_turn` it was put at; a grab keeps its `path` as
+`[step, x, y, z]` samples; a dab of paint holds the serials from its own to
+its own plus `count`); a scene saved without one opens with none, and acts
+out of order, with serials that overlap or are not yet handed out, a grab
+whose path goes back in time or a dab of more than a step bears are
+refused. Readers refuse unknown, duplicate, malformed
 or missing authored properties and unsupported versions. Window state is not
 part of this schema. Existing layer documents retain their existing format.
 
@@ -342,7 +399,8 @@ compiler's IR, and its recipes as compiler test fixtures.
 
 Continuous cross-population attraction/repulsion, event endpoints beyond
 collision and motion, light scene items, reusable assemblies, library
-organization, authored checkpoints, grabbing, painting and blasting by hand,
+organization, authored checkpoints, viewport tools for the hands (paint,
+grab, poke and blast exist in the core and the command line only),
 simulation-independent
 visibility/isolation, controls publishing and the full export review panel
 are not implemented in the scene workspace. Flow coupling is a smoke grid
@@ -355,6 +413,8 @@ The scene acceptance tests exercise strict save/load, independent surfaces in
 one colliding world, package round trips, tint/collider cache invalidation,
 order-independent reruns and seeks, bounded persistent populations, and ten
 distinct generated mesh inputs with fracture beyond the former 64-kind limit.
-The host renderer additionally checks surface color in rendered pixels. This
-is not yet proof of both full product-defining sandbox scenarios or a timed
-usability comparison.
+The host renderer additionally checks surface color in rendered pixels. The
+two sandbox scenes are recorded, saved, reopened and replayed bit for bit
+headless (`hands_tests.cpp`): logs painted in from a metre up that tumble and
+trail smoke, and a ball picked up, swung and let go so a wall breaks. That
+is not yet proof of them in the viewport, nor a timed usability comparison.

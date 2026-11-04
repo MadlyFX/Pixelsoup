@@ -132,6 +132,16 @@ Action steer_at(std::uint64_t tick, std::uint32_t target, Vec3 to) {
     return action;
 }
 
+Action blast_at(std::uint64_t tick, Vec3 center, float radius, float power) {
+    Action action;
+    action.kind = ActionKind::Blast;
+    action.tick = tick;
+    action.position = center;
+    action.radius = radius;
+    action.power = power;
+    return action;
+}
+
 // The boxes' action source is the first (only) spawn module.
 std::uint32_t box_index(std::uint32_t serial) {
     return spawn_index_of(0U, serial);
@@ -166,6 +176,7 @@ std::shared_ptr<ActionList> performance() {
     for (std::uint64_t tick = 120U; tick < 180U; ++tick) {
         list->add("boxes", steer_at(tick, box_index(3U), Vec3{0.0F, 1.0F, -1.0F}));
     }
+    list->add("boxes", blast_at(150U, Vec3{0.0F, 0.0F, 0.0F}, 2.0F, 4.0F));
     list->add("boxes", remove_at(200U, box_index(4U)));
     return list;
 }
@@ -297,6 +308,39 @@ void a_removed_body_leaves_in_its_step() {
     simulation.advance_to(26U, nullptr, more.get());
     AJFX_CHECK(simulation.emitter(0).alive() == 2U);
     AJFX_CHECK(simulation.emitter(0).body[1] == 0U);
+}
+
+void a_blast_throws_what_it_reaches() {
+    const Effect effect = stage();
+    auto list = std::make_shared<ActionList>();
+    list->add("boxes", spawn_at(0U, 1U, Vec3{0.5F, 0.15F, 0.0F}, {}, 0.3F));
+    list->add("boxes", spawn_at(0U, 2U, Vec3{-1.5F, 0.15F, 0.0F}, {}, 0.3F));
+    list->add("boxes", spawn_at(0U, 3U, Vec3{0.0F, 0.15F, 5.0F}, {}, 0.3F));
+    list->add("boxes", blast_at(30U, Vec3{0.0F, 0.15F, 0.0F}, 3.0F, 10.0F));
+    Simulation simulation = make(effect);
+    simulation.advance_to(30U, nullptr, list.get());
+    for (std::size_t i = 0U; i < 3U; ++i) {
+        AJFX_CHECK(length(simulation.emitter(0).velocity[i]) < 0.05F);
+    }
+    simulation.step(nullptr, list.get());
+    const EmitterState& s = simulation.emitter(0);
+    const Vec3 near = s.velocity[*find(s, box_index(1U))];
+    const Vec3 far = s.velocity[*find(s, box_index(2U))];
+    const Vec3 out = s.velocity[*find(s, box_index(3U))];
+    // Out from the centre, as hard as the blast is where each stands:
+    // 10 * (1 - 0.5 / 3) and 10 * (1 - 1.5 / 3), less a step of the floor.
+    AJFX_CHECK(near.x > 7.0F && near.x < 8.4F);
+    AJFX_CHECK(far.x < -4.0F && far.x > -5.1F);
+    // Beyond the radius, nothing.
+    AJFX_CHECK(length(out) < 0.05F);
+    // A blast is part of the performance's digest.
+    ActionList without = *list;
+    without.remove_if("boxes", [](const Action& a) { return a.kind == ActionKind::Blast; });
+    AJFX_CHECK(without.digest("boxes") != list->digest("boxes"));
+    Action weaker = blast_at(30U, Vec3{0.0F, 0.15F, 0.0F}, 3.0F, 9.0F);
+    ActionList other = without;
+    other.add("boxes", weaker);
+    AJFX_CHECK(other.digest("boxes") != list->digest("boxes"));
 }
 
 // ------------------------------------------------------------ contracts
@@ -579,6 +623,7 @@ int main() {
         {"a_spawn_without_a_size_takes_its_init_modules", a_spawn_without_a_size_takes_its_init_modules},
         {"a_push_throws_and_a_steer_carries", a_push_throws_and_a_steer_carries},
         {"a_removed_body_leaves_in_its_step", a_removed_body_leaves_in_its_step},
+        {"a_blast_throws_what_it_reaches", a_blast_throws_what_it_reaches},
         {"reruns_are_bit_identical_and_seeks_agree", reruns_are_bit_identical_and_seeks_agree},
         {"editing_past_actions_clears_the_checkpoints_after_them",
          editing_past_actions_clears_the_checkpoints_after_them},

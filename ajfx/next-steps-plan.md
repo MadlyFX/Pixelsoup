@@ -32,9 +32,14 @@ in [the design](docs/studio-ui-architecture.md#delivery-sequence-and-acceptance)
 4. Integrate cache-backed viewport playback; keep simulation, bake and drawing
    state distinct. Add complete initial-state adoption. Frame-stamped actions
    (Drop and Delete, the scene's performance) replay deterministically and
-   revise from their tick; still to come are grabbing, painting and blasting
-   by hand, a Setup mode at tick 0 that freezes settled bodies as the stage,
-   and exporting a performance to glTF.
+   revise from their tick. Painting (and erasing, pushing and pulling with
+   the brush), grabbing and throwing, poking, blasting and re-recording are
+   in the core and `ajfx-studio-cli`, with both sandbox scenes replayed bit
+   for bit headless; still to come are their viewport tools (brush cursor,
+   grab under the pointer with the wheel for depth, timeline bars dragged in
+   the window, a "re-record from here" confirmation), a Setup mode at tick 0
+   that freezes settled bodies as the stage, and exporting a performance to
+   glTF.
 5. Finish scene controls, target/resource reporting, dependency-aware assembly
    export and export review. Verify the shipping host's cache consumption
    before describing sidecar delivery as host cache playback.

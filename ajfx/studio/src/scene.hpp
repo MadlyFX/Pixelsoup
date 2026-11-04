@@ -227,38 +227,73 @@ struct ScenePhysics final {
     friend bool operator==(const ScenePhysics &, const ScenePhysics &) = default;
 };
 
-// What the artist did while the scene played: drops and deletions, each at
-// the simulation step it happened in. Saved with the scene and replayed
+// What the artist did while the scene played, each at the simulation step
+// it happened in: things dropped and painted in, bodies deleted, poked,
+// grabbed and carried, blasts set off. Saved with the scene and replayed
 // exactly, since the simulation takes them as inputs (ajfx::Action) beside
-// its own; changing them changes no package. See performance.hpp.
-enum class ActKind : std::uint8_t { Drop, Delete };
+// its own; changing them changes no package. See performance.hpp and, for
+// the hands that make them, hands.hpp.
+enum class ActKind : std::uint8_t { Drop, Delete, Push, Blast, Grab, Paint };
+// How the things a paint stroke lays down are turned. Realistic: as the
+// Object is, stood up along the surface painted and turned about it at
+// random. Random: any way at all. Locked: exactly as the Object is.
+enum class PaintTurn : std::uint8_t { Realistic, Random, Locked };
 // A body an act is done to: one of an Object's own (the ones it stands with
-// at the start), by its count among them, or one a drop made, by the drop's
-// serial.
+// at the start), by its count among them, or one a drop or a paint stroke
+// made, by its own serial (a drop's is the drop's; a painted thing's is one
+// of the serials its paint act holds).
 struct BodyRef final {
-    std::uint32_t object{}; // the Object item; 0 for a dropped body
+    std::uint32_t object{}; // the Object item; 0 for a dropped or painted body
     std::uint32_t count{};  // its place among the Object's own
-    std::uint32_t drop{};   // the drop's serial; 0 for an Object's own body
+    std::uint32_t drop{};   // the dropped or painted body's serial; 0 for an Object's own body
     friend bool operator==(const BodyRef &, const BodyRef &) = default;
+};
+// Where a hand holding a body steers its middle to, from this step on until
+// the next sample (steered along the line between the two).
+struct GrabSample final {
+    std::uint64_t tick{};
+    Vec3 point{};
+    friend bool operator==(const GrabSample &, const GrabSample &) = default;
 };
 struct Act final {
     // Never reused, even once the act is taken away: a dropped body's
     // random variation is drawn by its serial, so removing or moving one act
-    // leaves every other body as it was.
+    // leaves every other body as it was. A paint act holds `count` serials,
+    // this one and those after it, one for each thing it lays down.
     std::uint32_t serial{};
     ActKind kind{ActKind::Drop};
-    std::uint64_t tick{};      // simulation step it is applied in
-    std::uint32_t object{};    // Drop: the Object whose copy is dropped
-    Vec3 position{};           // Drop: where, metres in the scene
-    Vec3 turn{};               // Drop: degrees, as an Object's rotation
-    Vec3 velocity{};           // Drop: m/s
+    std::uint64_t tick{};      // simulation step it is applied in; a Grab's first
+    std::uint32_t object{};    // Drop, Paint: the Object whose copies are made
+    Vec3 position{};           // Drop: where; Paint: the brush's middle; Blast: its centre; metres in the scene
+    Vec3 turn{};               // Drop, Paint: degrees, as an Object's rotation; Grab: how the body is held
+    Vec3 velocity{};           // Drop, Paint: m/s
     // Drop at step 0 is a thing on the stage. A setup tool (Settle, Jitter)
     // moves it from where the artist put it; `home` is where that was, so
     // Reset can put it back. Putting it somewhere by hand makes that its home.
     bool touched{false};
     Vec3 home{};
     Vec3 home_turn{};
-    BodyRef target{};          // Delete: the body taken away
+    BodyRef target{};          // Delete, Push, Grab: the body acted on
+    Vec3 push{};               // Push: velocity added, m/s
+    Vec3 twist{};              // Push: spin added, radians a second about each axis
+    float radius{};            // Blast: its reach; Paint: the brush's; metres
+    float power{};             // Blast: the speed it gives at its centre, m/s
+    // Paint: the surface's way out where the brush touched (unit length),
+    // how many things it lays down (each its own serial), how they gather
+    // to the middle (0 spread evenly, 1 mostly in the middle), and how they
+    // are turned. The stroke is the serial of its first paint act: one
+    // stroke's acts move and go together on the timeline.
+    Vec3 normal{0.0F, 1.0F, 0.0F};
+    std::uint32_t count{};
+    float falloff{};
+    PaintTurn paint_turn{PaintTurn::Realistic};
+    std::uint32_t stroke{};
+    // Grab: where the body's middle is steered to, step by step, from `tick`
+    // to the last sample's step; let go after it. How quickly it closes on
+    // where it is steered (1 / seconds) and the fastest it is moved, m/s.
+    std::vector<GrabSample> path;
+    float gain{};
+    float max_speed{};
     friend bool operator==(const Act &, const Act &) = default;
 };
 struct Performance final {
@@ -268,6 +303,9 @@ struct Performance final {
 };
 inline constexpr std::uint32_t max_dropped_limit = 4096U;
 inline constexpr std::size_t max_acts = 65536U;
+// The most steps grabs may hold their bodies for, all told: a grab is a
+// steer at every step it holds, and those are what a replay is made of.
+inline constexpr std::uint64_t max_grab_steps = 1U << 20U;
 struct Scene;
 // Empty when the performance is well formed: acts in tick order, serials
 // unique and below next_serial, drops of Objects in the scene, deletions of

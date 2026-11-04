@@ -1373,6 +1373,48 @@ void blast_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physic
     }
 }
 
+// The Blast actions of the step on a rigid physics emitter, in the
+// provider's order, after its Shockwave blasts: as blast_bodies does for an
+// effect's blast, the bodies thrown at least as hard as their kind's
+// blast_threshold come apart first, then every body and every loose prop is
+// thrown. An action's blast has no per-body factor: each body takes the
+// blast's speed where it stands.
+void blast_actions(Step& step, const Emitter& emitter, const RigidPhysics& physics, RigidWorld& world,
+                   std::span<const Action> actions) {
+    EmitterState& s = step.s;
+    for (const Action& action : actions) {
+        if (action.kind != ActionKind::Blast || !(action.radius > 0.0F) || !(action.power > 0.0F)) {
+            continue;
+        }
+        const Blast blast{.name = {}, .center = action.position, .power = action.power, .radius = action.radius};
+        const std::vector<const Break*> breaks = breaks_by_kind(emitter, physics);
+        if (s.alive() != 0U && std::any_of(breaks.begin(), breaks.end(), [](const Break* b) {
+                return b != nullptr && b->blast_threshold > 0.0F;
+            })) {
+            shatter(step, emitter, world, breaks, [&](std::size_t i, const Break& by) {
+                return by.blast_threshold > 0.0F && blast_push(blast, s.position[i]).speed >= by.blast_threshold;
+            });
+        }
+        for (std::size_t i = 0U; i < s.alive(); ++i) {
+            const BlastPush push = blast_push(blast, s.position[i]);
+            if (push.direction == Vec3{}) {
+                continue;
+            }
+            world.push(RigidSide::Body, s.body[i], push.direction * push.speed);
+        }
+        for (std::size_t p = 0U; p < physics.props.size() && p < s.props.size(); ++p) {
+            if (physics.props[p].motion != PropMotion::Loose) {
+                continue;
+            }
+            const BlastPush push = blast_push(blast, s.props[p].position);
+            if (push.direction == Vec3{}) {
+                continue;
+            }
+            world.push(RigidSide::Prop, static_cast<std::uint32_t>(p), push.direction * push.speed);
+        }
+    }
+}
+
 std::string quoted(std::string_view text) {
     return "'" + std::string{text} + "'";
 }
@@ -2287,6 +2329,7 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
         // them: the actions first, then the blasts.
         push_bodies(acts, s, *world);
         blast_bodies(step, emitter, physics, *world);
+        blast_actions(step, emitter, physics, *world, acts);
         step.last = s.alive();
         move_rigid(step, emitter, physics, *world);
         // What the effect reads of the step's contacts, for its own breaks

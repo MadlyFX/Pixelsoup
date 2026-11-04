@@ -183,6 +183,9 @@ given at start replaces the scene; `--fresh` forgets the lot.
 | `src/library.*` | Generated textures and meshes |
 | `src/bake.*` | Baking and what a cache holds of the scene |
 | `src/stage_pick.*` | The solid things in the preview at a step, and which one a click meets |
+| `src/performance.*` | The performance as `ajfx::Action`s: drops, deletions, pushes, grabs, paint, blasts; editing and re-recording it |
+| `src/hands.*` | The hands: the brush (paint, erase, push, pull), grab and throw, poke, blast; playing a scene headless |
+| `src/cli.cpp` | `ajfx-studio-cli`: hands and replays from the command line |
 | `src/guides.*` | Guides and handles: where things act, and what a dragged handle sets |
 | `src/package_builder.*` | The background worker: kernels, packages, the artist's files, CPU analysis |
 | `src/user_assets.*` | The artist's files made package-ready: textures, meshes, baked collision fields, outlines |
@@ -201,6 +204,41 @@ given at start replaces the scene; `--fresh` forgets the lot.
 alone. The application adds the media server's renderer and UI toolkit
 (`MediaServer::Render`, `Gui` and `Editor`), so it builds from the repository
 root, beside the media server.
+
+## The command line
+
+`ajfx-studio-cli` acts on a scene's performance and replays it on the CPU
+with no window, through the same calls the viewport uses. It builds with
+ajfx's own presets (`../out/ajfx/<preset>/studio/ajfx-studio-cli.exe`).
+Scenes may use the library's shapes; a scene naming a model file is refused,
+since only the window reads those.
+
+```powershell
+ajfx-studio-cli new wall wall.ajfxstudio
+```
+
+```powershell
+ajfx-studio-cli wall.ajfxstudio info
+```
+
+```powershell
+ajfx-studio-cli wall.ajfxstudio do grab object:65 30 100 0,1.3,1.5 0,1.3,1.5 0,1.3,1.5 0,1.3,1.5 0,1.3,1.5 0,1.3,1.5 0,0.9,-0.4
+```
+
+```powershell
+ajfx-studio-cli wall.ajfxstudio verify 200
+```
+
+`new` writes a scene to act on (`logs`: a log kind painted in that trails
+smoke; `wall`: a wall that breaks and a ball to throw at it; `empty`).
+`info` lists what can be acted on, `acts` the performance, `bodies <step>`
+where the solid bodies stand, `play <step>` what stands and a digest of the
+whole state, and `verify <step>` plays twice and once more after saving and
+reopening, and fails unless all three agree bit for bit. `run <script>` does
+a script's lines in order and `do` one line, writing the scene back (or to
+`--out`). `--help` lists the lines: `drop`, `paint`, `stroke`, `erase`,
+`push`, `pull`, `poke`, `blast`, `grab`, `delete`, `remove`, `retime`,
+`rerecord` and `clear`.
 
 ## Building and testing
 

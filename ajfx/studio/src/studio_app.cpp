@@ -867,7 +867,11 @@ private:
         // The act picked on the timeline goes with Delete.
         if (over_stage && selected_act_ != 0U &&
             (ctx_.key_pressed(gui::Key::Delete) || ctx_.key_pressed(gui::Key::Backspace))) {
-            if (remove_act(document_.scene->performance, selected_act_)) {
+            Performance& performance = document_.scene->performance;
+            const Act* picked = find_act(performance, selected_act_);
+            // A stroke of paint goes whole, as its timeline bar shows it.
+            if (picked != nullptr && picked->kind == ActKind::Paint ? remove_stroke(performance, picked->stroke)
+                                                                    : remove_act(performance, selected_act_)) {
                 toast("Taken away: the scene replays without it", true);
             }
             selected_act_ = 0U;
@@ -1842,7 +1846,7 @@ private:
                         }
                     } else {
                         const float x = at_x(marker.seconds);
-                        const bool act = marker.kind == MarkerKind::Drop || marker.kind == MarkerKind::Delete;
+                        const bool act = act_marker(marker.kind);
                         ImGui::SetCursorScreenPos(ImVec2{x - 8.0F * s, min.y + 2.0F * s});
                         ImGui::InvisibleButton("##point", ImVec2{16.0F * s, row_h - 4.0F * s});
                         const bool drag = ImGui::IsItemActive();

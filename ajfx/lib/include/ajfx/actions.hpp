@@ -46,6 +46,13 @@ enum class ActionKind : std::uint8_t {
     // by what it meets; steering every step is a hand holding it, and not
     // steering is letting go, with whatever speed the last step gave it.
     Steer,
+    // Throws every body within `radius` of `position` out from it, as an
+    // effect's Blast does (blast_push): `power` m/s at the centre, falling
+    // to nothing at the radius. Bodies of a kind that breaks when blasted
+    // (Break::blast_threshold) and thrown at least that hard come apart
+    // first, so their pieces are thrown too; loose props are thrown as well.
+    // Bodies only, like Push.
+    Blast,
 };
 
 struct Action final {
@@ -73,6 +80,10 @@ struct Action final {
     Vec3 twist{};
     float gain{8.0F};
     float max_speed{12.0F};
+    // Blast: how far it reaches, metres, and the speed it gives at its
+    // centre, m/s.
+    float radius{0.0F};
+    float power{0.0F};
 
     friend bool operator==(const Action&, const Action&) = default;
 };

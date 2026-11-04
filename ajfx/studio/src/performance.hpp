@@ -12,12 +12,19 @@
 #include <optional>
 #include <string>
 
-// A scene's performance (scene.hpp) as the simulation takes it: drops and
-// deletions turned into ajfx::Actions on the solid world, the one emitter
-// they act on. Acting never changes the package. A drop is a Spawn of the
-// dropped Object's body kind with the drop's serial as its spawn count, so
-// taking an earlier drop away leaves every later dropped body's variation as
-// it was; a deletion is a Remove of the body's spawn index.
+// A scene's performance (scene.hpp) as the simulation takes it: acts turned
+// into ajfx::Actions on the solid world, the one emitter they act on. Acting
+// never changes the package.
+// - A drop is a Spawn of the dropped Object's body kind with the drop's
+//   serial as its spawn count, so taking an earlier drop away leaves every
+//   later dropped body's variation as it was.
+// - A paint act is one Spawn for each thing it lays down, each with a serial
+//   of its own, spread over the brush and turned as painted_things says.
+// - A deletion is a Remove of the body's spawn index, a push a Push of it.
+// - A grab is a Steer of the body at every step from its first sample to its
+//   last, towards the point along the line between the samples either side;
+//   after the last it is let go, with the speed the hand gave it.
+// - A blast is a Blast at its centre.
 namespace ajfx::studio {
 
 // Where a compiled scene takes acts: its solid world, the source drops are
@@ -59,18 +66,93 @@ struct ActTargets final {
 std::uint32_t add_drop(Performance& performance, std::uint64_t tick, Uid object, Vec3 position, Vec3 turn,
                        Vec3 velocity);
 std::uint32_t add_delete(Performance& performance, std::uint64_t tick, BodyRef target);
-// Takes an act away. A drop takes its deletions with it, since they named a
-// body that is no longer dropped. Returns whether there was one.
+// Adds `push` m/s to the body's velocity and `twist` radians a second to its
+// spin, at `tick`.
+std::uint32_t add_push(Performance& performance, std::uint64_t tick, BodyRef target, Vec3 push, Vec3 twist);
+// Sets off a blast at `center` at `tick`, `power` m/s at its centre falling
+// to nothing at `radius` metres.
+std::uint32_t add_blast(Performance& performance, std::uint64_t tick, Vec3 center, float radius, float power);
+
+// What a hand holding a body does unless told otherwise: closes on where it
+// is steered in a tenth of a second, at up to 20 m/s, fast enough to throw.
+inline constexpr float grab_gain = 10.0F;
+inline constexpr float grab_max_speed = 20.0F;
+// Takes hold of the body `target` at `tick`, steering its middle to `point`
+// and holding it turned as `turn` (degrees, as an Object's rotation).
+std::uint32_t add_grab(Performance& performance, std::uint64_t tick, BodyRef target, Vec3 point, Vec3 turn,
+                       float gain = grab_gain, float max_speed = grab_max_speed);
+// Steers the body the grab `serial` holds to `point` from `tick` on. A
+// sample at the grab's last step replaces where that one steers to; an
+// earlier one is refused, as is one for an act that is no grab.
+bool extend_grab(Performance& performance, std::uint32_t serial, std::uint64_t tick, Vec3 point);
+
+// One dab of a paint stroke: `count` copies of `object` laid down at once
+// over a disc of `radius` metres about `position`, across the surface whose
+// way out is `normal`. `stroke` names the stroke it is part of: 0 for its
+// first dab, which then names the stroke by its own serial.
+struct PaintDab final {
+    std::uint64_t tick{0U};
+    Uid object{};
+    Vec3 position{};
+    Vec3 normal{0.0F, 1.0F, 0.0F};
+    Vec3 turn{};
+    Vec3 velocity{};
+    float radius{0.5F};
+    std::uint32_t count{1U};
+    float falloff{0.0F};
+    PaintTurn paint_turn{PaintTurn::Realistic};
+    std::uint32_t stroke{0U};
+};
+// Records a dab and returns its serial, the first of the `count` it holds.
+std::uint32_t add_paint(Performance& performance, const PaintDab& dab);
+
+// Where each thing a paint act lays down starts, and how it is turned: its
+// place is drawn over the brush's disc (gathered to the middle by the
+// falloff) and its turn by the paint act's PaintTurn, each from the thing's
+// own serial alone. In serial order.
+struct PaintedThing final {
+    std::uint32_t serial{};
+    Vec3 position{};
+    Quat orientation{};
+};
+[[nodiscard]] std::vector<PaintedThing> painted_things(const Act& paint);
+
+// The last step an act acts in: a grab's last sample, any other act's own.
+[[nodiscard]] std::uint64_t act_end(const Act& act);
+// Whether `act` made the dropped or painted body of serial `drop`.
+[[nodiscard]] bool makes_body(const Act& act, std::uint32_t drop);
+// The act that made the dropped or painted body of serial `drop`; null when
+// there is none.
+[[nodiscard]] const Act* maker_of(const Performance& performance, std::uint32_t drop);
+// The Object a body is a copy of, or is: what its act's timeline track is.
+// 0 for a body made by no act there is.
+[[nodiscard]] Uid object_of(const Performance& performance, const BodyRef& body);
+
+// Takes an act away. One that made bodies (a drop, a dab of paint) takes
+// with it every act on them, since those named a body no longer made.
+// Returns whether there was one.
 bool remove_act(Performance& performance, std::uint32_t serial);
-// Moves an act to another tick, keeping tick order.
+// Moves an act to another tick, keeping tick order. A grab moves whole.
 bool retime_act(Performance& performance, std::uint32_t serial, std::uint64_t tick);
+// The acts of a paint stroke, by its first dab's serial, in tick order.
+[[nodiscard]] std::vector<std::uint32_t> stroke_acts(const Performance& performance, std::uint32_t stroke);
+// Takes a whole stroke away, or moves it whole so that it starts at `tick`.
+bool remove_stroke(Performance& performance, std::uint32_t stroke);
+bool retime_stroke(Performance& performance, std::uint32_t stroke, std::uint64_t tick);
+// Re-recording from a step: takes away every act from `tick` on, and cuts
+// short a grab still holding then so it lets go before `tick`. What came
+// before is left as it was, serials included. Returns how many acts were
+// taken away or cut short.
+std::size_t rerecord_from(Performance& performance, std::uint64_t tick);
 // Takes away every act on an Object (one removed from the scene).
 void forget_object(Performance& performance, Uid object);
 [[nodiscard]] const Act* find_act(const Performance& performance, std::uint32_t serial);
 
 // The first tick at which two performances act differently: where a
 // simulation that followed `before` has to go back to for `after`. Nothing
-// when they act alike.
+// when they act alike. A grab that only goes on further (a hand still
+// holding) differs from the step after its old last sample, so carrying a
+// body replays nothing.
 [[nodiscard]] std::optional<std::uint64_t> first_difference(const Performance& before, const Performance& after);
 
 // The scene without its performance: what a package is built of, so an act
@@ -97,8 +179,12 @@ inline constexpr float drop_height = 0.75F;
     return playing ? shown + lead + 1U : shown;
 }
 
-// Dropped things the performance holds at once: its drops less the
-// deletions of them.
+// What the performance holds, counted by kind in the artist's words: "2
+// drops, 1 paint stroke, 3 pushes". Empty for an empty one.
+[[nodiscard]] std::string performance_summary(const Performance& performance);
+
+// Dropped and painted things the performance holds at once: those its drops
+// and paint make less the deletions of them.
 [[nodiscard]] std::size_t dropped_count(const Performance& performance);
 
 struct StageAct final {

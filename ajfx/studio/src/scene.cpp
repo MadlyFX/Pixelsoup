@@ -1141,6 +1141,8 @@ Document lower_scene(const Document &document, Uid live) {
                                              {{"into", choice("cut")},
                                               {"cells", number(static_cast<float>(object->fragments))},
                                               {"force", number(object->fracture_speed)},
+                                              // Thrown by a blast as hard as a hit that breaks it.
+                                              {"blast", number(object->fracture_speed)},
                                               {"cut_seed", number(static_cast<float>(item->seed))}}));
             }
             layer.blocks.push_back(

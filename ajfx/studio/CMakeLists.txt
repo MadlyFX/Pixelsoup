@@ -38,6 +38,7 @@ add_library(ajfx_studio_core STATIC
     src/stage_pick.cpp
     src/performance.cpp
     src/stage.cpp
+    src/hands.cpp
 )
 target_include_directories(ajfx_studio_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -45,6 +46,15 @@ target_include_directories(ajfx_studio_core PUBLIC
 target_link_libraries(ajfx_studio_core PUBLIC ajfx::ajfx)
 ajfx_set_options(ajfx_studio_core)
 set_target_properties(ajfx_studio_core PROPERTIES FOLDER "ajfx")
+
+# A scene's performance acted on and replayed from the command line, with no
+# window: the hands Studio has, before (and beside) their buttons.
+if(TARGET ajfx::rigid)
+    add_executable(ajfx-studio-cli src/cli.cpp)
+    target_link_libraries(ajfx-studio-cli PRIVATE ajfx_studio_core ajfx::rigid)
+    ajfx_set_options(ajfx-studio-cli)
+    set_target_properties(ajfx-studio-cli PROPERTIES FOLDER "ajfx")
+endif()
 
 if(AJFX_BUILD_STUDIO_APP)
     if(PROJECT_IS_TOP_LEVEL OR NOT TARGET ajfx::d3d12)
@@ -152,6 +162,7 @@ if(BUILD_TESTING)
         tests/stage_pick_tests.cpp
         tests/performance_tests.cpp
         tests/stage_tests.cpp
+        tests/hands_tests.cpp
         tests/fixtures/recipes.cpp
         tests/fixtures/blast.cpp
     )

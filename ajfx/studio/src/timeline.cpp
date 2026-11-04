@@ -26,6 +26,14 @@ std::string_view TrackMarker::label() const {
         return "Dropped";
     case MarkerKind::Delete:
         return "Deleted";
+    case MarkerKind::Push:
+        return "Pushed";
+    case MarkerKind::Grab:
+        return "Grabbed";
+    case MarkerKind::Paint:
+        return "Painted";
+    case MarkerKind::Blasted:
+        return "Blasted";
     }
     return "";
 }
@@ -43,16 +51,41 @@ std::vector<Track> collect_tracks(const Scene &scene, float loop_seconds) {
                     {MarkerKind::Move, item.uid, 0U, object->move_at, std::max(object->move_over, 0.01F), true});
             }
             // What was done to it while the scene played: its copies
-            // dropped, and its bodies (or those copies) deleted.
-            for (const Act &act : scene.performance.acts) {
+            // dropped and painted, and its bodies (or those copies) deleted,
+            // pushed and grabbed.
+            const Performance &performance = scene.performance;
+            for (const Act &act : performance.acts) {
                 const float at = static_cast<float>(act.tick) / static_cast<float>(scene_step_rate);
-                if (act.kind == ActKind::Drop && act.object == item.uid) {
-                    track.markers.push_back({MarkerKind::Drop, item.uid, act.serial, at, 0.0F, true});
-                } else if (act.kind == ActKind::Delete) {
-                    const Act *dropped = act.target.drop != 0U ? find_act(scene.performance, act.target.drop) : nullptr;
-                    if (act.target.object == item.uid || (dropped != nullptr && dropped->object == item.uid)) {
-                        track.markers.push_back({MarkerKind::Delete, item.uid, act.serial, at, 0.0F, true});
+                switch (act.kind) {
+                case ActKind::Drop:
+                    if (act.object == item.uid) {
+                        track.markers.push_back({MarkerKind::Drop, item.uid, act.serial, at, 0.0F, true});
                     }
+                    break;
+                case ActKind::Paint:
+                    // A stroke is one bar, from its first dab to its last.
+                    if (act.object == item.uid && act.stroke == act.serial) {
+                        const std::vector<std::uint32_t> dabs = stroke_acts(performance, act.stroke);
+                        const Act *last = find_act(performance, dabs.back());
+                        const float bar =
+                            static_cast<float>(last->tick - act.tick) / static_cast<float>(scene_step_rate);
+                        track.markers.push_back({MarkerKind::Paint, item.uid, act.serial, at, bar, true});
+                    }
+                    break;
+                case ActKind::Delete:
+                case ActKind::Push:
+                case ActKind::Grab:
+                    if (object_of(performance, act.target) == item.uid) {
+                        const MarkerKind kind = act.kind == ActKind::Delete ? MarkerKind::Delete
+                                                : act.kind == ActKind::Push ? MarkerKind::Push
+                                                                            : MarkerKind::Grab;
+                        const float lasts =
+                            static_cast<float>(act_end(act) - act.tick) / static_cast<float>(scene_step_rate);
+                        track.markers.push_back({kind, item.uid, act.serial, at, lasts, true});
+                    }
+                    break;
+                case ActKind::Blast:
+                    break;
                 }
             }
         } else if (const auto *system = std::get_if<ParticleSystem>(&item.data)) {
@@ -82,22 +115,38 @@ std::vector<Track> collect_tracks(const Scene &scene, float loop_seconds) {
             out.push_back(std::move(track));
         }
     }
+    Track blasts{.item = 0U, .name = std::string{blasts_track}};
+    for (const Act &act : scene.performance.acts) {
+        if (act.kind == ActKind::Blast) {
+            blasts.markers.push_back({MarkerKind::Blasted, 0U, act.serial,
+                                      static_cast<float>(act.tick) / static_cast<float>(scene_step_rate), 0.0F,
+                                      true});
+        }
+    }
+    if (!blasts.markers.empty()) {
+        out.push_back(std::move(blasts));
+    }
     return out;
 }
 
 bool set_marker_time(Document &document, const TrackMarker &marker, float seconds) {
-    SceneItem *item = document.scene ? document.scene->item(marker.item) : nullptr;
-    if (item == nullptr || !marker.draggable) {
+    if (!document.scene || !marker.draggable) {
         return false;
     }
     seconds = std::clamp(seconds, 0.0F, 3600.0F);
-    if (marker.kind == MarkerKind::Drop || marker.kind == MarkerKind::Delete) {
-        const Act *act = find_act(document.scene->performance, marker.part);
+    if (act_marker(marker.kind)) {
+        Performance &performance = document.scene->performance;
+        const Act *act = find_act(performance, marker.part);
         const auto tick = static_cast<std::uint64_t>(std::llround(seconds * static_cast<float>(scene_step_rate)));
         if (act == nullptr || act->tick == tick) {
             return false;
         }
-        return retime_act(document.scene->performance, marker.part, tick);
+        return marker.kind == MarkerKind::Paint ? retime_stroke(performance, marker.part, tick)
+                                                : retime_act(performance, marker.part, tick);
+    }
+    SceneItem *item = document.scene->item(marker.item);
+    if (item == nullptr) {
+        return false;
     }
     if (auto *object = std::get_if<Object>(&item->data)) {
         float &target = marker.kind == MarkerKind::Release ? object->release : object->move_at;
@@ -143,6 +192,15 @@ bool set_marker_duration(Document &document, const TrackMarker &marker, float se
     const bool changed = object->move_over != seconds;
     object->move_over = seconds;
     return changed;
+}
+
+bool remove_marker_act(Document &document, const TrackMarker &marker) {
+    if (!document.scene || !act_marker(marker.kind)) {
+        return false;
+    }
+    Performance &performance = document.scene->performance;
+    return marker.kind == MarkerKind::Paint ? remove_stroke(performance, marker.part)
+                                            : remove_act(performance, marker.part);
 }
 
 } // namespace ajfx::studio

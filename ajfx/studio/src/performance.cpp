@@ -2,8 +2,11 @@
 
 #include "stage.hpp"
 
+#include <ajfx/random.hpp>
+
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <set>
 #include <utility>
 #include <variant>
@@ -33,10 +36,99 @@ std::vector<Act>::iterator place_for(std::vector<Act>& acts, std::uint64_t tick)
                             [](std::uint64_t t, const Act& act) { return t < act.tick; });
 }
 
+// How many serials an act holds: one for each thing a dab of paint lays
+// down, one for any other act.
+std::uint32_t serials_of(const Act& act) {
+    return act.kind == ActKind::Paint ? std::max(act.count, 1U) : 1U;
+}
+
 std::uint32_t append(Performance& performance, Act act) {
-    act.serial = performance.next_serial++;
+    act.serial = performance.next_serial;
+    performance.next_serial += serials_of(act);
     performance.acts.insert(place_for(performance.acts, act.tick), act);
     return act.serial;
+}
+
+bool targets_body(const Act& act) {
+    return act.kind == ActKind::Delete || act.kind == ActKind::Push || act.kind == ActKind::Grab;
+}
+
+bool makes_bodies(const Act& act) {
+    return act.kind == ActKind::Drop || act.kind == ActKind::Paint;
+}
+
+// Whether `act` names a body `maker` made.
+bool on_body_of(const Act& act, const Act& maker) {
+    return targets_body(act) && act.target.drop != 0U && makes_body(maker, act.target.drop);
+}
+
+Vec3 normalized(Vec3 v, Vec3 fallback) {
+    const float length = std::sqrt(dot(v, v));
+    return length > 1.0e-6F && std::isfinite(length) ? v * (1.0F / length) : fallback;
+}
+
+// The turn taking straight up to `n` (unit length) the shortest way.
+Quat up_to(Vec3 n) {
+    const Vec3 up{0.0F, 1.0F, 0.0F};
+    const float c = dot(up, n);
+    if (c > 1.0F - 1.0e-6F) {
+        return {};
+    }
+    if (c < -1.0F + 1.0e-6F) {
+        return Quat{1.0F, 0.0F, 0.0F, 0.0F};
+    }
+    const Vec3 axis = normalized(cross(up, n), Vec3{1.0F, 0.0F, 0.0F});
+    const float half = 0.5F * std::acos(std::clamp(c, -1.0F, 1.0F));
+    const float s = std::sin(half);
+    return Quat{axis.x * s, axis.y * s, axis.z * s, std::cos(half)};
+}
+
+// What a paint act's draws are keyed by, beside the thing's serial: fixed,
+// so a dab's things land where they did whenever it is replayed.
+constexpr std::uint32_t paint_seed = 0x7061696eU;
+constexpr float two_pi = 6.28318530718F;
+
+// Where a grab steers at `tick`: along the line between the samples either
+// side of it, or the last sample's point from there on.
+Vec3 grab_point_at(const std::vector<GrabSample>& path, std::uint64_t tick) {
+    const auto after = std::upper_bound(path.begin(), path.end(), tick,
+                                        [](std::uint64_t t, const GrabSample& s) { return t < s.tick; });
+    if (after == path.begin()) {
+        return path.front().point;
+    }
+    const GrabSample& from = *(after - 1);
+    if (after == path.end() || from.tick == tick) {
+        return from.point;
+    }
+    const float t = static_cast<float>(tick - from.tick) / static_cast<float>(after->tick - from.tick);
+    return from.point + (after->point - from.point) * t;
+}
+
+// The first step from which two acts of one serial act differently; nothing
+// when they act alike. A grab that only goes on further acts alike up to
+// its old last sample.
+std::optional<std::uint64_t> act_difference(const Act& before, const Act& after) {
+    if (before == after) {
+        return std::nullopt;
+    }
+    if (before.kind == ActKind::Grab && after.kind == ActKind::Grab && before.tick == after.tick &&
+        !before.path.empty() && !after.path.empty()) {
+        Act a = before;
+        Act b = after;
+        a.path.clear();
+        b.path.clear();
+        if (a == b) {
+            const std::size_t common = std::min(before.path.size(), after.path.size());
+            std::size_t i = 0U;
+            while (i < common && before.path[i] == after.path[i]) {
+                ++i;
+            }
+            // Steering after the last common sample follows the next one,
+            // whichever path that is.
+            return i == 0U ? before.tick : before.path[i - 1U].tick + 1U;
+        }
+    }
+    return std::min(before.tick, after.tick);
 }
 
 } // namespace
@@ -118,29 +210,68 @@ std::shared_ptr<const ActionList> performance_actions(const Performance& perform
     for (const Act& act : performance.acts) {
         Action action;
         action.tick = act.tick;
-        if (act.kind == ActKind::Drop) {
+        if (makes_bodies(act)) {
             const auto kind = targets.kinds.find(act.object);
             if (!targets.drops || kind == targets.kinds.end()) {
                 ++left_out;
                 continue;
             }
             action.kind = ActionKind::Spawn;
-            action.serial = act.serial;
             action.body = kind->second;
-            action.position = act.position;
-            action.orientation = prop_orientation(act.turn);
             action.velocity = act.velocity;
             action.release = act.tick;
-        } else {
-            const std::optional<std::uint32_t> target = body_index(targets, act.target);
-            if (!target) {
+            if (act.kind == ActKind::Drop) {
+                action.serial = act.serial;
+                action.position = act.position;
+                action.orientation = prop_orientation(act.turn);
+                list->add(targets.emitter, action);
+            } else {
+                for (const PaintedThing& thing : painted_things(act)) {
+                    action.serial = thing.serial;
+                    action.position = thing.position;
+                    action.orientation = thing.orientation;
+                    list->add(targets.emitter, action);
+                }
+            }
+            continue;
+        }
+        if (act.kind == ActKind::Blast) {
+            if (targets.emitter.empty()) {
                 ++left_out;
                 continue;
             }
-            action.kind = ActionKind::Remove;
-            action.target = *target;
+            action.kind = ActionKind::Blast;
+            action.position = act.position;
+            action.radius = act.radius;
+            action.power = act.power;
+            list->add(targets.emitter, action);
+            continue;
         }
-        list->add(targets.emitter, action);
+        const std::optional<std::uint32_t> target = body_index(targets, act.target);
+        if (!target) {
+            ++left_out;
+            continue;
+        }
+        action.target = *target;
+        if (act.kind == ActKind::Delete) {
+            action.kind = ActionKind::Remove;
+            list->add(targets.emitter, action);
+        } else if (act.kind == ActKind::Push) {
+            action.kind = ActionKind::Push;
+            action.push = act.push;
+            action.twist = act.twist;
+            list->add(targets.emitter, action);
+        } else if (act.kind == ActKind::Grab && !act.path.empty()) {
+            action.kind = ActionKind::Steer;
+            action.orientation = prop_orientation(act.turn);
+            action.gain = act.gain;
+            action.max_speed = act.max_speed;
+            for (std::uint64_t tick = act.path.front().tick; tick <= act.path.back().tick; ++tick) {
+                action.tick = tick;
+                action.position = grab_point_at(act.path, tick);
+                list->add(targets.emitter, action);
+            }
+        }
     }
     if (skipped != nullptr) {
         *skipped = left_out;
@@ -164,15 +295,132 @@ std::uint32_t add_delete(Performance& performance, std::uint64_t tick, BodyRef t
     return append(performance, Act{.serial = 0U, .kind = ActKind::Delete, .tick = tick, .target = target});
 }
 
+std::uint32_t add_push(Performance& performance, std::uint64_t tick, BodyRef target, Vec3 push, Vec3 twist) {
+    Act act{.serial = 0U, .kind = ActKind::Push, .tick = tick, .target = target};
+    act.push = push;
+    act.twist = twist;
+    return append(performance, act);
+}
+
+std::uint32_t add_blast(Performance& performance, std::uint64_t tick, Vec3 center, float radius, float power) {
+    Act act{.serial = 0U, .kind = ActKind::Blast, .tick = tick, .position = center};
+    act.radius = radius;
+    act.power = power;
+    return append(performance, act);
+}
+
+std::uint32_t add_grab(Performance& performance, std::uint64_t tick, BodyRef target, Vec3 point, Vec3 turn,
+                       float gain, float max_speed) {
+    Act act{.serial = 0U, .kind = ActKind::Grab, .tick = tick, .turn = turn, .target = target};
+    act.path = {GrabSample{tick, point}};
+    act.gain = gain;
+    act.max_speed = max_speed;
+    return append(performance, act);
+}
+
+bool extend_grab(Performance& performance, std::uint32_t serial, std::uint64_t tick, Vec3 point) {
+    const auto at = std::find_if(performance.acts.begin(), performance.acts.end(),
+                                 [serial](const Act& a) { return a.serial == serial; });
+    if (at == performance.acts.end() || at->kind != ActKind::Grab || at->path.empty() ||
+        tick < at->path.back().tick || !finite(point)) {
+        return false;
+    }
+    if (tick == at->path.back().tick) {
+        at->path.back().point = point;
+    } else {
+        at->path.push_back(GrabSample{tick, point});
+    }
+    return true;
+}
+
+std::uint32_t add_paint(Performance& performance, const PaintDab& dab) {
+    Act act{.serial = 0U,
+            .kind = ActKind::Paint,
+            .tick = dab.tick,
+            .object = dab.object,
+            .position = dab.position,
+            .turn = dab.turn,
+            .velocity = dab.velocity};
+    act.normal = normalized(dab.normal, Vec3{0.0F, 1.0F, 0.0F});
+    act.radius = dab.radius;
+    act.count = std::max(dab.count, 1U);
+    act.falloff = dab.falloff;
+    act.paint_turn = dab.paint_turn;
+    act.stroke = dab.stroke != 0U ? dab.stroke : performance.next_serial;
+    return append(performance, act);
+}
+
+std::vector<PaintedThing> painted_things(const Act& paint) {
+    std::vector<PaintedThing> things;
+    if (paint.kind != ActKind::Paint) {
+        return things;
+    }
+    const Vec3 n = normalized(paint.normal, Vec3{0.0F, 1.0F, 0.0F});
+    const Vec3 across = normalized(cross(std::fabs(n.y) < 0.9F ? Vec3{0.0F, 1.0F, 0.0F} : Vec3{1.0F, 0.0F, 0.0F}, n),
+                                   Vec3{1.0F, 0.0F, 0.0F});
+    const Vec3 along = cross(n, across);
+    const Quat own = prop_orientation(paint.turn);
+    // 0.5 spreads evenly over the disc; higher powers gather to the middle.
+    const float gather = 0.5F + std::clamp(paint.falloff, 0.0F, 1.0F);
+    for (std::uint32_t k = 0U; k < std::max(paint.count, 1U); ++k) {
+        const std::uint32_t serial = paint.serial + k;
+        const float out = paint.radius * std::pow(particle_unit(paint_seed, serial, 0U), gather);
+        const float round = two_pi * particle_unit(paint_seed, serial, 1U);
+        PaintedThing thing{.serial = serial,
+                           .position = paint.position + across * (out * std::cos(round)) +
+                                       along * (out * std::sin(round)),
+                           .orientation = own};
+        if (paint.paint_turn == PaintTurn::Realistic) {
+            const float half = 0.5F * two_pi * particle_unit(paint_seed, serial, 2U);
+            const Quat about_up{0.0F, std::sin(half), 0.0F, std::cos(half)};
+            thing.orientation = times(up_to(n), times(about_up, own));
+        } else if (paint.paint_turn == PaintTurn::Random) {
+            // Shoemake's uniform turn from three draws.
+            const float u1 = particle_unit(paint_seed, serial, 2U);
+            const float u2 = two_pi * particle_unit(paint_seed, serial, 3U);
+            const float u3 = two_pi * particle_unit(paint_seed, serial, 4U);
+            const float a = std::sqrt(1.0F - u1);
+            const float b = std::sqrt(u1);
+            thing.orientation = Quat{a * std::sin(u2), a * std::cos(u2), b * std::sin(u3), b * std::cos(u3)};
+        }
+        things.push_back(thing);
+    }
+    return things;
+}
+
+std::uint64_t act_end(const Act& act) {
+    return act.kind == ActKind::Grab && !act.path.empty() ? act.path.back().tick : act.tick;
+}
+
+bool makes_body(const Act& act, std::uint32_t drop) {
+    if (act.kind == ActKind::Drop) {
+        return act.serial == drop;
+    }
+    return act.kind == ActKind::Paint && drop >= act.serial && drop - act.serial < std::max(act.count, 1U);
+}
+
+const Act* maker_of(const Performance& performance, std::uint32_t drop) {
+    const auto at = std::find_if(performance.acts.begin(), performance.acts.end(),
+                                 [drop](const Act& a) { return makes_body(a, drop); });
+    return at == performance.acts.end() ? nullptr : &*at;
+}
+
+Uid object_of(const Performance& performance, const BodyRef& body) {
+    if (body.drop == 0U) {
+        return body.object;
+    }
+    const Act* maker = maker_of(performance, body.drop);
+    return maker != nullptr ? maker->object : 0U;
+}
+
 bool remove_act(Performance& performance, std::uint32_t serial) {
     const Act* act = find_act(performance, serial);
     if (act == nullptr) {
         return false;
     }
-    const bool drop = act->kind == ActKind::Drop;
-    std::erase_if(performance.acts, [serial, drop](const Act& a) {
-        return a.serial == serial || (drop && a.kind == ActKind::Delete && a.target.drop == serial);
-    });
+    const Act maker = *act;
+    std::erase_if(performance.acts,
+                  [&maker](const Act& a) { return a.serial == maker.serial || on_body_of(a, maker); });
     return true;
 }
 
@@ -186,22 +434,86 @@ bool retime_act(Performance& performance, std::uint32_t serial, std::uint64_t ti
         return true;
     }
     Act moved = *at;
+    // A grab moves whole, every sample by as much as its first.
+    for (GrabSample& sample : moved.path) {
+        sample.tick = sample.tick - moved.tick + tick;
+    }
     moved.tick = tick;
     performance.acts.erase(at);
     performance.acts.insert(place_for(performance.acts, tick), moved);
     return true;
 }
 
-void forget_object(Performance& performance, Uid object) {
-    std::set<std::uint32_t> drops;
+std::vector<std::uint32_t> stroke_acts(const Performance& performance, std::uint32_t stroke) {
+    std::vector<std::uint32_t> serials;
     for (const Act& act : performance.acts) {
-        if (act.kind == ActKind::Drop && act.object == object) {
-            drops.insert(act.serial);
+        if (act.kind == ActKind::Paint && act.stroke == stroke) {
+            serials.push_back(act.serial);
+        }
+    }
+    return serials;
+}
+
+bool remove_stroke(Performance& performance, std::uint32_t stroke) {
+    const std::vector<std::uint32_t> serials = stroke_acts(performance, stroke);
+    for (const std::uint32_t serial : serials) {
+        remove_act(performance, serial);
+    }
+    return !serials.empty();
+}
+
+bool retime_stroke(Performance& performance, std::uint32_t stroke, std::uint64_t tick) {
+    const std::vector<std::uint32_t> serials = stroke_acts(performance, stroke);
+    if (serials.empty()) {
+        return false;
+    }
+    const std::uint64_t first = find_act(performance, serials.front())->tick;
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> moves;
+    for (const std::uint32_t serial : serials) {
+        moves.emplace_back(serial, find_act(performance, serial)->tick - first + tick);
+    }
+    // Each dab goes after whatever already stands at its new step, so moving
+    // them in the order they were laid down keeps that order.
+    for (const auto& [serial, to] : moves) {
+        retime_act(performance, serial, to);
+    }
+    return true;
+}
+
+std::size_t rerecord_from(Performance& performance, std::uint64_t tick) {
+    std::size_t changed = 0U;
+    std::vector<Act> kept;
+    for (Act& act : performance.acts) {
+        if (act.tick >= tick) {
+            ++changed;
+            continue;
+        }
+        if (act.kind == ActKind::Grab && act_end(act) >= tick) {
+            std::erase_if(act.path, [tick](const GrabSample& s) { return s.tick >= tick; });
+            ++changed;
+        }
+        kept.push_back(std::move(act));
+    }
+    performance.acts = std::move(kept);
+    return changed;
+}
+
+void forget_object(Performance& performance, Uid object) {
+    std::vector<Act> makers;
+    for (const Act& act : performance.acts) {
+        if (makes_bodies(act) && act.object == object) {
+            makers.push_back(act);
         }
     }
     std::erase_if(performance.acts, [&](const Act& a) {
-        return (a.kind == ActKind::Drop && a.object == object) ||
-               (a.kind == ActKind::Delete && (a.target.object == object || drops.contains(a.target.drop)));
+        if (makes_bodies(a) && a.object == object) {
+            return true;
+        }
+        if (!targets_body(a)) {
+            return false;
+        }
+        return a.target.object == object ||
+               std::any_of(makers.begin(), makers.end(), [&a](const Act& m) { return on_body_of(a, m); });
     });
 }
 
@@ -212,8 +524,23 @@ const Act* find_act(const Performance& performance, std::uint32_t serial) {
 }
 
 std::optional<std::uint64_t> first_difference(const Performance& before, const Performance& after) {
-    // Both are in tick order and agree up to the first place they differ,
-    // so everything before the earlier of the two ticks there is the same.
+    // Act for act, when both hold the same acts in the same order (what a
+    // hand still holding a body, or one act changed in place, leaves): the
+    // earliest step any of them acts differently from.
+    if (before.acts.size() == after.acts.size() &&
+        std::equal(before.acts.begin(), before.acts.end(), after.acts.begin(),
+                   [](const Act& a, const Act& b) { return a.serial == b.serial; })) {
+        std::optional<std::uint64_t> first;
+        for (std::size_t i = 0U; i < before.acts.size(); ++i) {
+            if (const std::optional<std::uint64_t> at = act_difference(before.acts[i], after.acts[i])) {
+                first = first ? std::min(*first, *at) : *at;
+            }
+        }
+        return first;
+    }
+    // Otherwise both are in tick order and agree up to the first place they
+    // differ, so everything before the earlier of the two ticks there is the
+    // same.
     const std::size_t common = std::min(before.acts.size(), after.acts.size());
     for (std::size_t i = 0U; i < common; ++i) {
         if (!(before.acts[i] == after.acts[i])) {
@@ -236,17 +563,50 @@ Document without_performance(Document document) {
     return document;
 }
 
-std::size_t dropped_count(const Performance& performance) {
+std::string performance_summary(const Performance& performance) {
     std::size_t drops = 0U;
+    std::size_t deletions = 0U;
+    std::size_t pushes = 0U;
+    std::size_t blasts = 0U;
+    std::size_t grabs = 0U;
+    std::set<std::uint32_t> strokes;
+    for (const Act& act : performance.acts) {
+        switch (act.kind) {
+        case ActKind::Drop: ++drops; break;
+        case ActKind::Delete: ++deletions; break;
+        case ActKind::Push: ++pushes; break;
+        case ActKind::Blast: ++blasts; break;
+        case ActKind::Grab: ++grabs; break;
+        case ActKind::Paint: strokes.insert(act.stroke); break;
+        }
+    }
+    std::string out;
+    const auto count = [&out](std::size_t n, const char* one, const char* many) {
+        if (n == 0U) {
+            return;
+        }
+        out += (out.empty() ? "" : ", ") + std::to_string(n) + " " + (n == 1U ? one : many);
+    };
+    count(drops, "drop", "drops");
+    count(strokes.size(), "paint stroke", "paint strokes");
+    count(grabs, "grab", "grabs");
+    count(pushes, "push", "pushes");
+    count(blasts, "blast", "blasts");
+    count(deletions, "deletion", "deletions");
+    return out;
+}
+
+std::size_t dropped_count(const Performance& performance) {
+    std::size_t made = 0U;
     std::set<std::uint32_t> deleted;
     for (const Act& act : performance.acts) {
-        if (act.kind == ActKind::Drop) {
-            ++drops;
-        } else if (act.target.drop != 0U) {
+        if (makes_bodies(act)) {
+            made += serials_of(act);
+        } else if (act.kind == ActKind::Delete && act.target.drop != 0U) {
             deleted.insert(act.target.drop);
         }
     }
-    return drops - std::min(drops, deleted.size());
+    return made - std::min(made, deleted.size());
 }
 
 StageAct act_on_stage(Document& document, const ActTargets& targets, StageTool tool, Uid selected,
@@ -303,30 +663,79 @@ StageAct act_on_stage(Document& document, const ActTargets& targets, StageTool t
 std::string validate_performance(const Scene& scene) {
     const Performance& performance = scene.performance;
     if (performance.acts.size() > max_acts) {
-        return "more than " + std::to_string(max_acts) + " drops and deletions";
+        return "more than " + std::to_string(max_acts) + " acts";
     }
     if (performance.next_serial == 0U || performance.next_serial > spawn_count_mask) {
         return "invalid serial allocator";
     }
-    std::set<std::uint32_t> serials;
+    // The serials held so far, as [first, end) by their first.
+    std::map<std::uint32_t, std::uint32_t> held;
     std::uint64_t last = 0U;
+    std::uint64_t steps = 0U;
     for (const Act& act : performance.acts) {
-        if (act.serial == 0U || act.serial >= performance.next_serial || !serials.insert(act.serial).second) {
+        const std::uint32_t end = act.serial + serials_of(act);
+        if (act.serial == 0U || end < act.serial || end > performance.next_serial) {
             return "an act with an invalid or repeated serial";
         }
+        const auto next = held.lower_bound(act.serial);
+        if ((next != held.end() && next->first < end) ||
+            (next != held.begin() && std::prev(next)->second > act.serial)) {
+            return "an act with an invalid or repeated serial";
+        }
+        held.emplace(act.serial, end);
         if (act.tick < last) {
             return "acts out of order";
         }
         last = act.tick;
-        if (act.kind == ActKind::Drop) {
+        const bool names_body =
+            (act.target.object == 0U) != (act.target.drop == 0U) && act.target.count <= spawn_count_mask;
+        switch (act.kind) {
+        case ActKind::Drop:
             if (act.object == 0U || !finite(act.position) || !finite(act.turn) || !finite(act.velocity)) {
                 return "an invalid drop";
             }
-        } else if (act.kind == ActKind::Delete) {
-            if ((act.target.object == 0U) == (act.target.drop == 0U) || act.target.count > spawn_count_mask) {
+            break;
+        case ActKind::Delete:
+            if (!names_body) {
                 return "a deletion that names no one body";
             }
-        } else {
+            break;
+        case ActKind::Push:
+            if (!names_body || !finite(act.push) || !finite(act.twist)) {
+                return "an invalid push";
+            }
+            break;
+        case ActKind::Blast:
+            if (!finite(act.position) || !std::isfinite(act.radius) || !(act.radius > 0.0F) ||
+                !std::isfinite(act.power) || !(act.power > 0.0F)) {
+                return "an invalid blast";
+            }
+            break;
+        case ActKind::Grab:
+            if (!names_body || act.path.empty() || act.path.front().tick != act.tick || !finite(act.turn) ||
+                !std::isfinite(act.gain) || !(act.gain > 0.0F) || !std::isfinite(act.max_speed) ||
+                !(act.max_speed > 0.0F)) {
+                return "an invalid grab";
+            }
+            for (std::size_t i = 0U; i < act.path.size(); ++i) {
+                if (!finite(act.path[i].point) || (i > 0U && act.path[i].tick <= act.path[i - 1U].tick)) {
+                    return "a grab whose path goes back in time";
+                }
+            }
+            steps += act.path.back().tick - act.tick + 1U;
+            if (steps > max_grab_steps) {
+                return "grabs holding for more than " + std::to_string(max_grab_steps) + " steps in all";
+            }
+            break;
+        case ActKind::Paint:
+            if (act.object == 0U || !finite(act.position) || !finite(act.turn) || !finite(act.velocity) ||
+                !finite(act.normal) || !(dot(act.normal, act.normal) > 0.5F) || !std::isfinite(act.radius) ||
+                act.radius < 0.0F || act.count == 0U || act.count > SolidWorld::drops_per_step ||
+                !(act.falloff >= 0.0F && act.falloff <= 1.0F) || act.stroke == 0U || act.stroke > act.serial) {
+                return "an invalid dab of paint";
+            }
+            break;
+        default:
             return "an act of an unknown kind";
         }
     }

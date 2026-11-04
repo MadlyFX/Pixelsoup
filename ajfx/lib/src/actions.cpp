@@ -47,6 +47,8 @@ std::uint64_t action_digest(std::span<const Action> actions, std::uint64_t hash)
         mix(hash, a.twist);
         mix(hash, a.gain);
         mix(hash, a.max_speed);
+        mix(hash, a.radius);
+        mix(hash, a.power);
     }
     return hash;
 }

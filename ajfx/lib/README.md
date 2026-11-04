@@ -340,7 +340,12 @@ take it away, paint particles in. Actions are inputs like parameter values:
 - `Push` adds a velocity and a spin to a body; `Steer` drives a body towards
   a pose, as a hand holding it that lets go when the steering stops; `Remove`
   ends a body's life. All three name their body by its spawn index, so a
-  pile's bodies can be handled too. They act on bodies only.
+  pile's bodies can be handled too. `Blast` names none: it throws every body
+  within its `radius` of its `position` out from there, `power` m/s at the
+  middle falling to nothing at the edge (`blast_push`, as an effect's Blast
+  does), after breaking the bodies thrown at least as hard as their kind's
+  `Break::blast_threshold`, and throws loose props too. They act on bodies
+  only.
 - Spawns take the action's own `serial` as their spawn count rather than a
   running one, so taking an action away or moving it leaves every other
   spawn's random draws as they were. A spawn past the bounds is refused and

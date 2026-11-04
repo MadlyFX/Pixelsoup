@@ -245,11 +245,51 @@ std::string save_scene(const Document &document) {
                 a.add("home", numbers({act.home.x, act.home.y, act.home.z}));
                 a.add("home_turn", numbers({act.home_turn.x, act.home_turn.y, act.home_turn.z}));
             }
+        } else if (act.kind == ActKind::Paint) {
+            a.add("kind", Json::of("paint"));
+            a.add("object", numeric(act.object));
+            a.add("position", numbers({act.position.x, act.position.y, act.position.z}));
+            a.add("normal", numbers({act.normal.x, act.normal.y, act.normal.z}));
+            a.add("turn", numbers({act.turn.x, act.turn.y, act.turn.z}));
+            a.add("velocity", numbers({act.velocity.x, act.velocity.y, act.velocity.z}));
+            a.add("radius", numeric(act.radius));
+            a.add("count", numeric(act.count));
+            a.add("falloff", numeric(act.falloff));
+            a.add("orient", Json::of(act.paint_turn == PaintTurn::Random   ? "random"
+                                     : act.paint_turn == PaintTurn::Locked ? "locked"
+                                                                           : "realistic"));
+            a.add("stroke", numeric(act.stroke));
+        } else if (act.kind == ActKind::Blast) {
+            a.add("kind", Json::of("blast"));
+            a.add("position", numbers({act.position.x, act.position.y, act.position.z}));
+            a.add("radius", numeric(act.radius));
+            a.add("power", numeric(act.power));
         } else {
-            a.add("kind", Json::of("delete"));
+            a.add("kind", Json::of(act.kind == ActKind::Push   ? "push"
+                                   : act.kind == ActKind::Grab ? "grab"
+                                                               : "delete"));
             a.add("object", numeric(act.target.object));
             a.add("count", numeric(act.target.count));
             a.add("drop", numeric(act.target.drop));
+            if (act.kind == ActKind::Push) {
+                a.add("push", numbers({act.push.x, act.push.y, act.push.z}));
+                a.add("twist", numbers({act.twist.x, act.twist.y, act.twist.z}));
+            } else if (act.kind == ActKind::Grab) {
+                a.add("turn", numbers({act.turn.x, act.turn.y, act.turn.z}));
+                a.add("gain", numeric(act.gain));
+                a.add("max_speed", numeric(act.max_speed));
+                // Each sample as [tick, x, y, z].
+                Json path = Json::array();
+                for (const GrabSample& sample : act.path) {
+                    Json s = Json::array();
+                    s.push(numeric(static_cast<double>(sample.tick)));
+                    s.push(numeric(sample.point.x));
+                    s.push(numeric(sample.point.y));
+                    s.push(numeric(sample.point.z));
+                    path.push(std::move(s));
+                }
+                a.add("path", std::move(path));
+            }
         }
         acts.push(std::move(a));
     }
@@ -552,6 +592,88 @@ Loaded load_scene(const Json &root) {
                     return fail("invalid deletion");
                 }
                 act.kind = ActKind::Delete;
+            } else if (kind == "push") {
+                std::array<float, 3> push{};
+                std::array<float, 3> twist{};
+                if (!keys(a, {"serial", "tick", "kind", "object", "count", "drop", "push", "twist"}) ||
+                    !integer(a, "object", act.target.object) || !integer(a, "count", act.target.count) ||
+                    !integer(a, "drop", act.target.drop) || !numbers(a.find("push"), push) ||
+                    !numbers(a.find("twist"), twist)) {
+                    return fail("invalid push");
+                }
+                act.kind = ActKind::Push;
+                act.push = {push[0], push[1], push[2]};
+                act.twist = {twist[0], twist[1], twist[2]};
+            } else if (kind == "blast") {
+                std::array<float, 3> position{};
+                std::array<float, 2> reach{};
+                const Json* radius = a.find("radius");
+                const Json* power = a.find("power");
+                if (!keys(a, {"serial", "tick", "kind", "position", "radius", "power"}) ||
+                    !numbers(a.find("position"), position) || radius == nullptr || power == nullptr ||
+                    radius->type != Json::Type::Number || power->type != Json::Type::Number) {
+                    return fail("invalid blast");
+                }
+                reach = {static_cast<float>(radius->number), static_cast<float>(power->number)};
+                act.kind = ActKind::Blast;
+                act.position = {position[0], position[1], position[2]};
+                act.radius = reach[0];
+                act.power = reach[1];
+            } else if (kind == "grab") {
+                std::array<float, 3> turn{};
+                const Json* gain = a.find("gain");
+                const Json* most = a.find("max_speed");
+                const Json* path = a.find("path");
+                if (!keys(a, {"serial", "tick", "kind", "object", "count", "drop", "turn", "gain", "max_speed",
+                              "path"}) ||
+                    !integer(a, "object", act.target.object) || !integer(a, "count", act.target.count) ||
+                    !integer(a, "drop", act.target.drop) || !numbers(a.find("turn"), turn) || gain == nullptr ||
+                    most == nullptr || gain->type != Json::Type::Number || most->type != Json::Type::Number ||
+                    path == nullptr || path->type != Json::Type::Array) {
+                    return fail("invalid grab");
+                }
+                for (const Json& sample : path->items) {
+                    std::array<float, 4> s{};
+                    if (!numbers(&sample, s) || sample.items[0].number < 0.0 || sample.items[0].number > 9.0e15 ||
+                        std::floor(sample.items[0].number) != sample.items[0].number) {
+                        return fail("invalid grab");
+                    }
+                    act.path.push_back(GrabSample{static_cast<std::uint64_t>(sample.items[0].number),
+                                                  Vec3{s[1], s[2], s[3]}});
+                }
+                act.kind = ActKind::Grab;
+                act.turn = {turn[0], turn[1], turn[2]};
+                act.gain = static_cast<float>(gain->number);
+                act.max_speed = static_cast<float>(most->number);
+            } else if (kind == "paint") {
+                std::array<float, 3> position{};
+                std::array<float, 3> normal{};
+                std::array<float, 3> turn{};
+                std::array<float, 3> velocity{};
+                const Json* radius = a.find("radius");
+                const Json* falloff = a.find("falloff");
+                const std::string orient = a.string_or("orient", "");
+                if (!keys(a, {"serial", "tick", "kind", "object", "position", "normal", "turn", "velocity", "radius",
+                              "count", "falloff", "orient", "stroke"}) ||
+                    !integer(a, "object", act.object) || !numbers(a.find("position"), position) ||
+                    !numbers(a.find("normal"), normal) || !numbers(a.find("turn"), turn) ||
+                    !numbers(a.find("velocity"), velocity) || radius == nullptr ||
+                    radius->type != Json::Type::Number || falloff == nullptr ||
+                    falloff->type != Json::Type::Number || !integer(a, "count", act.count) ||
+                    !integer(a, "stroke", act.stroke) ||
+                    (orient != "realistic" && orient != "random" && orient != "locked")) {
+                    return fail("invalid paint");
+                }
+                act.kind = ActKind::Paint;
+                act.position = {position[0], position[1], position[2]};
+                act.normal = {normal[0], normal[1], normal[2]};
+                act.turn = {turn[0], turn[1], turn[2]};
+                act.velocity = {velocity[0], velocity[1], velocity[2]};
+                act.radius = static_cast<float>(radius->number);
+                act.falloff = static_cast<float>(falloff->number);
+                act.paint_turn = orient == "random"   ? PaintTurn::Random
+                                 : orient == "locked" ? PaintTurn::Locked
+                                                      : PaintTurn::Realistic;
             } else {
                 return fail("unsupported act");
             }
