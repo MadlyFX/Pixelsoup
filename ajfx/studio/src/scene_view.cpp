@@ -217,6 +217,8 @@ bool visible_property(const SceneItem &item, const SceneProperty &p) {
 }
 } // namespace
 
+bool property_visible(const SceneItem &item, const SceneProperty &p) { return visible_property(item, p); }
+
 void SceneView::forget() {
     selection_.clear();
     folded_.clear();

@@ -3,15 +3,26 @@
 #include "widgets.hpp"
 #include <mediaserver/editor/number_field.hpp>
 
+#include <imgui.h>
+
 #include <set>
 
 namespace ajfx::studio {
+// Whether the inspector shows `p` for `item`: a property that does not apply
+// to what the item is set to is left out.
+[[nodiscard]] bool property_visible(const SceneItem &item, const SceneProperty &p);
+
 // All view state stays here; it never changes a scene's solver membership.
 class SceneView final {
   public:
     void draw_tree(gui::UiContext &ctx, const gui::Rect &bounds, Document &document);
     void draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Document &document, std::string_view issue);
     void draw_overlays(gui::UiContext &ctx, const gui::Rect &window, Document &document);
+    // The same panels as Dear ImGui windows at `pos` and `size` (pixels).
+    void tree_panel(Document &document, ImVec2 pos, ImVec2 size);
+    void inspector_panel(Document &document, std::string_view issue, ImVec2 pos, ImVec2 size);
+    // Where the tree drew each item last frame (left, top, right, bottom).
+    [[nodiscard]] const std::vector<std::pair<Uid, ImVec4>> &tree_rows() const { return tree_rows_; }
     void select(Uid uid, bool extend = false);
     void forget();
     [[nodiscard]] Uid selected() const { return selection_.empty() ? 0U : selection_.back(); }
@@ -19,7 +30,7 @@ class SceneView final {
         return add_.covers(x, y) || behavior_add_.covers(x, y) || relation_add_.covers(x, y);
     }
     [[nodiscard]] const std::vector<Uid> &selection() const { return selection_; }
-    [[nodiscard]] bool gesture_live() const { return numbers_.live() || color_live_; }
+    [[nodiscard]] bool gesture_live() const { return numbers_.live() || color_live_ || im_live_; }
     void import_models(Document &document);
     void open_add(float x, float y);
     // What the scene costs, as lines for Scene settings; the host counts them.
@@ -45,6 +56,15 @@ class SceneView final {
     // Size and colour over age: a driver choice, then editable keys.
     void draw_over_age(gui::UiContext &ctx, SceneItem &item, float x, float &y, float width);
     void draw_settings(gui::UiContext &ctx, Document &document, float x, float &y, float width);
+    void im_settings(Document &document);
+    void im_relationships(Document &document, const SceneItem *item);
+    void im_sources(Document &document, SceneItem &item);
+    void im_grid_cells(const SceneItem &item);
+    void im_targets(Document &document, SceneItem &item);
+    void im_motion_stack(Document &document, SceneItem &item);
+    void im_over_age(SceneItem &item);
+    bool im_live_{};
+    std::vector<std::pair<Uid, ImVec4>> tree_rows_;
     std::vector<Uid> selection_;
     std::set<Uid> folded_;
     gui::ScrollRegion tree_scroll_;

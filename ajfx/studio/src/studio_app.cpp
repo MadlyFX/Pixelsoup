@@ -220,8 +220,13 @@ public:
         // panels with independent resize handles.
         const gui::Split left = ctx_.split(gui::ui_id("scene.tree.split"), body, scene_tree_split_, gui::Axis::Row, 8.0F);
         const gui::Split right = ctx_.split(gui::ui_id("scene.inspector.split"), left.second, scene_inspector_split_, gui::Axis::Row, 8.0F);
-        scene_view_.draw_tree(ctx_, left.first, document_);
-        scene_view_.draw_inspector(ctx_, right.second, document_, compiled_.error.empty() ? std::string_view{build_error_} : std::string_view{compiled_.error});
+        const float px = window_.ui_scale();
+        scene_view_.tree_panel(document_, ImVec2{left.first.x * px, left.first.y * px},
+                               ImVec2{left.first.width * px, left.first.height * px});
+        scene_view_.inspector_panel(document_,
+                                    compiled_.error.empty() ? std::string_view{build_error_} : std::string_view{compiled_.error},
+                                    ImVec2{right.second.x * px, right.second.y * px},
+                                    ImVec2{right.second.width * px, right.second.height * px});
         draw_preview(right.first, now);
         stage_area_ = right.first;
         shield.release();

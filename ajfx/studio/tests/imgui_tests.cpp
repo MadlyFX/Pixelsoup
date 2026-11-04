@@ -1,4 +1,6 @@
+#include "im_controls.hpp"
 #include "imgui_layer.hpp"
+#include "scene_view.hpp"
 #include "scene.hpp"
 #include "stage.hpp"
 #include "stage_camera.hpp"
@@ -289,6 +291,144 @@ void dragging_the_gizmos_middle_moves_the_thing_across_the_view() {
     CHECK(std::abs(pose.turn.x) < 0.01F && std::abs(pose.turn.y) < 0.01F && std::abs(pose.turn.z) < 0.01F);
 }
 
+ImVec2 middle(ImVec4 r) { return ImVec2{(r.x + r.z) * 0.5F, (r.y + r.w) * 0.5F}; }
+
+// A scene with two objects, side by side, panels drawn at fixed places.
+struct Panels final {
+    Document document = new_scene();
+    SceneView view;
+    Uid first{};
+    Uid second{};
+    Panels() {
+        first = add_object(document);
+        second = add_object(document);
+    }
+    void frame(Headless& imgui) {
+        imgui.frame([&] {
+            view.tree_panel(document, ImVec2{0.0F, 0.0F}, ImVec2{300.0F, 600.0F});
+            view.inspector_panel(document, {}, ImVec2{320.0F, 0.0F}, ImVec2{450.0F, 700.0F});
+        });
+    }
+    void frames(Headless& imgui, int count) {
+        for (int i = 0; i < count; ++i) {
+            frame(imgui);
+        }
+    }
+    void click(Headless& imgui, ImVec2 at) {
+        Headless::move(at.x, at.y);
+        frames(imgui, 2);
+        Headless::button(true);
+        frames(imgui, 2);
+        Headless::button(false);
+        frames(imgui, 2);
+    }
+    [[nodiscard]] ImVec4 row_of(Uid uid) const {
+        for (const auto& [item, rect] : view.tree_rows()) {
+            if (item == uid) {
+                return rect;
+            }
+        }
+        throw std::runtime_error{"no such row"};
+    }
+    [[nodiscard]] static ImVec4 control(std::string_view id) {
+        for (const im::Drawn& row : im::drawn()) {
+            if (row.id == id) {
+                return row.control;
+            }
+        }
+        throw std::runtime_error{"no such control: " + std::string{id}};
+    }
+    [[nodiscard]] static const im::Drawn& drawn_row(std::string_view id) {
+        for (const im::Drawn& row : im::drawn()) {
+            if (row.id == id) {
+                return row;
+            }
+        }
+        throw std::runtime_error{"no such control: " + std::string{id}};
+    }
+    // Drags from the middle of a control by `dx` pixels.
+    void drag(Headless& imgui, ImVec4 from, float dx) {
+        const ImVec2 start = middle(from);
+        Headless::move(start.x, start.y);
+        frames(imgui, 2);
+        Headless::button(true);
+        frames(imgui, 2);
+        for (int step = 1; step <= 10; ++step) {
+            Headless::move(start.x + dx * static_cast<float>(step) / 10.0F, start.y);
+            frame(imgui);
+        }
+        Headless::button(false);
+        frames(imgui, 3);
+    }
+};
+
+Object& object_of(Document& document, Uid uid) { return std::get<Object>(document.scene->item(uid)->data); }
+
+void the_tree_selects_what_is_clicked_and_adds_with_control() {
+    Headless imgui;
+    Panels panels;
+    panels.frames(imgui, 3);
+    CHECK(panels.view.selected() == 0U);
+    panels.click(imgui, middle(panels.row_of(panels.second)));
+    CHECK(panels.view.selection() == std::vector<Uid>{panels.second});
+    // Control adds the other to the selection; the same again takes it out.
+    ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
+    panels.click(imgui, middle(panels.row_of(panels.first)));
+    CHECK(panels.view.selection() == (std::vector<Uid>{panels.second, panels.first}));
+    ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, false);
+    // Without it, a click selects that one alone.
+    panels.click(imgui, middle(panels.row_of(panels.first)));
+    CHECK(panels.view.selection() == std::vector<Uid>{panels.first});
+}
+
+void dragging_a_property_edits_one_axis_and_reset_puts_it_back() {
+    Headless imgui;
+    Panels panels;
+    panels.view.select(panels.first);
+    panels.frames(imgui, 4);
+    const ajfx::Vec3 before = object_of(panels.document, panels.first).position;
+    panels.drag(imgui, Panels::control("position"), 80.0F);
+    const ajfx::Vec3 after = object_of(panels.document, panels.first).position;
+    // The first axis moved to the right; the others stood still.
+    CHECK(after.x > before.x + 1.0F);
+    CHECK(after.y == before.y && after.z == before.z);
+    // The other object was not selected, so it was not touched.
+    CHECK(object_of(panels.document, panels.second).position == Object{}.position);
+    // Not the default now: the reset arrow is there, and puts all three back.
+    const im::Drawn& row = Panels::drawn_row("position");
+    CHECK(row.has_reset);
+    panels.click(imgui, middle(row.reset));
+    CHECK(object_of(panels.document, panels.first).position == ajfx::Vec3(0.0F, 0.0F, 0.0F) ||
+          object_of(panels.document, panels.first).position == Object{}.position);
+}
+
+void a_value_dragged_with_two_things_selected_reaches_both() {
+    Headless imgui;
+    Panels panels;
+    panels.view.select(panels.first);
+    panels.view.select(panels.second, true);
+    panels.frames(imgui, 4);
+    object_of(panels.document, panels.first).size = 2.0F;
+    object_of(panels.document, panels.second).size = 3.0F;
+    panels.frames(imgui, 3);
+    panels.drag(imgui, Panels::control("size"), 40.0F);
+    const float a = object_of(panels.document, panels.first).size;
+    const float b = object_of(panels.document, panels.second).size;
+    // Mixed to begin with, they now hold the one value that was dragged to.
+    CHECK(a == b && a != 2.0F && a != 3.0F);
+}
+
+void a_scene_with_nothing_picked_shows_its_settings() {
+    Headless imgui;
+    Panels panels;
+    panels.frames(imgui, 4);
+    // Gravity is the first setting, 1 g; dragging it sets the scene's own.
+    const float before = panels.document.scene->physics.gravity;
+    panels.drag(imgui, Panels::control("gravity"), -30.0F);
+    CHECK(panels.document.scene->physics.gravity < before);
+    CHECK(panels.document.scene->physics.gravity >= 0.0F);
+}
+
 void the_old_interface_is_told_what_imgui_took() {
     gui::InputState input;
     input.set_mouse_position(120.0F, 80.0F);
@@ -323,6 +463,10 @@ int main() {
         {"a_stage_without_things_cannot_be_settled", a_stage_without_things_cannot_be_settled},
         {"the_cameras_matrices_land_where_it_projects", the_cameras_matrices_land_where_it_projects},
         {"dragging_the_gizmos_middle_moves_the_thing_across_the_view", dragging_the_gizmos_middle_moves_the_thing_across_the_view},
+        {"the_tree_selects_what_is_clicked_and_adds_with_control", the_tree_selects_what_is_clicked_and_adds_with_control},
+        {"dragging_a_property_edits_one_axis_and_reset_puts_it_back", dragging_a_property_edits_one_axis_and_reset_puts_it_back},
+        {"a_value_dragged_with_two_things_selected_reaches_both", a_value_dragged_with_two_things_selected_reaches_both},
+        {"a_scene_with_nothing_picked_shows_its_settings", a_scene_with_nothing_picked_shows_its_settings},
         {"the_old_interface_is_told_what_imgui_took", the_old_interface_is_told_what_imgui_took},
     };
     int failures = 0;
