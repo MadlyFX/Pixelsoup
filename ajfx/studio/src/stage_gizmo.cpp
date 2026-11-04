@@ -12,7 +12,7 @@ GizmoOutcome draw_gizmo(const StageCamera& camera, const gui::Rect& view, GizmoM
     GizmoOutcome outcome;
     ImGuizmo::BeginFrame();
     ImGuizmo::SetOrthographic(false);
-    ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
+    ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList());
     ImGuizmo::SetRect(view.x, view.y, view.width, view.height);
 
     const std::array<float, 16> v = camera.view_matrix();

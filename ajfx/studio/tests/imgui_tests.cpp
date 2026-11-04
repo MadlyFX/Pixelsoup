@@ -1,4 +1,6 @@
 #include "im_controls.hpp"
+#include "im_viewport.hpp"
+#include "guides.hpp"
 #include "imgui_layer.hpp"
 #include "scene_view.hpp"
 #include "scene.hpp"
@@ -429,6 +431,104 @@ void a_scene_with_nothing_picked_shows_its_settings() {
     CHECK(panels.document.scene->physics.gravity >= 0.0F);
 }
 
+// An object with its handle in an 800 x 600 view; the pointer takes the
+// handle across the floor, and the camera events say what the rest did.
+void dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest() {
+    Headless imgui;
+    ImGui::GetIO().DisplaySize = ImVec2{800.0F, 600.0F};
+    Document document = new_scene();
+    const Uid uid = add_object(document);
+    object_of(document, uid).position = ajfx::Vec3{0.0F, 0.5F, 0.0F};
+    Document lowered = lower_scene(document);
+    const GuideOptions options{.focus = handle_block(document, uid), .layer = uid};
+    const gui::Rect view{0.0F, 0.0F, 800.0F, 600.0F};
+    const CameraPose pose{.eye = ajfx::Vec3{0.0F, 3.0F, 6.0F}, .target = ajfx::Vec3{0.0F, 0.25F, 0.0F}};
+    const StageCamera camera{pose, view};
+    Viewport viewport;
+    ViewportEvents last;
+    bool held = false;
+    ViewportEvents seen;
+    const auto frame = [&] {
+        imgui.frame([&] {
+            const GuideSet guides = build_guides(lowered, options);
+            ViewportInputs in;
+            in.guides = &guides;
+            last = viewport.draw(view, pose, lowered, in, 1.0F);
+            held = held || last.handle_held;
+            seen.clicked = seen.clicked || last.clicked;
+            seen.orbiting = seen.orbiting || last.orbiting;
+            seen.panning = seen.panning || last.panning;
+            seen.wheel += last.wheel;
+        });
+    };
+    const GuideSet guides = build_guides(lowered, options);
+    const Handle* at = nullptr;
+    for (const Handle& handle : guides.handles) {
+        if (handle.block == options.focus && handle.control == "at") {
+            at = &handle;
+        }
+    }
+    CHECK(at != nullptr);
+    const ajfx::Vec3 goal{1.5F, at->at.y, -0.5F};
+    const auto from = camera.project(at->at);
+    const auto to = camera.project(goal);
+    CHECK(from && to);
+
+    Headless::move(from->x, from->y);
+    frame();
+    frame();
+    Headless::button(true);
+    frame();
+    frame();
+    CHECK(viewport.dragging());
+    for (int step = 1; step <= 8; ++step) {
+        Headless::move(from->x + (to->x - from->x) * static_cast<float>(step) / 8.0F,
+                       from->y + (to->y - from->y) * static_cast<float>(step) / 8.0F);
+        frame();
+    }
+    Headless::button(false);
+    frame();
+    frame();
+    CHECK(held && !viewport.dragging());
+    CHECK(adopt_handle_edit(document, lowered, uid));
+    const Object& moved = object_of(document, uid);
+    CHECK(std::fabs(moved.position.x - goal.x) < 0.05F && std::fabs(moved.position.y - 0.5F) < 1.0e-3F &&
+          std::fabs(moved.position.z - goal.z) < 0.05F);
+    // The press went to the handle, not the camera.
+    CHECK(!seen.orbiting && !seen.clicked);
+
+    // Elsewhere on the picture the left button orbits, and a click is a
+    // press and release in place.
+    Headless::move(100.0F, 500.0F);
+    frame();
+    frame();
+    Headless::button(true);
+    frame();
+    frame();
+    Headless::move(140.0F, 500.0F);
+    frame();
+    frame();
+    CHECK(seen.orbiting);
+    Headless::button(false);
+    frame();
+    frame();
+    seen = {};
+    Headless::move(400.0F, 550.0F);
+    frame();
+    Headless::button(true);
+    frame();
+    frame();
+    Headless::button(false);
+    frame();
+    frame();
+    CHECK(seen.clicked && !seen.orbiting);
+    // The wheel zooms where it is over the picture.
+    ImGui::GetIO().AddMouseWheelEvent(0.0F, 2.0F);
+    frame();
+    frame();
+    CHECK(seen.wheel > 0.0F);
+}
+
 void the_old_interface_is_told_what_imgui_took() {
     gui::InputState input;
     input.set_mouse_position(120.0F, 80.0F);
@@ -467,6 +567,7 @@ int main() {
         {"dragging_a_property_edits_one_axis_and_reset_puts_it_back", dragging_a_property_edits_one_axis_and_reset_puts_it_back},
         {"a_value_dragged_with_two_things_selected_reaches_both", a_value_dragged_with_two_things_selected_reaches_both},
         {"a_scene_with_nothing_picked_shows_its_settings", a_scene_with_nothing_picked_shows_its_settings},
+        {"dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest", dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest},
         {"the_old_interface_is_told_what_imgui_took", the_old_interface_is_told_what_imgui_took},
     };
     int failures = 0;

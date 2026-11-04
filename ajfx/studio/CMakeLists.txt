@@ -65,6 +65,7 @@ if(AJFX_BUILD_STUDIO_APP)
         src/stage_gizmo.cpp
         src/im_controls.cpp
         src/scene_view_imgui.cpp
+        src/im_viewport.cpp
                             src/stage_camera.cpp
         )
     target_link_libraries(ajfx_studio_page PUBLIC

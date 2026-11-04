@@ -9,6 +9,7 @@
 #include "performance.hpp"
 #include "preview.hpp"
 #include "scene.hpp"
+#include "im_viewport.hpp"
 #include "imgui_layer.hpp"
 #include "scene_view.hpp"
 #include "stage.hpp"
@@ -717,7 +718,7 @@ private:
         if (preview_ && !preview_->status().waiting && has_package_) {
             ++settled_frames_;
         }
-        const bool held = scene_view_.gesture_live() || ctx_.pointer_down() || overlay_.dragging();
+        const bool held = scene_view_.gesture_live() || ctx_.pointer_down() || viewport_.dragging();
         if (current && analysed_.differs(document_, at) && now - last_analysis_ >= submit_interval) {
             submit_analysis(now);
         }
@@ -752,7 +753,7 @@ private:
                 builder_.cancel_bake();
             }
         }
-        const bool held = scene_view_.gesture_live() || ctx_.pointer_down() || overlay_.dragging();
+        const bool held = scene_view_.gesture_live() || ctx_.pointer_down() || viewport_.dragging();
         const bool settled = !compile_behind && !bake_status_dirty_ && !bake_status_for_.differs(document_, at) &&
                              now - change_time_ >= auto_bake_delay && !held && !builder_.busy() &&
                              preview_shows_page_ && builder_.bake_progress() < 0.0;
@@ -1148,11 +1149,6 @@ private:
         preview_aspect_ = view.width / std::max(view.height, 1.0F);
 
         const rhi::Texture* picture = render_preview(view);
-        if (picture != nullptr) {
-            ctx_.image(view, *picture);
-        } else {
-            ctx_.rounded(view, theme.track, theme.radius);
-        }
         // Guides, handles and paths over the picture. Their handles take a
         // press before the camera does.
         const Uid working = scene_view_.selected();
@@ -1175,18 +1171,23 @@ private:
         // the last frame left it, so taking it back otherwise would undo an
         // edit typed into the inspector this frame.
         const GuideSet guides = build_guides(scene_guides_, guide_options);
-        const bool handle_held = overlay_.draw(ctx_, view, orbit_, scene_guides_,
-                                               OverlayInputs{.guides = &guides,
-                                                             .analysis = analysis_ ? &*analysis_ : nullptr,
-                                                             .show_guides = show_guides_,
-                                                             .show_handles = show_handles_,
-                                                             .show_paths = show_paths_,
-                                                             .layer = working,
-                                                             .frame = frame_});
-        if (handle_held) {
+        const float px = window_.ui_scale();
+        const gui::Rect view_px{view.x * px, view.y * px, view.width * px, view.height * px};
+        ViewportInputs viewport_in{.picture = picture != nullptr ? ImguiLayer::texture_id(*picture) : ImTextureID{},
+                                   .has_picture = picture != nullptr,
+                                   .guides = &guides,
+                                   .analysis = analysis_ ? &*analysis_ : nullptr,
+                                   .show_guides = show_guides_,
+                                   .show_handles = show_handles_,
+                                   .show_paths = show_paths_,
+                                   .layer = working,
+                                   .frame = frame_};
+        const ViewportEvents viewport_events =
+            viewport_.draw(view_px, camera_pose(orbit_), scene_guides_, viewport_in, px);
+        if (viewport_events.handle_held) {
             static_cast<void>(adopt_handle_edit(document_, scene_guides_, working));
         }
-        ctx_.draw_list().add_corner_mask(view.x, view.y, view.width, view.height, theme.radius, theme.panel);
+        apply_viewport(viewport_events, view);
 
         // What the picture is, and anything holding it.
         // A held picture is the last complete one, so what held it is not
@@ -1228,10 +1229,6 @@ private:
             note = "Paths of " + thousands(count) + " particles" +
                    (item != nullptr && !item->name.empty() ? " in " + item->name : std::string{});
         }
-        // After the tools over the picture: the first control a press lands
-        // on takes it, and the camera covers the whole view.
-        camera_input(view);
-
         // What it costs, bottom left.
         // The HUD: what the scene costs and how close its limits are, at the
         // foot of the picture. The same lines go to Scene settings.
@@ -1272,8 +1269,7 @@ private:
         const float s = window_.ui_scale();
         constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                                           ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
-                                           ImGuiWindowFlags_NoBringToFrontOnFocus;
+                                           ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{10.0F * s, 5.0F * s});
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0F * s);
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.07F, 0.07F, 0.09F, 0.94F});
@@ -1353,53 +1349,42 @@ private:
         ImGui::PopStyleVar(2);
     }
 
-    void camera_input(const gui::Rect& view) {
-        const gui::UiId id = gui::ui_id("studio.preview.camera");
-        const gui::Interaction hit = ctx_.grab(id, view);
-        const bool over = view.contains(ctx_.pointer_x(), ctx_.pointer_y()) && !ctx_.pointer_blocked();
-        if (hit.held && !hit.pressed) {
-            orbit_.yaw -= ctx_.pointer_dx() / 700.0F;
-            orbit_.pitch = std::clamp(orbit_.pitch + ctx_.pointer_dy() / 700.0F, -0.02F, 0.24F);
+    // What the pointer did over the picture: the camera orbits, pans and
+    // dollies, the wheel zooms, and a click picks or acts with the tool.
+    void apply_viewport(const ViewportEvents& events, const gui::Rect& view) {
+        stage_view_ = view;
+        if (gizmo_took_) {
+            return;
+        }
+        const float px = window_.ui_scale();
+        const float dx = events.drag.x / px;
+        const float dy = events.drag.y / px;
+        if (events.orbiting) {
+            orbit_.yaw -= dx / 700.0F;
+            orbit_.pitch = std::clamp(orbit_.pitch + dy / 700.0F, -0.02F, 0.24F);
             want_frame_ = false;
         }
-        stage_view_ = view;
-        pick_click(view, hit);
-        if (hit.clicked && clicks_.double_click(1U, ctx_.time_seconds())) {
-            orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
+        const float two_pi = 6.28318530718F;
+        if (events.panning) {
+            const float yaw = orbit_.yaw * two_pi;
+            const float scale = orbit_.distance / std::max(view.height, 1.0F) * 0.8F;
+            const mediaserver::scene::Vec3 right{std::cos(yaw), 0.0F, -std::sin(yaw)};
+            orbit_.target = orbit_.target - right * (dx * scale) + mediaserver::scene::Vec3{0.0F, dy * scale, 0.0F};
+            want_frame_ = false;
         }
-        if (over || panning_ || dollying_) {
-            if (ctx_.middle_pointer_pressed() && over) {
-                panning_ = true;
-            }
-            if (ctx_.secondary_pointer_pressed() && over) {
-                dollying_ = true;
-            }
-            if (!ctx_.middle_pointer_down()) {
-                panning_ = false;
-            }
-            if (!ctx_.secondary_pointer_down()) {
-                dollying_ = false;
-            }
-            const float two_pi = 6.28318530718F;
-            if (panning_) {
-                const float yaw = orbit_.yaw * two_pi;
-                const float scale = orbit_.distance / std::max(view.height, 1.0F) * 0.8F;
-                const mediaserver::scene::Vec3 right{std::cos(yaw), 0.0F, -std::sin(yaw)};
-                orbit_.target = orbit_.target - right * (ctx_.pointer_dx() * scale) +
-                                mediaserver::scene::Vec3{0.0F, ctx_.pointer_dy() * scale, 0.0F};
-                want_frame_ = false;
-            }
-            if (dollying_) {
-                orbit_.distance = std::clamp(orbit_.distance * std::exp(ctx_.pointer_dy() * 0.005F), 0.2F, 500.0F);
-                want_frame_ = false;
-            }
-            if (over && ctx_.wheel() != 0.0F) {
-                orbit_.distance = std::clamp(orbit_.distance * std::exp(-ctx_.wheel() * 0.12F), 0.2F, 500.0F);
-                want_frame_ = false;
-            }
+        if (events.dollying) {
+            orbit_.distance = std::clamp(orbit_.distance * std::exp(dy * 0.005F), 0.2F, 500.0F);
+            want_frame_ = false;
         }
-        if (hit.held || panning_ || dollying_) {
-            ctx_.set_cursor(gui::Cursor::Move);
+        if (events.wheel != 0.0F) {
+            orbit_.distance = std::clamp(orbit_.distance * std::exp(-events.wheel * 0.12F), 0.2F, 500.0F);
+            want_frame_ = false;
+        }
+        if (events.clicked) {
+            pick_click(view, events.ctrl, events.click_at.x / px, events.click_at.y / px);
+            if (events.double_clicked) {
+                orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
+            }
         }
     }
 
@@ -1407,21 +1392,18 @@ private:
     // analysis's samples have it at the playhead; Ctrl adds to the selection.
     // With Drop, it drops a copy of the selected object above where it lands;
     // with Delete, it takes the thing under it away.
-    void pick_click(const gui::Rect& view, const gui::Interaction& hit) {
-        if (!hit.clicked) {
-            return;
-        }
+    void pick_click(const gui::Rect& view, bool ctrl, float x, float y) {
         const StageBodies* standing =
             analysis_ ? stage_bodies_at(analysis_->bodies, static_cast<std::uint64_t>(frame_)) : nullptr;
         const std::span<const StageBody> bodies =
             standing != nullptr ? std::span<const StageBody>{standing->bodies} : std::span<const StageBody>{};
         const StageCamera camera{camera_pose(orbit_), view};
         Vec3 origin{}, direction{};
-        camera.ray(ctx_.pointer_x(), ctx_.pointer_y(), origin, direction);
+        camera.ray(x, y, origin, direction);
         const std::optional<StageHit> picked = pick_stage(bodies, origin, direction, stage_floor(document_));
         if (tool_ == StageTool::Select) {
             if (picked && picked->on_body) {
-                scene_view_.select(picked->layer, ctx_.ctrl_held());
+                scene_view_.select(picked->layer, ctrl);
                 // A thing put down or dropped is picked as itself, to be
                 // moved with the gizmo or timed on the timeline.
                 if (const std::optional<BodyRef> ref =
@@ -1463,6 +1445,7 @@ private:
     // The gizmo over the thing picked on the stage: drawn before the rest, so
     // a press on it is not also a press on the picture under it.
     void gizmo_overlay() {
+        gizmo_took_ = false;
         if (!document_.scene || selected_act_ == 0U || tool_ != StageTool::Select || stage_view_.width <= 1.0F) {
             return;
         }
@@ -1475,6 +1458,7 @@ private:
                                stage_view_.height * scale};
         const StageCamera camera{camera_pose(orbit_), pixels};
         const GizmoOutcome gizmo = draw_gizmo(camera, pixels, stage_panel_.gizmo, GizmoPose{act->position, act->turn});
+        gizmo_took_ = gizmo.took_pointer;
         if (gizmo.took_pointer) {
             input_.withhold_pointer();
         }
@@ -1915,7 +1899,8 @@ private:
     float scene_inspector_split_{0.66F};
     Document scene_guides_;
     std::uint64_t scene_guides_for_{};
-    StageOverlay overlay_;
+    Viewport viewport_;
+    bool gizmo_took_{false};
     // The viewport and timeline, as last drawn: where letter shortcuts act.
     gui::Rect stage_area_{};
     SessionState session_;
@@ -2031,8 +2016,6 @@ private:
     Orbit orbit_{};
     bool want_frame_{true};
     float preview_aspect_{16.0F / 9.0F};
-    bool panning_{false};
-    bool dollying_{false};
     bool figure_{true};
     std::array<Flight, 2> flights_{};
     const rhi::Texture* last_picture_{nullptr};
