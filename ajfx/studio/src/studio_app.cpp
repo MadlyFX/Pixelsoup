@@ -1332,10 +1332,7 @@ private:
         ctx_.tooltip(hud_rect, "GPU time for the whole preview frame, then what the scene costs. A limit is named once it is four fifths used.");
 
         const gui::Rect bar{pane.x + 8.0F, view.bottom() + 8.0F, pane.width - 16.0F, transport_height - 8.0F};
-        draw_transport(bar);
-        if (!tracks.empty()) {
-            draw_timeline(gui::Rect{bar.x, bar.bottom() + 2.0F, bar.width, timeline_h - 2.0F}, tracks, scrub_track(bar));
-        }
+        draw_transport(bar, gui::Rect{bar.x, bar.bottom() + 2.0F, bar.width, timeline_h - 2.0F}, tracks);
         static_cast<void>(now);
     }
 
@@ -1671,153 +1668,215 @@ private:
         return gui::Rect{bar.x + 150.0F, bar.center_y() - 10.0F, std::max(bar.width - 150.0F - time_w - 12.0F, 20.0F), 20.0F};
     }
 
-    // One row a track: the item's name on the left, its moments on the right
-    // under the scrub bar. A point is a diamond, a span a bar; dragging either
-    // writes the authored value. Clicking the name selects the item.
-    void draw_timeline(const gui::Rect& area, const std::vector<Track>& tracks, const gui::Rect& scrub) {
-        const gui::Theme& theme = ctx_.theme();
-        const double frames = loop_frames();
-        const float seconds = static_cast<float>(frames / 60.0);
-        const float offset = timeline_scroll_.begin(ctx_, area);
-        float y = area.y + 4.0F - offset;
-        const float label_w = std::max(scrub.x - area.x - 12.0F, 40.0F);
-        const auto at_x = [&](float t) { return scrub.x + scrub.width * std::clamp(t / seconds, 0.0F, 1.0F); };
-        const auto to_seconds = [&](float x) { return std::clamp((x - scrub.x) / scrub.width, 0.0F, 1.0F) * seconds; };
-        for (const Track& track : tracks) {
-            const gui::Rect row{area.x, y, area.width, track_height};
-            const bool selected = std::find(scene_view_.selection().begin(), scene_view_.selection().end(), track.item) !=
-                                  scene_view_.selection().end();
-            const gui::Rect name{area.x, y, label_w, track_height};
-            const gui::Interaction pick = ctx_.grab(part_id(track.item, "track.name"), name);
-            ctx_.cursor_for(pick, gui::Cursor::Hand);
-            if (selected || pick.hovered) {
-                ctx_.rounded(row, selected ? gui::fade(theme.selection, 0.5F) : theme.row, theme.radius);
-            }
-            ctx_.label(gui::Rect{name.x + 8.0F, name.y, name.width - 8.0F, name.height}, track.name,
-                       selected ? theme.text : theme.text_muted);
-            ctx_.tooltip(name, "Select " + track.name);
-            if (pick.clicked) {
-                scene_view_.select(track.item, ctx_.ctrl_held());
-            }
-            // A faint line the moments sit on, under the scrub bar.
-            ctx_.panel(gui::Rect{scrub.x, row.center_y(), scrub.width, 1.0F}, theme.divider);
-            std::uint32_t k = 0U;
-            for (const TrackMarker& marker : track.markers) {
-                const gui::UiColor tone = marker.draggable ? theme.keyframe : theme.text_muted;
-                const std::string when = format_number(marker.seconds, 2) + " s";
-                if (marker.duration > 0.0F) {
-                    const float x0 = at_x(marker.seconds);
-                    const float x1 = at_x(marker.seconds + marker.duration);
-                    const gui::Rect span{x0, row.center_y() - 5.0F, std::max(x1 - x0, 4.0F), 10.0F};
-                    const gui::Interaction drag = marker.draggable ? ctx_.grab(part_id(track.item, "track.span", k), span)
-                                                                   : gui::Interaction{};
-                    const gui::Rect end{x1 - 5.0F, row.center_y() - 7.0F, 10.0F, 14.0F};
-                    const gui::Interaction stretch = marker.draggable ? ctx_.grab(part_id(track.item, "track.end", k), end)
-                                                                      : gui::Interaction{};
-                    ctx_.cursor_for(drag, gui::Cursor::ResizeHorizontal);
-                    ctx_.cursor_for(stretch, gui::Cursor::ResizeHorizontal);
-                    ctx_.rounded(span, (drag.held || drag.hovered) ? theme.accent : gui::fade(tone, 0.6F), 4.0F);
-                    if (marker.draggable) {
-                        ctx_.rounded(end, (stretch.held || stretch.hovered) ? theme.accent : tone, 3.0F);
-                    }
-                    ctx_.tooltip(span, std::string{marker.label()} + " from " + when + " for " +
-                                           format_number(marker.duration, 2) + " s" +
-                                           (marker.draggable ? ". Drag it; drag its end for how long." : ""));
-                    if (stretch.held) {
-                        if (stretch.pressed) { drag_grip_ = 0.0F; }
-                        static_cast<void>(set_marker_duration(document_, marker, to_seconds(ctx_.pointer_x()) - marker.seconds));
-                    } else if (drag.held) {
-                        if (drag.pressed) { drag_grip_ = to_seconds(ctx_.pointer_x()) - marker.seconds; }
-                        static_cast<void>(set_marker_time(document_, marker, to_seconds(ctx_.pointer_x()) - drag_grip_));
-                    }
-                } else {
-                    const float x = at_x(marker.seconds);
-                    const gui::Rect hit{x - 8.0F, row.y + 2.0F, 16.0F, track_height - 4.0F};
-                    const bool act = marker.kind == MarkerKind::Drop || marker.kind == MarkerKind::Delete;
-                    const gui::Interaction drag =
-                        marker.draggable ? ctx_.grab(part_id(track.item, act ? "track.act" : "track.point",
-                                                             act ? marker.part : k),
-                                                     hit)
-                                         : gui::Interaction{};
-                    ctx_.cursor_for(drag, gui::Cursor::ResizeHorizontal);
-                    const bool picked = act && marker.part == selected_act_;
-                    if (act && drag.pressed) {
-                        selected_act_ = marker.part;
-                    }
-                    const bool lit = drag.held || drag.hovered || picked;
-                    const gui::UiColor act_tone = marker.kind == MarkerKind::Delete ? theme.warning : theme.good;
-                    editor::draw_diamond(ctx_, x, row.center_y(), lit ? 7.0F : (act ? 5.0F : 6.0F),
-                                         lit ? theme.accent : (act ? act_tone : tone));
-                    ctx_.tooltip(hit, std::string{marker.label()} + " at " + when +
-                                          (act ? ". Drag to move it; Delete takes it away."
-                                               : marker.draggable ? ". Drag it." : ""));
-                    if (drag.held) {
-                        static_cast<void>(set_marker_time(document_, marker, to_seconds(ctx_.pointer_x())));
-                    }
-                }
-                ++k;
-            }
-            y += track_height;
+    // The transport and the timeline under it, in Dear ImGui: restart, play
+    // and loop, the loop as a bar to scrub with the cache's band over it, and
+    // a row a track with its moments as diamonds and bars to drag. Everything
+    // is placed in the interface's units (as the picture above it is) and
+    // scaled to pixels as it is drawn.
+    void draw_transport(const gui::Rect& bar, const gui::Rect& area, const std::vector<Track>& tracks) {
+        const float s = window_.ui_scale();
+        const ImVec4 good{0.36F, 0.80F, 0.52F, 1.0F};
+        const ImVec4 caution{1.0F, 0.72F, 0.25F, 1.0F};
+        const ImVec4 warning{0.95F, 0.40F, 0.35F, 1.0F};
+        const ImU32 keyframe = IM_COL32(255, 204, 77, 255);
+        const ImU32 head_color = IM_COL32(255, 255, 255, 235);
+        ImGui::SetNextWindowPos(ImVec2{bar.x * s, bar.y * s});
+        ImGui::SetNextWindowSize(ImVec2{bar.width * s, (area.bottom() - bar.y) * s});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0F, 0.0F});
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.0F, 0.0F, 0.0F, 0.0F});
+        constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                           ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                           ImGuiWindowFlags_NoBackground;
+        const bool open = ImGui::Begin("##transport", nullptr, flags);
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+        if (!open) {
+            ImGui::End();
+            return;
         }
-        // The playhead runs down through the tracks too.
-        const float head_x = scrub.x + scrub.width * std::clamp(static_cast<float>(frame_ / frames), 0.0F, 1.0F);
-        ctx_.rounded(gui::Rect{head_x - 0.5F, area.y, 1.0F, area.height}, gui::fade(theme.playhead, 0.5F), 0.5F);
-        timeline_scroll_.end(ctx_, y + offset - area.y + 4.0F);
-    }
-
-    void draw_transport(const gui::Rect& bar) {
-        const gui::Theme& theme = ctx_.theme();
-        const float y = bar.y + (bar.height - 32.0F) * 0.5F;
-        if (editor::tool_key(ctx_, gui::ui_id("studio.restart"), gui::Rect{bar.x, y, 36.0F, 32.0F}, gui::Icon::ToStart,
-                             false, "Back to the start (Home)", theme.accent)) {
+        const ImVec2 origin = ImGui::GetWindowPos();
+        ImDrawList* list = ImGui::GetWindowDrawList();
+        const float h = ImGui::GetFrameHeight();
+        const auto toggle_button = [&](const char* label, bool on, const char* tip) {
+            if (on) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            }
+            const bool pressed = ImGui::Button(label);
+            if (on) {
+                ImGui::PopStyleColor();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", tip);
+            }
+            return pressed;
+        };
+        ImGui::SetCursorPos(ImVec2{0.0F, (bar.height * s - h) * 0.5F});
+        if (toggle_button("|<", false, "Back to the start (Home)")) {
             frame_ = 0.0;
         }
-        if (editor::tool_key(ctx_, gui::ui_id("studio.play"), gui::Rect{bar.x + 42.0F, y, 52.0F, 32.0F},
-                             playing_ ? gui::Icon::Pause : gui::Icon::Play, playing_,
-                             playing_ ? "Pause (Space)" : "Play (Space)", theme.good)) {
+        ImGui::SameLine();
+        if (toggle_button(playing_ ? "Pause" : "Play", playing_, playing_ ? "Pause (Space)" : "Play (Space)")) {
             toggle_playing();
         }
-        if (editor::tool_key(ctx_, gui::ui_id("studio.loop"), gui::Rect{bar.x + 100.0F, y, 36.0F, 32.0F}, gui::Icon::Loop,
-                             looping_, looping_ ? "Looping: plays round and round (L)" : "Plays once and stops (L)",
-                             theme.accent)) {
+        ImGui::SameLine();
+        if (toggle_button("Loop", looping_, looping_ ? "Looping: plays round and round (L)" : "Plays once and stops (L)")) {
             looping_ = !looping_;
         }
 
         // The loop as a bar to scrub, a tick a second.
         const double frames = loop_frames();
-        const std::string time = format_number(static_cast<float>(frame_ / 60.0), 1) + " / " +
-                                 format_number(static_cast<float>(frames / 60.0), 1) + " s";
-        const float time_w = 96.0F;
+        const float seconds = static_cast<float>(frames / 60.0);
         const gui::Rect track = scrub_track(bar);
-        const gui::Interaction hit = ctx_.grab(gui::ui_id("studio.scrub"), track.inflated(0.0F, 6.0F));
-        ctx_.cursor_for(hit, gui::Cursor::ResizeHorizontal);
-        ctx_.rounded(gui::Rect{track.x, track.center_y() - 3.0F, track.width, 6.0F}, theme.track, 3.0F);
+        const float tx = (track.x - bar.x) * s;
+        const float tw = track.width * s;
+        const float ty = (track.center_y() - bar.y) * s;
+        ImGui::SetCursorPos(ImVec2{tx, ty - 10.0F * s});
+        ImGui::InvisibleButton("##scrub", ImVec2{tw, 20.0F * s});
         const float t = std::clamp(static_cast<float>(frame_ / frames), 0.0F, 1.0F);
-        ctx_.rounded(gui::Rect{track.x, track.center_y() - 3.0F, track.width * t, 6.0F}, gui::fade(theme.playhead, 0.35F), 3.0F);
-        const int seconds = static_cast<int>(frames / 60.0);
-        for (int s = 1; s < seconds; ++s) {
-            const float tx = track.x + track.width * static_cast<float>(s * 60.0 / frames);
-            ctx_.panel(gui::Rect{tx, track.center_y() + 5.0F, 1.0F, 5.0F}, theme.text_muted);
+        const float x0 = origin.x + tx;
+        const float cy = origin.y + ty;
+        list->AddRectFilled(ImVec2{x0, cy - 3.0F * s}, ImVec2{x0 + tw, cy + 3.0F * s}, ImGui::GetColorU32(ImGuiCol_FrameBg),
+                            3.0F * s);
+        list->AddRectFilled(ImVec2{x0, cy - 3.0F * s}, ImVec2{x0 + tw * t, cy + 3.0F * s}, IM_COL32(255, 255, 255, 90),
+                            3.0F * s);
+        for (int second = 1; second < static_cast<int>(seconds); ++second) {
+            const float x = x0 + tw * static_cast<float>(second * 60.0 / frames);
+            list->AddRectFilled(ImVec2{x, cy + 5.0F * s}, ImVec2{x + 1.0F, cy + 10.0F * s}, IM_COL32(150, 150, 150, 200));
         }
         // What the cache holds: a band over the steps it covers, green while
         // it holds the scene as it is, amber once it is stale.
         if (bake_status_.any_baked && bake_status_.cached_frames > 0U) {
             const float covered =
                 std::clamp(static_cast<float>(static_cast<double>(bake_status_.cached_frames) / frames), 0.0F, 1.0F);
-            const gui::Rect band{track.x, track.y - 1.0F, track.width * covered, 3.0F};
-            ctx_.rounded(band, bake_status_.current ? theme.good : theme.caution, 1.5F);
-            ctx_.tooltip(gui::Rect{band.x, band.y - 3.0F, band.width, band.height + 6.0F},
-                         bake_status_.current ? "Steps the cache holds."
-                                              : "Steps the cache holds, now stale. Bake again.");
+            const ImVec2 min{x0, cy - 11.0F * s};
+            list->AddRectFilled(min, ImVec2{x0 + tw * covered, min.y + 3.0F * s},
+                                ImGui::ColorConvertFloat4ToU32(bake_status_.current ? good : caution), 1.5F * s);
         }
-        const float head_x = track.x + track.width * t;
-        ctx_.rounded(gui::Rect{head_x - 1.5F, track.y - 2.0F, 3.0F, track.height + 4.0F}, theme.playhead, 1.5F);
-        if (hit.held) {
-            const float u = std::clamp((ctx_.pointer_x() - track.x) / track.width, 0.0F, 1.0F);
+        list->AddRectFilled(ImVec2{x0 + tw * t - 1.5F * s, cy - 12.0F * s}, ImVec2{x0 + tw * t + 1.5F * s, cy + 12.0F * s},
+                            head_color, 1.5F * s);
+        if (ImGui::IsItemActive()) {
+            const float u = std::clamp((ImGui::GetIO().MousePos.x - x0) / std::max(tw, 1.0F), 0.0F, 1.0F);
             frame_ = std::min(static_cast<double>(u) * frames, frames - 1.0);
             playing_ = false;
         }
-        ctx_.label(gui::Rect{track.right() + 12.0F, bar.y, time_w, bar.height}, time, theme.text_muted);
+        const std::string time = format_number(static_cast<float>(frame_ / 60.0), 1) + " / " + format_number(seconds, 1) + " s";
+        ImGui::SetCursorPos(ImVec2{tx + tw + 12.0F * s, (bar.height * s - ImGui::GetFontSize()) * 0.5F});
+        ImGui::TextDisabled("%s", time.c_str());
+
+        if (!tracks.empty()) {
+            const float top = (area.y - bar.y) * s;
+            ImGui::SetCursorPos(ImVec2{0.0F, top});
+            ImGui::BeginChild("##tracks", ImVec2{bar.width * s, area.height * s}, false, ImGuiWindowFlags_NoBackground);
+            const ImVec2 child = ImGui::GetWindowPos();
+            ImDrawList* rows = ImGui::GetWindowDrawList();
+            const float row_h = track_height * s;
+            const float label_w = std::max(track.x - bar.x - 12.0F, 40.0F) * s;
+            const auto at_x = [&](float seconds_at) {
+                return child.x + tx + tw * std::clamp(seconds_at / seconds, 0.0F, 1.0F);
+            };
+            const auto to_seconds = [&](float x) {
+                return std::clamp((x - child.x - tx) / std::max(tw, 1.0F), 0.0F, 1.0F) * seconds;
+            };
+            for (const Track& row : tracks) {
+                ImGui::PushID(static_cast<int>(row.item));
+                const ImVec2 at = ImGui::GetCursorPos();
+                const bool selected = std::find(scene_view_.selection().begin(), scene_view_.selection().end(), row.item) !=
+                                      scene_view_.selection().end();
+                ImGui::SetCursorPos(at);
+                ImGui::InvisibleButton("##name", ImVec2{label_w, row_h});
+                const ImVec2 min = ImGui::GetItemRectMin();
+                if (selected || ImGui::IsItemHovered()) {
+                    rows->AddRectFilled(min, ImVec2{child.x + bar.width * s, min.y + row_h},
+                                        selected ? IM_COL32(60, 90, 140, 120) : IM_COL32(255, 255, 255, 20), 4.0F * s);
+                }
+                rows->AddText(ImVec2{min.x + 8.0F * s, min.y + (row_h - ImGui::GetFontSize()) * 0.5F},
+                              selected ? ImGui::GetColorU32(ImGuiCol_Text) : ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                              row.name.c_str());
+                if (ImGui::IsItemClicked()) {
+                    scene_view_.select(row.item, ImGui::GetIO().KeyCtrl);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Select %s", row.name.c_str());
+                }
+                const float mid = min.y + row_h * 0.5F;
+                rows->AddRectFilled(ImVec2{child.x + tx, mid}, ImVec2{child.x + tx + tw, mid + 1.0F}, IM_COL32(120, 120, 120, 120));
+                std::uint32_t k = 0U;
+                for (const TrackMarker& marker : row.markers) {
+                    ImGui::PushID(static_cast<int>(k));
+                    const ImU32 tone = marker.draggable ? keyframe : IM_COL32(150, 150, 150, 255);
+                    const std::string when = format_number(marker.seconds, 2) + " s";
+                    if (marker.duration > 0.0F) {
+                        const float a = at_x(marker.seconds);
+                        const float b = at_x(marker.seconds + marker.duration);
+                        ImGui::SetCursorScreenPos(ImVec2{a, mid - 5.0F * s});
+                        ImGui::InvisibleButton("##span", ImVec2{std::max(b - a, 4.0F * s), 10.0F * s});
+                        const bool drag = ImGui::IsItemActive();
+                        const bool hover = ImGui::IsItemHovered();
+                        if (marker.draggable) {
+                            if (ImGui::IsItemActivated()) { drag_grip_ = to_seconds(ImGui::GetIO().MousePos.x) - marker.seconds; }
+                            if (drag) {
+                                static_cast<void>(set_marker_time(document_, marker, to_seconds(ImGui::GetIO().MousePos.x) - drag_grip_));
+                            }
+                        }
+                        if (hover) {
+                            ImGui::SetTooltip("%s from %s for %s s%s", std::string{marker.label()}.c_str(), when.c_str(),
+                                              format_number(marker.duration, 2).c_str(),
+                                              marker.draggable ? ". Drag it; drag its end for how long." : "");
+                        }
+                        const float ex = std::max(b, a + 4.0F * s);
+                        rows->AddRectFilled(ImVec2{a, mid - 5.0F * s}, ImVec2{ex, mid + 5.0F * s},
+                                            (drag || hover) ? ImGui::GetColorU32(ImGuiCol_ButtonActive) : (tone & 0x99FFFFFFU),
+                                            4.0F * s);
+                        if (marker.draggable) {
+                            ImGui::SetCursorScreenPos(ImVec2{ex - 5.0F * s, mid - 7.0F * s});
+                            ImGui::InvisibleButton("##end", ImVec2{10.0F * s, 14.0F * s});
+                            const bool stretch = ImGui::IsItemActive();
+                            if (stretch) {
+                                static_cast<void>(set_marker_duration(document_, marker,
+                                                                      to_seconds(ImGui::GetIO().MousePos.x) - marker.seconds));
+                            }
+                            rows->AddRectFilled(ImVec2{ex - 5.0F * s, mid - 7.0F * s}, ImVec2{ex + 5.0F * s, mid + 7.0F * s},
+                                                (stretch || ImGui::IsItemHovered()) ? ImGui::GetColorU32(ImGuiCol_ButtonActive) : tone,
+                                                3.0F * s);
+                        }
+                    } else {
+                        const float x = at_x(marker.seconds);
+                        const bool act = marker.kind == MarkerKind::Drop || marker.kind == MarkerKind::Delete;
+                        ImGui::SetCursorScreenPos(ImVec2{x - 8.0F * s, min.y + 2.0F * s});
+                        ImGui::InvisibleButton("##point", ImVec2{16.0F * s, row_h - 4.0F * s});
+                        const bool drag = ImGui::IsItemActive();
+                        const bool lit = drag || ImGui::IsItemHovered() || (act && marker.part == selected_act_);
+                        if (act && ImGui::IsItemActivated()) {
+                            selected_act_ = marker.part;
+                        }
+                        if (drag && marker.draggable) {
+                            static_cast<void>(set_marker_time(document_, marker, to_seconds(ImGui::GetIO().MousePos.x)));
+                        }
+                        const ImU32 act_tone = marker.kind == MarkerKind::Delete
+                                                   ? ImGui::ColorConvertFloat4ToU32(warning)
+                                                   : ImGui::ColorConvertFloat4ToU32(good);
+                        const float r = (lit ? 7.0F : (act ? 5.0F : 6.0F)) * s;
+                        const ImU32 fill = lit ? ImGui::GetColorU32(ImGuiCol_ButtonActive) : (act ? act_tone : tone);
+                        rows->AddQuadFilled(ImVec2{x, mid - r}, ImVec2{x + r, mid}, ImVec2{x, mid + r}, ImVec2{x - r, mid}, fill);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s at %s%s", std::string{marker.label()}.c_str(), when.c_str(),
+                                              act ? ". Drag to move it; Delete takes it away."
+                                                  : marker.draggable ? ". Drag it." : "");
+                        }
+                    }
+                    ImGui::PopID();
+                    ++k;
+                }
+                ImGui::SetCursorPos(ImVec2{at.x, at.y + row_h});
+                ImGui::PopID();
+            }
+            // The playhead runs down through the tracks too.
+            const float head = child.x + tx + tw * std::clamp(static_cast<float>(frame_ / frames), 0.0F, 1.0F);
+            rows->AddRectFilled(ImVec2{head - 0.5F, child.y}, ImVec2{head + 0.5F, child.y + area.height * s},
+                                IM_COL32(255, 255, 255, 120));
+            ImGui::EndChild();
+        }
+        ImGui::End();
     }
 
     struct Flight final {
@@ -1834,7 +1893,6 @@ private:
     std::unique_ptr<Preview> preview_;
     std::string preview_error_;
     SceneView scene_view_;
-    gui::ScrollRegion timeline_scroll_;
     float drag_grip_{}; // seconds between a dragged span's start and where it was taken
     float scene_tree_split_{0.19F};
     float scene_inspector_split_{0.66F};
