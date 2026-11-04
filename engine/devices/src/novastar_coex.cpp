@@ -330,13 +330,23 @@ parse_screens(const JsonValue &data, const std::vector<Input> &inputs) {
     const int working_mode =
         static_cast<int>(entry.number_at("workingMode", 1.0));
 
-    // The raster is everything the canvases cover. A cabinet sits within its
-    // canvas, which sits within the screen. Some firmware lists the cabinets
-    // beside the canvases instead, in screen pixels, or gives the screen's
-    // own size; whichever is largest is the raster.
+    // The raster is what the mapped cabinets cover. A cabinet sits within its
+    // canvas, which sits within the screen; some firmware lists the cabinets
+    // beside the canvases instead, in screen pixels. The canvases' and the
+    // screen's declared sizes can be far larger than the panels (a 2880x1536
+    // wall came back over 32768 square), so they only count when no cabinet
+    // is listed.
+    const auto far_edge = [](core::u32 a, core::u32 b) noexcept {
+      return b > std::numeric_limits<core::u32>::max() - a
+                 ? std::numeric_limits<core::u32>::max()
+                 : a + b;
+    };
+    core::u32 mapped_width{};
+    core::u32 mapped_height{};
+    core::u32 declared_width{};
+    core::u32 declared_height{};
     const auto add_cabinets = [&](const JsonValue *cabinets, core::u32 left,
-                                  core::u32 top, core::u32 &width,
-                                  core::u32 &height) {
+                                  core::u32 top) {
       if (cabinets == nullptr) {
         return;
       }
@@ -346,8 +356,11 @@ parse_screens(const JsonValue &data, const std::vector<Input> &inputs) {
         }
         const auto [x, y] = place_of(cabinet);
         const auto [w, h] = extent_of(cabinet, {"resolution", "size"});
-        width = std::max(width, left + x + w);
-        height = std::max(height, top + y + h);
+        if (w == 0U || h == 0U) {
+          continue;
+        }
+        mapped_width = std::max(mapped_width, far_edge(far_edge(left, x), w));
+        mapped_height = std::max(mapped_height, far_edge(far_edge(top, y), h));
         ++screen.cabinets;
       }
     };
@@ -361,17 +374,19 @@ parse_screens(const JsonValue &data, const std::vector<Input> &inputs) {
         const auto [rect_width, rect_height] = size_at(canvas, "rectSize");
         width = std::max(width, rect_width);
         height = std::max(height, rect_height);
-        add_cabinets(canvas.find("cabinets"), 0U, 0U, width, height);
-        screen.width = std::max(screen.width, canvas_x + width);
-        screen.height = std::max(screen.height, canvas_y + height);
+        declared_width = std::max(declared_width, far_edge(canvas_x, width));
+        declared_height = std::max(declared_height, far_edge(canvas_y, height));
+        add_cabinets(canvas.find("cabinets"), canvas_x, canvas_y);
       }
     }
-    add_cabinets(entry.find("cabinets"), 0U, 0U, screen.width, screen.height);
+    add_cabinets(entry.find("cabinets"), 0U, 0U);
     {
       const auto [width, height] = extent_of(entry, {"resolution", "size"});
-      screen.width = std::max(screen.width, width);
-      screen.height = std::max(screen.height, height);
+      declared_width = std::max(declared_width, width);
+      declared_height = std::max(declared_height, height);
     }
+    screen.width = screen.cabinets != 0U ? mapped_width : declared_width;
+    screen.height = screen.cabinets != 0U ? mapped_height : declared_height;
 
     // In All-In-One mode layers place inputs on the screen; pick the layer
     // set for the screen's working mode.

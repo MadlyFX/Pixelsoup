@@ -200,7 +200,8 @@ void coex_answers_become_a_processor_card() {
   DEVICES_CHECK(screens.size() == 1U);
   const topology::HardwareProcessorScreen &screen = screens.front();
   DEVICES_CHECK(screen.id == "{8a0f}" && screen.name == "Main wall");
-  DEVICES_CHECK(screen.width == 3000U && screen.height == 600U);
+  // The cabinets, not canvas 1's declared 600 rows, set the height.
+  DEVICES_CHECK(screen.width == 3000U && screen.height == 500U);
   DEVICES_CHECK(screen.cabinets == 3U && screen.refresh_millihertz == 59'940U);
   // Layers in z order: HDMI 1 cropped on the left, then the DP on the right.
   DEVICES_CHECK(screen.layers.size() == 2U);
@@ -251,6 +252,24 @@ void coex_answers_become_a_processor_card() {
                     topology::HardwarePixelRect{0U, 0U, 2880U, 1536U} &&
                 other[0].layers[0].screen ==
                     topology::HardwarePixelRect{0U, 0U, 2880U, 1536U});
+
+  // A canvas and screen declaring the processor's whole area, and a cabinet
+  // with no pixel size, do not stretch the wall past its mapped panels.
+  const auto oversized = devices::parse_json(R"({"screens":[{
+      "screenID":"{78}","workingMode":0,
+      "size":{"width":32768,"height":32768},
+      "canvases":[{"canvasID":0,"position":{"x":0,"y":0},
+        "size":{"width":32768,"height":32768},
+        "rectSize":{"width":65535,"height":65535},
+        "cabinets":[
+          {"cabinetID":1,"position":{"x":0,"y":0},"size":{"width":1440,"height":768}},
+          {"cabinetID":2,"position":{"x":1440,"y":768},"size":{"width":1440,"height":768}},
+          {"cabinetID":3,"position":{"x":40000,"y":40000},"size":{"width":0,"height":0}}]}]}]})");
+  DEVICES_CHECK(oversized.has_value());
+  const auto panels = coex::parse_screens(*oversized, inputs);
+  DEVICES_CHECK(panels.size() == 1U);
+  DEVICES_CHECK(panels[0].width == 2880U && panels[0].height == 1536U &&
+                panels[0].cabinets == 2U);
 
   const auto monitor = devices::parse_json(monitor_answer);
   const coex::Identity identity =
