@@ -1524,7 +1524,7 @@ void write_action(Writer& w, const Action& a) {
 
 bool read_action(Reader& r, Action& a) {
     const std::uint8_t kind = r.u8();
-    if (kind > static_cast<std::uint8_t>(ActionKind::Blast)) {
+    if (kind > static_cast<std::uint8_t>(ActionKind::Hold)) {
         return false;
     }
     a.kind = static_cast<ActionKind>(kind);

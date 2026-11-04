@@ -182,7 +182,7 @@ std::optional<Vec3> on_plane(const GrabPlane& plane, Vec3 origin, Vec3 direction
 }
 
 GrabStart begin_grab(Document& document, const ActTargets& targets, const StageHit& hit, Quat held, Vec3 view,
-                     std::uint64_t tick, float gain, float max_speed) {
+                     std::uint64_t tick, float gain, float max_speed, bool firm) {
     GrabStart start;
     if (!document.scene) {
         start.refusal = "Only a scene can be acted on";
@@ -205,7 +205,7 @@ GrabStart begin_grab(Document& document, const ActTargets& targets, const StageH
     start.hold.plane = GrabPlane{hit.point, normalized(view, Vec3{0.0F, 0.0F, -1.0F})};
     start.hold.offset = hit.center - hit.point;
     start.hold.serial =
-        add_grab(document.scene->performance, tick, *ref, hit.center, turn_of(held), gain, max_speed);
+        add_grab(document.scene->performance, tick, *ref, hit.center, turn_of(held), gain, max_speed, firm);
     return start;
 }
 

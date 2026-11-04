@@ -1590,10 +1590,51 @@ struct Heat final {
     friend bool operator==(const Heat&, const Heat&) = default;
 };
 
+// Wind on a rigid physics emitter's bodies: air moving at `velocity` (m/s)
+// drags each body towards its own speed, as a sail is pushed.
+// - **How hard:** `drag` (kg/m^3: half the air's density times a drag
+//   coefficient; 0.6 is about a box in air) times the body's area (the
+//   square of its size, its kind's scale applied) times the air's speed past
+//   it, squared, along the way the air moves past it. The world divides that
+//   force by the body's mass, so a light body (a cardboard box, a sheet) is
+//   carried off where a heavy one hardly moves.
+// - **Gusts:** with `gust` above 0 the wind's speed rises and falls by up to
+//   that share of itself, smoothly, over about `gust_seconds`, the same for
+//   every body: a function of the step and the module's id, never a clock.
+// - **Resting bodies:** a sleeping body is woken only when the push could
+//   slide it: more than its kind's friction times its weight, worked out
+//   from its kind's density and its size. Heavy things at rest stay asleep
+//   and cost nothing; awake ones are pushed whatever they weigh.
+// Rigid physics emitters only; their props are left alone.
+struct BodyWind final {
+    static constexpr std::string_view kind = "body_wind";
+    ModuleId id{};
+    Vec3 velocity{4.0F, 0.0F, 0.0F};
+    float drag{0.6F};
+    float gust{0.0F};
+    float gust_seconds{2.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("velocity", self.velocity);
+        visit("drag", self.drag);
+        visit("gust", self.gust);
+        visit("gust_seconds", self.gust_seconds);
+    }
+    friend bool operator==(const BodyWind&, const BodyWind&) = default;
+};
+
+// Winds one rigid physics emitter may blow its bodies with.
+inline constexpr std::size_t max_body_winds = 16U;
+
+// The air's velocity a BodyWind blows with in step `tick` at
+// `simulation_rate`: its velocity, times its gust at that step.
+[[nodiscard]] Vec3 body_wind_at(const BodyWind& wind, std::uint64_t tick, std::uint32_t simulation_rate) noexcept;
+
 using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, Converge, PlaneCollision,
                                   SphereCollision, BoxCollision, SdfCollision, BodyCollision, ColorOverLife,
                                   SizeOverLife, RigidBody, RigidPhysics, Break, Glue, Shockwave, Heat, Wake,
-                                  VolumeAdvect, VolumeSource>;
+                                  VolumeAdvect, VolumeSource, BodyWind>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
@@ -1609,7 +1650,7 @@ using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, C
            !std::holds_alternative<SizeOverLife>(module) && !std::holds_alternative<RigidBody>(module) &&
            !std::holds_alternative<RigidPhysics>(module) && !std::holds_alternative<Break>(module) &&
            !std::holds_alternative<Glue>(module) && !std::holds_alternative<Heat>(module) &&
-           !std::holds_alternative<VolumeSource>(module);
+           !std::holds_alternative<VolumeSource>(module) && !std::holds_alternative<BodyWind>(module);
 }
 
 // ---------------------------------------------------------------- render

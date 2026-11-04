@@ -3,6 +3,7 @@
 #include "catalog.hpp"
 #include "compile.hpp"
 #include "document.hpp"
+#include "kinds.hpp"
 #include "library.hpp"
 #include "performance.hpp"
 #include "scene_properties.hpp"
@@ -422,9 +423,18 @@ Uid add_bound_system(Document &document, RelationKind kind, Uid object) {
         particles.speed = {0.5F, 1.5F};
         particles.lifetime = {0.6F, 1.4F};
     }
-    if (add_relationship(document, kind, object, system) == 0U) {
+    const Uid rule = add_relationship(document, kind, object, system);
+    if (rule == 0U) {
         static_cast<void>(remove_item(document, system));
         return 0U;
+    }
+    if (kind == RelationKind::EmitOnHit) {
+        // What a hit gives off unless the artist says otherwise: a puff of
+        // dust, bigger for harder hits (kinds.hpp has sparks and glints).
+        auto &relationships = document.scene->relationships;
+        const auto made = std::find_if(relationships.begin(), relationships.end(),
+                                       [rule](const Relationship &r) { return r.uid == rule; });
+        style_effect(std::get<ParticleSystem>(document.scene->item(system)->data), *made, EffectTemplate::DustOnHit);
     }
     return system;
 }
@@ -1045,6 +1055,24 @@ Document lower_scene(const Document &document, Uid live) {
         ordered.push_back(&item);
     }
     std::sort(ordered.begin(), ordered.end(), [](const SceneItem *a, const SceneItem *b) { return a->uid < b->uid; });
+    // Wind that blows on things blows on the whole solid world, in identity
+    // order, each with ids of its own item's.
+    for (const SceneItem *item : ordered) {
+        const auto *force = std::get_if<Force>(&item->data);
+        if (force == nullptr || force->kind != ForceKind::Wind || !force->bodies || !item->simulate ||
+            !(force->air_speed > 0.0F)) {
+            continue;
+        }
+        constexpr float degrees = 3.14159265358979F / 180.0F;
+        const float heading = force->heading * degrees;
+        out.body_winds.push_back(BodyWind{
+            .id = item->uid * 16U,
+            .velocity = Vec3{std::cos(heading), 0.0F, -std::sin(heading)} * force->air_speed,
+            .drag = body_wind_drag,
+            .gust = std::clamp(force->gust, 0.0F, 1.0F),
+            .gust_seconds = body_wind_gust_seconds,
+        });
+    }
     Uid host = 0U; // the first simulating layer holds every blast; a blast throws everything
     for (const SceneItem *item : ordered) {
         if (std::holds_alternative<Group>(item->data) || std::holds_alternative<Force>(item->data)) {

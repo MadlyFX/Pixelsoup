@@ -99,6 +99,7 @@ the emitter, module and field at fault.
 | Update: after integration | `RigidBody`, `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `VolumeSource` (feeds a grid volume) |
 | Update: instead of all motion | `RigidPhysics` (needs a rigid solver, see below) |
 | Update: coming apart | `Break` (rigid physics only) |
+| Update: wind on bodies | `BodyWind` (rigid physics only: drag on each body by its area, divided by its mass, gusting by the step; `RigidWorld::force`) |
 | Update: hitting another emitter's bodies | `BodyCollision`, and `Wake` (stirred by them as they move) |
 
 Each step ages and retires particles, applies forces in stack order,
@@ -338,8 +339,11 @@ take it away, paint particles in. Actions are inputs like parameter values:
   emitter's spawns start where the action says, offset and thrown by the
   init modules; the GPU runtime bears them too.
 - `Push` adds a velocity and a spin to a body; `Steer` drives a body towards
-  a pose, as a hand holding it that lets go when the steering stops; `Remove`
-  ends a body's life. All three name their body by its spawn index, so a
+  a pose, as a hand holding it that lets go when the steering stops; `Hold`
+  puts a body exactly at a pose by the end of its step, kinematic, shoving
+  what it meets and never pushed back, and the first step without one lets
+  it go at the speed the hold moved it (`RigidWorld::hold`, `let_go`); `Remove`
+  ends a body's life. All four name their body by its spawn index, so a
   pile's bodies can be handled too. `Blast` names none: it throws every body
   within its `radius` of its `position` out from there, `power` m/s at the
   middle falling to nothing at the edge (`blast_push`, as an effect's Blast
@@ -1028,7 +1032,8 @@ player.
 
 A small container of named entries, sorted by name, with an FNV-1a checksum
 (layout in `include/ajfx/package.hpp`).
-- `effect.json` holds the effect (format 10: the `spawn_actions` module; 9
+- `effect.json` holds the effect (format 11: the `body_wind` module; 10 the
+  `spawn_actions` module; 9
   BoxCollision's turn; 8 SpawnPile's single shape; 7 the effect's `volumes`
   and the `volume_source` and `volume_advect` modules; 6 the renderer's `lighting`,
   `lightmap`, `curvature`, `wrap`, `ambient` and `shadowed`; 5 added

@@ -185,7 +185,9 @@ given at start replaces the scene; `--fresh` forgets the lot.
 | `src/stage_pick.*` | The solid things in the preview at a step, and which one a click meets |
 | `src/performance.*` | The performance as `ajfx::Action`s: drops, deletions, pushes, grabs, paint, blasts; editing and re-recording it |
 | `src/hands.*` | The hands: the brush (paint, erase, push, pull), grab and throw, poke, blast; playing a scene headless |
-| `src/cli.cpp` | `ajfx-studio-cli`: hands and replays from the command line |
+| `src/kinds.*` | The palette's starter kinds and the effect templates attached to objects |
+| `src/issues.*` | The issues list: validation, budgets, refused drops, unapplied acts, stale caches |
+| `src/cli.cpp` | `ajfx-studio-cli`: hands, the palette, issues and replays from the command line |
 | `src/guides.*` | Guides and handles: where things act, and what a dragged handle sets |
 | `src/package_builder.*` | The background worker: kernels, packages, the artist's files, CPU analysis |
 | `src/user_assets.*` | The artist's files made package-ready: textures, meshes, baked collision fields, outlines |
@@ -238,7 +240,32 @@ reopening, and fails unless all three agree bit for bit. `run <script>` does
 a script's lines in order and `do` one line, writing the scene back (or to
 `--out`). `--help` lists the lines: `drop`, `paint`, `stroke`, `erase`,
 `push`, `pull`, `poke`, `blast`, `grab`, `delete`, `remove`, `retime`,
-`rerecord` and `clear`.
+`rerecord` and `clear`; `grab ... hold=firm` holds the body firmly rather
+than steering it.
+
+The palette and the issues list are driven from it too:
+
+```powershell
+ajfx-studio-cli new sandbox sandbox.ajfxstudio
+```
+
+```powershell
+ajfx-studio-cli sandbox.ajfxstudio wind 90 12 gust=0.3
+```
+
+```powershell
+ajfx-studio-cli sandbox.ajfxstudio issues 360
+```
+
+`kinds` lists the starter kinds and effect templates; `new sandbox` stands
+one of every starter kind on the stage. `add-kind <kind> [<point>]` adds a
+starter kind with its effects, `attach <object> <template> [tint=r,g,b]`
+attaches an effect to any object, `restyle <system> <template>` puts a
+template back over an attached effect, `effects <object>` lists them, and
+`wind <heading> <air m/s> [gust= strength=]` adds a wind that blows on
+particles and light things alike. `issues [<step>] [--cache <file>]` prints
+the issues list, played to the step (the loop by default), and with
+`--cache` whether that cache still holds the scene.
 
 Delivery is driven from the command line too:
 

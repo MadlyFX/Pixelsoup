@@ -27,6 +27,7 @@ void add_scene_tests(std::vector<studio_test::Case>& cases);
 void add_performance_tests(std::vector<studio_test::Case>& cases);
 void add_stage_tests(std::vector<studio_test::Case>& cases);
 void add_hands_tests(std::vector<studio_test::Case>& cases);
+void add_palette_tests(std::vector<studio_test::Case>& cases);
 void add_delivery_tests(std::vector<studio_test::Case>& cases);
 
 int main() {
@@ -46,6 +47,7 @@ int main() {
     add_performance_tests(cases);
     add_stage_tests(cases);
     add_hands_tests(cases);
+    add_palette_tests(cases);
     add_delivery_tests(cases);
     int failures = 0;
     for (const studio_test::Case& test : cases) {

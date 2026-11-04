@@ -53,6 +53,14 @@ enum class ActionKind : std::uint8_t {
     // first, so their pieces are thrown too; loose props are thrown as well.
     // Bodies only, like Push.
     Blast,
+    // Holds the body whose spawn index is `target` firmly at `position` and
+    // `orientation` by the end of this step: it is moved there whatever
+    // stands in the way, shoving what it meets, and nothing it meets pushes
+    // it back (a kinematic body, as a driven prop is). Holding it every step
+    // is a firm hand; the first step without a Hold lets go of it, awake,
+    // with the velocity the last step's move gave it, so a firm hand throws
+    // exactly as fast as it moved. Bodies only.
+    Hold,
 };
 
 struct Action final {
@@ -74,7 +82,7 @@ struct Action final {
     // Spawn: the tick a body wakes at; at or before its own tick, it is
     // awake from the start.
     std::uint64_t release{0U};
-    // Push, Remove, Steer: the spawn index of the particle acted on.
+    // Push, Remove, Steer, Hold: the spawn index of the particle acted on.
     std::uint32_t target{0U};
     Vec3 push{};
     Vec3 twist{};

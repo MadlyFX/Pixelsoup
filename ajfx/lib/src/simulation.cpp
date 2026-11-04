@@ -759,6 +759,9 @@ void apply(const Break&, Step&) {}
 // Joins are made as bodies are born and broken by the world (see glue_bodies).
 void apply(const Glue&, Step&) {}
 
+// The wind blows on bodies before the world steps (see wind_bodies).
+void apply(const BodyWind&, Step&) {}
+
 // A glow is worked out afresh with the colour, after every colour over life
 // (see detail::glow).
 void apply(const Heat&, Step&) {}
@@ -921,6 +924,95 @@ void push_bodies(std::span<const Action> actions, const EmitterState& s, RigidWo
             const std::uint32_t slot = s.body[*i];
             world.wake(std::span<const std::uint32_t>{&slot, 1U});
             steer_body(action, s, *i, world);
+        }
+    }
+}
+
+// The Hold actions of the step, in the provider's order, after the pushes
+// and steers so a firm hand has the last word on what it holds. A body held
+// the step before (`before`, that step's actions) and not held now is let
+// go: the world holding it gives it back, and a world rebuilt from a
+// checkpoint since, which holds nothing, only wakes it, so the two agree.
+void hold_bodies(std::span<const Action> actions, std::span<const Action> before, const EmitterState& s,
+                 RigidWorld& world) {
+    const auto holds = [](std::span<const Action> list, std::uint32_t target) {
+        return std::any_of(list.begin(), list.end(), [target](const Action& a) {
+            return a.kind == ActionKind::Hold && a.target == target;
+        });
+    };
+    for (const Action& action : before) {
+        if (action.kind != ActionKind::Hold || holds(actions, action.target)) {
+            continue;
+        }
+        if (const std::optional<std::size_t> i = find_target(s, action.target)) {
+            world.let_go(s.body[*i]);
+        }
+    }
+    for (const Action& action : actions) {
+        if (action.kind != ActionKind::Hold) {
+            continue;
+        }
+        if (const std::optional<std::size_t> i = find_target(s, action.target)) {
+            world.hold(s.body[*i], action.position, action.orientation);
+        }
+    }
+}
+
+// What the wind needs of one body kind: how much of a cube of its size it
+// fills, its density and its friction, and its scale.
+struct WindKind final {
+    float fill{1.0F};
+    float density{1000.0F};
+    float friction{0.5F};
+    float scale{1.0F};
+};
+
+WindKind wind_kind(const Emitter& emitter, const RigidPhysics& physics, std::uint32_t kind) {
+    const bool own = kind == 0U || kind > physics.bodies.size();
+    const RigidShape shape = own ? physics.shape : physics.bodies[kind - 1U].shape;
+    const bool modelled = !own && !physics.bodies[kind - 1U].mesh.empty();
+    RigidShape is = shape;
+    if (is == RigidShape::Auto) {
+        is = emitter.renderer.geometry == Geometry::Mesh || modelled ? RigidShape::Hull : RigidShape::Sphere;
+    }
+    WindKind out;
+    // A hull of a model fills about half its box; a ball pi/6 of it.
+    out.fill = is == RigidShape::Box ? 1.0F : is == RigidShape::Sphere ? std::numbers::pi_v<float> / 6.0F : 0.5F;
+    out.density = own ? physics.density : physics.bodies[kind - 1U].density;
+    out.friction = own ? physics.friction : physics.bodies[kind - 1U].friction;
+    out.scale = own ? 1.0F : physics.bodies[kind - 1U].scale;
+    return out;
+}
+
+// The emitter's BodyWind modules, in stack order, on every body in birth
+// order, before the world steps (see BodyWind): the force of the air past
+// each, which the world divides by the body's mass. A sleeping body is woken
+// only by a push that could slide it.
+void wind_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physics, RigidWorld& world,
+                 const Vec3& gravity) {
+    EmitterState& s = step.s;
+    const float weight_per_kg = std::sqrt(dot(gravity, gravity));
+    for (const UpdateModule& module : emitter.update) {
+        const auto* wind = std::get_if<BodyWind>(&module);
+        if (wind == nullptr || !(wind->drag > 0.0F)) {
+            continue;
+        }
+        const Vec3 air = body_wind_at(*wind, step.tick, step.in.effect.simulation_rate);
+        for (std::size_t i = 0U; i < s.alive(); ++i) {
+            const WindKind kind = wind_kind(emitter, physics, i < s.body_kind.size() ? s.body_kind[i] : 0U);
+            const float side = s.size[i] * kind.scale;
+            const Vec3 past = air - s.velocity[i];
+            const float speed = std::sqrt(dot(past, past));
+            if (!(speed > 0.0F) || !(side > 0.0F)) {
+                continue;
+            }
+            const Vec3 force = past * (wind->drag * side * side * speed);
+            // Could the push slide it from rest? Its weight from its kind's
+            // density and its size, times its kind's grip.
+            const float mass = kind.density * kind.fill * side * side * side;
+            const float push = wind->drag * side * side * speed * speed;
+            const bool wake = push > kind.friction * mass * weight_per_kg;
+            world.force(RigidSide::Body, s.body[i], force, wake);
         }
     }
 }
@@ -2325,9 +2417,21 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
             world->wake(waking);
         }
         const RigidPhysics& physics = *rigid_physics(emitter);
-        // Hands and blasts act before the world steps, so the step carries
-        // them: the actions first, then the blasts.
+        // Hands, wind and blasts act before the world steps, so the step
+        // carries them: the actions first (pushes and steers, then firm
+        // holds), the wind, then the blasts.
         push_bodies(acts, s, *world);
+        const std::span<const Action> before = acting && actions != nullptr && state_.tick > 0U
+                                                    ? actions->actions_at(emitter.name, state_.tick - 1U)
+                                                    : std::span<const Action>{};
+        hold_bodies(acts, before, s, *world);
+        Vec3 gravity{};
+        for (const UpdateModule& module : emitter.update) {
+            if (const auto* g = std::get_if<Gravity>(&module)) {
+                gravity += step.in(g->acceleration);
+            }
+        }
+        wind_bodies(step, emitter, physics, *world, gravity);
         blast_bodies(step, emitter, physics, *world);
         blast_actions(step, emitter, physics, *world, acts);
         step.last = s.alive();

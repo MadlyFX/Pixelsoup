@@ -277,6 +277,27 @@ public:
     // in birth order, then props in order), so the step carries it. Fixed
     // and Driven props, statics and slots holding no body are left alone.
     virtual void push(RigidSide side, std::uint32_t index, Vec3 change, Vec3 twist = {}) = 0;
+    // Applies `force` (newtons) through the middle of one of the emitter's
+    // bodies (its slot) or of a Loose prop (its index) for the next step
+    // alone: the world divides it by the body's own mass, so the same force
+    // carries a light body off and hardly moves a heavy one. A sleeping body
+    // is woken by it only when `wake` is set; otherwise it is left asleep
+    // and untouched, and nothing of the force waits for it. Called before
+    // step, in a fixed order, like push. Statics, Fixed and Driven props and
+    // empty slots are left alone.
+    virtual void force(RigidSide side, std::uint32_t index, Vec3 force, bool wake) = 0;
+    // Holds the body in `slot` firmly: it is moved to `position` and
+    // `orientation` over the next step, shoving whatever it meets, and
+    // nothing it meets moves it (it is kinematic, as a Driven prop is).
+    // Called before step, every step it is to be held; it is held until
+    // let_go.
+    virtual void hold(std::uint32_t slot, Vec3 position, Quat orientation) = 0;
+    // Gives a held body back to the world: it moves under forces and what it
+    // meets again, awake, at the velocity its last hold gave it; a body not
+    // held is only woken. A world rebuilt from a checkpoint holds nothing
+    // until it is told to, so a caller lets go of every body it held the
+    // step before, whether or not this world was the one holding it.
+    virtual void let_go(std::uint32_t slot) = 0;
     // Advances by the world's step under `gravity`.
     virtual void step(Vec3 gravity) = 0;
     [[nodiscard]] virtual RigidBodyState body(std::uint32_t slot) const = 0;

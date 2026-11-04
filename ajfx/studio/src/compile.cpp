@@ -323,7 +323,14 @@ Compiled compile(const Document& document, Purpose purpose, std::uint32_t live) 
                                                              .max_per_step = SolidWorld::drops_per_step,
                                                              .max_alive = document.drops});
             }
-            if (merged && (members.size() > 1U || drops)) {
+            // Wind that blows on things blows on every body of the world.
+            if (merged) {
+                for (BodyWind wind : document.body_winds) {
+                    wind.velocity = wind.velocity * document.scale;
+                    merged->emitter.update.push_back(wind);
+                }
+            }
+            if (merged && (members.size() > 1U || drops || !document.body_winds.empty())) {
                 // Sized and checked as one emitter, as a layer is.
                 Effect alone;
                 alone.name = effect.name;

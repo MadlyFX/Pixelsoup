@@ -162,6 +162,9 @@ const std::vector<SceneProperty> &force_properties() {
             property("power", "Power", "Force", &Force::power, 0, 1000, "m/s"),
             property("radius", "Radius", "Force", &Force::radius, 0.01F, 1000, "m"),
             property("time", "Goes off at", "Force", &Force::time, 0, 3600, "s"),
+            property("bodies", "Blows on things", "Force", &Force::bodies),
+            property("air_speed", "Air speed", "Force", &Force::air_speed, 0, 100, "m/s"),
+            property("gust", "Gusts", "Force", &Force::gust, 0, 1, {}),
             property("all_systems", "Every particle system", "Targets", &Force::all_systems)};
         for (SceneProperty &p : out) {
             if (p.control.id == "heading" || p.control.id == "time") {

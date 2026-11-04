@@ -478,6 +478,9 @@ inline void pack(const Break&, const PackContext&, Packer&) {}
 // So does holding bodies to each other.
 inline void pack(const Glue&, const PackContext&, Packer&) {}
 
+// And the wind on bodies.
+inline void pack(const BodyWind&, const PackContext&, Packer&) {}
+
 // One module: its id, then its scope where it has one (scope_floats), then
 // its data.
 template <class Module>

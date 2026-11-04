@@ -459,6 +459,9 @@ public:
         settings.mLinearDamping = desc_.linear_damping;
         settings.mAngularDamping = desc_.angular_damping;
         settings.mAllowSleeping = desc_.allow_sleep;
+        // So a hand can hold it firmly (hold): Dynamic bodies have motion
+        // properties either way, so this changes nothing about how one moves.
+        settings.mAllowDynamicOrKinematic = true;
         JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
         if (JPH::Body* body = bodies.CreateBodyWithID(JPH::BodyID(slot), settings)) {
             bodies.AddBody(body->GetID(), asleep ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
@@ -606,6 +609,59 @@ public:
         } else {
             bodies.AddLinearAndAngularVelocity(id, vec(change), vec(twist));
         }
+    }
+
+    // Jolt divides the force by the body's mass in the step, then forgets
+    // it. A sleeping body that is not to be woken is not given it at all, so
+    // no force waits on a body that a checkpoint would not carry.
+    void force(RigidSide side, std::uint32_t index, Vec3 force, bool wake) override {
+        JPH::BodyID id;
+        if (side == RigidSide::Body && index < desc_.capacity) {
+            id = JPH::BodyID(index);
+        } else if (side == RigidSide::Prop && index < desc_.props.size() &&
+                   desc_.props[index].motion == RigidPropDesc::Motion::Loose) {
+            id = JPH::BodyID(prop_id(index));
+        } else {
+            return;
+        }
+        JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
+        if (!bodies.IsAdded(id) || bodies.GetMotionType(id) != JPH::EMotionType::Dynamic ||
+            (!wake && !bodies.IsActive(id))) {
+            return;
+        }
+        bodies.AddForce(id, vec(force), JPH::EActivation::Activate);
+    }
+
+    // A held body is kinematic: Jolt gives it the velocity that takes it to
+    // the pose over the step, as it does a driven prop, so it shoves what is
+    // in its way and is never pushed back.
+    void hold(std::uint32_t slot, Vec3 position, Quat orientation) override {
+        const JPH::BodyID id(slot);
+        JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
+        if (slot >= desc_.capacity || !bodies.IsAdded(id)) {
+            return;
+        }
+        if (bodies.GetMotionType(id) != JPH::EMotionType::Kinematic) {
+            bodies.SetMotionType(id, JPH::EMotionType::Kinematic, JPH::EActivation::Activate);
+        }
+        bodies.MoveKinematic(id, JPH::RVec3(position.x, position.y, position.z),
+                             JPH::Quat(orientation.x, orientation.y, orientation.z, orientation.w).Normalized(),
+                             desc_.step_seconds);
+    }
+
+    // Jolt keeps a kinematic body's velocity when it becomes dynamic, which
+    // is the throw. It is woken either way, so a world that was holding the
+    // body and one rebuilt from a checkpoint (which holds nothing) agree.
+    void let_go(std::uint32_t slot) override {
+        const JPH::BodyID id(slot);
+        JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
+        if (slot >= desc_.capacity || !bodies.IsAdded(id)) {
+            return;
+        }
+        if (bodies.GetMotionType(id) != JPH::EMotionType::Dynamic) {
+            bodies.SetMotionType(id, JPH::EMotionType::Dynamic, JPH::EActivation::DontActivate);
+        }
+        bodies.ActivateBody(id);
     }
 
     void step(Vec3 gravity) override {

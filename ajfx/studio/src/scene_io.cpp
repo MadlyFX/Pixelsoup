@@ -278,6 +278,9 @@ std::string save_scene(const Document &document) {
                 a.add("turn", numbers({act.turn.x, act.turn.y, act.turn.z}));
                 a.add("gain", numeric(act.gain));
                 a.add("max_speed", numeric(act.max_speed));
+                if (act.firm) {
+                    a.add("firm", Json::of(true));
+                }
                 // Each sample as [tick, x, y, z].
                 Json path = Json::array();
                 for (const GrabSample& sample : act.path) {
@@ -624,8 +627,10 @@ Loaded load_scene(const Json &root) {
                 const Json* gain = a.find("gain");
                 const Json* most = a.find("max_speed");
                 const Json* path = a.find("path");
+                const Json* firm = a.find("firm");
                 if (!keys(a, {"serial", "tick", "kind", "object", "count", "drop", "turn", "gain", "max_speed",
-                              "path"}) ||
+                              "path", "firm"}) ||
+                    (firm != nullptr && firm->type != Json::Type::Bool) ||
                     !integer(a, "object", act.target.object) || !integer(a, "count", act.target.count) ||
                     !integer(a, "drop", act.target.drop) || !numbers(a.find("turn"), turn) || gain == nullptr ||
                     most == nullptr || gain->type != Json::Type::Number || most->type != Json::Type::Number ||
@@ -645,6 +650,7 @@ Loaded load_scene(const Json &root) {
                 act.turn = {turn[0], turn[1], turn[2]};
                 act.gain = static_cast<float>(gain->number);
                 act.max_speed = static_cast<float>(most->number);
+                act.firm = firm != nullptr && firm->boolean;
             } else if (kind == "paint") {
                 std::array<float, 3> position{};
                 std::array<float, 3> normal{};

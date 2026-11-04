@@ -303,12 +303,12 @@ void grids_round_trip_through_packages() {
     plain.emitter("e").spawn(SpawnBurst{}).init(Lifetime{});
     AJFX_CHECK(effect_to_json(plain.build().value()).find("volumes") == std::string::npos);
     // A misspelt field of a volume is reported with its path.
-    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 10, "name": "x", "volumes": [{"name": "a", "cel_size": 2}]})"),
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 11, "name": "x", "volumes": [{"name": "a", "cel_size": 2}]})"),
                           ErrorCode::MalformedPackage, "volumes[0] has unknown field 'cel_size'"));
-    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 10, "name": "x", "volumes": {"name": "a"}})"),
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 11, "name": "x", "volumes": {"name": "a"}})"),
                           ErrorCode::MalformedPackage, "volumes must be an array of volumes"));
     // A volume in the JSON with nothing but a name takes the defaults.
-    const Result<Effect> defaults = effect_from_json(R"({"format": 10, "name": "x", "volumes": [{"name": "a"}]})");
+    const Result<Effect> defaults = effect_from_json(R"({"format": 11, "name": "x", "volumes": [{"name": "a"}]})");
     AJFX_CHECK(defaults.ok() && defaults.value().volumes.size() == 1U && defaults.value().volumes[0].nx == 16U);
 }
 

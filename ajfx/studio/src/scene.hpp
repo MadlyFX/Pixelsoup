@@ -148,6 +148,13 @@ struct Force final {
     float power{12.0F};              // Blast: speed given at the centre, m/s
     float radius{3.0F};              // Blast: nothing beyond this
     float time{0.5F};                // Blast: when it goes off, seconds
+    // Wind: it blows on the solid world's things too, as air moving at
+    // `air_speed` m/s along the heading, its speed rising and falling by
+    // `gust` of itself (0 is steady, 1 stops and doubles). Light things are
+    // carried off; heavy ones at rest are left be (ajfx::BodyWind).
+    bool bodies{false};
+    float air_speed{8.0F};
+    float gust{0.0F};
     bool all_systems{true};          // otherwise `targets` names the systems it acts on
     std::vector<std::uint32_t> targets;
     friend bool operator==(const Force &, const Force &) = default;
@@ -294,6 +301,11 @@ struct Act final {
     std::vector<GrabSample> path;
     float gain{};
     float max_speed{};
+    // Grab: held firmly rather than steered. A firm hand puts the body
+    // exactly where it is carried, shoving whatever is in the way, and
+    // nothing pushes it back (ajfx::ActionKind::Hold); a steered one is
+    // stopped by what it meets. Either throws it as fast as it moved.
+    bool firm{false};
     friend bool operator==(const Act &, const Act &) = default;
 };
 struct Performance final {
@@ -380,6 +392,10 @@ void rebase_models(Document &document, const std::filesystem::path &from, const 
 // A blast throws everything; the others each lower into the systems they
 // act on, at most this many per system.
 inline constexpr std::size_t max_forces_per_system = 16U;
+// How a Wind that blows on things blows (ajfx::BodyWind): drag of about a
+// box in air, kg/m^3, and gusts that rise and fall over about two seconds.
+inline constexpr float body_wind_drag = 0.6F;
+inline constexpr float body_wind_gust_seconds = 2.0F;
 [[nodiscard]] std::uint32_t add_source(Document &document, std::uint32_t system, SourceMode mode);
 // Appends a behavior to a system's Motion stack with that kind's defaults.
 [[nodiscard]] std::uint32_t add_behavior(Document &document, std::uint32_t system, BehaviorKind kind);

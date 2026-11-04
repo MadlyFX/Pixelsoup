@@ -49,7 +49,7 @@ namespace ajfx {
 // writes.
 inline constexpr std::uint32_t state_format_version = 4U;
 // Version of the cache file this library reads and writes.
-inline constexpr std::uint32_t cache_format_version = 4U;
+inline constexpr std::uint32_t cache_format_version = 5U;
 
 // The whole state as bytes: deterministic, so equal states give equal bytes.
 [[nodiscard]] std::vector<std::uint8_t> write_state(const SimulationState& state);

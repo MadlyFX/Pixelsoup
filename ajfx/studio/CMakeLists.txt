@@ -39,6 +39,8 @@ add_library(ajfx_studio_core STATIC
     src/performance.cpp
     src/stage.cpp
     src/hands.cpp
+    src/kinds.cpp
+    src/issues.cpp
     src/delivery.cpp
     src/export_gltf.cpp
 )
@@ -171,6 +173,7 @@ if(BUILD_TESTING)
         tests/performance_tests.cpp
         tests/stage_tests.cpp
         tests/hands_tests.cpp
+        tests/palette_tests.cpp
         tests/delivery_tests.cpp
         tests/fixtures/recipes.cpp
         tests/fixtures/blast.cpp

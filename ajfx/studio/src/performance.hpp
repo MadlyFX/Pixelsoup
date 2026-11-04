@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 // A scene's performance (scene.hpp) as the simulation takes it: acts turned
 // into ajfx::Actions on the solid world, the one emitter they act on. Acting
@@ -55,11 +56,12 @@ struct ActTargets final {
 
 // The performance as actions, keyed by the solid world's name. Acts on an
 // Object this compile has no body kind for, or on a body it does not make,
-// are left out and counted in `skipped`. Immutable once made: a new
-// performance makes a new one.
+// are left out and counted in `skipped`, and their serials listed in
+// `unapplied`. Immutable once made: a new performance makes a new one.
 [[nodiscard]] std::shared_ptr<const ActionList> performance_actions(const Performance& performance,
                                                                     const ActTargets& targets,
-                                                                    std::size_t* skipped = nullptr);
+                                                                    std::size_t* skipped = nullptr,
+                                                                    std::vector<std::uint32_t>* unapplied = nullptr);
 
 // Records a drop of `object` at `tick` and returns its serial. Acts stay in
 // tick order; one at the same tick as others goes after them.
@@ -79,8 +81,9 @@ inline constexpr float grab_gain = 10.0F;
 inline constexpr float grab_max_speed = 20.0F;
 // Takes hold of the body `target` at `tick`, steering its middle to `point`
 // and holding it turned as `turn` (degrees, as an Object's rotation).
+// A `firm` grab holds it exactly there (Act::firm) rather than steering it.
 std::uint32_t add_grab(Performance& performance, std::uint64_t tick, BodyRef target, Vec3 point, Vec3 turn,
-                       float gain = grab_gain, float max_speed = grab_max_speed);
+                       float gain = grab_gain, float max_speed = grab_max_speed, bool firm = false);
 // Steers the body the grab `serial` holds to `point` from `tick` on. A
 // sample at the grab's last step replaces where that one steers to; an
 // earlier one is refused, as is one for an act that is no grab.

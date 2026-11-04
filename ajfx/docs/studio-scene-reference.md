@@ -133,7 +133,12 @@ buttons for them yet.
   steered to at every step it is held (`ajfx::ActionKind::Steer`, 10 per
   second gain, 20 m/s at most); between samples it is steered along the
   line between them. Letting go is the last sample: the body flies on with
-  the speed the hand gave it, so a swing throws it.
+  the speed the hand gave it, so a swing throws it. A **firm** grab
+  (`Act::firm`, saved as `"firm": true`) holds the body instead
+  (`ajfx::ActionKind::Hold`): it is exactly where it is carried at every
+  step, shoving whatever is in the way and never pushed back, and is let go
+  at the speed it last moved. A steered grab is stopped by a wall; a firm one
+  goes through it, breaking it.
 - **Poke** pushes the body under the pointer along the pointer's way; off its
   middle the push spins it as it would a ball.
 - **Blast** throws every body within its reach out from where it is set off,
@@ -155,6 +160,63 @@ made with it. The timeline panel draws these markers, but dragging the new
 bars there has not been checked in the window yet. A hand that goes on holding
 replays nothing: the performance differs only from the step after its last
 sample (`first_difference`).
+
+### The palette: starter kinds and attached effects
+
+The palette's starters are kinds that already answer when something happens
+to them (`studio/src/kinds.*`; `ajfx-studio-cli kinds`, `add-kind`). Each is an
+ordinary Placed Object with its model, size, material and break rule set,
+and its effects attached; the inspector edits it as any Object.
+
+| Kind | Model, size | Density | Breaks | Effects |
+| --- | --- | --- | --- | --- |
+| Smouldering log | slab, 0.6 m | 600 | never | smoke trail, embers |
+| Crate | cube, 0.5 m, box collider | 300 | into 8 at 5 m/s | dust on hit |
+| Glass pane | slab, 0.8 m | 2500 | into 12 at 2.5 m/s | glints on hit |
+| Brick | cube, 0.25 m, box collider | 1900 | into 4 at 7 m/s | red dust on hit |
+| Rock | rock, 0.4 m | 2600 | never | sparks and dust on hit |
+| Cardboard box | cube, 0.4 m, box collider | 25 | never | none; the wind carries it off |
+
+An attached effect is a particle system bound to its object by a rule,
+styled by a template (`attach_effect`, CLI `attach <object> <template>`):
+*Smoke trail* and *Embers* are trails that run even while the object rests
+(rate per second) and more while it moves (per m/s); *Dust on hit*, *Sparks
+on hit* (only hits of 3 m/s or harder) and *Glints on hit* are hit rules.
+The system and its rule are ordinary scene items, named after the object
+("Log smoke"); `apply_effect_template` (CLI `restyle`) puts a template's
+look, motion stack and rule settings back over one, keeping its name and
+what it is bound to, and refuses a template of the other rule kind. An Emit
+on hit rule made in the inspector now starts as dust rather than a bare glow.
+
+### Wind on things
+
+A Wind force with **Blows on things** set (`Force::bodies`) blows on the
+solid world's loose bodies too, as air moving at **Air speed** m/s along its
+heading, rising and falling by **Gusts** (0 to 1) over about two seconds
+(`ajfx::BodyWind`, drag 0.6 kg/m^3). The push is drag times the body's area
+times the air's speed past it squared, divided by the body's mass in the
+solver, so a cardboard box is carried off and a brick does not move; a body
+at rest is woken only by a push that could slide it, so heavy things at rest
+stay asleep. Props are left alone. The wind's strength on particles is
+unchanged.
+
+### Issues
+
+`studio/src/issues.*` gathers what is wrong, or about to be, into one list
+(`ajfx-studio-cli <scene> issues [<step>] [--cache <file>]`); the Issues panel
+will draw the same list. Each issue has a level (problem, warning, note), a
+kind, the item and act it is about and the step:
+
+- before playing: validation and compile failures, the body kinds and props
+  of the solid world at 75% of their limits or over (every piece a breakable
+  thing comes apart into is a kind), acts this compile cannot apply, and a
+  wind told to blow on things in a scene with nothing loose;
+- played to a step: every refused drop or painted thing, by act and step,
+  with why (the scene's most dropped things at once, or more than 16 asked
+  for in one step), and every particle system that ran out of room;
+- the cache: baked layers whose cache is stale, missing or too large
+  (`bake_issues`), and a cache file opened against the scene as it is now,
+  with its performance and seed (`cache_issue`).
 
 Ctrl-click tree rows to extend a selection. Common inspector values apply to
 the selection in one undoable gesture; `*` marks mixed values. Each property
@@ -427,7 +489,9 @@ compiler's IR, and its recipes as compiler test fixtures.
 Continuous cross-population attraction/repulsion, event endpoints beyond
 collision and motion, light scene items, reusable assemblies, library
 organization, authored checkpoints, viewport tools for the hands (paint,
-grab, poke and blast exist in the core and the command line only),
+grab, poke and blast exist in the core and the command line only), the
+palette panel (starter kinds and effect templates exist in the core and the
+command line only), the Issues panel,
 simulation-independent
 visibility/isolation, controls publishing and the full export review panel
 are not implemented in the scene workspace. Flow coupling is a smoke grid
@@ -443,5 +507,9 @@ distinct generated mesh inputs with fracture beyond the former 64-kind limit.
 The host renderer additionally checks surface color in rendered pixels. The
 two sandbox scenes are recorded, saved, reopened and replayed bit for bit
 headless (`hands_tests.cpp`): logs painted in from a metre up that tumble and
-trail smoke, and a ball picked up, swung and let go so a wall breaks. That
-is not yet proof of them in the viewport, nor a timed usability comparison.
+trail smoke, and a ball picked up, swung and let go so a wall breaks. Every
+starter kind is dropped and checked to break into its fragment count (or not
+at all) and to fire each attached effect; the wind on things moves a
+cardboard box metres and a brick not at all; and a firm grab puts a ball
+exactly on its path through a wall (`palette_tests.cpp`). That is not yet
+proof of them in the viewport, nor a timed usability comparison.

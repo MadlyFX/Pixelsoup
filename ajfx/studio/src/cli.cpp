@@ -8,12 +8,18 @@
 // Delivery too: the performance baked into a cache, written beside its
 // package as the media server plays it, replayed from that cache and
 // compared with the scene, and written as animated glTF for DCC tools.
+//
+// And the palette: starter kinds that answer when something happens to them
+// (kinds.hpp), effects attached to any object from templates, wind that
+// blows on light things, and the issues list (issues.hpp).
 
 #include "bake.hpp"
 #include "delivery.hpp"
 #include "document_io.hpp"
 #include "export_gltf.hpp"
 #include "hands.hpp"
+#include "issues.hpp"
+#include "kinds.hpp"
 #include "performance.hpp"
 #include "scene.hpp"
 #include "stage.hpp"
@@ -51,9 +57,10 @@ using namespace ajfx::studio;
 constexpr const char* usage =
     "ajfx-studio-cli: acts on a scene's performance and replays it, without a window.\n"
     "\n"
-    "  ajfx-studio-cli new <logs|wall|empty> <scene.ajfxstudio>\n"
+    "  ajfx-studio-cli new <logs|wall|sandbox|empty> <scene.ajfxstudio>\n"
     "      Writes a scene to act on: logs that smoulder (a Placed log kind with a\n"
-    "      trail), a wall that breaks with a ball to throw at it, or just ground.\n"
+    "      trail), a wall that breaks with a ball to throw at it, one of every\n"
+    "      starter kind standing on the stage, or just ground.\n"
     "  ajfx-studio-cli <scene> info           What can be acted on and what has been.\n"
     "  ajfx-studio-cli <scene> acts           Every act, one a line.\n"
     "  ajfx-studio-cli <scene> bodies <step>  The solid bodies where they stand at a step.\n"
@@ -62,6 +69,22 @@ constexpr const char* usage =
     "                                         reopening the scene: the digests must agree.\n"
     "  ajfx-studio-cli <scene> run <script>   Does the hands a script lists, in order.\n"
     "  ajfx-studio-cli <scene> do <command...>  Does one hand, as a script line.\n"
+    "  ajfx-studio-cli <scene> issues [<step>] [--cache <file>]\n"
+    "      What is wrong or about to be: validation, budgets, acts not applied, and,\n"
+    "      played to the step (default the loop), refused drops and full systems;\n"
+    "      with --cache, whether that cache still holds the scene.\n"
+    "\n"
+    "Palette (each writes the scene, or --out):\n"
+    "  ajfx-studio-cli kinds                  The starter kinds and effect templates.\n"
+    "  ajfx-studio-cli <scene> add-kind <kind> [<point>]\n"
+    "      Adds a starter kind (log, crate, glass, brick, rock, box) with its effects.\n"
+    "  ajfx-studio-cli <scene> attach <object> <template> [tint=r,g,b]\n"
+    "      Attaches an effect (smoke, embers, dust, sparks, glints) to an object.\n"
+    "  ajfx-studio-cli <scene> restyle <system> <template> [tint=r,g,b]\n"
+    "      Puts a template back over an attached effect's system and its rule.\n"
+    "  ajfx-studio-cli <scene> effects <object>  The effects attached to an object.\n"
+    "  ajfx-studio-cli <scene> wind <heading> <air m/s> [gust=0 strength=1.5]\n"
+    "      Adds a wind that blows on particles and on light things alike.\n"
     "\n"
     "Delivery:\n"
     "  ajfx-studio-cli <scene> bake <out.ajfxcache>\n"
@@ -90,8 +113,9 @@ constexpr const char* usage =
     "  erase|push|pull <step> <point> [radius=0.5 strength=3 falloff=0]\n"
     "  poke <step> <body> <direction> [speed=4 at=<point on the body>]\n"
     "  blast <step> <point> [radius=3 power=10]\n"
-    "  grab <body> <from> <to> <point> [<point> ...] [camera=0,3,10]\n"
+    "  grab <body> <from> <to> <point> [<point> ...] [camera=0,3,10 hold=steer|firm]\n"
     "        Takes hold at <from>, carries it through the points evenly, lets go at <to>.\n"
+    "        A firm hold goes exactly there, shoving what is in its way.\n"
     "  delete <step> <body>\n"
     "  remove <serial>      retime <serial> <step>      rerecord <step>      clear\n";
 
@@ -381,7 +405,12 @@ void act(Session& session, const std::vector<std::string>& tokens) {
                            .block = 0U,
                            .on_body = true,
                            .spawn_index = body->spawn_index};
-        GrabStart start = begin_grab(document, targets, hit, body->orientation, body->position - camera, from);
+        const std::string grip = words.text("hold").value_or("steer");
+        if (grip != "steer" && grip != "firm") {
+            fail("hold is steer or firm");
+        }
+        GrabStart start = begin_grab(document, targets, hit, body->orientation, body->position - camera, from,
+                                     grab_gain, grab_max_speed, grip == "firm");
         refuse_unless(start.refusal);
         // Through the points evenly, a step at a time: the wheel takes the
         // plane to each point's depth, the pointer's ray goes through it.
@@ -398,7 +427,7 @@ void act(Session& session, const std::vector<std::string>& tokens) {
                 fail("the pointer missed the plane at step " + std::to_string(tick));
             }
         }
-        say("grab " + std::to_string(start.hold.serial));
+        say("grab " + std::to_string(start.hold.serial) + (grip == "firm" ? " (firm)" : ""));
     } else if (verb == "delete") {
         words.need(2U, "delete <step> <body>");
         say("delete " + std::to_string(add_delete(performance, to_u64(words.args[0]), to_body(words.args[1]))));
@@ -704,7 +733,121 @@ Document make_scene(std::string_view kind) {
         thrown.density = 3000.0F;
         return document;
     }
-    fail("new makes logs, wall or empty");
+    if (kind == "sandbox") {
+        // One of every starter kind standing on the stage, a step apart
+        // along x, each a Placed kind put down at step 0.
+        float x = -4.0F;
+        for (const StarterKindInfo& info : starter_kinds()) {
+            const Uid made = add_starter_kind(document, info.kind, Vec3{x, 0.5F, -6.0F});
+            if (made == 0U) {
+                fail("no room for " + std::string{info.name});
+            }
+            const Object& o = std::get<Object>(document.scene->item(made)->data);
+            static_cast<void>(add_drop(document.scene->performance, 0U, made, Vec3{x, o.size * 0.5F + 0.02F, 0.0F},
+                                       o.rotation, {}));
+            x += 2.0F;
+        }
+        return document;
+    }
+    fail("new makes logs, wall, sandbox or empty");
+}
+
+// "1.000,0.500,0.250": a colour as a script line writes it.
+Color to_color(std::string_view text) {
+    const Vec3 c = to_vec3(text);
+    return Color{c.x, c.y, c.z, 1.0F};
+}
+
+std::string what_is(const Document& document, Uid uid) {
+    const SceneItem* item = document.scene->item(uid);
+    return std::to_string(uid) + " " + (item == nullptr ? std::string{"?"} : item->name);
+}
+
+void print_effects(const Document& document, Uid object) {
+    for (const AttachedEffect& effect : attached_effects(*document.scene, object)) {
+        say("  " + std::string{relation_name(effect.kind)} + " -> system " + what_is(document, effect.system) +
+            " (rule " + std::to_string(effect.rule) + ")");
+    }
+}
+
+// The palette's commands: they edit the scene itself, not its performance.
+// True when `command` was one of them.
+bool edit_palette(Document& document, const std::string& command, const std::vector<std::string>& rest) {
+    const Words words = words_of(std::vector<std::string>{rest.begin() + 2, rest.end()});
+    const std::optional<Color> tint = words.text("tint") ? std::optional{to_color(*words.text("tint"))} : std::nullopt;
+    if (command == "add-kind") {
+        words.need(1U, "add-kind <kind> [<point>]");
+        const std::optional<StarterKind> kind = starter_kind(words.args[0]);
+        if (!kind) {
+            fail("no starter kind " + words.args[0] + " (log, crate, glass, brick, rock, box)");
+        }
+        const Vec3 at = words.args.size() > 1U ? to_vec3(words.args[1]) : Vec3{0.0F, 0.5F, -6.0F};
+        const Uid made = add_starter_kind(document, *kind, at);
+        if (made == 0U) {
+            fail("the scene has no room for another kind");
+        }
+        say("kind " + what_is(document, made));
+        print_effects(document, made);
+        return true;
+    }
+    if (command == "attach" || command == "restyle") {
+        words.need(2U, command + " <item> <template> [tint=r,g,b]");
+        const Uid uid = to_u32(words.args[0]);
+        const std::optional<EffectTemplate> effect = effect_template(words.args[1]);
+        if (!effect) {
+            fail("no effect template " + words.args[1] + " (smoke, embers, dust, sparks, glints)");
+        }
+        if (command == "attach") {
+            const Uid system = attach_effect(document, uid, *effect, tint);
+            if (system == 0U) {
+                fail("item " + words.args[0] + " is not an object, or the scene has no room");
+            }
+            say("attached " + std::string{effect_template_info(*effect).name} + ": system " + what_is(document, system));
+        } else {
+            if (!apply_effect_template(document, uid, *effect, tint)) {
+                fail("system " + words.args[0] + " is bound by no " +
+                     std::string{relation_name(effect_template_info(*effect).rule)} + " rule");
+            }
+            say("restyled " + what_is(document, uid) + " as " + std::string{effect_template_info(*effect).name});
+        }
+        return true;
+    }
+    if (command == "wind") {
+        words.need(2U, "wind <heading> <air m/s> [gust= strength=]");
+        const Uid uid = add_force(document, ForceKind::Wind);
+        if (uid == 0U) {
+            fail("the scene has no room for a force");
+        }
+        auto& force = std::get<Force>(document.scene->item(uid)->data);
+        force.heading = to_float(words.args[0]);
+        force.air_speed = to_float(words.args[1]);
+        force.bodies = true;
+        force.gust = words.number("gust", 0.0F);
+        const float strength = words.number("strength", force.strength.min);
+        force.strength = {strength, strength};
+        say("wind " + what_is(document, uid) + ": " + words.args[1] + " m/s toward " + words.args[0] +
+            " degrees, on particles and things");
+        return true;
+    }
+    return false;
+}
+
+void print_issues(const std::vector<Issue>& issues) {
+    if (issues.empty()) {
+        say("no issues");
+        return;
+    }
+    for (const Issue& issue : issues) {
+        std::string line = std::string{issue_level_name(issue.level)} + " [" + std::string{issue_kind_name(issue.kind)} +
+                           "]";
+        if (issue.item != 0U) {
+            line += " item " + std::to_string(issue.item);
+        }
+        if (issue.act != 0U) {
+            line += " act " + std::to_string(issue.act);
+        }
+        say(line + ": " + issue.message);
+    }
 }
 
 void write_scene(const Document& document, const std::filesystem::path& path) {
@@ -750,6 +893,23 @@ int run(std::vector<std::string> args) {
             rest.push_back(args[i]);
         }
     }
+    if (!rest.empty() && rest[0] == "kinds") {
+        say("starter kinds (add-kind <id>):");
+        for (const StarterKindInfo& info : starter_kinds()) {
+            std::string effects;
+            for (const EffectTemplate effect : starter_effects(info.kind)) {
+                effects += (effects.empty() ? "" : ", ") + std::string{effect_template_info(effect).id};
+            }
+            say("  " + std::string{info.id} + ": " + std::string{info.name} + " - " + std::string{info.about} +
+                " [" + effects + "]");
+        }
+        say("effect templates (attach <object> <id>):");
+        for (const EffectTemplateInfo& info : effect_templates()) {
+            say("  " + std::string{info.id} + ": " + std::string{info.name} + " (" +
+                std::string{relation_name(info.rule)} + ") - " + std::string{info.about});
+        }
+        return 0;
+    }
     if (rest.size() >= 3U && rest[0] == "new") {
         write_scene(make_scene(rest[1]), rest[2]);
         say("wrote " + rest[2]);
@@ -761,6 +921,22 @@ int run(std::vector<std::string> args) {
     }
     const std::filesystem::path path = rest[0];
     const std::string command = rest[1];
+    if (command == "add-kind" || command == "attach" || command == "restyle" || command == "wind") {
+        Document document = read_scene(path);
+        static_cast<void>(edit_palette(document, command, rest));
+        if (const std::string wrong = validate_scene(document, false); !wrong.empty()) {
+            fail("the scene is now invalid: " + wrong);
+        }
+        write_scene(document, out.value_or(path));
+        return 0;
+    }
+    if (command == "effects" && rest.size() >= 3U) {
+        const Document document = read_scene(path);
+        const Uid object = to_u32(rest[2]);
+        say("effects of " + what_is(document, object) + ":");
+        print_effects(document, object);
+        return 0;
+    }
     Session session{.document = read_scene(path), .prepared = {}, .seed = seed};
     session.prepared = prepare_scene(session.document);
     if (!session.prepared.compiled) {
@@ -769,6 +945,28 @@ int run(std::vector<std::string> args) {
     const ActTargets& targets = session.prepared.targets;
     const Performance& performance = session.document.scene->performance;
 
+    if (command == "issues") {
+        std::vector<Issue> issues = scene_issues(session.document, session.prepared);
+        const std::uint64_t to =
+            rest.size() >= 3U ? to_u64(rest[2]) : bake_frames(session.document, *session.prepared.compiled);
+        for (Issue& issue : play_issues(session.document, session.prepared, session.solver.get(), seed, to)) {
+            issues.push_back(std::move(issue));
+        }
+        if (cache_file) {
+            const std::vector<std::uint8_t> bytes = read_bytes(*cache_file);
+            Result<Cache> opened = Cache::open_as_baked(bytes, *session.prepared.compiled->effect,
+                                                        session.prepared.compiled->meshes,
+                                                        session.prepared.compiled->fields);
+            const std::uint32_t baked_seed = opened ? opened.value().identity().instance_seed : seed;
+            if (std::optional<Issue> stale = cache_issue(session.document, session.prepared, bytes, baked_seed)) {
+                issues.push_back(std::move(*stale));
+            }
+        }
+        sort_issues(issues);
+        say("played to step " + std::to_string(to));
+        print_issues(issues);
+        return 0;
+    }
     if (command == "info") {
         say("solid world: " + (targets.emitter.empty() ? std::string{"none"} : targets.emitter));
         say("most dropped and painted at once: " + std::to_string(session.document.scene->physics.max_dropped) +
@@ -778,6 +976,11 @@ int run(std::vector<std::string> args) {
                 say("object " + std::to_string(item.uid) + " " + item.name +
                     (droppable(targets, item.uid) ? " (can be dropped and painted)" : "") +
                     (object->distribution == Distribution::Placed ? " [placed only]" : ""));
+                print_effects(session.document, item.uid);
+                static_cast<void>(object);
+            } else if (const auto* force = std::get_if<Force>(&item.data); force != nullptr && force->bodies) {
+                say("wind " + std::to_string(item.uid) + " " + item.name + ": " + std::to_string(force->air_speed) +
+                    " m/s on things, gusts " + std::to_string(force->gust));
             }
         }
         say("performance: " + (performance.acts.empty() ? std::string{"empty"} : performance_summary(performance)));

@@ -243,6 +243,12 @@ if(BUILD_TESTING)
         ajfx_set_options(ajfx_action_tests)
         add_test(NAME ajfx.action COMMAND ajfx_action_tests)
         set_target_properties(ajfx_action_tests PROPERTIES FOLDER "ajfx/tests")
+        # A world that answers: wind on bodies and a firm hand's hold.
+        add_executable(ajfx_reactive_tests tests/reactive_tests.cpp)
+        target_link_libraries(ajfx_reactive_tests PRIVATE ajfx::rigid)
+        ajfx_set_options(ajfx_reactive_tests)
+        add_test(NAME ajfx.reactive COMMAND ajfx_reactive_tests)
+        set_target_properties(ajfx_reactive_tests PROPERTIES FOLDER "ajfx/tests")
         # Step cost, checkpoint size and a state digest; run by hand.
         add_executable(ajfx_rigid_bench tests/rigid_bench.cpp)
         target_link_libraries(ajfx_rigid_bench PRIVATE ajfx::rigid)

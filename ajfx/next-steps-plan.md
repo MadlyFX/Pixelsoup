@@ -45,7 +45,15 @@ in [the design](docs/studio-ui-architecture.md#delivery-sequence-and-acceptance)
    seek, and the performance exports to glTF from the cache. Still to come:
    the viewport playing its current bake through that cached path, the
    transport's cache band switching it, and the same check on a remote
-   node's wall.
+   node's wall. The reactive palette is in the core and the command line
+   too: starter kinds (smouldering log, crate, glass pane, brick, rock,
+   cardboard box) with their effects attached, effect templates attached to
+   and restyling any object, dust as the default on-hit effect, wind that
+   blows on light bodies (`ajfx::BodyWind` through `RigidWorld::force`), a
+   firm kinematic hold for grabs (`ActionKind::Hold`), and the issues list
+   (refused drops, unapplied acts, kind and prop budgets, stale caches).
+   Still to come: the palette panel, a template picker in the inspector, the
+   Issues panel and a firm-grab choice in the viewport's grab tool.
 5. Finish scene controls, target/resource reporting, dependency-aware assembly
    export and export review. Host cache playback is verified on the renderer's
    tests and headless replay; qualify it in a running show on a node, and

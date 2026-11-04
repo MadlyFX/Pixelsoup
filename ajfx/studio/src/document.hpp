@@ -312,6 +312,9 @@ struct Document final {
     // Compiler IR from a scene (ScenePhysics::max_dropped): the most bodies
     // actions may add to the solid world at once. 0 takes none.
     std::uint32_t drops{0U};
+    // Compiler IR from a scene: the winds that blow on the solid world's
+    // bodies (Wind forces that blow on things), each with its module id.
+    std::vector<BodyWind> body_winds;
     std::vector<Layer> layers;
     Uid next_uid{1U};
 

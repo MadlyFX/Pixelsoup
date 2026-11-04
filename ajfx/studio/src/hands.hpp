@@ -106,9 +106,11 @@ struct GrabStart final {
 // `held` (how it stands then), carried across the plane through the point
 // hit facing `view` (the way the camera looks). Refused for a click on no
 // body, or on one acts cannot name (a piece of something broken).
+// A `firm` hand holds it exactly where it is carried, through whatever is
+// in the way (Act::firm).
 [[nodiscard]] GrabStart begin_grab(Document& document, const ActTargets& targets, const StageHit& hit, Quat held,
                                    Vec3 view, std::uint64_t tick,
-                                   float gain = grab_gain, float max_speed = grab_max_speed);
+                                   float gain = grab_gain, float max_speed = grab_max_speed, bool firm = false);
 
 // Carries the held body to where the pointer's ray meets the plane, from
 // step `tick` on. Called once a step for as long as it is held, even when

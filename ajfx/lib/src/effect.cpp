@@ -1,4 +1,5 @@
 #include <ajfx/effect.hpp>
+#include <ajfx/random.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -400,6 +401,13 @@ void check_module(const Effect& e, const VolumeSource& m, FieldChecker& check) {
     check.require(range(e, m.velocity).lo >= 0.0F, "velocity", "must not be negative");
 }
 
+void check_module(const Effect&, const BodyWind& m, FieldChecker& check) {
+    check.require(m.drag >= 0.0F, "drag", "must not be negative");
+    check.require(m.gust >= 0.0F && m.gust <= 1.0F, "gust",
+                  "must be between 0 and 1: the share of its speed the wind rises and falls by");
+    check.require(m.gust_seconds > 0.0F, "gust_seconds", "must be positive");
+}
+
 void check_module(const Effect&, const Glue& m, FieldChecker& check) {
     check.require(m.range >= 0.0F, "range", "must not be negative");
     check.require(m.strength > 0.0F, "strength",
@@ -617,7 +625,8 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
                     unmoving(m, m.center.bound() || m.restitution.bound() || m.friction.bound());
                 } else if constexpr (!std::is_same_v<M, Gravity> && !std::is_same_v<M, ColorOverLife> &&
                                      !std::is_same_v<M, Break> && !std::is_same_v<M, Glue> &&
-                                     !std::is_same_v<M, Shockwave> && !std::is_same_v<M, Heat>) {
+                                     !std::is_same_v<M, Shockwave> && !std::is_same_v<M, Heat> &&
+                                     !std::is_same_v<M, BodyWind>) {
                     refuse(m, "cannot act on rigid physics particles; the physics engine moves them");
                 }
             },
@@ -1032,6 +1041,7 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
     std::size_t spins = 0U;
     std::size_t breaks = 0U;
     std::size_t glues = 0U;
+    std::size_t body_winds = 0U;
     std::uint64_t piled = 0U;
     std::size_t action_sources = 0U;
     std::uint32_t action_alive = 0U;
@@ -1057,6 +1067,8 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
             ++breaks;
         } else if constexpr (std::is_same_v<M, Glue>) {
             ++glues;
+        } else if constexpr (std::is_same_v<M, BodyWind>) {
+            ++body_winds;
         } else if constexpr (std::is_same_v<M, InitSpin>) {
             ++spins;
         } else if constexpr (std::is_same_v<M, SpawnPile>) {
@@ -1131,6 +1143,15 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
         return Error{ErrorCode::InvalidEffect,
                      where + " has a 'glue' module but no 'rigid_physics' module: only bodies in a physics "
                              "world can be held to each other"};
+    }
+    if (body_winds > 0U && rigid_physics == 0U) {
+        return Error{ErrorCode::InvalidEffect,
+                     where + " has a 'body_wind' module but no 'rigid_physics' module: it blows on bodies in a "
+                             "physics world; a particle emitter takes wind as a gravity or a drag"};
+    }
+    if (body_winds > max_body_winds) {
+        return Error{ErrorCode::InvalidEffect, where + " has more than " + std::to_string(max_body_winds) +
+                                                   " 'body_wind' modules"};
     }
     if (breaks > 0U && rigid_physics == 0U) {
         return Error{ErrorCode::InvalidEffect, where +
@@ -1534,6 +1555,25 @@ BlastPush blast_push(const Blast& blast, Vec3 at) noexcept {
 
 std::uint64_t blast_tick(const Blast& blast, std::uint32_t simulation_rate) noexcept {
     return static_cast<std::uint64_t>(std::ceil(static_cast<double>(blast.time) * simulation_rate));
+}
+
+Vec3 body_wind_at(const BodyWind& wind, std::uint64_t tick, std::uint32_t simulation_rate) noexcept {
+    if (!(wind.gust > 0.0F) || !(wind.gust_seconds > 0.0F) || simulation_rate == 0U) {
+        return wind.velocity;
+    }
+    // Smooth value noise over time, a lattice point every gust_seconds, in
+    // [-1, 1]: worked out from the step alone, in doubles to the lattice and
+    // floats after it, so every node and every seek blows alike.
+    const double at = static_cast<double>(tick) / (static_cast<double>(simulation_rate) * wind.gust_seconds);
+    const double whole = std::floor(at);
+    const auto lattice = static_cast<std::uint32_t>(static_cast<std::uint64_t>(whole) & 0xffffffffULL);
+    const auto point = [&](std::uint32_t k) { return hash_unit(hash_mix(hash_mix(0x9e3779b9U, wind.id), k)); };
+    const float t = static_cast<float>(at - whole);
+    const float s = t * t * (3.0F - 2.0F * t);
+    const float a = point(lattice);
+    const float b = point(lattice + 1U);
+    const float noise = (a + (b - a) * s) * 2.0F - 1.0F;
+    return wind.velocity * (1.0F + wind.gust * noise);
 }
 
 const Volume* find_volume(const Effect& effect, std::string_view name) noexcept {

@@ -204,16 +204,22 @@ std::optional<BodyRef> body_ref(const ActTargets& targets, std::uint32_t spawn_i
 }
 
 std::shared_ptr<const ActionList> performance_actions(const Performance& performance, const ActTargets& targets,
-                                                      std::size_t* skipped) {
+                                                      std::size_t* skipped, std::vector<std::uint32_t>* unapplied) {
     auto list = std::make_shared<ActionList>();
     std::size_t left_out = 0U;
     for (const Act& act : performance.acts) {
+        const auto leave_out = [&] {
+            ++left_out;
+            if (unapplied != nullptr) {
+                unapplied->push_back(act.serial);
+            }
+        };
         Action action;
         action.tick = act.tick;
         if (makes_bodies(act)) {
             const auto kind = targets.kinds.find(act.object);
             if (!targets.drops || kind == targets.kinds.end()) {
-                ++left_out;
+                leave_out();
                 continue;
             }
             action.kind = ActionKind::Spawn;
@@ -237,7 +243,7 @@ std::shared_ptr<const ActionList> performance_actions(const Performance& perform
         }
         if (act.kind == ActKind::Blast) {
             if (targets.emitter.empty()) {
-                ++left_out;
+                leave_out();
                 continue;
             }
             action.kind = ActionKind::Blast;
@@ -249,7 +255,7 @@ std::shared_ptr<const ActionList> performance_actions(const Performance& perform
         }
         const std::optional<std::uint32_t> target = body_index(targets, act.target);
         if (!target) {
-            ++left_out;
+            leave_out();
             continue;
         }
         action.target = *target;
@@ -262,7 +268,8 @@ std::shared_ptr<const ActionList> performance_actions(const Performance& perform
             action.twist = act.twist;
             list->add(targets.emitter, action);
         } else if (act.kind == ActKind::Grab && !act.path.empty()) {
-            action.kind = ActionKind::Steer;
+            // A firm hand holds it there; a soft one steers it there.
+            action.kind = act.firm ? ActionKind::Hold : ActionKind::Steer;
             action.orientation = prop_orientation(act.turn);
             action.gain = act.gain;
             action.max_speed = act.max_speed;
@@ -310,11 +317,12 @@ std::uint32_t add_blast(Performance& performance, std::uint64_t tick, Vec3 cente
 }
 
 std::uint32_t add_grab(Performance& performance, std::uint64_t tick, BodyRef target, Vec3 point, Vec3 turn,
-                       float gain, float max_speed) {
+                       float gain, float max_speed, bool firm) {
     Act act{.serial = 0U, .kind = ActKind::Grab, .tick = tick, .turn = turn, .target = target};
     act.path = {GrabSample{tick, point}};
     act.gain = gain;
     act.max_speed = max_speed;
+    act.firm = firm;
     return append(performance, act);
 }
 
