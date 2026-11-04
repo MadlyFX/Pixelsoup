@@ -93,19 +93,17 @@ std::vector<StageBody> stage_bodies(const Compiled& compiled, const EmitterState
     }
     const Emitter& emitter = compiled.effect->emitters[*index];
     const RigidPhysics* physics = rigid_physics(emitter);
-    // The block each spawn module came from, by its id.
+    // The item each spawn module came from, by its id.
     std::map<ModuleId, Uid> origins;
-    for (const LayerReport& report : compiled.layers) {
-        for (const ModuleLine& line : report.modules) {
-            if (const auto* spawn = std::get_if<SpawnModule>(&line.module)) {
-                origins.emplace(id_of(*spawn), line.origin);
-            }
+    for (const ItemReport& report : compiled.items) {
+        for (const ModuleId id : report.spawns) {
+            origins.emplace(id, report.item);
         }
     }
-    const auto layer_of = [&](std::uint32_t spawn_index, std::uint32_t kind) -> Uid {
-        for (const SolidWorld::Member& member : compiled.solids.layers) {
+    const auto item_of = [&](std::uint32_t spawn_index, std::uint32_t kind) -> Uid {
+        for (const SolidWorld::Member& member : compiled.solids.items) {
             if (member.bodies.empty() || in_scope(member.bodies, spawn_index, kind)) {
-                return member.layer;
+                return member.item;
             }
         }
         return 0U;
@@ -125,27 +123,26 @@ std::vector<StageBody> stage_bodies(const Compiled& compiled, const EmitterState
         }
         const float size = i < world.size.size() && std::isfinite(world.size[i]) ? world.size[i] : 0.1F;
         const std::uint32_t source = spawn_source(spawn_index);
-        Uid block = 0U;
+        // A piece of something broken was made by no spawn module.
+        Uid item = 0U;
         if (source < emitter.spawn.size()) {
             if (const auto found = origins.find(id_of(emitter.spawn[source])); found != origins.end()) {
-                block = found->second;
+                item = found->second;
             }
         }
         out.push_back(StageBody{.center = p,
                                 .radius = std::max(0.5F * size * scale * 1.15F, 0.03F),
-                                .layer = layer_of(spawn_index, kind),
-                                .block = block,
+                                .item = item != 0U ? item : item_of(spawn_index, kind),
+                                .piece = item == 0U,
                                 .spawn_index = spawn_index});
     }
     if (physics != nullptr) {
-        // The props, by the Object each is: the world's lists its members'
-        // in the order of their layers' uids, as SolidWorld lists them.
-        std::vector<std::pair<Uid, Uid>> owners;
-        for (const SolidWorld::Member& member : compiled.solids.layers) {
-            if (const LayerReport* report = compiled.layer(member.layer)) {
-                for (const Uid block : report->props) {
-                    owners.emplace_back(member.layer, block);
-                }
+        // The props, by the Object each is: the world lists its Objects'
+        // in identity order, as SolidWorld lists them.
+        std::vector<Uid> owners;
+        for (const SolidWorld::Member& member : compiled.solids.items) {
+            if (const ItemReport* report = compiled.item(member.item); report != nullptr && report->prop) {
+                owners.push_back(member.item);
             }
         }
         for (std::size_t p = 0U; p < physics->props.size() && p < world.props.size(); ++p) {
@@ -155,8 +152,7 @@ std::vector<StageBody> stage_bodies(const Compiled& compiled, const EmitterState
             }
             out.push_back(StageBody{.center = at,
                                     .radius = prop_reach(physics->props[p]),
-                                    .layer = p < owners.size() ? owners[p].first : 0U,
-                                    .block = p < owners.size() ? owners[p].second : 0U});
+                                    .item = p < owners.size() ? owners[p] : 0U});
         }
     }
     return out;
@@ -174,7 +170,8 @@ const StageBodies* stage_bodies_at(const std::vector<StageBodies>& samples, std:
 }
 
 float stage_floor(const Document& document) {
-    return document.world.ground ? document.world.ground_height * page_scale(document) : 0.0F;
+    static_cast<void>(document);
+    return 0.0F;
 }
 
 std::optional<StageHit> pick_stage(std::span<const StageBody> bodies, Vec3 origin, Vec3 direction, float floor) {
@@ -198,14 +195,14 @@ std::optional<StageHit> pick_stage(std::span<const StageBody> bodies, Vec3 origi
     if (met != nullptr && (!ground || *nearest <= *ground)) {
         return StageHit{.point = origin + direction * *nearest,
                         .center = met->center,
-                        .layer = met->layer,
-                        .block = met->block,
+                        .item = met->item,
+                        .piece = met->piece,
                         .on_body = true,
                         .spawn_index = met->spawn_index};
     }
     if (ground) {
         const Vec3 point = origin + direction * *ground;
-        return StageHit{.point = point, .center = point, .layer = 0U, .block = 0U, .on_body = false};
+        return StageHit{.point = point, .center = point, .item = 0U, .piece = false, .on_body = false};
     }
     return std::nullopt;
 }

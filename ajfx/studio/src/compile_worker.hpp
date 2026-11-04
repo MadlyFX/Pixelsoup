@@ -9,13 +9,12 @@
 #include <optional>
 #include <thread>
 
-// Compiles the page on a thread of its own.
+// Compiles the scene on a thread of its own.
 //
-// A page changes on every frame of a drag, and the compile took 6 ms for the
-// Explosion recipe and 43 ms for a page of twenty layers in Debug: on the
-// interface thread, every frame of the drag paid it. Here the interface
-// thread hands the page over and carries on, and takes the compile up when it
-// is done, a frame or two later.
+// A scene changes on every frame of a drag, and a compile of a large one
+// takes milliseconds in Debug: on the interface thread, every frame of the
+// drag would pay it. Here the interface thread hands the scene over and
+// carries on, and takes the compile up when it is done, a frame or two later.
 // - **Newest wins.** A page handed over while another compiles replaces any
 //   that was waiting, so a drag compiles at most one page behind the
 //   pointer, never a queue of them.
@@ -34,8 +33,6 @@ public:
         // moved on from it.
         Document document;
         Compiled compiled;
-        // What the compile came to (natural_loop_seconds), worked out here.
-        float natural_loop{2.0F};
     };
 
     CompileWorker();

@@ -58,6 +58,14 @@ in [the design](docs/studio-ui-architecture.md#delivery-sequence-and-acceptance)
    export and export review. Host cache playback is verified on the renderer's
    tests and headless replay; qualify it in a running show on a node, and
    stream large caches rather than read them whole on the package worker.
-6. Run the affected area checks during implementation and the full Debug and
+6. The scene compiles directly (the layer-and-block IR is gone), reproducing
+   the old effects bit for bit so caches stayed valid. Two of its artifacts
+   are worth dropping in one deliberate digest break: the unused body kind
+   every Object after the first holds in the solid world, and seeds and
+   counts carried through float. A system trailing a system with a higher
+   identity is refused because emitters are checked in identity order;
+   order them by what they read instead. Behaviors still have no viewport
+   handles.
+7. Run the affected area checks during implementation and the full Debug and
    Release root qualification before merging. Include workspace usability and
    measured responsiveness results; no improvement is claimed without evidence.

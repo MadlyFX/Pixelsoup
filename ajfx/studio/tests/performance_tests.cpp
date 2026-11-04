@@ -9,7 +9,7 @@ using namespace studio_test;
 Object& object(Document& document, Uid uid) { return std::get<Object>(document.scene->item(uid)->data); }
 
 Compiled ready(const Document& document) {
-    Compiled compiled = compile(document, Purpose::Export);
+    Compiled compiled = compile(document);
     if (!compiled.error.empty()) {
         throw std::runtime_error{compiled.error};
     }
@@ -154,7 +154,7 @@ void acting_changes_no_package_and_no_drop_past_the_budget() {
     const Compiled plain = ready(stage.document);
     const ActTargets targets = act_targets(plain);
     CHECK(targets.max_dropped == 2U);
-    StageHit floor{.point = {0.5F, 0.0F, -0.5F}, .center = {}, .layer = 0U, .block = 0U, .on_body = false};
+    StageHit floor{.point = {0.5F, 0.0F, -0.5F}, .center = {}, .item = 0U, .piece = false, .on_body = false};
     const StageAct made = act_on_stage(stage.document, targets, StageTool::Drop, stage.cube, floor, 50U);
     CHECK(made.serial == 1U && made.refusal.empty());
     const Act& act = stage.document.scene->performance.acts.front();
@@ -237,12 +237,11 @@ void the_performance_is_saved_and_shown_on_the_timeline() {
 
 void a_bake_holds_the_performance_it_was_taken_with() {
     Stage stage = cube_on_the_ground();
-    stage.document.loop_auto = false;
     stage.document.loop_seconds = 2.0F;
     add_drop(stage.document.scene->performance, 20U, stage.cube, {0.0F, 2.5F, 0.0F}, {}, {});
     const Compiled compiled = ready(stage.document);
     auto solver = ajfx::rigid::make_jolt_solver();
-    const ajfx::Result<BakeRecord> baked = bake_page(stage.document, compiled, 71U, solver.get(), {});
+    const ajfx::Result<BakeRecord> baked = bake_scene(stage.document, compiled, 71U, solver.get(), {});
     CHECK(baked.ok());
     const BakeRecord& record = baked.value();
     CHECK(bake_status(stage.document, compiled, &record, nullptr).current);
@@ -258,7 +257,7 @@ void a_bake_holds_the_performance_it_was_taken_with() {
     add_drop(more.scene->performance, 40U, stage.cube, {0.5F, 2.5F, 0.0F}, {}, {});
     const BakeStatus stale = bake_status(more, compiled, &record, nullptr);
     CHECK(!stale.current);
-    CHECK(std::any_of(stale.layers.begin(), stale.layers.end(), [](const LayerBake& layer) {
+    CHECK(std::any_of(stale.items.begin(), stale.items.end(), [](const ItemBake& layer) {
         return layer.state == BakeState::Stale && layer.why.find("dropped") != std::string::npos;
     }));
 }

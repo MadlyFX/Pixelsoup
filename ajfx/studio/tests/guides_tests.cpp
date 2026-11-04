@@ -1,112 +1,114 @@
 #include "test_support.hpp"
 
-// Guides in the preview: what a focused block shows and lets be dragged.
+// Guides in the preview: what the selected item shows, and what its handles
+// set when dragged.
 namespace {
 
 using namespace studio_test;
 
-void guides_show_the_focused_block_with_handles() {
-    Document document = recipe("campfire");
+void guides_show_the_selected_item_with_handles() {
+    Document document = starter("campfire");
     document.scale = 2.0F;
-    Layer& flames = layer_named(document, "Flames");
-    Block& shape = block_of(flames, "shape");
-    shape.set("offset", vec3(0.5F, 0.25F, 0.0F));
-    shape.set("size", range(0.1F, 0.2F));
+    const Uid flames = item_named(document, "Flames");
+    auto& fire = std::get<ParticleSystem>(document.scene->item(flames)->data);
+    fire.position = {0.5F, 0.25F, 0.0F};
+    fire.radius = {0.1F, 0.2F};
 
-    // Nothing worked on, nothing drawn: the stage stays clear.
+    // Nothing selected, nothing drawn: the stage stays clear.
     CHECK(build_guides(document, GuideOptions{}).guides.empty());
-    // A layer worked on with no block focused: only where its things are -
-    // its spawn shape, faintly, with no handles - and no other layer's.
-    GuideSet idle = build_guides(document, GuideOptions{.layer = flames.uid});
-    CHECK(idle.handles.empty() && idle.guides.size() == 1U);
-    for (const Guide& guide : idle.guides) {
-        CHECK(!guide.focused && guide.layer == flames.uid && document.block(guide.block)->kind == BlockKind::Shape);
-    }
 
-    // Focused, the shape carries a handle for its offset and each end of its
-    // radius, in metres at the page's scale.
-    const GuideSet focused = build_guides(document, GuideOptions{.focus = shape.uid});
-    for (const Guide& guide : focused.guides) {
-        CHECK(guide.layer == flames.uid);
-    }
-    const Handle* offset = nullptr;
+    // A system: its birth ball with a handle for its position and each end
+    // of its radius, in metres at the scene's scale.
+    const GuideSet selected = build_guides(document, GuideOptions{.item = flames});
+    CHECK(!selected.guides.empty() && selected.guides.front().item == flames && selected.guides.front().focused);
+    const Handle* position = nullptr;
     const Handle* high = nullptr;
     const Handle* low = nullptr;
-    for (const Handle& handle : focused.handles) {
-        CHECK(handle.block == shape.uid);
-        if (handle.control == "offset") {
-            offset = &handle;
-        } else if (handle.control == "size") {
+    for (const Handle& handle : selected.handles) {
+        CHECK(handle.item == flames);
+        if (handle.target == HandleTarget::Position) {
+            position = &handle;
+        } else if (handle.target == HandleTarget::Radius) {
             (handle.end == 1 ? high : low) = &handle;
         }
     }
-    CHECK(offset != nullptr && high != nullptr && low != nullptr);
-    CHECK(offset->at == (ajfx::Vec3{1.0F, 0.5F, 0.0F}));
-    CHECK(near(high->at.x - offset->at.x, 0.4F) && near(offset->at.x - low->at.x, 0.2F));
+    CHECK(position != nullptr && high != nullptr && low != nullptr);
+    CHECK(position->at == (ajfx::Vec3{1.0F, 0.5F, 0.0F}));
+    CHECK(near(high->at.x - position->at.x, 0.4F) && near(position->at.x - low->at.x, 0.2F));
 
-    // Dragging a handle sets its control, back in the page's units.
-    CHECK(handle_value(document, *offset, ajfx::Vec3{2.0F, 0.5F, -1.0F}) == vec3(1.0F, 0.25F, -0.5F));
-    const std::optional<Value> pulled = handle_value(document, *high, offset->at + ajfx::Vec3{0.0F, 0.0F, 1.0F});
-    CHECK(pulled && pulled->x == 0.1F && near(pulled->y, 0.5F));
+    // Dragging a handle sets the item, back in the scene's units.
+    CHECK(drag_handle(document, *position, ajfx::Vec3{2.0F, 0.5F, -1.0F}));
+    CHECK(fire.position == (ajfx::Vec3{1.0F, 0.25F, -0.5F}));
+    CHECK(!drag_handle(document, *position, ajfx::Vec3{2.0F, 0.5F, -1.0F})); // already there
+    CHECK(drag_handle(document, *high, high->origin + ajfx::Vec3{0.0F, 0.0F, 1.0F}));
+    CHECK(fire.radius.min == 0.1F && near(fire.radius.max, 0.5F));
     // The low end dragged past the high takes it along.
-    const std::optional<Value> pushed = handle_value(document, *low, offset->at + ajfx::Vec3{0.8F, 0.0F, 0.0F});
-    CHECK(pushed && near(pushed->x, 0.4F) && pushed->y == pushed->x);
+    CHECK(drag_handle(document, *low, low->origin + ajfx::Vec3{1.2F, 0.0F, 0.0F}));
+    CHECK(near(fire.radius.min, 0.6F) && fire.radius.max == fire.radius.min);
 
-    // Wind turns by its heading handle, round the arrow's start.
-    std::optional<Block> wind = make_block(document, "wind");
-    const Uid wind_uid = insert_block(flames, 0U, std::move(*wind));
-    const GuideSet windy = build_guides(document, GuideOptions{.focus = wind_uid});
+    // Wind turns by its heading handle, round the arrow's start beside the
+    // system it acts on.
+    const Uid breeze = item_named(document, "Wind");
+    const GuideSet windy = build_guides(document, GuideOptions{.item = breeze});
     CHECK(windy.handles.size() == 1U && windy.handles[0].motion == HandleMotion::Heading);
-    const Handle& heading = windy.handles[0];
-    CHECK(handle_value(document, heading, heading.origin + ajfx::Vec3{0.0F, 0.0F, -1.0F}) == number(90.0F));
+    CHECK(std::any_of(windy.guides.begin(), windy.guides.end(),
+                      [&](const Guide& g) { return g.item == item_named(document, "Smoke") && !g.focused; }));
+    CHECK(drag_handle(document, windy.handles[0], windy.handles[0].origin + ajfx::Vec3{0.0F, 0.0F, -1.0F}));
+    CHECK(std::get<Force>(document.scene->item(breeze)->data).heading == 90.0F);
 
-    // Draw in fades by a height above its own centre, wherever that is.
-    Block& draw_in = block_of(flames, "draw_in");
-    draw_in.set("center", vec3(0.0F, 0.5F, 0.0F));
+    // A draw-in fades by a height above its own centre, wherever that is.
+    const Uid funnel = add_force(document, ForceKind::DrawIn);
+    auto& draw_in = std::get<Force>(document.scene->item(funnel)->data);
+    draw_in.position = {0.0F, 0.5F, 0.0F};
+    draw_in.height = 1.0F;
     std::size_t heights = 0U;
-    for (const Handle& handle : build_guides(document, GuideOptions{.focus = draw_in.uid}).handles) {
+    for (const Handle& handle : build_guides(document, GuideOptions{.item = funnel}).handles) {
         if (handle.motion == HandleMotion::Height) {
             ++heights;
-            CHECK(near(handle.at.y, (0.5F + number_of(draw_in, "height")) * 2.0F));
-            const std::optional<Value> raised = handle_value(document, handle, handle.origin + ajfx::Vec3{0.0F, 3.0F, 0.0F});
-            CHECK(raised && near(raised->x, 1.5F));
+            CHECK(near(handle.at.y, (0.5F + 1.0F) * 2.0F));
+            CHECK(drag_handle(document, handle, handle.origin + ajfx::Vec3{0.0F, 3.0F, 0.0F}));
+            CHECK(near(std::get<Force>(document.scene->item(funnel)->data).height, 1.5F));
         }
     }
     CHECK(heights == 1U);
 
-    // A muted layer draws nothing.
-    for (Layer& layer : document.layers) {
-        layer.enabled = false;
-    }
-    CHECK(build_guides(document, GuideOptions{.focus = shape.uid}).guides.empty());
+    // A switched-off item draws nothing.
+    document.scene->item(flames)->simulate = false;
+    CHECK(build_guides(document, GuideOptions{.item = flames}).guides.empty());
 }
 
-void the_turbulence_guide_follows_its_field() {
-    Document document = recipe("campfire");
-    Layer& flames = layer_named(document, "Flames");
-    const Uid turbulence = block_of(flames, "turbulence").uid;
-    const auto flow = [&](float seconds) {
-        for (const Guide& guide : build_guides(document, GuideOptions{.focus = turbulence, .seconds = seconds}).guides) {
-            if (guide.block == turbulence) {
-                return guide.strokes;
-            }
-        }
-        return std::vector<GuideStroke>{};
-    };
-    const std::vector<GuideStroke> now = flow(0.0F);
-    CHECK(now.size() == 64U && now[0].points.size() == 11U);
-    // The field churns: later, the same streamline goes elsewhere.
-    const std::vector<GuideStroke> later = flow(2.0F);
-    CHECK(later[0].points.front() == now[0].points.front() && !(later[0].points.back() == now[0].points.back()));
-    // Only the focused turbulence draws its field.
-    for (const Guide& guide : build_guides(document, GuideOptions{.layer = flames.uid}).guides) {
-        CHECK(guide.block != turbulence);
+void an_object_shows_what_it_collides_as() {
+    Document document = starter("wall");
+    const Uid ball = item_named(document, "Ball");
+    auto& thrown = std::get<Object>(document.scene->item(ball)->data);
+    thrown.collider = ObjectCollider::Sphere;
+    const GuideSet guides = build_guides(document, GuideOptions{.item = ball});
+    CHECK(guides.guides.size() == 1U && guides.guides.front().kind == GuideKind::Collider);
+    // A marker (no outline is read yet) and its ball, faintly.
+    CHECK(std::any_of(guides.guides.front().strokes.begin(), guides.guides.front().strokes.end(),
+                      [](const GuideStroke& s) { return s.faint && s.closed; }));
+    // Its radius handle sets its size.
+    const auto radius = std::find_if(guides.handles.begin(), guides.handles.end(),
+                                     [](const Handle& h) { return h.target == HandleTarget::Radius; });
+    CHECK(radius != guides.handles.end());
+    CHECK(drag_handle(document, *radius, radius->origin + ajfx::Vec3{0.5F, 0.0F, 0.0F}));
+    CHECK(near(std::get<Object>(document.scene->item(ball)->data).size, 1.0F));
+
+    // A system shows the Static things its particles meet, without handles.
+    Document room = starter("smoke_room");
+    const Uid fire = item_named(room, "Fire");
+    const GuideSet beside = build_guides(room, GuideOptions{.item = fire});
+    const std::size_t met = static_cast<std::size_t>(std::count_if(
+        beside.guides.begin(), beside.guides.end(), [](const Guide& g) { return g.kind == GuideKind::Collider; }));
+    CHECK(met == 2U);
+    for (const Handle& handle : beside.handles) {
+        CHECK(handle.item == fire);
     }
 }
 
 } // namespace
 
 void add_guides_tests(std::vector<studio_test::Case>& cases) {
-    cases.push_back({"guides_show_the_focused_block_with_handles", guides_show_the_focused_block_with_handles});
-    cases.push_back({"the_turbulence_guide_follows_its_field", the_turbulence_guide_follows_its_field});
+    cases.push_back({"guides show the selected item with handles", guides_show_the_selected_item_with_handles});
+    cases.push_back({"an object shows what it collides as", an_object_shows_what_it_collides_as});
 }

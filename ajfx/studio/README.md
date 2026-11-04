@@ -38,13 +38,16 @@ no replacement framework has been selected or implemented.
 
 ## How a scene compiles
 
-A scene is lowered to the block compiler's layers (`lower_scene`), one per
-object or particle system, sorted by item UID. That copy is transient compiler
-IR: it is never saved, edited or shown, and names, tree order and grouping
-never change it. The compiler turns the layers into one `ajfx::Effect`; every
-rigid object shares one solver world and keeps its own draw tint. The old
-page editor that authored layers directly has been removed. Its recipes
-remain in `tests/fixtures` as compiler fixtures.
+The compiler (`src/compile.*`) turns a scene straight into one
+`ajfx::Effect`: every particle system an emitter of its own, every Object a
+body kind or a prop of the scene's one solid world, every smoke grid a volume
+and every blast a blast. Module ids and seeds come from items' reserved
+identities, so names, tree order and grouping never change the effect, and
+an edit to one item leaves every other emitter as it was. A scene that cannot
+play whole does not play, and the first item at fault is named.
+`ajfx-studio-cli <scene> compile` prints what a scene compiles to. The
+[scene reference](../docs/studio-scene-reference.md#compiling-a-scene) has
+the whole mapping.
 
 ## The preview
 
@@ -167,19 +170,16 @@ given at start replaces the scene; `--fresh` forgets the lot.
 
 | Path | Contents |
 | --- | --- |
-| `src/scene.*` | Typed scene owners, creation and editing operations, validation, lowering to layers, and taking back a handle drag |
+| `src/scene.*` | Typed scene owners, creation and editing operations, validation, live parameters |
 | `src/scene_properties.*` | The one property registry: defaults, bounds, units, resets, storage and motion invalidation |
 | `src/scene_io.*`, `src/document_io.*`, `src/json.*` | Saving and loading scenes |
 | `src/scene_view.*` | The scene tree, the selected-item inspector and the Add menu |
-| `src/block_kind.hpp` | `BlockKind`: every kind of block the compiler IR holds, named once |
-| `src/document.*` | The document: the scene, and the layers and blocks it lowers to |
+| `src/document.hpp` | The document: the scene, its name and scale, and how the preview stands it |
+| `src/controls.*` | The controls scene properties are edited with, and the values they hold |
 | `src/page_revision.hpp` | Knowing the document has changed: one look a frame, then a number to ask |
-| `src/catalog.*`, `src/catalog_<category>.cpp`, `src/catalog_parts.hpp` | The block catalog the compiler reads: controls and defaults |
-| `src/compile.*` | Layers to `ajfx::Effect`: budgets, scale, loops, cuts, the solid layers' one world |
-| `src/solid_world.*` | Solid layers merged into one rigid physics emitter, each layer's modules scoped to its body kinds |
+| `src/compile.*` | The scene to `ajfx::Effect`: emitters, the solid world, budgets, scale, cuts, item reports |
 | `src/compile_worker.*` | The compile, off the interface thread: newest wins, never an older one after a newer |
-| `src/layer_builder.*`, `src/build_core.hpp`, `src/rigid_builder.*` | One layer to one emitter, and the rigid world, Objects and fracture |
-| `src/raw_modules.*` | Generic access to every ajfx module, through its `fields` list |
+| `src/starter_scenes.*` | Whole scenes to start from, by name: what `new` makes, and the compiler's fixtures |
 | `src/library.*` | Generated textures and meshes |
 | `src/bake.*` | Baking and what a cache holds of the scene |
 | `src/stage_pick.*` | The solid things in the preview at a step, and which one a click meets |
@@ -187,24 +187,22 @@ given at start replaces the scene; `--fresh` forgets the lot.
 | `src/hands.*` | The hands: the brush (paint, erase, push, pull), grab and throw, poke, blast; playing a scene headless |
 | `src/kinds.*` | The palette's starter kinds and the effect templates attached to objects |
 | `src/issues.*` | The issues list: validation, budgets, refused drops, unapplied acts, stale caches |
-| `src/cli.cpp` | `ajfx-studio-cli`: hands, the palette, issues and replays from the command line |
-| `src/guides.*` | Guides and handles: where things act, and what a dragged handle sets |
+| `src/cli.cpp` | `ajfx-studio-cli`: the compiler, hands, the palette, issues and replays from the command line |
+| `src/guides.*` | Guides and handles: where the selected item acts, and what a dragged handle sets in it |
 | `src/package_builder.*` | The background worker: kernels, packages, the artist's files, CPU analysis |
 | `src/user_assets.*` | The artist's files made package-ready: textures, meshes, baked collision fields, outlines |
 | `src/session.*` | Where Studio was left, written on close and read on open |
 | `src/preview.*` | The stage and the media server renderer |
 | `src/stage_overlay.*` | Guides, handles and particle paths drawn over the preview, in its camera |
 | `src/stage_camera.*` | The preview's camera, and dragging handles through it (no renderer, so the UI tests drive it) |
-| `src/widgets.*` | Studio's controls and theme |
 | `src/studio_app.*` | The window: top bar, viewport, transport, history, files |
 | `tests/studio_tests.cpp`, `tests/<area>_tests.cpp`, `tests/test_support.hpp` | Headless tests of the scene and compiler (`ajfx.studio`) |
-| `tests/fixtures/` | Layer recipes the compiler tests are built from |
-| `tests/studio_ui_tests.cpp` | The scene workspace and controls against synthetic input (`ajfx.studio_ui`) |
+| `tests/imgui_tests.cpp` | The panels and the viewport on a headless Dear ImGui context with synthetic input (`ajfx.studio_imgui`) |
 | `tests/frame_bench.cpp` | `ajfx_studio_frame_bench`: times what the application does on its interface thread each frame and per edit. Not a test |
 
 `ajfx_studio_core` (the scene model and compiler) depends on the ajfx runtime
-alone. The application adds the media server's renderer and UI toolkit
-(`MediaServer::Render`, `Gui` and `Editor`), so it builds from the repository
+alone. The application adds the media server's renderer and window
+(`MediaServer::Render`, `Gui` and `Editor`) and Dear ImGui, so it builds from the repository
 root, beside the media server.
 
 ## The command line
@@ -231,8 +229,13 @@ ajfx-studio-cli wall.ajfxstudio do grab object:65 30 100 0,1.3,1.5 0,1.3,1.5 0,1
 ajfx-studio-cli wall.ajfxstudio verify 200
 ```
 
-`new` writes a scene to act on (`logs`: a log kind painted in that trails
-smoke; `wall`: a wall that breaks and a ball to throw at it; `empty`).
+`new <name>` writes a starter scene (`scenes` lists them: `logs`, a log kind
+painted in that trails smoke; `wall`, a wall that breaks and a ball to throw
+at it; `sandbox`; `campfire`; `explosion`; `smoke_room`; `rain`; `magic`;
+`rock_pile`; `empty`). `compile [--json] [--live <system>]` prints what the
+scene compiles to: each emitter with the items in it, its capacity and
+modules, each item's report, the files it needs and the cuts it makes, and
+the simulation digest; `--json` prints the effect itself.
 `info` lists what can be acted on, `acts` the performance, `bodies <step>`
 where the solid bodies stand, `play <step>` what stands and a digest of the
 whole state, and `verify <step>` plays twice and once more after saving and
@@ -281,7 +284,7 @@ ajfx-studio-cli wall.ajfxstudio replay wall.ajfx 0 95 140 359
 ajfx-studio-cli wall.ajfxstudio gltf wall.gltf --cache wall.ajfxcache
 ```
 
-`bake <out.ajfxcache>` bakes the scene's baked layers with its performance
+`bake <out.ajfxcache>` bakes the scene's baked items with its performance
 and `--seed` for its loop. `deliver <out.ajfx>` bakes (or takes `--cache`),
 compiles the kernels and writes the package with its cache beside it, after
 opening the cache against the written package as the media server will.

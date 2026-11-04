@@ -297,8 +297,8 @@ void a_ball_grabbed_and_flung_breaks_the_wall() {
     // Pressed on the top of the ball.
     const StageHit hit{.point = resting->position + ajfx::Vec3{0.0F, 0.2F, 0.0F},
                        .center = resting->position,
-                       .layer = 0U,
-                       .block = 0U,
+                       .item = 0U,
+                       .piece = false,
                        .on_body = true,
                        .spawn_index = resting->spawn_index};
     GrabStart start = begin_grab(scene.document, targets, hit, resting->orientation, resting->position - camera, 30U);
@@ -391,7 +391,7 @@ void a_hand_carries_across_a_plane_facing_the_camera() {
     // A hand on nothing is refused, and acts on nothing.
     Wall scene = wall_and_ball();
     const Prepared ready = prepared(scene.document);
-    const StageHit floor{.point = {}, .center = {}, .layer = 0U, .block = 0U, .on_body = false};
+    const StageHit floor{.point = {}, .center = {}, .item = 0U, .piece = false, .on_body = false};
     CHECK(!begin_grab(scene.document, ready.targets, floor, {}, {0.0F, 0.0F, -1.0F}, 10U).refusal.empty());
     CHECK(!carry(scene.document, hold, {0.0F, 1.0F, 5.0F}, {0.0F, 0.0F, -1.0F}, 11U));
     CHECK(scene.document.scene->performance.acts.empty());
@@ -411,8 +411,8 @@ void a_poke_pushes_and_spins_and_a_blast_breaks() {
     const float r = resting.size * 0.5F;
     const StageHit top{.point = resting.position + ajfx::Vec3{0.0F, r, 0.0F},
                        .center = resting.position,
-                       .layer = 0U,
-                       .block = 0U,
+                       .item = 0U,
+                       .piece = false,
                        .on_body = true,
                        .spawn_index = resting.spawn_index};
     const StageAct poked = poke(scene.document, targets, top, {1.0F, 0.0F, 0.0F}, 4.0F, r, 30U);

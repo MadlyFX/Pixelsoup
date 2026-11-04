@@ -273,7 +273,7 @@ StageAct set_off_blast(Document& document, const ActTargets& targets, Vec3 cente
 
 Prepared prepare_scene(const Document& document) {
     Prepared prepared;
-    Compiled compiled = compile(without_performance(document), Purpose::Export);
+    Compiled compiled = compile(without_performance(document));
     if (!compiled.error.empty()) {
         prepared.error = compiled.error;
         return prepared;

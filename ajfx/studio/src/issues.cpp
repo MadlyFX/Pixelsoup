@@ -331,33 +331,33 @@ std::vector<Issue> play_issues(const Document& document, const Prepared& prepare
 std::vector<Issue> bake_issues(const Document& document, const BakeStatus& status) {
     std::vector<Issue> out;
     const auto name = [&](Uid uid) {
-        return document.scene ? item_name(*document.scene, uid) : "layer " + std::to_string(uid);
+        return document.scene ? item_name(*document.scene, uid) : "item " + std::to_string(uid);
     };
-    for (const LayerBake& layer : status.layers) {
-        switch (layer.state) {
+    for (const ItemBake& baked : status.items) {
+        switch (baked.state) {
         case BakeState::Live:
         case BakeState::Current:
             break;
         case BakeState::Stale:
             out.push_back(Issue{.level = IssueLevel::Warning,
                                 .kind = IssueKind::CacheStale,
-                                .item = layer.layer,
-                                .message = name(layer.layer) + ": the cache holds it as it was" +
-                                           (layer.why.empty() ? std::string{} : " (" + layer.why + ")") +
+                                .item = baked.item,
+                                .message = name(baked.item) + ": the cache holds it as it was" +
+                                           (baked.why.empty() ? std::string{} : " (" + baked.why + ")") +
                                            "; bake again"});
             break;
         case BakeState::Unbaked:
             out.push_back(Issue{.level = IssueLevel::Note,
                                 .kind = IssueKind::CacheUnbaked,
-                                .item = layer.layer,
-                                .message = name(layer.layer) + " is baked and no cache holds it yet" +
-                                           (layer.why.empty() ? std::string{} : ": " + layer.why)});
+                                .item = baked.item,
+                                .message = name(baked.item) + " is baked and no cache holds it yet" +
+                                           (baked.why.empty() ? std::string{} : ": " + baked.why)});
             break;
         case BakeState::TooLarge:
             out.push_back(Issue{.level = IssueLevel::Problem,
                                 .kind = IssueKind::CacheTooLarge,
-                                .item = layer.layer,
-                                .message = name(layer.layer) + " cannot be baked: " + layer.why});
+                                .item = baked.item,
+                                .message = name(baked.item) + " cannot be baked: " + baked.why});
             break;
         }
     }

@@ -1,12 +1,14 @@
 #include "scene_properties.hpp"
 #include "test_support.hpp"
 
+#include <ajfx/random.hpp>
+
 namespace {
 using namespace studio_test;
 
 Object &object(Document &document, Uid uid) { return std::get<Object>(document.scene->item(uid)->data); }
 Compiled ready(const Document &document) {
-    Compiled compiled = compile(document, Purpose::Export);
+    Compiled compiled = compile(document);
     if (!compiled.error.empty()) {
         throw std::runtime_error{compiled.error};
     }
@@ -159,7 +161,7 @@ void typed_scene_roundtrip_and_strict_fields() {
     CHECK(loaded.document->backdrop == Backdrop::Night);
     CHECK(save_document(*loaded.document) == saved);
     CHECK(saved.find("\"layers\"") == std::string::npos);
-    // The light settings reach the renderer through the Appearance block.
+    // The light settings reach the renderer.
     {
         Document lit_scene = empty_scene();
         const Uid puff = add_particle_system(lit_scene);
@@ -170,13 +172,13 @@ void typed_scene_roundtrip_and_strict_fields() {
         lit.wrap = 0.65F;
         lit.ambient = 1.75F;
         lit.shadowed = false;
-        const Compiled compiled = compile(lit_scene, Purpose::Export);
+        const Compiled compiled = compile(lit_scene);
         CHECK(compiled.effect && compiled.effect->emitters.size() == 1U);
         const ajfx::SpriteRenderer &r = compiled.effect->emitters[0].renderer;
         CHECK(r.lighting == ajfx::Lighting::Lit && r.curvature == 0.35F && r.wrap == 0.65F && r.ambient == 1.75F &&
               !r.shadowed);
         lit.lighting = ParticleLighting::Glows;
-        CHECK(compile(lit_scene, Purpose::Export).effect->emitters[0].renderer.lighting == ajfx::Lighting::Unlit);
+        CHECK(compile(lit_scene).effect->emitters[0].renderer.lighting == ajfx::Lighting::Unlit);
     }
     std::string bad = saved;
     bad.insert(bad.find("\"position\""), "\"invented\": 1, ");
@@ -193,7 +195,7 @@ void typed_scene_roundtrip_and_strict_fields() {
     object(document, a).motion = ObjectMotion::Static;
     const Loaded unfinished = load_document(save_document(document));
     CHECK(unfinished.document && *unfinished.document == document);
-    CHECK(!compile(*unfinished.document, Purpose::Export).effect);
+    CHECK(!compile(*unfinished.document).effect);
     document.scene->items.back().parent = group;
     CHECK(!validate_scene(document).empty());
 }
@@ -216,8 +218,8 @@ void independent_surfaces_share_one_colliding_world() {
     const auto &emitter = compiled.effect->emitters.front();
     const auto *physics = ajfx::rigid_physics(emitter);
     CHECK(physics && physics->bodies.size() >= 2U);
-    const auto *ar = compiled.layer(a);
-    const auto *br = compiled.layer(b);
+    const auto *ar = compiled.item(a);
+    const auto *br = compiled.item(b);
     CHECK(ar && br && ar->emitter == br->emitter);
     const auto has_tint = [&](ajfx::Color tint) {
         return std::any_of(physics->bodies.begin(), physics->bodies.end(),
@@ -236,18 +238,18 @@ void independent_surfaces_share_one_colliding_world() {
     // The upper object rests on the held lower one rather than falling through.
     CHECK(run.emitter(0).position[1].y > 1.0F);
     CHECK(run.emitter(0).position[1].y < 2.1F);
-    auto baked = bake_page(document, compiled, 71U, solver.get());
+    auto baked = bake_scene(document, compiled, 71U, solver.get());
     CHECK(baked);
     const BakeRecord &record = baked.value();
-    CHECK(bake_status(document, compile(document, Purpose::Export), &record).current);
+    CHECK(bake_status(document, compile(document), &record).current);
     object(document, b).tint = {0.2F, 0.9F, 0.4F, 1};
     const Compiled recolored = ready(document);
-    CHECK(same_scene_motion(record.page, document));
-    CHECK(bake_status(document, compile(document, Purpose::Export), &record).current);
+    CHECK(same_scene_motion(record.document, document));
+    CHECK(bake_status(document, compile(document), &record).current);
     CHECK(ajfx::Cache::open(record.bytes, *recolored.effect, 71U, {}, recolored.meshes));
     object(document, b).collider = ObjectCollider::Sphere;
-    CHECK(!same_scene_motion(record.page, document));
-    CHECK(!bake_status(document, compile(document, Purpose::Export), &record).current);
+    CHECK(!same_scene_motion(record.document, document));
+    CHECK(!bake_status(document, compile(document), &record).current);
 }
 
 void organization_and_rename_do_not_change_simulation() {
@@ -300,10 +302,10 @@ void initial_population_is_bounded_and_persistent() {
     CHECK(run.emitter(0).alive() == 37U);
     CHECK(run.emitter(0).spawned == 37U);
     system.sources.front().mode = SourceMode::Continuous;
-    CHECK(!compile(document, Purpose::Export).effect);
+    CHECK(!compile(document).effect);
     system.sources.front().mode = SourceMode::Initial;
     document.loop_seconds = 200.0F;
-    CHECK(bake_frames(document, compile(document, Purpose::Export)) == 12000U);
+    CHECK(bake_frames(document, compile(document)) == 12000U);
 }
 
 void ten_distinct_models_fracture_without_losing_owners() {
@@ -322,7 +324,7 @@ void ten_distinct_models_fracture_without_losing_owners() {
         o.fracture_speed = 0.5F;
         o.tint = {static_cast<float>(i + 1U) / 11.0F, 0.4F, 0.8F, 1};
     }
-    Compiled compiled = compile(document, Purpose::Export);
+    Compiled compiled = compile(document);
     CHECK(compiled.effect && compiled.error.empty());
     CHECK(compiled.requests.size() == 10U);
     for (std::size_t i = 0U; i < compiled.requests.size(); ++i) {
@@ -350,7 +352,7 @@ void ten_distinct_models_fracture_without_losing_owners() {
         if (item.uid == floor) {
             continue;
         }
-        const auto *report = compiled.layer(item.uid);
+        const auto *report = compiled.item(item.uid);
         CHECK(report && report->included && report->scope.kinds.size() >= 9U);
         for (auto kind : report->scope.kinds) {
             if (kind) {
@@ -363,7 +365,7 @@ void ten_distinct_models_fracture_without_losing_owners() {
             o->fragments = 64U;
         }
     }
-    const Compiled overflow = compile(document, Purpose::Export);
+    const Compiled overflow = compile(document);
     CHECK(!overflow.effect && !overflow.error.empty());
 }
 } // namespace
@@ -394,27 +396,32 @@ void motion_stack_and_age_drivers_reach_the_runtime() {
     CHECK(system.motion[1].uid == turbulence && system.motion[2].uid == drag);
     CHECK(validate_scene(document).empty());
 
-    const auto kinds = [](const Document &lowered) {
+    // Each enabled behavior is its runtime force, with its own values; a
+    // switched-off one is not there.
+    const auto motion_kinds = [](const Compiled &compiled) {
         std::vector<std::string> out;
-        for (const Block &block : lowered.layers.front().blocks) {
-            if (block.kind == "swirl" || block.kind == "turbulence" || block.kind == "drag") {
-                out.push_back(block.kind);
+        for (const std::string &kind : update_kinds(compiled.effect->emitters.front())) {
+            if (kind == ajfx::Vortex::kind || kind == ajfx::CurlNoise::kind || kind == ajfx::Drag::kind) {
+                out.push_back(kind);
             }
         }
         return out;
     };
-    Document lowered = lower_scene(document);
-    CHECK(lowered.layers.size() == 1U);
-    CHECK((kinds(lowered) == std::vector<std::string>{"swirl", "turbulence", "drag"}));
-    const Block *swirl = lowered.block(vortex);
-    const Block *noise = lowered.block(turbulence);
-    CHECK(swirl && swirl->kind == "swirl" && get(*swirl, "strength").x == -7.5F &&
-          get(*swirl, "axis").text == "horizontal" && get(*swirl, "center").z == 3.5F);
-    CHECK(noise && get(*noise, "size").x == 1.3F && get(*noise, "churn").x == 0.9F && get(*noise, "seed").x == 5.0F);
-    CHECK(lowered.block(drag) && get(*lowered.block(drag), "amount") == range(0.75F, 2.25F));
+    {
+        const Compiled stack = ready(document);
+        CHECK((motion_kinds(stack) == std::vector<std::string>{"vortex", "curl_noise", "drag"}));
+        const ajfx::Emitter &emitter = stack.effect->emitters.front();
+        const ajfx::Vortex *swirl = find_module<ajfx::Vortex>(emitter);
+        const ajfx::CurlNoise *noise = find_module<ajfx::CurlNoise>(emitter);
+        const ajfx::Drag *slow = find_module<ajfx::Drag>(emitter);
+        CHECK(swirl && swirl->scale_min.value == -7.5F && swirl->axis == ajfx::Vec3{1.0F, 0.0F, 0.0F} &&
+              swirl->center.value.z == 3.5F);
+        CHECK(noise && near(noise->frequency.value, 1.0F / 1.3F) && noise->evolution.value == 0.9F &&
+              noise->seed == ajfx::hash_mix(turbulence, 5U));
+        CHECK(slow && slow->scale_min.value == 0.75F && slow->scale_max.value == 2.25F);
+    }
     system.motion[2].enabled = false;
-    lowered = lower_scene(document);
-    CHECK((kinds(lowered) == std::vector<std::string>{"swirl", "turbulence"}));
+    CHECK((motion_kinds(ready(document)) == std::vector<std::string>{"vortex", "curl_noise"}));
     system.motion[2].enabled = true;
 
     // Age drivers: the compiled effect carries the authored keys.
@@ -551,24 +558,21 @@ void forces_are_scene_items_that_act_on_their_targets() {
     x.time = 1.25F;
     CHECK(validate_scene(document).empty());
 
-    Document lowered = lower_scene(document);
-    CHECK(lowered.layers.size() == 2U);
-    const Block *swirl_a = lowered.block(a + 16U);
-    const Block *swirl_b = lowered.block(b + 16U);
-    const Block *wind_b = lowered.block(b + 17U);
-    CHECK(swirl_a && swirl_a->kind == "swirl" && get(*swirl_a, "center").z == 3.0F &&
-          get(*swirl_a, "strength") == range(-2.0F, -5.0F) && get(*swirl_a, "axis").text == "horizontal");
-    CHECK(swirl_b && swirl_b->kind == "swirl");
-    CHECK(wind_b && wind_b->kind == "wind" && get(*wind_b, "heading").x == 90.0F);
-    CHECK(lowered.block(a + 17U) == nullptr);
-    const Block *explosion = lowered.block(blast + 1U);
-    CHECK(explosion && explosion->kind == "explosion" && get(*explosion, "power").x == 9.0F);
-    CHECK(std::find_if(lowered.layers.front().blocks.begin(), lowered.layers.front().blocks.end(),
-                       [blast](const Block &block) { return block.uid == blast + 1U; }) !=
-          lowered.layers.front().blocks.end());
-    CHECK(handle_block(document, vortex) == a + 16U);
-    CHECK(handle_block(document, wind) == b + 17U);
-    CHECK(handle_block(document, blast) == blast + 1U);
+    {
+        // Each system holds the forces that act on it, with the force's own
+        // values; the blast is the effect's.
+        const Compiled acted = ready(document);
+        const ajfx::Vortex *swirl_a = find_module<ajfx::Vortex>(emitter_of(acted, a));
+        CHECK(swirl_a && swirl_a->center.value.z == 3.0F && swirl_a->scale_min.value == -2.0F &&
+              swirl_a->scale_max.value == -5.0F && swirl_a->axis == ajfx::Vec3{1.0F, 0.0F, 0.0F});
+        CHECK(find_module<ajfx::Vortex>(emitter_of(acted, b)) != nullptr);
+        // Its own share of gravity, and for b the wind toward -Z.
+        CHECK(modules_of<ajfx::Gravity>(emitter_of(acted, a)).size() == 1U);
+        const std::vector<const ajfx::Gravity *> pushed = modules_of<ajfx::Gravity>(emitter_of(acted, b));
+        CHECK(pushed.size() == 2U && near(pushed.back()->acceleration.value.z, -1.0F) &&
+              near(pushed.back()->acceleration.value.x, 0.0F, 1.0e-5F));
+        CHECK(acted.effect->blasts.size() == 1U && acted.effect->blasts.front().power == 9.0F);
+    }
 
     // The compiled effect carries one blast and the forces in each emitter.
     const Compiled compiled = ready(document);
@@ -584,21 +588,21 @@ void forces_are_scene_items_that_act_on_their_targets() {
     CHECK(vortices == 2U);
     CHECK(winds >= 1U);
 
-    // Tree order and names never change where a force lowers to.
+    // Tree order and names never change the effect.
+    const Compiled before = ready(document);
     std::swap(document.scene->items[0], document.scene->items[4]);
     document.scene->item(vortex)->name = "Whirl";
-    const Document reordered = lower_scene(document);
-    CHECK(reordered.block(a + 16U) && get(*reordered.block(a + 16U), "center").z == 3.0F);
-    CHECK(reordered.block(b + 17U) && reordered.block(b + 17U)->kind == "wind");
+    CHECK(*ready(document).effect == *before.effect);
 
-    // A dragged handle writes back to the force, never to the compiler's copy.
-    Document dragged = lowered;
-    dragged.block(a + 16U)->set("center", vec3(4.0F, 2.0F, 6.0F));
-    CHECK(adopt_handle_edit(document, dragged, vortex));
-    CHECK(v.position == ajfx::Vec3{4.0F, 2.0F, 6.0F});
-    dragged.block(blast + 1U)->set("radius", number(0.75F));
-    CHECK(adopt_handle_edit(document, dragged, blast));
-    CHECK(std::get<Force>(document.scene->item(blast)->data).radius == 0.75F); // the swap moved the items
+    // A dragged handle writes to the force.
+    const GuideSet vortex_guides = build_guides(document, GuideOptions{.item = vortex});
+    CHECK(!vortex_guides.handles.empty() && vortex_guides.handles.back().target == HandleTarget::Position);
+    CHECK(drag_handle(document, vortex_guides.handles.back(), ajfx::Vec3{4.0F, 2.0F, 6.0F}));
+    CHECK(std::get<Force>(document.scene->item(vortex)->data).position == ajfx::Vec3{4.0F, 2.0F, 6.0F});
+    const GuideSet blast_guides = build_guides(document, GuideOptions{.item = blast});
+    CHECK(!blast_guides.handles.empty() && blast_guides.handles.front().target == HandleTarget::Radius);
+    CHECK(drag_handle(document, blast_guides.handles.front(), ajfx::Vec3{0.75F, 0.7F, 0.0F}));
+    CHECK(near(std::get<Force>(document.scene->item(blast)->data).radius, 0.75F));
 
     // Removing a named system drops it from the force; a missing one is refused.
     CHECK(remove_item(document, b));
@@ -651,14 +655,13 @@ void relationships_bind_an_object_to_a_system() {
     r.seed = 9U;
     CHECK(validate_scene(document).empty());
 
-    const Document lowered = lower_scene(document);
-    const Block *hits = lowered.block(rule);
-    CHECK(hits && hits->kind == "hit_puffs" && get(*hits, "solid").x == static_cast<float>(cube) &&
-          get(*hits, "per_hit").x == 7.0F && get(*hits, "spread").x == 45.0F && get(*hits, "seed").x == 9.0F);
-    CHECK(std::any_of(lowered.layers.begin(), lowered.layers.end(), [&](const Layer &layer) {
-        return layer.uid == dust && std::any_of(layer.blocks.begin(), layer.blocks.end(),
-                                                [rule](const Block &b) { return b.uid == rule; });
-    }));
+    // The dust is born of the cube's hits, with the rule's own values and seed.
+    {
+        const Compiled born = ready(document);
+        const ajfx::SpawnFromContacts *hits = find_module<ajfx::SpawnFromContacts>(emitter_of(born, dust));
+        CHECK(hits && hits->per_hit == 7.0F && hits->spread == 45.0F && near(hits->min_speed, 0.3F) &&
+              (hits->id & 0x80000000U) != 0U);
+    }
 
     // The cube lands on the ground and dust is born where it hits.
     const Compiled compiled = ready(document);
@@ -703,7 +706,10 @@ void relationships_bind_an_object_to_a_system() {
     // A persistent population cannot be born of hits; a trail from every object can.
     const Uid trail = add_relationship(document, RelationKind::TrailFrom, 0U, dust);
     CHECK(trail != 0U && document.scene->relationships.back().per_speed == 10.0F);
-    CHECK(lower_scene(document).block(trail) && lower_scene(document).block(trail)->kind == "trail");
+    {
+        const Compiled trailed = ready(document);
+        CHECK(find_module<ajfx::SpawnFromBodies>(emitter_of(trailed, dust)) != nullptr);
+    }
     std::get<ParticleSystem>(document.scene->item(dust)->data).persistent = true;
     CHECK(!validate_scene(document).empty());
     std::get<ParticleSystem>(document.scene->item(dust)->data).persistent = false;
@@ -769,20 +775,13 @@ void a_system_trails_another_systems_particles() {
     CHECK(validate_scene(document).empty());
     CHECK(relationship_active(*document.scene, document.scene->relationships.back()));
 
-    // Lowered: the runtime module itself, in the smoke's layer, naming the
-    // embers' layer emitter.
-    const Document lowered = lower_scene(document);
-    const Block *shed = lowered.block(rule);
-    CHECK(shed && shed->kind == "module" && shed->raw);
-    const auto *spawn = std::get_if<ajfx::SpawnModule>(&*shed->raw);
-    const auto *trail = spawn ? std::get_if<ajfx::SpawnFromParticles>(spawn) : nullptr;
-    CHECK(trail && trail->emitter == "item_" + std::to_string(embers) && trail->per_speed == 20.0F &&
-          trail->min_speed == 0.5F);
-    CHECK(get(*shed, "seed").x == 4.0F);
-    CHECK(std::any_of(lowered.layers.begin(), lowered.layers.end(), [&](const Layer &layer) {
-        return layer.uid == smoke &&
-               std::any_of(layer.blocks.begin(), layer.blocks.end(), [rule](const Block &b) { return b.uid == rule; });
-    }));
+    // The smoke is born of the embers' emitter, with the rule's values and seed.
+    {
+        const Compiled shed = ready(document);
+        const ajfx::SpawnFromParticles *trail = find_module<ajfx::SpawnFromParticles>(emitter_of(shed, smoke));
+        CHECK(trail && trail->emitter == "item_" + std::to_string(embers) && trail->per_speed == 20.0F &&
+              trail->min_speed == 0.5F && (trail->id & 0x80000000U) != 0U);
+    }
 
     // Nothing before the embers are thrown; smoke while they fly; none once
     // drag has stopped them.
@@ -963,11 +962,13 @@ void particles_meet_static_objects() {
     dust.lifetime = {5.0F, 5.0F};
     dust.size = {0.02F, 0.02F};
 
-    const Document lowered = lower_scene(document);
-    const Block *plane = lowered.block(ground + 3U);
-    const Block *ball = lowered.block(wall + 3U);
-    CHECK(plane && plane->kind == "ground" && near(get(*plane, "height").x, 0.0F, 0.001F));
-    CHECK(ball && ball->kind == "sphere" && get(*ball, "radius").x == 0.5F && get(*ball, "center").x == 3.0F);
+    {
+        const Compiled met = ready(document);
+        const ajfx::PlaneCollision *plane = find_module<ajfx::PlaneCollision>(emitter_of(met, system));
+        const ajfx::SphereCollision *ball = find_module<ajfx::SphereCollision>(emitter_of(met, system));
+        CHECK(plane && near(plane->offset, 0.0F, 0.001F));
+        CHECK(ball && ball->radius.value == 0.5F && ball->center.value.x == 3.0F);
+    }
 
     const Compiled compiled = ready(document);
     auto solver = ajfx::rigid::make_jolt_solver();
@@ -995,7 +996,7 @@ void particles_meet_static_objects() {
         deepest = std::min(deepest, fallen.position[i].y);
     }
     CHECK(deepest < -1.0F);
-    CHECK(lower_scene(document).block(ground + 3U) == nullptr);
+    CHECK(find_module<ajfx::PlaneCollision>(emitter_of(through, system)) == nullptr);
 
     // A rule on the floor can never fire; one on a Dynamic object can.
     const Uid rule = add_relationship(document, RelationKind::EmitOnHit, ground, system);
@@ -1038,8 +1039,8 @@ void a_system_casts_light_in_its_own_colour() {
     Document document = new_scene();
     const Uid fire = add_particle_system(document);
     {
-        const Document lowered = lower_scene(document);
-        CHECK(lowered.block(fire + 9U) == nullptr);
+        const Compiled unlit = ready(document);
+        CHECK(emitter_of(unlit, fire).renderer.light_count == 0U);
     }
     auto &flames = std::get<ParticleSystem>(document.scene->item(fire)->data);
     flames.casts_light = true;
@@ -1086,10 +1087,11 @@ void a_static_object_is_met_as_it_stands() {
     grit.lifetime = {6.0F, 6.0F};
     grit.size = {0.02F, 0.02F};
 
-    const Document lowered = lower_scene(document);
-    const Block *box = lowered.block(diamond + 3U);
-    CHECK(box && box->kind == "box");
-    CHECK(box && get(*box, "turn").z == 45.0F && get(*box, "center").y == 1.0F);
+    {
+        const Compiled turned = ready(document);
+        const ajfx::BoxCollision *box = find_module<ajfx::BoxCollision>(emitter_of(turned, system));
+        CHECK(box && box->turn.z == 45.0F && near(box->center.value.y, 1.0F));
+    }
 
     const Compiled compiled = ready(document);
     auto solver = ajfx::rigid::make_jolt_solver();
@@ -1114,10 +1116,10 @@ void a_static_object_is_met_as_it_stands() {
     // A primitive is met as its own bounds, not a cube of its longest side.
     cube.mesh = "slab";
     cube.rotation = {0.0F, 30.0F, 0.0F};
-    const Document slab_scene = lower_scene(document);
-    const Block *slab = slab_scene.block(diamond + 3U);
+    const Compiled slab_scene = ready(document);
+    const ajfx::BoxCollision *slab = find_module<ajfx::BoxCollision>(emitter_of(slab_scene, system));
     const auto *mesh = library_mesh("slab");
-    CHECK(slab && mesh && slab->kind == "box");
+    CHECK(slab && mesh);
     if (slab && mesh) {
         float low = 1.0F;
         float high = -1.0F;
@@ -1125,8 +1127,8 @@ void a_static_object_is_met_as_it_stands() {
             low = std::min(low, vertex.position.y);
             high = std::max(high, vertex.position.y);
         }
-        CHECK(near(get(*slab, "size").y, high - low, 1.0e-5F) && get(*slab, "size").y < get(*slab, "size").x);
-        CHECK(get(*slab, "turn").y == 30.0F);
+        CHECK(near(2.0F * slab->half_size.y, high - low, 1.0e-5F) && slab->half_size.y < slab->half_size.x);
+        CHECK(slab->turn.y == 30.0F);
     }
 
     // An artist's model with a hull collider is met as its own surface:
@@ -1135,18 +1137,21 @@ void a_static_object_is_met_as_it_stands() {
     cube.collider = ObjectCollider::Hull;
     cube.size = 1.6F;
     cube.rotation = {0.0F, 20.0F, 80.0F};
-    const Document log_scene = lower_scene(document);
-    const Block *log = log_scene.block(diamond + 3U);
-    CHECK(log && log->kind == "mesh_collider");
-    if (log) {
-        CHECK(file_of(*log, "file") == "models/log.obj" && toggle_of(*log, "fit"));
-        CHECK(get(*log, "scale").x == 1.6F && get(*log, "turn").z == 80.0F && get(*log, "position").y == 1.0F);
+    {
+        const Compiled fitted = compile(document);
+        CHECK(fitted.error.empty());
+        const ajfx::SdfCollision *log = find_module<ajfx::SdfCollision>(emitter_of(fitted, system));
+        CHECK(log && log->offset.value.y == 1.0F);
+        const auto request = std::find_if(fitted.requests.begin(), fitted.requests.end(),
+                                          [](const AssetRequest &r) { return r.kind == AssetRequest::Kind::Field; });
+        CHECK(request != fitted.requests.end() && request->path == "models/log.obj" && request->fit &&
+              request->scale == 1.6F && request->turn.z == 80.0F && log && log->field == request->entry);
     }
     // The same model met as a box is the box of its longest side, turned.
     cube.collider = ObjectCollider::Box;
-    const Document box_scene = lower_scene(document);
-    const Block *block = box_scene.block(diamond + 3U);
-    CHECK(block && block->kind == "box" && get(*block, "size").x == 1.6F && get(*block, "turn").z == 80.0F);
+    const Compiled box_scene = compile(document);
+    const ajfx::BoxCollision *block = find_module<ajfx::BoxCollision>(emitter_of(box_scene, system));
+    CHECK(block && near(2.0F * block->half_size.x, 1.6F) && block->turn.z == 80.0F);
 }
 
 // A system made from an object lives only on its rule: no source of its
@@ -1244,27 +1249,27 @@ void smoke_grids_are_fed_and_ridden_by_systems() {
     ash_system.sources = ash_sources;
     CHECK(validate_scene(document).empty());
 
-    // Lowering: the grid is a layer of one block (so it has handles), and
-    // the bindings are the runtime's modules naming its volume.
-    Document lowered = lower_scene(document);
-    CHECK(lowered.layers.size() == 3U);
-    const Block *box = lowered.block(grid + 1U);
-    CHECK(box && box->kind == "smoke_grid" && get(*box, "size") == vec3(1.0F, 1.5F, 2.0F) &&
-          get(*box, "center").x == 1.0F && get(*box, "solve").x == 12.0F && get(*box, "cell").x == 0.25F);
-    CHECK(handle_block(document, grid) == grid + 1U);
-    const Block *feeding = lowered.block(feed);
-    CHECK(feeding && feeding->raw);
-    const auto *source = feeding ? std::get_if<ajfx::VolumeSource>(&std::get<ajfx::UpdateModule>(*feeding->raw)) : nullptr;
-    CHECK(source && source->volume == smoke_grid_volume(grid) && source->density.value == 3.0F &&
-          source->temperature.value == 0.75F && source->velocity.value == 0.5F);
-    const Block *riding = lowered.block(ride_ash);
-    const auto *advect = riding && riding->raw ? std::get_if<ajfx::VolumeAdvect>(&std::get<ajfx::UpdateModule>(*riding->raw)) : nullptr;
-    CHECK(advect && advect->volume == smoke_grid_volume(grid) && advect->strength.value == 10.0F);
-    // A handle drag on the box writes back to the item.
-    lowered.block(grid + 1U)->set("center", vec3(3.0F, 2.0F, -0.5F));
-    lowered.block(grid + 1U)->set("size", vec3(1.0F, 1.5F, 4.0F));
-    CHECK(adopt_handle_edit(document, lowered, grid));
-    CHECK(smoke.position.x == 3.0F && smoke.size.z == 4.0F);
+    // The bindings are the runtime's modules naming the grid's volume.
+    {
+        const Compiled bound = ready(document);
+        const ajfx::VolumeSource *source = find_module<ajfx::VolumeSource>(emitter_of(bound, embers));
+        CHECK(source && source->volume == smoke_grid_volume(grid) && source->density.value == 3.0F &&
+              source->temperature.value == 0.75F && source->velocity.value == 0.5F);
+        const ajfx::VolumeAdvect *advect = find_module<ajfx::VolumeAdvect>(emitter_of(bound, ash));
+        CHECK(advect && advect->volume == smoke_grid_volume(grid) && advect->strength.value == 10.0F);
+    }
+    // The box's handles write to the grid, from where they are drawn at the
+    // scene's scale.
+    {
+        const GuideSet guides = build_guides(document, GuideOptions{.item = grid});
+        CHECK(guides.handles.size() == 2U && guides.handles[0].target == HandleTarget::Size &&
+              guides.handles[1].target == HandleTarget::Position);
+        const float s = document.scale;
+        CHECK(drag_handle(document, guides.handles[1], ajfx::Vec3{3.0F, 2.0F, -0.5F} * s));
+        CHECK(drag_handle(document, guides.handles[0], guides.handles[0].origin + ajfx::Vec3{0.5F, 0.75F, 2.0F} * s));
+        const auto &moved = std::get<SmokeGrid>(document.scene->item(grid)->data);
+        CHECK(moved.position.x == 3.0F && near(moved.size.z, 4.0F) && near(moved.size.x, 1.0F));
+    }
     smoke.position.x = 1.0F;
     smoke.size.z = 2.0F;
 
@@ -1279,13 +1284,13 @@ void smoke_grids_are_fed_and_ridden_by_systems() {
     CHECK(v.density_dissipation == 0.4F && v.temperature_dissipation == 0.4F && v.velocity_dissipation == 0.05F);
     CHECK(v.extinction == 2.5F && v.albedo == 0.7F && v.color.x == 0.2F && v.color.y == 0.4F && v.color.z == 0.6F);
     CHECK(ajfx::validate(*compiled.effect).ok());
-    const LayerReport *grid_report = compiled.layer(grid);
+    const ItemReport *grid_report = compiled.item(grid);
     CHECK(grid_report && grid_report->included && grid_report->emitter.empty() && !grid_report->baked);
     const ajfx::Emitter *fed = nullptr;
     const ajfx::Emitter *carried = nullptr;
     for (const ajfx::Emitter &emitter : compiled.effect->emitters) {
-        if (emitter.name == compiled.layer(embers)->emitter) { fed = &emitter; }
-        if (emitter.name == compiled.layer(ash)->emitter) { carried = &emitter; }
+        if (emitter.name == compiled.item(embers)->emitter) { fed = &emitter; }
+        if (emitter.name == compiled.item(ash)->emitter) { carried = &emitter; }
     }
     CHECK(fed && carried);
     const auto *fed_source = find_module<ajfx::VolumeSource>(*fed);
@@ -1318,11 +1323,11 @@ void smoke_grids_are_fed_and_ridden_by_systems() {
     }
     const BakeStatus status = bake_status(document, compiled, nullptr);
     CHECK(status.any_baked && !status.current);
-    CHECK(status.layer(embers) && status.layer(embers)->state == BakeState::Live &&
-          status.layer(embers)->why.find("feeds smoke") != std::string::npos);
-    CHECK(status.layer(ash) && status.layer(ash)->state == BakeState::Unbaked);
-    CHECK(status.layer(grid) && status.layer(grid)->state == BakeState::Live);
-    const ajfx::Result<BakeRecord> baked = bake_page(document, compiled, 71U, nullptr);
+    CHECK(status.item(embers) && status.item(embers)->state == BakeState::Live &&
+          status.item(embers)->why.find("feeds smoke") != std::string::npos);
+    CHECK(status.item(ash) && status.item(ash)->state == BakeState::Unbaked);
+    CHECK(status.item(grid) && status.item(grid)->state == BakeState::Live);
+    const ajfx::Result<BakeRecord> baked = bake_scene(document, compiled, 71U, nullptr);
     CHECK(baked);
     CHECK(bake_status(document, compiled, &baked.value()).current);
 
@@ -1359,7 +1364,7 @@ void smoke_grids_are_fed_and_ridden_by_systems() {
     // or rides it.
     document.scene->item(grid)->simulate = false;
     CHECK(!relationship_active(*document.scene, rule(feed)));
-    const Compiled off = compile(document, Purpose::Export);
+    const Compiled off = compile(document);
     CHECK(off.effect && off.effect->volumes.empty());
     for (const ajfx::Emitter &emitter : off.effect->emitters) {
         CHECK(find_module<ajfx::VolumeSource>(emitter) == nullptr && find_module<ajfx::VolumeAdvect>(emitter) == nullptr);
@@ -1374,7 +1379,7 @@ void smoke_grids_are_fed_and_ridden_by_systems() {
     CHECK(error.find("Smoke grid") == 0U && error.find("width is 1000 cells") != std::string::npos &&
           error.find(std::to_string(ajfx::max_volume_size)) != std::string::npos);
     CHECK(validate_scene(document, false).empty());
-    CHECK(!compile(document, Purpose::Export).effect);
+    CHECK(!compile(document).effect);
     smoke.size = {2.5F, 2.5F, 2.5F};
     error = validate_scene(document);
     CHECK(error.find("15,625,000") == std::string::npos && error.find("15625000 cells") != std::string::npos &&
@@ -1454,7 +1459,7 @@ void live_values_play_as_a_rebuilt_preview() {
     CHECK(add_behavior(document, sparks, BehaviorKind::Vortex) != 0U);
     CHECK(validate_scene(document).empty());
 
-    const Compiled live = compile(document, Purpose::Preview, sparks);
+    const Compiled live = compile(document, sparks);
     CHECK(live.effect && live.error.empty());
     const std::vector<LiveParameter> before = live_parameters(document, sparks);
     // speed, spread, radius, gravity and two behaviors in two halves, and a direction.
@@ -1481,7 +1486,7 @@ void live_values_play_as_a_rebuilt_preview() {
     CHECK(!same_but_live(document, longer, sparks));
     CHECK(!same_but_live(document, edited, document.scene->items.front().uid));
 
-    const Compiled rebuilt = compile(edited, Purpose::Preview);
+    const Compiled rebuilt = compile(edited);
     CHECK(rebuilt.effect && rebuilt.error.empty());
     const LiveValues values{*live.effect, live_parameters(edited, sparks)};
     CHECK(values.size() == before.size());
@@ -1497,7 +1502,7 @@ void live_values_play_as_a_rebuilt_preview() {
     // And the values the package was built with are its defaults: without
     // any, it plays as the scene it was built of.
     ajfx::Simulation unedited = simulation(live, solver.get());
-    ajfx::Simulation original = simulation(compile(document, Purpose::Preview), solver.get());
+    ajfx::Simulation original = simulation(compile(document), solver.get());
     unedited.advance_to(90U);
     original.advance_to(90U);
     CHECK(same_particles(unedited.emitter(emitter_named(*live.effect, sparks)),
@@ -1539,12 +1544,12 @@ void a_focus_scene_moves_its_system_as_the_whole_scene_does() {
     CHECK(!sparks_alone.scene->item(smoke)->simulate && !sparks_alone.scene->item(dust)->simulate);
 
     auto solver = ajfx::rigid::make_jolt_solver();
-    const Compiled whole = compile(document, Purpose::Preview);
+    const Compiled whole = compile(document);
     CHECK(whole.effect && whole.error.empty());
     ajfx::Simulation everything = simulation(whole, solver.get());
     everything.advance_to(150U);
     for (const auto &[focus, alone] : {std::pair{smoke, smoke_alone}, std::pair{sparks, sparks_alone}}) {
-        const Compiled part = compile(alone, Purpose::Preview);
+        const Compiled part = compile(alone);
         CHECK(part.effect && part.error.empty());
         CHECK(part.effect->emitters.size() < whole.effect->emitters.size());
         ajfx::Simulation run = simulation(part, solver.get());

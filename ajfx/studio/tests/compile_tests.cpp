@@ -1,691 +1,452 @@
 #include "test_support.hpp"
 
-// The compiler: recipes, merging, scale, ranges, seeds, packages and loops.
+#include "scene.hpp"
+
+#include <ajfx/package.hpp>
+
+#include <cstdlib>
+#include <random>
+
+// The scene compiler: every starter scene compiles whole, and over many
+// generated scenes -- every kind of item, Motion behavior, force, rule and
+// Object setting, at random -- the effect is a function of the scene alone.
 namespace {
 
 using namespace studio_test;
+using namespace ajfx;
 
-ImportedMesh unit_cube() {
-    const ajfx::MeshData cube = ajfx::cube_mesh();
-    ImportedMesh mesh;
-    for (const ajfx::MeshVertex& v : cube.vertices) {
-        mesh.positions.push_back(v.position);
+Simulation simulation(const Compiled& compiled, const RigidSolver* solver) {
+    auto created =
+        Simulation::create(*compiled.effect, 71U, SimulationOptions{.meshes = compiled.meshes, .rigid = solver});
+    if (!created) {
+        throw std::runtime_error{created.error().message};
     }
-    mesh.indices = cube.indices;
-    return mesh;
+    return std::move(created).value();
 }
 
-void every_recipe_compiles_within_its_budget() {
-    for (const Recipe& entry : recipes()) {
-        const Document document = recipe(entry.id);
-        const Compiled compiled = compile(document, Purpose::Export);
-        if (!compiled.error.empty()) {
-            std::cout << "  " << entry.id << ": " << compiled.error << '\n';
+class Dice final {
+public:
+    explicit Dice(std::uint32_t seed) : rng_{seed} {}
+    float real(float lo, float hi) { return std::uniform_real_distribution<float>{lo, hi}(rng_); }
+    int whole(int lo, int hi) { return std::uniform_int_distribution<int>{lo, hi}(rng_); }
+    bool coin(float p = 0.5F) { return real(0.0F, 1.0F) < p; }
+    template <class T>
+    const T& pick(const std::vector<T>& from) {
+        return from[static_cast<std::size_t>(whole(0, static_cast<int>(from.size()) - 1))];
+    }
+    Vec3 point(float spread) { return Vec3{real(-spread, spread), real(0.0F, spread), real(-spread, spread)}; }
+    Range range(float lo, float hi) {
+        const float a = real(lo, hi);
+        const float b = coin(0.3F) ? a : real(a, hi);
+        return Range{a, b};
+    }
+    std::uint32_t seed() { return coin(0.2F) ? 0U : coin(0.1F) ? 20000000U + static_cast<std::uint32_t>(whole(0, 99)) : static_cast<std::uint32_t>(whole(1, 400)); }
+
+private:
+    std::mt19937 rng_;
+};
+
+Document random_scene(Dice& dice) {
+    Document document = empty_scene();
+    Scene& scene = *document.scene;
+    document.scale = dice.pick(std::vector<float>{1.0F, 1.0F, 0.5F, 2.25F});
+    scene.physics.gravity = dice.pick(std::vector<float>{1.0F, 1.0F, 0.0F, 0.4F});
+    scene.physics.angular_damping = dice.real(0.0F, 0.5F);
+    scene.physics.allow_sleep = dice.coin(0.8F);
+    scene.physics.max_dropped = dice.pick(std::vector<std::uint32_t>{64U, 0U, 12U});
+
+    std::vector<Uid> objects;
+    std::vector<Uid> systems;
+    std::vector<Uid> grids;
+    const int object_count = dice.whole(0, 4);
+    for (int i = 0; i < object_count; ++i) {
+        const std::string mesh =
+            dice.pick(std::vector<std::string>{"cube", "slab", "rock", "shard", "floor", "models/crate.glb", "cube"});
+        const Uid uid = mesh == "floor" ? add_floor(document) : add_object(document, mesh);
+        SceneItem& item = *scene.item(uid);
+        item.seed = dice.seed();
+        item.simulate = dice.coin(0.9F);
+        auto& o = std::get<Object>(item.data);
+        o.position = dice.point(2.0F);
+        o.rotation = Vec3{dice.real(-90.0F, 90.0F), dice.real(-180.0F, 180.0F), 0.0F};
+        o.size = dice.real(0.2F, 2.0F);
+        o.tint = Color{dice.real(0.0F, 1.0F), dice.real(0.0F, 1.0F), dice.real(0.0F, 1.0F), 1.0F};
+        if (mesh != "floor") {
+            o.motion = dice.pick(std::vector<ObjectMotion>{ObjectMotion::Dynamic, ObjectMotion::Dynamic,
+                                                            ObjectMotion::Static, ObjectMotion::Animated});
+            o.collider = dice.pick(std::vector<ObjectCollider>{ObjectCollider::Hull, ObjectCollider::Sphere,
+                                                                ObjectCollider::Box});
+            if (o.motion == ObjectMotion::Animated && o.collider == ObjectCollider::Hull) {
+                o.collider = ObjectCollider::Box;
+            }
+            if (o.motion == ObjectMotion::Dynamic) {
+                o.distribution = dice.pick(std::vector<Distribution>{Distribution::Single, Distribution::Grid,
+                                                                      Distribution::Pile, Distribution::Placed});
+                o.count = static_cast<std::uint32_t>(dice.whole(2, 30));
+                o.fracture = dice.coin(0.3F);
+                o.fragments = static_cast<std::uint32_t>(dice.whole(2, 16));
+            }
         }
-        CHECK(compiled.error.empty());
-        CHECK(compiled.effect.has_value());
-        // One emitter a layer, but the solid layers are one world together.
-        const auto solid_layers = static_cast<std::size_t>(std::count_if(
-            document.layers.begin(), document.layers.end(), [](const Layer& l) { return l.kind == LayerKind::Rigid; }));
-        CHECK(compiled.effect->emitters.size() ==
-              document.layers.size() - solid_layers + (solid_layers > 0U ? 1U : 0U));
-        CHECK(compiled.solids.layers.size() == solid_layers);
-        CHECK(ajfx::validate(*compiled.effect).ok());
-        for (const ajfx::Emitter& emitter : compiled.effect->emitters) {
-            CHECK(ajfx::particle_bound(*compiled.effect, emitter) <= emitter.capacity);
-            CHECK(emitter.capacity % 64U == 0U);
-        }
-        // Every texture and mesh it names travels with it.
-        CHECK(ajfx::check_textures(*compiled.effect, compiled.textures).ok());
-        CHECK(ajfx::check_meshes(*compiled.effect, compiled.meshes).ok());
-        CHECK(ajfx::write_package(*compiled.effect, asset_entries(compiled)).ok());
+        o.density = dice.real(100.0F, 5000.0F);
+        o.friction = dice.real(0.0F, 1.0F);
+        o.restitution = dice.real(0.0F, 1.0F);
+        o.velocity = dice.coin() ? Vec3{} : dice.point(3.0F);
+        o.release = dice.coin() ? 0.0F : dice.real(0.0F, 2.0F);
+        o.move_to = dice.point(2.0F);
+        o.turn_to = Vec3{0.0F, dice.real(0.0F, 90.0F), 0.0F};
+        o.move_at = dice.real(0.0F, 2.0F);
+        o.move_over = dice.real(0.1F, 2.0F);
+        o.width = dice.real(0.5F, 3.0F);
+        o.depth = dice.real(0.5F, 3.0F);
+        o.spacing = dice.real(0.8F, 1.5F);
+        o.variation = dice.real(0.0F, 1.0F);
+        o.fracture_speed = dice.real(1.0F, 10.0F);
+        objects.push_back(uid);
     }
-    // Every layer preset compiles on its own too.
-    for (const LayerPreset& preset : layer_presets()) {
-        Document document;
-        std::optional<Layer> layer = make_layer_preset(document, preset.id);
-        CHECK(layer.has_value());
-        document.layers.push_back(std::move(*layer));
-        CHECK(compile(document, Purpose::Export).error.empty());
-    }
-}
-
-void block_order_does_not_change_the_effect() {
-    Document document = recipe("campfire");
-    const Compiled before = compile(document, Purpose::Export);
-    for (Layer& layer : document.layers) {
-        std::reverse(layer.blocks.begin(), layer.blocks.end());
-    }
-    const Compiled after = compile(document, Purpose::Export);
-    CHECK(before.effect.has_value() && after.effect.has_value());
-    CHECK(*before.effect == *after.effect);
-}
-
-void a_new_block_leaves_the_others_alone() {
-    Document document = recipe("campfire");
-    const Compiled before = compile(document, Purpose::Export);
-    Layer& flames = layer_named(document, "Flames");
-    std::optional<Block> wind = make_block(document, "wind");
-    CHECK(wind.has_value());
-    insert_block(flames, 0U, std::move(*wind));
-    const Compiled after = compile(document, Purpose::Export);
-
-    // Every module of the old effect is in the new one, with the same id and
-    // the same values, so its random streams are where they were.
-    const ajfx::Emitter& old_emitter = emitter_of(before, flames);
-    const ajfx::Emitter& new_emitter = emitter_of(after, flames);
-    CHECK(new_emitter.update.size() == old_emitter.update.size() + 1U);
-    for (const ajfx::InitModule& module : old_emitter.init) {
-        CHECK(std::find(new_emitter.init.begin(), new_emitter.init.end(), module) != new_emitter.init.end());
-    }
-    for (const ajfx::UpdateModule& module : old_emitter.update) {
-        CHECK(std::find(new_emitter.update.begin(), new_emitter.update.end(), module) != new_emitter.update.end());
-    }
-    // The other layers did not change at all.
-    CHECK(emitter_of(before, layer_named(document, "Embers")) == emitter_of(after, layer_named(document, "Embers")));
-}
-
-void page_scale_scales_the_whole_effect() {
-    Document document = recipe("campfire");
-    const Compiled one = compile(document, Purpose::Export);
-    document.scale = 2.0F;
-    const Compiled two = compile(document, Purpose::Export);
-    const Layer& flames = layer_named(document, "Flames");
-    const ajfx::Emitter& a = emitter_of(one, flames);
-    const ajfx::Emitter& b = emitter_of(two, flames);
-
-    CHECK(near(find_module<ajfx::ShapeLocation>(b)->radius_max.value, find_module<ajfx::ShapeLocation>(a)->radius_max.value * 2.0F));
-    CHECK(near(find_module<ajfx::Velocity>(b)->speed_max.value, find_module<ajfx::Velocity>(a)->speed_max.value * 2.0F));
-    CHECK(near(find_module<ajfx::InitSize>(b)->max.value, find_module<ajfx::InitSize>(a)->max.value * 2.0F));
-    CHECK(near(find_module<ajfx::Gravity>(b)->acceleration.value.y, find_module<ajfx::Gravity>(a)->acceleration.value.y * 2.0F));
-    CHECK(near(find_module<ajfx::CurlNoise>(b)->frequency.value, find_module<ajfx::CurlNoise>(a)->frequency.value * 0.5F));
-    CHECK(near(b.renderer.light_range_min, a.renderer.light_range_min * 2.0F));
-    CHECK(near(b.renderer.light_range_max, a.renderer.light_range_max * 2.0F));
-    // Time is not a distance: life and spawn rates stay.
-    CHECK(a.spawn == b.spawn);
-    CHECK(*find_module<ajfx::Lifetime>(a) == *find_module<ajfx::Lifetime>(b));
-}
-
-void blocks_that_shape_one_curve_are_merged() {
-    Document document;
-    Layer layer;
-    layer.uid = document.allocate();
-    layer.name = "Merge";
-    for (const char* kind : {"stream", "color", "fade", "size"}) {
-        layer.blocks.push_back(*make_block(document, kind));
-    }
-    block_of(layer, "color").set("over_life", choice("fire"));
-    block_of(layer, "fade").set("in", number(25.0F));
-    block_of(layer, "fade").set("out", number(25.0F));
-    document.layers.push_back(layer);
-    Compiled compiled = compile(document, Purpose::Export);
-    CHECK(compiled.error.empty());
-    const ajfx::Emitter& emitter = emitter_of(compiled, layer);
-    const std::size_t color_curves = static_cast<std::size_t>(std::count_if(
-        emitter.update.begin(), emitter.update.end(),
-        [](const ajfx::UpdateModule& m) { return std::holds_alternative<ajfx::ColorOverLife>(m); }));
-    CHECK(color_curves == 1U);
-    const auto& keys = find_module<ajfx::ColorOverLife>(emitter)->keys;
-    CHECK(keys.size() == 17U);
-    // Faded in from nothing and out to nothing; burning from white at birth
-    // to a dark ember at death.
-    CHECK(keys.front().value.a == 0.0F && keys.back().value.a == 0.0F);
-    CHECK(near(keys[8].value.a, 1.0F));
-    CHECK(keys.front().value.r == 1.0F && keys.front().value.b == 1.0F);
-    CHECK(keys.back().value.r < 0.2F);
-    // A Size block that stays the same adds no curve.
-    CHECK(find_module<ajfx::SizeOverLife>(emitter) == nullptr);
-
-    // A raw colour curve replaces the merged one.
-    const ajfx::ColorOverLife raw{.id = 0U, .keys = {{0.0F, ajfx::Color{0.5F, 0.5F, 0.5F, 1.0F}}, {1.0F, ajfx::Color{}}}};
-    insert_block(document.layers[0], 9U, make_raw_block(document, RawModule{ajfx::UpdateModule{raw}}));
-    compiled = compile(document, Purpose::Export);
-    CHECK(find_module<ajfx::ColorOverLife>(emitter_of(compiled, document.layers[0]))->keys == raw.keys);
-}
-
-void solo_and_broken_layers_leave_the_rest_playing() {
-    Document document = recipe("campfire");
-    layer_named(document, "Embers").solo = true;
-    Compiled preview = compile(document, Purpose::Preview);
-    CHECK(preview.effect->emitters.size() == 1U);
-    CHECK(compile(document, Purpose::Export).effect->emitters.size() == 3U);
-
-    // A layer that cannot compile is named, with its block, and the others
-    // still play.
-    layer_named(document, "Embers").solo = false;
-    Layer& smoke = layer_named(document, "Smoke");
-    const Uid broken = insert_block(smoke, 0U,
-                                    make_raw_block(document, RawModule{ajfx::UpdateModule{ajfx::SdfCollision{}}}));
-    preview = compile(document, Purpose::Preview);
-    CHECK(preview.effect->emitters.size() == 2U);
-    CHECK(preview.layer(smoke.uid)->error_block == broken);
-    CHECK(!preview.error.empty());
-
-    // A raw module the runtime refuses is traced to its block.
-    remove_block(document, broken);
-    ajfx::Velocity bad{};
-    bad.spread = 400.0F;
-    const Uid refused = insert_block(smoke, 0U, make_raw_block(document, RawModule{ajfx::InitModule{bad}}));
-    preview = compile(document, Purpose::Preview);
-    CHECK(preview.layer(smoke.uid)->error_block == refused);
-}
-
-void published_controls_become_parameters_with_budgets_for_their_range() {
-    Document document = recipe("campfire");
-    document.scale = 2.0F;
-    Layer& flames = layer_named(document, "Flames");
-    block_of(flames, "stream").publish(Published{"rate", "fire_rate", 0.0F, 500.0F});
-    block_of(flames, "color").publish(Published{"color", "fire_color", 0.0F, 20.0F});
-    block_of(flames, "size").publish(Published{"size", "fire_size", 0.1F, 1.0F});
-    Compiled compiled = compile(document, Purpose::Export);
-    CHECK(compiled.error.empty());
-
-    const ajfx::ParameterDesc* rate = parameter_of(compiled, "fire_rate");
-    CHECK(rate != nullptr && rate->type == ajfx::ParameterType::Float);
-    CHECK(rate->default_value[0] == 90.0F && rate->min == 0.0F && rate->max == 500.0F);
-    const ajfx::Emitter& emitter = emitter_of(compiled, flames);
-    CHECK(std::get<ajfx::SpawnRate>(emitter.spawn[0]).rate.parameter == "fire_rate");
-    // Sized for the top of the range: 500 a second for up to 1.1 seconds.
-    CHECK(emitter.capacity >= 550U);
-
-    // A colour is the whole starting colour, brightness and opacity in it.
-    const ajfx::ParameterDesc* tint = parameter_of(compiled, "fire_color");
-    CHECK(tint != nullptr && tint->type == ajfx::ParameterType::Color);
-    CHECK(near(tint->default_value[0], 5.0F) && near(tint->default_value[1], 3.1F) && tint->default_value[3] == 1.0F);
-    const ajfx::InitColor& color = *find_module<ajfx::InitColor>(emitter);
-    CHECK(color.a.parameter == "fire_color" && color.b.parameter == "fire_color");
-
-    // A range publishes both ends, in scaled units like the value.
-    const ajfx::ParameterDesc* low = parameter_of(compiled, "fire_size_min");
-    const ajfx::ParameterDesc* high = parameter_of(compiled, "fire_size_max");
-    CHECK(low != nullptr && high != nullptr);
-    CHECK(near(low->min, 0.2F) && near(high->max, 2.0F) && near(low->default_value[0], 0.76F));
-    CHECK(find_module<ajfx::InitSize>(emitter)->max.parameter == "fire_size_max");
-    CHECK(ajfx::write_package(*compiled.effect, asset_entries(compiled)).ok());
-
-    // Two layers sharing a name share one parameter, sized for both ranges.
-    Layer& embers = layer_named(document, "Embers");
-    block_of(embers, "stream").publish(Published{"rate", "fire_rate", 0.0F, 800.0F});
-    compiled = compile(document, Purpose::Export);
-    CHECK(compiled.error.empty());
-    CHECK(parameter_of(compiled, "fire_rate")->max == 800.0F);
-    CHECK(emitter_of(compiled, flames).capacity >= 880U);
-    CHECK(std::get<ajfx::SpawnRate>(emitter_of(compiled, embers).spawn[0]).rate.parameter == "fire_rate");
-
-    // ...unless they publish different kinds of value, which names the block.
-    const Uid clash = block_of(embers, "color").uid;
-    block_of(embers, "color").publish(Published{"color", "fire_rate", 0.0F, 1.0F});
-    compiled = compile(document, Purpose::Export);
-    CHECK(compiled.layer(embers.uid)->error_block == clash);
-    block_of(embers, "color").unpublish("color");
-
-    // A layer that does not play offers nothing to the host.
-    Layer& smoke = layer_named(document, "Smoke");
-    block_of(smoke, "drag").publish(Published{"amount", "smoke_drag", 0.0F, 3.0F});
-    smoke.enabled = false;
-    compiled = compile(document, Purpose::Export);
-    CHECK(parameter_of(compiled, "smoke_drag") == nullptr);
-}
-
-void ranges_give_each_particle_its_own_value() {
-    Document document = recipe("campfire");
-    document.scale = 2.0F;
-    Layer& flames = layer_named(document, "Flames");
-    block_of(flames, "shape").set("size", range(0.1F, 0.3F));
-    block_of(flames, "launch").set("spread", range(10.0F, 40.0F));
-    block_of(flames, "rise").set("strength", range(3.0F, 6.0F));
-    block_of(flames, "drag").set("amount", range(0.5F, 2.0F));
-    block_of(flames, "color").set("brightness", range(2.0F, 8.0F));
-    const Compiled compiled = compile(document, Purpose::Export);
-    const ajfx::Emitter& emitter = emitter_of(compiled, flames);
-
-    // A radius between the two ends, in metres at the page's scale.
-    const auto* shape = find_module<ajfx::ShapeLocation>(emitter);
-    CHECK(near(shape->radius_min.value, 0.2F) && near(shape->radius_max.value, 0.6F));
-    // A spread of 10 to 40 degrees is a cone hollowed to 10.
-    const auto* velocity = find_module<ajfx::Velocity>(emitter);
-    CHECK(velocity->spread_min.value == 10.0F && velocity->spread.value == 40.0F);
-    // A force takes each particle by its own factor between the two ends.
-    const Uid rise = block_of(flames, "rise").uid;
-    bool found_rise = false;
-    for (const ajfx::UpdateModule& module : emitter.update) {
-        if (const auto* gravity = std::get_if<ajfx::Gravity>(&module); gravity != nullptr && gravity->acceleration.value.y > 0.0F) {
-            CHECK(near(gravity->acceleration.value.y, 2.0F));
-            CHECK(gravity->scale_min.value == 3.0F && gravity->scale_max.value == 6.0F);
-            found_rise = true;
-        }
-    }
-    CHECK(found_rise && rise != 0U);
-    const auto* drag = find_module<ajfx::Drag>(emitter);
-    CHECK(drag->coefficient.value == 1.0F && drag->scale_min.value == 0.5F && drag->scale_max.value == 2.0F);
-    // The starting colour carries the brightest end; each particle a share of it.
-    const auto* color = find_module<ajfx::InitColor>(emitter);
-    const Value base = get(block_of(flames, "color"), "color");
-    CHECK(near(color->a.value.r, base.x * 8.0F));
-    CHECK(near(color->brightness_min.value, 0.25F) && color->brightness_max.value == 1.0F);
-
-    // Equal ends are the one value, exactly as a single number was.
-    Document plain = recipe("campfire");
-    const Compiled plain_compiled = compile(plain, Purpose::Export);
-    const ajfx::Emitter& plain_flames = emitter_of(plain_compiled, layer_named(plain, "Flames"));
-    const auto* plain_drag = find_module<ajfx::Drag>(plain_flames);
-    CHECK(plain_drag->scale_min.value == plain_drag->scale_max.value);
-    CHECK(find_module<ajfx::InitColor>(plain_flames)->brightness_min.value == 1.0F);
-
-    // A published range is two parameters, sized for both ends.
-    block_of(flames, "drag").publish(Published{"amount", "flames_drag", 0.0F, 4.0F});
-    const Compiled published = compile(document, Purpose::Export);
-    const auto* bound = find_module<ajfx::Drag>(emitter_of(published, flames));
-    CHECK(bound->scale_min.parameter == "flames_drag_min" && bound->scale_max.parameter == "flames_drag_max");
-}
-
-void seeds_deal_new_values_to_their_block_alone() {
-    Document document = recipe("campfire");
-    Layer& flames = layer_named(document, "Flames");
-    const Compiled before = compile(document, Purpose::Export);
-    block_of(flames, "launch").set("seed", number(7.0F));
-    const Compiled after = compile(document, Purpose::Export);
-
-    // The launch's module has a new id, so its particles draw new values...
-    const ajfx::Velocity* old_velocity = find_module<ajfx::Velocity>(emitter_of(before, flames));
-    const ajfx::Velocity* new_velocity = find_module<ajfx::Velocity>(emitter_of(after, flames));
-    CHECK(old_velocity->id != new_velocity->id && (new_velocity->id & 0x80000000U) != 0U);
-    ajfx::Velocity same = *new_velocity;
-    same.id = old_velocity->id;
-    CHECK(same == *old_velocity);
-    // ...and every other module is untouched.
-    for (const ajfx::UpdateModule& module : emitter_of(before, flames).update) {
-        const auto& update = emitter_of(after, flames).update;
-        CHECK(std::find(update.begin(), update.end(), module) != update.end());
-    }
-    // Each seed is its own pattern; seed 0 is the block's own.
-    block_of(flames, "launch").set("seed", number(8.0F));
-    CHECK(find_module<ajfx::Velocity>(emitter_of(compile(document, Purpose::Export), flames))->id != new_velocity->id);
-    block_of(flames, "launch").clear("seed");
-    CHECK(compile(document, Purpose::Export).effect == before.effect);
-
-    // Turbulence's seed is its field's: a different pattern of swirls.
-    block_of(flames, "turbulence").set("seed", number(3.0F));
-    CHECK(find_module<ajfx::CurlNoise>(emitter_of(compile(document, Purpose::Export), flames))->seed !=
-          find_module<ajfx::CurlNoise>(emitter_of(before, flames))->seed);
-    block_of(flames, "turbulence").clear("seed");
-
-    // A layer's seed reseeds its emitter and nothing else.
-    flames.seed = 12U;
-    const Compiled reseeded = compile(document, Purpose::Export);
-    CHECK(emitter_of(reseeded, flames).seed != emitter_of(before, flames).seed);
-    ajfx::Emitter restored = emitter_of(reseeded, flames);
-    restored.seed = emitter_of(before, flames).seed;
-    CHECK(restored == emitter_of(before, flames));
-    CHECK(emitter_of(reseeded, layer_named(document, "Embers")) == emitter_of(before, layer_named(document, "Embers")));
-
-    // Every block that deals random values offers a seed under More settings.
-    for (const char* kind : {"shape", "launch", "gravity", "rise", "wind", "turbulence", "drag", "swirl", "draw_in",
-                             "attract", "color", "size", "spin", "tumble"}) {
-        const ControlDef* seed = find_control(*find_block_def(kind), "seed");
-        CHECK(seed != nullptr && seed->level == Level::Detail);
-    }
-}
-
-void flipbook_cells_fade_out_at_their_edges() {
-    // A cell drawn up to its border shows as a hard line across the sprite.
-    for (const char* id : {"flame", "smoke"}) {
-        const LibraryTexture* texture = library_texture(id);
-        CHECK(texture != nullptr);
-        const ajfx::TextureData* data = library_texture_data(texture->entry);
-        CHECK(data != nullptr);
-        const std::uint32_t cell_w = data->width / texture->columns;
-        const std::uint32_t cell_h = data->height / texture->rows;
-        const std::vector<std::uint8_t>& pixels = data->mips.front();
-        for (std::uint32_t cy = 0U; cy < texture->rows; ++cy) {
-            for (std::uint32_t cx = 0U; cx < texture->columns; ++cx) {
-                for (std::uint32_t i = 0U; i < cell_w; ++i) {
-                    for (const std::uint32_t row : {cy * cell_h, cy * cell_h + cell_h - 1U}) {
-                        const std::size_t at = (std::size_t{row} * data->width + cx * cell_w + i) * 4U + 3U;
-                        if (pixels[at] > 40U) {
-                            throw std::runtime_error{std::string{id} + " cell " + std::to_string(cy * texture->columns + cx) +
-                                                     " is opaque at its edge"};
-                        }
-                    }
+    const int system_count = dice.whole(0, 3);
+    for (int i = 0; i < system_count; ++i) {
+        const Uid uid = add_particle_system(document);
+        SceneItem& item = *scene.item(uid);
+        item.seed = dice.seed();
+        item.simulate = dice.coin(0.9F);
+        auto& p = std::get<ParticleSystem>(item.data);
+        p.position = dice.point(2.0F);
+        p.radius = dice.range(0.0F, 1.0F);
+        p.sources.clear();
+        const int sources = dice.whole(0, 3);
+        for (int k = 0; k < sources; ++k) {
+            const SourceMode mode =
+                dice.pick(std::vector<SourceMode>{SourceMode::Continuous, SourceMode::Burst, SourceMode::Initial});
+            const Uid source = add_source(document, uid, mode);
+            for (ParticleSource& s : std::get<ParticleSystem>(scene.item(uid)->data).sources) {
+                if (s.uid == source) {
+                    s.count = static_cast<std::uint32_t>(dice.whole(1, 400));
+                    s.rate = dice.real(1.0F, 200.0F);
+                    s.time = dice.real(0.0F, 3.0F);
                 }
             }
         }
-    }
-}
-
-void the_loop_is_as_long_as_the_effect_plays() {
-    // A stream builds up, then shows a whole generation at its full.
-    Document document;
-    Layer layer;
-    layer.uid = document.allocate();
-    layer.name = "Sparks";
-    layer.life_min = 0.5F;
-    layer.life_max = 1.5F;
-    layer.blocks.push_back(*make_block(document, "stream"));
-    document.layers.push_back(layer);
-    CHECK(document.loop_auto);
-    Compiled compiled = compile(document, Purpose::Preview);
-    CHECK(near(natural_loop_seconds(compiled), 3.2F));
-    CHECK(near(loop_seconds(document, compiled), 3.2F));
-
-    // A burst plays until its last particle dies; repeats wait for the last.
-    Document bursts = document;
-    Layer& burst_layer = bursts.layers[0];
-    burst_layer.blocks.clear();
-    Block burst = *make_block(bursts, "burst");
-    burst.set("time", number(0.5F));
-    burst.set("every", number(1.0F));
-    burst.set("repeats", number(3.0F));
-    burst_layer.blocks.push_back(burst);
-    burst_layer.life_max = 2.0F;
-    compiled = compile(bursts, Purpose::Preview);
-    // The third burst at 2.5 s, its particles gone by 4.5 s.
-    CHECK(near(natural_loop_seconds(compiled), 4.7F));
-
-    // The longest layer sets it, a published life at the top of its range.
-    Document both = document;
-    both.layers.push_back(bursts.layers[0]);
-    both.layers.back().uid = both.allocate();
-    both.layers.back().blocks[0].uid = both.allocate();
-    CHECK(near(natural_loop_seconds(compile(both, Purpose::Preview)), 4.7F));
-
-    // A page's own loop is kept when it sets one.
-    document.loop_auto = false;
-    document.loop_seconds = 9.0F;
-    CHECK(loop_seconds(document, compile(document, Purpose::Preview)) == 9.0F);
-    // An effect with nothing born still loops.
-    CHECK(natural_loop_seconds(Compiled{}) == 2.0F);
-    // Every recipe gets a loop that covers its longest life. A pile lives
-    // on after it falls; its loop covers the fall and settling.
-    for (const Recipe& entry : recipes()) {
-        const Document page = recipe(entry.id);
-        const Compiled built = compile(page, Purpose::Preview);
-        float longest = 0.0F;
-        for (const Layer& l : page.layers) {
-            const bool piled =
-                std::any_of(l.blocks.begin(), l.blocks.end(), [](const Block& b) { return b.kind == BlockKind::Object; });
-            longest = std::max(longest, l.enabled ? (piled ? 5.0F : l.life_max) : 0.0F);
+        auto& q = std::get<ParticleSystem>(scene.item(uid)->data);
+        q.persistent = dice.coin(0.1F) && std::all_of(q.sources.begin(), q.sources.end(), [](const ParticleSource& s) {
+                           return s.mode != SourceMode::Continuous;
+                       });
+        q.lifetime = dice.range(0.2F, 5.0F);
+        q.direction = dice.coin(0.1F) ? Vec3{} : dice.point(1.0F);
+        q.speed = dice.range(0.0F, 6.0F);
+        q.spread = dice.real(0.0F, 180.0F);
+        q.gravity = dice.real(0.0F, 2.0F);
+        const int behaviors = dice.whole(0, 4);
+        for (int k = 0; k < behaviors; ++k) {
+            const BehaviorKind kind =
+                dice.pick(std::vector<BehaviorKind>{BehaviorKind::Drag, BehaviorKind::Turbulence, BehaviorKind::Vortex,
+                                                    BehaviorKind::Wind, BehaviorKind::Attract, BehaviorKind::DrawIn});
+            static_cast<void>(add_behavior(document, uid, kind));
         }
-        const float loop = loop_seconds(page, built);
-        CHECK(loop >= 1.0F && loop <= 120.0F && (built.effect.has_value() ? loop >= longest : true));
+        auto& r = std::get<ParticleSystem>(scene.item(uid)->data);
+        for (MotionBehavior& b : r.motion) {
+            b.enabled = dice.coin(0.85F);
+            b.strength = dice.range(0.0F, 4.0F);
+            b.size = dice.real(0.1F, 2.0F);
+            b.churn = dice.real(0.0F, 2.0F);
+            b.center = dice.point(2.0F);
+            b.axis = dice.coin() ? VortexAxis::Vertical : VortexAxis::Horizontal;
+            b.heading = dice.real(0.0F, 360.0F);
+            b.reach = dice.real(0.0F, 3.0F);
+            b.seed = dice.seed();
+        }
+        r.collide = dice.coin(0.8F);
+        r.tint = Color{dice.real(0.0F, 1.0F), dice.real(0.0F, 1.0F), dice.real(0.0F, 1.0F), dice.real(0.5F, 1.0F)};
+        r.brightness = dice.range(0.0F, 3.0F);
+        r.size = dice.range(0.01F, 0.3F);
+        r.spin = dice.coin() ? Range{} : dice.range(0.0F, 200.0F);
+        r.look = dice.pick(std::vector<ParticleLook>{ParticleLook::Glow, ParticleLook::Smoke, ParticleLook::Solid});
+        r.lighting = dice.coin() ? ParticleLighting::Glows : ParticleLighting::Lit;
+        r.curvature = dice.real(0.0F, 1.0F);
+        r.wrap = dice.real(0.0F, 1.0F);
+        r.ambient = dice.real(0.0F, 2.0F);
+        r.shadowed = dice.coin();
+        r.casts_light = dice.coin(0.3F);
+        r.light_count = static_cast<std::uint32_t>(dice.whole(1, 16));
+        r.light_strength = dice.range(0.0F, 4.0F);
+        r.light_reach = dice.range(0.1F, 3.0F);
+        if (dice.coin(0.3F)) {
+            r.size_driver = Driver::Age;
+            r.size_over_age = {{0.0F, dice.real(0.0F, 2.0F)}, {1.0F, dice.real(0.0F, 2.0F)}};
+        }
+        if (dice.coin(0.3F)) {
+            r.tint_driver = Driver::Age;
+            r.tint_over_age = {{0.0F, {1.0F, 0.5F, 0.2F, 1.0F}}, {1.0F, {0.2F, 0.2F, 0.2F, 0.0F}}};
+        }
+        systems.push_back(uid);
     }
-}
-
-void own_pictures_and_models_go_into_the_package() {
-    // A picture is a sprite texture, halved until it fits.
-    ImportedImage image;
-    image.width = 2048U;
-    image.height = 512U;
-    image.rgba.assign(static_cast<std::size_t>(image.width) * image.height * 4U, 200U);
-    std::string error;
-    const std::optional<ajfx::TextureData> texture = sprite_texture(image, error);
-    CHECK(texture && texture->width == max_sprite_size && texture->height == 256U && texture->mips.size() > 1U);
-    CHECK(!sprite_texture(ImportedImage{}, error) && !error.empty());
-
-    // A model for debris is centred and fitted to a metre.
-    ImportedMesh brick = unit_cube();
-    for (ajfx::Vec3& p : brick.positions) {
-        p = ajfx::Vec3{p.x * 4.0F + 10.0F, p.y * 2.0F, p.z * 1.0F - 3.0F};
-    }
-    const std::optional<ajfx::MeshData> debris = debris_mesh(brick, error);
-    CHECK(debris.has_value());
-    float lo = 1.0F;
-    float hi = -1.0F;
-    for (const ajfx::MeshVertex& v : debris->vertices) {
-        lo = std::min(lo, v.position.x);
-        hi = std::max(hi, v.position.x);
-        CHECK(std::fabs(v.position.y) <= 0.2501F && std::fabs(v.position.z) <= 0.1251F);
-    }
-    CHECK(near(lo, -0.5F) && near(hi, 0.5F));
-
-    // A page naming files compiles to entries the builder fills, and two
-    // blocks using one file share its entry.
-    Document document = recipe("explosion");
-    Layer& sparks = document.layers[0];
-    Block& look = block_of(sparks, "appearance");
-    look.set("material", choice("smoke"));
-    look.set("texture", choice("file"));
-    look.set("texture_file", choice("C:/art/puff.png"));
-    look.set("columns", number(4.0F));
-    look.set("rows", number(2.0F));
-    Block& debris_look = block_of(layer_named(document, "Debris"), "appearance");
-    debris_look.set("mesh", choice("file"));
-    debris_look.set("mesh_file", choice("C:/art/rock.glb"));
-    Block collider = *make_block(document, "mesh_collider");
-    collider.set("file", choice("C:/art/table.obj"));
-    collider.set("position", vec3(0.0F, 0.5F, 0.0F));
-    insert_block(sparks, sparks.blocks.size(), collider);
-    const Compiled compiled = compile(document, Purpose::Export);
-    CHECK(compiled.error.empty() && compiled.requests.size() == 3U);
-    std::map<AssetRequest::Kind, const AssetRequest*> by_kind;
-    for (const AssetRequest& request : compiled.requests) {
-        by_kind[request.kind] = &request;
-        CHECK(request.entry.starts_with("user."));
-    }
-    CHECK(by_kind.at(AssetRequest::Kind::Texture)->path == "C:/art/puff.png");
-    CHECK(by_kind.at(AssetRequest::Kind::Mesh)->path == "C:/art/rock.glb");
-    const AssetRequest& field = *by_kind.at(AssetRequest::Kind::Field);
-    CHECK(field.path == "C:/art/table.obj" && field.cells == 72U && near(field.scale, document.scale));
-    const ajfx::Emitter& emitter = emitter_of(compiled, sparks);
-    CHECK(emitter.renderer.texture == by_kind.at(AssetRequest::Kind::Texture)->entry);
-    CHECK(emitter.renderer.flipbook_columns == 4U && emitter.renderer.flipbook_rows == 2U);
-    bool collides = false;
-    for (const ajfx::UpdateModule& module : emitter.update) {
-        if (const auto* sdf = std::get_if<ajfx::SdfCollision>(&module)) {
-            collides = sdf->field == field.entry;
+    const int force_count = dice.whole(0, 3);
+    for (int i = 0; i < force_count; ++i) {
+        const ForceKind kind = dice.pick(std::vector<ForceKind>{ForceKind::Wind, ForceKind::Vortex, ForceKind::Attract,
+                                                                ForceKind::DrawIn, ForceKind::Blast});
+        const Uid uid = add_force(document, kind);
+        SceneItem& item = *scene.item(uid);
+        item.seed = dice.seed();
+        item.simulate = dice.coin(0.9F);
+        auto& f = std::get<Force>(item.data);
+        f.position = dice.point(2.0F);
+        f.strength = dice.range(0.0F, 4.0F);
+        f.heading = dice.real(0.0F, 360.0F);
+        f.axis = dice.coin() ? VortexAxis::Vertical : VortexAxis::Horizontal;
+        f.reach = dice.real(0.0F, 3.0F);
+        f.height = dice.real(0.0F, 3.0F);
+        f.power = dice.real(1.0F, 30.0F);
+        f.radius = dice.real(0.5F, 6.0F);
+        f.time = dice.real(0.0F, 3.0F);
+        f.bodies = kind == ForceKind::Wind && dice.coin(0.5F);
+        f.air_speed = dice.real(0.0F, 12.0F);
+        f.gust = dice.real(0.0F, 1.0F);
+        if (!systems.empty() && dice.coin(0.3F)) {
+            f.all_systems = false;
+            f.targets = {dice.pick(systems)};
         }
     }
-    CHECK(collides);
-    // No file picked yet: a soft dot, slabs, nothing to collide with.
-    look.set("texture_file", choice(""));
-    debris_look.set("mesh_file", choice(""));
-    sparks.blocks.back().set("file", choice(""));
-    const Compiled waiting = compile(document, Purpose::Export);
-    CHECK(waiting.error.empty() && waiting.requests.empty());
-    CHECK(emitter_of(waiting, layer_named(document, "Debris")).renderer.mesh == "slab");
+    const int grid_count = dice.whole(0, 1);
+    for (int i = 0; i < grid_count; ++i) {
+        const Uid uid = add_smoke_grid(document);
+        SceneItem& item = *scene.item(uid);
+        item.simulate = dice.coin(0.85F);
+        auto& g = std::get<SmokeGrid>(item.data);
+        g.position = dice.point(1.0F);
+        g.size = Vec3{dice.real(0.5F, 2.0F), dice.real(0.5F, 2.0F), dice.real(0.5F, 2.0F)};
+        g.cell = dice.real(0.08F, 0.25F);
+        g.rises = dice.real(0.0F, 3.0F);
+        g.swirl = dice.real(0.0F, 3.0F);
+        grids.push_back(uid);
+    }
+    if (dice.coin(0.3F)) {
+        static_cast<void>(add_group(document));
+    }
+    // Rules.
+    const int rule_count = systems.empty() ? 0 : dice.whole(0, 3);
+    for (int i = 0; i < rule_count; ++i) {
+        const RelationKind kind =
+            dice.pick(std::vector<RelationKind>{RelationKind::EmitOnHit, RelationKind::TrailFrom,
+                                                RelationKind::TrailFromSystem, RelationKind::FeedSmoke,
+                                                RelationKind::RideSmoke});
+        Uid source = 0U;
+        if (kind == RelationKind::TrailFromSystem) {
+            source = dice.pick(systems);
+        } else if (kind == RelationKind::FeedSmoke || kind == RelationKind::RideSmoke) {
+            if (grids.empty()) {
+                continue;
+            }
+            source = dice.pick(grids);
+        } else if (!objects.empty() && dice.coin(0.7F)) {
+            source = dice.pick(objects);
+        }
+        const Uid rule = add_relationship(document, kind, source, dice.pick(systems));
+        for (Relationship& r : scene.relationships) {
+            if (r.uid == rule) {
+                r.hardness = dice.real(0.0F, 3.0F);
+                r.per_hit = dice.real(0.0F, 5.0F);
+                r.per_speed = dice.real(0.0F, 6.0F);
+                r.spread = dice.real(0.0F, 180.0F);
+                r.min_speed = dice.real(0.0F, 2.0F);
+                r.rate = dice.real(0.0F, 20.0F);
+                r.pieces = dice.coin(0.3F);
+                r.density = dice.real(0.0F, 2.0F);
+                r.heat = dice.real(0.0F, 2.0F);
+                r.push = dice.real(0.0F, 2.0F);
+                r.strength = dice.real(0.0F, 20.0F);
+                r.seed = dice.seed();
+            }
+        }
+    }
+    return document;
 }
 
-// The Appearance block's light choice reaches the renderer: lit by the
-// scene with its look, six-way maps when a picture from a file has its
-// second map (and plainly lit until it does), and a trail glows whatever
-// it says.
-void the_scenes_light_reaches_the_renderer() {
-    Document document = recipe("explosion");
-    Layer& sparks = document.layers[0];
-    Block& look = block_of(sparks, "appearance");
-    look.set("material", choice("smoke"));
-    look.set("lighting", choice("lit"));
-    look.set("curvature", number(0.3F));
-    look.set("wrap", number(0.7F));
-    look.set("ambient", number(1.5F));
-    look.set("shadowed", toggle(false));
-    {
-        const Compiled compiled = compile(document, Purpose::Export);
-        CHECK(compiled.error.empty());
-        const ajfx::SpriteRenderer& r = emitter_of(compiled, sparks).renderer;
-        CHECK(r.lighting == ajfx::Lighting::Lit && r.lightmap.empty());
-        CHECK(near(r.curvature, 0.3F) && near(r.wrap, 0.7F) && near(r.ambient, 1.5F) && !r.shadowed);
+std::string first_difference(const std::string& a, const std::string& b) {
+    std::size_t at = 0U;
+    while (at < a.size() && at < b.size() && a[at] == b[at]) {
+        ++at;
     }
-    // Six-way maps: the picture from a file and its second map.
-    look.set("lighting", choice("six_way"));
-    look.set("texture", choice("file"));
-    look.set("texture_file", choice("C:/art/puff_rtf.png"));
-    look.set("lightmap_file", choice("C:/art/puff_lbb.png"));
-    {
-        const Compiled compiled = compile(document, Purpose::Export);
-        CHECK(compiled.error.empty() && compiled.requests.size() == 2U);
-        const ajfx::SpriteRenderer& r = emitter_of(compiled, sparks).renderer;
-        CHECK(r.lighting == ajfx::Lighting::SixWay);
-        CHECK(!r.texture.empty() && !r.lightmap.empty() && r.texture != r.lightmap);
-        CHECK(compiled.requests[1].path == "C:/art/puff_lbb.png" && compiled.requests[1].entry == r.lightmap);
-    }
-    // Without the second map, or with a library picture, plainly lit.
-    look.set("lightmap_file", choice(""));
-    CHECK(emitter_of(compile(document, Purpose::Export), sparks).renderer.lighting == ajfx::Lighting::Lit);
-    look.set("lightmap_file", choice("C:/art/puff_lbb.png"));
-    look.set("texture", choice("smoke"));
-    CHECK(emitter_of(compile(document, Purpose::Export), sparks).renderer.lighting == ajfx::Lighting::Lit);
-    // A trail glows.
-    look.set("material", choice("trail"));
-    look.set("lighting", choice("lit"));
-    CHECK(emitter_of(compile(document, Purpose::Export), sparks).renderer.lighting == ajfx::Lighting::Unlit);
+    const std::size_t from = at > 160U ? at - 160U : 0U;
+    return "first: ..." + a.substr(from, 320U) + "\nsecond: ..." + b.substr(from, 320U);
 }
 
-void model_colliders_bake_to_distance_fields() {
-    const ImportedMesh cube = unit_cube();
-    CHECK(closed_mesh(cube));
-    std::string error;
-    const std::optional<ColliderBake> bake = bake_collider(cube, 2.0F, 32U, ColliderSolid::Auto, error);
-    CHECK(bake && bake->solid);
-    const ajfx::DistanceField& field = bake->field;
-    // A 2 m cube: inside below zero, outside above, about right in metres.
-    const auto at = [&](ajfx::Vec3 p) { return ajfx::sample_field(field, p)->distance; };
-    CHECK(near(at(ajfx::Vec3{0.0F, 0.0F, 0.0F}), -1.0F, 0.03F));
-    CHECK(near(at(ajfx::Vec3{1.15F, 0.0F, 0.0F}), 0.15F, 0.03F));
-    CHECK(near(at(ajfx::Vec3{0.3F, -1.1F, 0.2F}), 0.1F, 0.03F));
-    // Its gradient points out of the surface.
-    CHECK(ajfx::sample_field(field, ajfx::Vec3{1.1F, 0.1F, 0.0F})->gradient.x > 0.5F);
-    // Within the runtime's limits, and readable from a package.
-    CHECK(field.nx <= ajfx::max_field_size && field.distances.size() <= ajfx::max_field_samples);
-    CHECK(ajfx::read_field(ajfx::write_field(field)).ok());
+int setting(const char* name, int fallback) {
+#pragma warning(suppress : 4996)
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::atoi(value) : fallback;
+}
 
-    // An open model is a thin surface: kept off both sides.
-    ImportedMesh floor;
-    floor.positions = {{-1.0F, 0.0F, -1.0F}, {1.0F, 0.0F, -1.0F}, {1.0F, 0.0F, 1.0F}, {-1.0F, 0.0F, 1.0F}};
-    floor.indices = {0U, 2U, 1U, 0U, 3U, 2U};
-    CHECK(!closed_mesh(floor));
-    const std::optional<ColliderBake> sheet = bake_collider(floor, 1.0F, 32U, ColliderSolid::Auto, error);
-    CHECK(sheet && !sheet->solid);
-    CHECK(ajfx::sample_field(sheet->field, ajfx::Vec3{0.0F, 0.0F, 0.0F})->distance < 0.0F);
-    CHECK(near(ajfx::sample_field(sheet->field, ajfx::Vec3{0.1F, 0.15F, 0.2F})->distance, 0.15F - sheet->field.spacing * 0.75F, 0.05F));
+// How many generated scenes each property is checked over: AJFX_SCENES sets
+// it, and AJFX_SCENE_SEED the dice, to look further than the suite does.
+int generated() {
+    return setting("AJFX_SCENES", 600);
+}
 
-    // Particles thrown at a baked model bounce off it on the CPU reference.
-    Document document;
-    Layer layer;
-    layer.uid = document.allocate();
-    layer.name = "Rain";
-    layer.life_min = layer.life_max = 2.0F;
-    Block burst = *make_block(document, "burst");
-    burst.set("count", number(50.0F));
-    layer.blocks.push_back(burst);
-    Block shape = *make_block(document, "shape");
-    shape.set("shape", choice("point"));
-    shape.set("offset", vec3(0.0F, 3.0F, 0.0F));
-    layer.blocks.push_back(shape);
-    layer.blocks.push_back(*make_block(document, "gravity"));
-    Block collider = *make_block(document, "mesh_collider");
-    collider.set("file", choice("cube.obj"));
-    collider.set("scale", number(2.0F));
-    layer.blocks.push_back(collider);
-    document.layers.push_back(layer);
-    Compiled compiled = compile(document, Purpose::Export);
-    CHECK(compiled.error.empty() && compiled.requests.size() == 1U);
-    const AssetRequest& request = compiled.requests[0];
-    const std::optional<ColliderBake> baked = bake_collider(cube, request.scale, request.cells, request.solid, error);
-    CHECK(baked.has_value());
-    compiled.fields.emplace(request.entry, baked->field);
-    ajfx::Result<ajfx::Simulation> simulation = ajfx::Simulation::create(*compiled.effect, 1U, compiled.fields);
-    CHECK(simulation.ok());
-    for (int step = 0; step < 90; ++step) {
-        simulation.value().step();
+void same_effect(const Compiled& a, const Compiled& b, const std::string& what) {
+    if (a.error.empty() != b.error.empty() || a.effect.has_value() != b.effect.has_value()) {
+        throw std::runtime_error{what + ": one compiled and the other did not (" + a.error + " / " + b.error + ")"};
     }
-    const ajfx::EmitterState& state = simulation.value().emitter(0U);
-    CHECK(state.alive() == 50U);
-    for (std::size_t i = 0U; i < state.alive(); ++i) {
-        // Resting on the cube's top, a metre up, rather than through it.
-        CHECK(state.position[i].y > 0.9F);
+    if (a.effect && !(*a.effect == *b.effect)) {
+        throw std::runtime_error{what + "\n" + first_difference(effect_to_json(*a.effect), effect_to_json(*b.effect))};
     }
-    // The outline draws the cube's twelve edges.
-    CHECK(mesh_outline(cube, 100U).size() == 24U);
+}
+
+// Every starter scene compiles whole: each item it holds reported, every
+// emitter checked by the runtime and holding at least what it can bear.
+void every_starter_scene_compiles_whole() {
+    for (const StarterScene& entry : starter_scenes()) {
+        const Document document = starter(entry.id);
+        const Compiled compiled = compile(document);
+        if (!compiled.error.empty() || !compiled.effect) {
+            throw std::runtime_error{std::string{entry.id} + ": " + compiled.error};
+        }
+        CHECK(validate(*compiled.effect).ok());
+        for (const SceneItem& item : document.scene->items) {
+            const bool reported = std::holds_alternative<Object>(item.data) ||
+                                  std::holds_alternative<ParticleSystem>(item.data) ||
+                                  std::holds_alternative<SmokeGrid>(item.data);
+            CHECK((compiled.item(item.uid) != nullptr) == reported);
+            if (reported && item.simulate) {
+                CHECK(compiled.item(item.uid)->included);
+            }
+        }
+        for (const Emitter& emitter : compiled.effect->emitters) {
+            CHECK(emitter.capacity >= particle_bound(*compiled.effect, emitter));
+        }
+    }
+}
+
+// The effect is a function of the scene alone: compiled twice it is the
+// same, the tree's order and the items' names change nothing, and an edit to
+// one particle system leaves every other emitter exactly as it was.
+void the_effect_depends_on_the_scene_alone() {
+    Dice dice{static_cast<std::uint32_t>(setting("AJFX_SCENE_SEED", 20261105))};
+    int edited = 0;
+    for (int i = 0; i < generated(); ++i) {
+        Document document = random_scene(dice);
+        const Compiled first = compile(document);
+        same_effect(first, compile(document), "scene " + std::to_string(i) + " compiled twice");
+        Document shuffled = document;
+        std::reverse(shuffled.scene->items.begin(), shuffled.scene->items.end());
+        for (SceneItem& item : shuffled.scene->items) {
+            item.name += " moved";
+        }
+        same_effect(first, compile(shuffled), "scene " + std::to_string(i) + " in another order");
+        if (!first.effect) {
+            continue;
+        }
+        // A new seed for one system deals its own particles afresh.
+        for (SceneItem& item : document.scene->items) {
+            if (!std::holds_alternative<ParticleSystem>(item.data) || !item.simulate) {
+                continue;
+            }
+            item.seed += 1000U;
+            const Compiled after = compile(document);
+            CHECK(after.effect.has_value() && after.effect->emitters.size() == first.effect->emitters.size());
+            const std::string mine = "item_" + std::to_string(item.uid);
+            for (std::size_t e = 0U; e < first.effect->emitters.size(); ++e) {
+                const Emitter& before = first.effect->emitters[e];
+                CHECK((before == after.effect->emitters[e]) == (before.name != mine));
+            }
+            ++edited;
+            break;
+        }
+    }
+    CHECK(edited > generated() / 4);
+}
+
+// Scale multiplies distances, sizes, speeds and accelerations, and leaves
+// counts and rates alone.
+void scale_scales_the_whole_scene() {
+    Document document = starter("campfire");
+    const Compiled one = compile(document);
+    document.scale = 2.0F;
+    const Compiled two = compile(document);
+    const Uid flames = item_named(document, "Flames");
+    const Emitter& small = emitter_of(one, flames);
+    const Emitter& large = emitter_of(two, flames);
+    CHECK(near(find_module<ShapeLocation>(large)->center.value.y, 2.0F * find_module<ShapeLocation>(small)->center.value.y));
+    CHECK(near(find_module<ShapeLocation>(large)->radius_max.value, 2.0F * find_module<ShapeLocation>(small)->radius_max.value));
+    CHECK(near(find_module<Velocity>(large)->speed_max.value, 2.0F * find_module<Velocity>(small)->speed_max.value));
+    CHECK(near(find_module<InitSize>(large)->max.value, 2.0F * find_module<InitSize>(small)->max.value));
+    CHECK(find_module<SpawnRate>(large)->rate.value == find_module<SpawnRate>(small)->rate.value);
+    CHECK(find_module<Lifetime>(large)->max.value == find_module<Lifetime>(small)->max.value);
+}
+
+// A live system's Motion values are parameters of the effect, at the values
+// the scene holds, so the preview changes them without a new package.
+void a_live_system_publishes_its_motion() {
+    const Document document = starter("campfire");
+    const Uid flames = item_named(document, "Flames");
+    const Compiled plain = compile(document);
+    CHECK(plain.effect->parameters.empty() && plain.item(flames)->baked);
+    const Compiled live = compile(document, flames);
+    CHECK(live.error.empty() && !live.item(flames)->baked);
+    const std::vector<LiveParameter> values = live_parameters(document, flames);
+    CHECK(!values.empty() && values.size() == live.effect->parameters.size());
+    for (const LiveParameter& value : values) {
+        const ParameterDesc* declared = parameter_of(live, value.name);
+        CHECK(declared != nullptr);
+        for (std::uint32_t c = 0U; c < value.components; ++c) {
+            CHECK(declared->default_value[c] == value.value[c]);
+        }
+    }
+    // Played at those values, it plays as the plain effect does.
+    auto solver = rigid::make_jolt_solver();
+    auto a = simulation(plain, solver.get());
+    auto b = simulation(live, solver.get());
+    a.advance_to(45U);
+    b.advance_to(45U);
+    const std::size_t at = static_cast<std::size_t>(
+        std::find_if(plain.effect->emitters.begin(), plain.effect->emitters.end(),
+                     [&](const Emitter& e) { return e.name == plain.item(flames)->emitter; }) -
+        plain.effect->emitters.begin());
+    CHECK(a.emitter(at).alive() == b.emitter(at).alive() && a.emitter(at).position == b.emitter(at).position);
+}
+
+// What only the old layer-and-block compiler refused: a system with two draw-in forces,
+// and a scene whose switched-off system trails a system that comes after it.
+void scenes_compile_without_the_old_layer_limits() {
+    Document document = starter("magic");
+    const Uid second = add_force(document, ForceKind::DrawIn);
+    std::get<Force>(document.scene->item(second)->data).position = {1.0F, 0.0F, 0.0F};
+    const Compiled drawn = compile(document);
+    CHECK(drawn.error.empty());
+    CHECK(modules_of<Converge>(emitter_of(drawn, item_named(document, "Sparkles"))).size() == 2U);
+
+    Document trails = starter("campfire");
+    const Uid off = add_particle_system(trails);
+    const Uid later = add_particle_system(trails);
+    CHECK(add_relationship(trails, RelationKind::TrailFromSystem, later, off) != 0U);
+    trails.scene->item(off)->simulate = false;
+    const Compiled compiled = compile(trails);
+    CHECK(compiled.error.empty() && compiled.effect && !compiled.item(off)->included &&
+          compiled.item(later)->included);
+}
+
+// A scene that cannot play whole does not play, and says which item is at
+// fault.
+void a_scene_that_cannot_play_names_the_item_at_fault() {
+    Document document = starter("wall");
+    const Uid wall = item_named(document, "Wall");
+    std::get<Object>(document.scene->item(wall)->data).motion = ObjectMotion::Static;
+    const Compiled compiled = compile(document);
+    CHECK(!compiled.effect && compiled.error.starts_with("Wall"));
 }
 
 } // namespace
 
-// A Smoke grid block is the page's, as an Explosion is: listed on the effect
-// as a grid volume, scaled with the page, named from its block so a layer's
-// raw module can feed it. A layer of nothing but grids builds no emitter.
-void smoke_grid_blocks_become_the_effects_volumes() {
-    Document document;
-    document.scale = 3.0F;
-    Layer dust = make_layer(document, LayerKind::Particles, "Dust");
-    insert_block(dust, 0U, *make_block(document, "stream"));
-    insert_block(dust, 1U, *make_block(document, "shape"));
-    Block grid = *make_block(document, BlockKind::SmokeGrid);
-    grid.set("center", vec3(0.0F, 1.0F, 0.0F));
-    grid.set("size", vec3(1.0F, 2.0F, 1.0F));
-    grid.set("cell", number(0.5F));
-    grid.set("swirl", number(0.25F));
-    const Uid grid_uid = insert_block(dust, 2U, grid);
-    insert_block(dust, 3U,
-                 make_raw_block(document, RawModule{ajfx::UpdateModule{ajfx::VolumeSource{.volume = volume_name(grid_uid)}}}));
-    document.layers.push_back(std::move(dust));
-    Layer air = make_layer(document, LayerKind::Particles, "Air");
-    Block second = *make_block(document, BlockKind::SmokeGrid);
-    second.set("size", vec3(4.0F, 4.0F, 4.0F));
-    second.set("cell", number(1.0F));
-    const Uid second_uid = insert_block(air, 0U, second);
-    document.layers.push_back(std::move(air));
-    CHECK(volume_only(document.layers[1]) && !volume_only(document.layers[0]));
-    CHECK(volume_block(volume_name(second_uid)) == second_uid && volume_block("grid_") == 0U && volume_block("dust") == 0U);
-    CHECK(grid_block_named_in("emitter 'dust' names volume '" + volume_name(grid_uid) + "', which this effect has none of") == grid_uid);
-
-    const Compiled compiled = compile(document, Purpose::Export);
-    CHECK(compiled.error.empty() && compiled.effect.has_value());
-    CHECK(compiled.effect->emitters.size() == 1U && compiled.effect->volumes.size() == 2U);
-    const ajfx::Volume& first = compiled.effect->volumes[0];
-    CHECK(first.name == volume_name(grid_uid) && first.nx == 2U && first.ny == 4U && first.nz == 2U);
-    CHECK(near(first.cell_size, 1.5F) && near(first.origin.x, -1.5F) && near(first.origin.y, 0.0F) && near(first.origin.z, -1.5F));
-    CHECK(first.vorticity == 0.25F && compiled.effect->volumes[1].nx == 4U);
-    CHECK(find_module<ajfx::VolumeSource>(compiled.effect->emitters.front()) != nullptr);
-    const LayerReport* report = compiled.layer(document.layers[1].uid);
-    CHECK(report && report->included && report->emitter.empty() && report->error.empty());
-    CHECK(ajfx::validate(*compiled.effect).ok());
-
-    // A grid the runtime refuses is the grid's layer's fault, named by its
-    // block, not the emitter's it was checked beside.
-    document.layers[1].blocks.front().set("cell", number(0.01F));
-    const Compiled refused = compile(document, Purpose::Export);
-    CHECK(!refused.error.empty() && refused.error.rfind("Air: ", 0U) == 0U);
-    const LayerReport* air_report = refused.layer(document.layers[1].uid);
-    CHECK(air_report && !air_report->error.empty() && air_report->error_block == second_uid);
-    // A module naming a grid the page has none of is refused with the
-    // runtime's own reason.
-    document.layers[1].blocks.front().set("cell", number(1.0F));
-    document.layers[0].blocks[3].raw = RawModule{ajfx::UpdateModule{ajfx::VolumeSource{.volume = "nowhere"}}};
-    const Compiled missing = compile(document, Purpose::Export);
-    CHECK(!missing.error.empty() && missing.error.find("nowhere") != std::string::npos);
-}
-
-void add_compile_tests(std::vector<studio_test::Case>& cases) {
-    cases.push_back({"smoke_grid_blocks_become_the_effects_volumes", smoke_grid_blocks_become_the_effects_volumes});
-    cases.push_back({"every_recipe_compiles_within_its_budget", every_recipe_compiles_within_its_budget});
-    cases.push_back({"block_order_does_not_change_the_effect", block_order_does_not_change_the_effect});
-    cases.push_back({"a_new_block_leaves_the_others_alone", a_new_block_leaves_the_others_alone});
-    cases.push_back({"page_scale_scales_the_whole_effect", page_scale_scales_the_whole_effect});
-    cases.push_back({"blocks_that_shape_one_curve_are_merged", blocks_that_shape_one_curve_are_merged});
-    cases.push_back({"solo_and_broken_layers_leave_the_rest_playing", solo_and_broken_layers_leave_the_rest_playing});
-    cases.push_back({"published_controls_become_parameters_with_budgets_for_their_range", published_controls_become_parameters_with_budgets_for_their_range});
-    cases.push_back({"ranges_give_each_particle_its_own_value", ranges_give_each_particle_its_own_value});
-    cases.push_back({"seeds_deal_new_values_to_their_block_alone", seeds_deal_new_values_to_their_block_alone});
-    cases.push_back({"flipbook_cells_fade_out_at_their_edges", flipbook_cells_fade_out_at_their_edges});
-    cases.push_back({"the_loop_is_as_long_as_the_effect_plays", the_loop_is_as_long_as_the_effect_plays});
-    cases.push_back({"own_pictures_and_models_go_into_the_package", own_pictures_and_models_go_into_the_package});
-    cases.push_back({"the_scenes_light_reaches_the_renderer", the_scenes_light_reaches_the_renderer});
-    cases.push_back({"model_colliders_bake_to_distance_fields", model_colliders_bake_to_distance_fields});
-}
-
 #if AJFX_STUDIO_TEST_KERNELS
-// Whether the GPU compiler was there to run; the kernels of every recipe compile.
-bool kernels_compile_for_every_recipe() {
+bool kernels_compile_for_every_starter_scene() {
     using namespace studio_test;
     ajfx::Result<std::unique_ptr<ajfx::gpu::ShaderCompiler>> compiler = ajfx::d3d12::create_shader_compiler();
     if (!compiler) {
-        std::cout << "[skip] kernels_compile_for_every_recipe: " << compiler.error().message << '\n';
+        std::cout << "[skip] kernels_compile_for_every_starter_scene: " << compiler.error().message << '\n';
         return false;
     }
-    for (const Recipe& entry : recipes()) {
-        const Compiled compiled = compile(recipe(entry.id), Purpose::Export);
-        const ajfx::Result<ajfx::gpu::KernelSet> kernels = ajfx::gpu::compile_kernels(*compiled.effect, *compiler.value());
+    for (const StarterScene& entry : starter_scenes()) {
+        const Compiled compiled = compile(starter(entry.id));
+        const ajfx::Result<ajfx::gpu::KernelSet> kernels =
+            ajfx::gpu::compile_kernels(*compiled.effect, *compiler.value());
         if (!kernels) {
             throw std::runtime_error{std::string{entry.id} + ": " + kernels.error().message};
         }
@@ -693,3 +454,12 @@ bool kernels_compile_for_every_recipe() {
     return true;
 }
 #endif
+
+void add_compile_tests(std::vector<studio_test::Case>& cases) {
+    cases.push_back({"every starter scene compiles whole", every_starter_scene_compiles_whole});
+    cases.push_back({"the effect depends on the scene alone", the_effect_depends_on_the_scene_alone});
+    cases.push_back({"scale scales the whole scene", scale_scales_the_whole_scene});
+    cases.push_back({"a live system publishes its motion", a_live_system_publishes_its_motion});
+    cases.push_back({"scenes compile without the old layer limits", scenes_compile_without_the_old_layer_limits});
+    cases.push_back({"a scene that cannot play names the item at fault", a_scene_that_cannot_play_names_the_item_at_fault});
+}

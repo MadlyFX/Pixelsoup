@@ -1,6 +1,6 @@
 #include "package_builder.hpp"
 
-#include "catalog.hpp"
+#include "controls.hpp"
 #include "delivery.hpp"
 #include "document_io.hpp"
 #include "library.hpp"
@@ -107,15 +107,15 @@ void bounded(Map& map, std::vector<std::string>& order, const std::string& key, 
     }
 }
 
-// Paths traced in each layer at most: enough to see an effect's shape,
+// Paths traced of each item at most: enough to see an effect's shape,
 // few enough to draw every frame.
 constexpr std::size_t paths_per_layer = 160U;
 
-// Traces every `stride`-th particle of one layer by spawn index, doubling the
+// Traces every `stride`-th particle of one item by spawn index, doubling the
 // stride (and dropping the paths it no longer picks) whenever there are too
 // many, so the paths kept are spread evenly through the whole loop's births.
-// A layer is the particles of its emitter in its scope: the page's solid
-// layers share one world (SolidWorld), each its own body kinds of it.
+// An item is the particles of its emitter in its scope: the scene's Objects
+// share one world (SolidWorld), each its own body kinds of it.
 class PathTracer final {
 public:
     PathTracer(Uid of_layer, std::size_t in_emitter, Scope within)
@@ -405,7 +405,7 @@ void PackageBuilder::run_analyses() {
         // Both runs cover the whole scene's loop, so the focus run's paths
         // are the very ones the whole run traces.
         const std::uint64_t steps = static_cast<std::uint64_t>(
-            std::ceil(std::clamp(loop_seconds(taken->request.document, taken->compiled), 0.5F, 30.0F) *
+            std::ceil(std::clamp(loop_seconds(taken->request.document), 0.5F, 30.0F) *
                       static_cast<float>(taken->compiled.effect->simulation_rate)));
         if (taken->focus) {
             analyse(taken->request, *taken->focus, steps, taken->request.focus, false);
@@ -416,7 +416,7 @@ void PackageBuilder::run_analyses() {
 
 Compiled PackageBuilder::prepare(const Document& document, const std::filesystem::path& base, std::string& issue,
                                  std::map<std::string, std::vector<Vec3>, std::less<>>* outlines, Uid live) {
-    Compiled compiled = compile(document, Purpose::Preview, live);
+    Compiled compiled = compile(document, live);
     if (compiled.effect) {
         resolve_assets(compiled, base, issue, outlines);
     }
@@ -460,11 +460,6 @@ void PackageBuilder::resolve_assets(Compiled& compiled, const std::filesystem::p
             fresh.size = size;
             if (error) {
                 fresh.error = "cannot be found";
-            } else if (request.kind == AssetRequest::Kind::Texture) {
-                ImportedImage image;
-                if (read_image(path, image, fresh.error)) {
-                    fresh.texture = sprite_texture(image, fresh.error);
-                }
             } else {
                 const Model& model = model_at(path);
                 fresh.error = model.error;
@@ -500,7 +495,7 @@ void PackageBuilder::resolve_assets(Compiled& compiled, const std::filesystem::p
             compiled.fields.emplace(request.entry, *prepared->field);
             continue;
         }
-        // Not usable: the layer plays without it.
+        // Not usable: the item plays without it.
         const std::string reason = file_label(request.path) + " " + (prepared->error.empty() ? "cannot be read" : prepared->error);
         if (issue.empty()) {
             issue = reason;
@@ -509,11 +504,7 @@ void PackageBuilder::resolve_assets(Compiled& compiled, const std::filesystem::p
             continue;
         }
         for (Emitter& emitter : compiled.effect->emitters) {
-            if (request.kind == AssetRequest::Kind::Texture && emitter.renderer.texture == request.entry) {
-                emitter.renderer.texture.clear();
-                emitter.renderer.flipbook_columns = emitter.renderer.flipbook_rows = 1U;
-                emitter.renderer.flipbook_blend = false;
-            } else if (request.kind == AssetRequest::Kind::Mesh && emitter.renderer.mesh == request.entry) {
+            if (request.kind == AssetRequest::Kind::Mesh && emitter.renderer.mesh == request.entry) {
                 emitter.renderer.mesh = "slab";
                 if (const MeshData* slab = library_mesh("slab")) {
                     compiled.meshes.emplace("slab", *slab);
@@ -638,15 +629,15 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled, s
     Analysis analysis;
     analysis.revision = request.revision;
     analysis.focus = focus;
-    // Each layer that plays, by the emitter it plays in and its scope there.
+    // Each item that plays, by the emitter it plays in and its scope there.
     std::vector<PathTracer> tracers;
-    for (const LayerReport& report : compiled.layers) {
-        if (!report.included || (focus != 0U && report.layer != focus)) {
+    for (const ItemReport& report : compiled.items) {
+        if (!report.included || (focus != 0U && report.item != focus)) {
             continue;
         }
         for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
             if (compiled.effect->emitters[e].name == report.emitter) {
-                tracers.emplace_back(report.layer, e, report.scope);
+                tracers.emplace_back(report.item, e, report.scope);
                 break;
             }
         }
@@ -741,7 +732,7 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled, s
 
 ExportResult PackageBuilder::export_package(const ExportRequest& request) {
     ExportResult result;
-    Compiled compiled = compile(request.document, Purpose::Export);
+    Compiled compiled = compile(request.document);
     if (!compiled.error.empty()) {
         result.message = "Not exported. " + compiled.error;
         return result;
@@ -755,7 +746,7 @@ ExportResult PackageBuilder::export_package(const ExportRequest& request) {
         return result;
     }
     if (!compiled.effect) {
-        result.message = "Not exported: there is nothing to play. Add a layer with a stream or burst.";
+        result.message = "Not exported: there is nothing to play. Add an object or a particle system.";
         return result;
     }
     const std::vector<CacheMode> modes = bake_modes(request.document, compiled);
@@ -823,7 +814,7 @@ ExportResult PackageBuilder::export_package(const ExportRequest& request) {
                               ": bake again, then export";
         }
     } else if (any_baked) {
-        result.message += ". No cache was written: the baked layers' cache is missing or out of date, so press "
+        result.message += ". No cache was written: the baked items' cache is missing or out of date, so press "
                           "Bake, then export";
     }
     return result;
@@ -838,7 +829,7 @@ SettleOutcome PackageBuilder::settle_request(const SettleRequest& request) {
     outcome.before = request.document.scene->performance;
     // As a bake does: the exported effect with its files read and its cuts
     // made, since that is the world the stage stands in.
-    Compiled compiled = compile(request.document, Purpose::Export);
+    Compiled compiled = compile(request.document);
     if (!compiled.error.empty()) {
         outcome.message = "Not settled. " + compiled.error;
         return outcome;
@@ -869,7 +860,7 @@ SettleOutcome PackageBuilder::settle_request(const SettleRequest& request) {
 
 BakeResult PackageBuilder::bake_request(const BakeRequest& request) {
     BakeResult result;
-    Compiled compiled = compile(request.document, Purpose::Export);
+    Compiled compiled = compile(request.document);
     if (!compiled.error.empty()) {
         result.message = "Not baked. " + compiled.error;
         return result;
@@ -886,7 +877,7 @@ BakeResult PackageBuilder::bake_request(const BakeRequest& request) {
         rigid_ = rigid::make_jolt_solver();
     }
     Result<BakeRecord> baked =
-        bake_page(request.document, compiled, instance_seed_, rigid_.get(), [this](double share) {
+        bake_scene(request.document, compiled, instance_seed_, rigid_.get(), [this](double share) {
             bake_progress_.store(share);
             return !cancel_bake_.load();
         });

@@ -25,7 +25,7 @@ on nothing there.
 A `.ajfx` package carries everything an effect needs: emitters and module
 stacks, textures, meshes and distance fields, published parameters, and
 precompiled kernels. A host loads and plays packages; it does not author
-them. A `.ajfxcache` beside a package holds what its baked layers worked
+them. A `.ajfxcache` beside a package holds what its baked emitters worked
 out, for a host to play back rather than simulate.
 
 ## Building
@@ -55,7 +55,7 @@ Windows SDK that ships them); without either they report "skipped". Details
 are under [Building](lib/README.md#building) in the runtime reference.
 
 **The Studio application** previews through the media server's renderer and
-draws with its UI toolkit, so it builds from the repository root with the
+draws with Dear ImGui through the media server's window and renderer, so it builds from the repository root with the
 media server's GUI presets (which need `VCPKG_ROOT`):
 
 ```powershell

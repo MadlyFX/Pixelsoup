@@ -159,12 +159,6 @@ public:
     // point it was let go at, and is kept for the one frame that reads it.
     void set_file_drag(bool over, float x, float y) noexcept;
     void add_dropped_file(std::string path, float x, float y);
-    // Another UI drawn over this one has the pointer (or the keyboard) this
-    // frame: the pointer is far away with nothing down, pressed, released or
-    // scrolled; no key, text or movement key is seen. Call after the frame's
-    // events and before the UI reads them.
-    void withhold_pointer() noexcept;
-    void withhold_keyboard() noexcept;
     // The window lost the keyboard and mouse: whatever was held is released,
     // with release edges, so no drag or flight outlives the focus.
     void release_held() noexcept;

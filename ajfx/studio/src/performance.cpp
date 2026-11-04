@@ -143,29 +143,23 @@ ActTargets act_targets(const Compiled& compiled) {
     targets.emitter = emitter.name;
     targets.drops = compiled.solids.drops;
     targets.max_dropped = compiled.solids.max_dropped;
-    // A scene's Object is a layer of its own; the spawn module its block
-    // made is where its own bodies come from, and the kind it bears is the
-    // Object's.
-    for (const LayerReport& report : compiled.layers) {
+    // The spawn module an Object made is where its own bodies come from,
+    // and the kind it bears is the Object's.
+    for (const ItemReport& report : compiled.items) {
         if (!report.included || report.emitter != targets.emitter) {
             continue;
         }
-        for (const ModuleLine& line : report.modules) {
-            const auto* spawn = std::get_if<SpawnModule>(&line.module);
-            if (spawn == nullptr) {
-                continue;
-            }
-            const ModuleId id = spawn_id(*spawn);
+        for (const ModuleId id : report.spawns) {
             for (std::uint32_t s = 0U; s < emitter.spawn.size(); ++s) {
                 if (spawn_id(emitter.spawn[s]) != id || std::holds_alternative<SpawnActions>(emitter.spawn[s])) {
                     continue;
                 }
                 const std::uint32_t kind = std::visit([](const auto& m) { return spawn_body(m); }, emitter.spawn[s]);
-                if (!targets.own.contains(report.layer)) {
-                    targets.own[report.layer] = s;
-                    targets.kinds[report.layer] = kind;
+                if (!targets.own.contains(report.item)) {
+                    targets.own[report.item] = s;
+                    targets.kinds[report.item] = kind;
                 }
-                targets.owners[s] = report.layer;
+                targets.owners[s] = report.item;
                 break;
             }
         }

@@ -123,8 +123,19 @@ void ImguiLayer::build_fonts(float scale) {
         static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
     io.Fonts->SetTexID(font_page_ != nullptr ? texture_id(*font_page_) : ImTextureID{});
 
+    apply_style();
+}
+
+void ImguiLayer::apply_style() {
     ImGuiStyle style;
     ImGui::StyleColorsDark(&style);
+    if (night_) {
+        for (ImVec4& colour : style.Colors) {
+            colour.x *= 0.72F;
+            colour.y *= 0.72F;
+            colour.z *= 0.72F;
+        }
+    }
     style.WindowRounding = 8.0F;
     style.ChildRounding = 6.0F;
     style.FrameRounding = 6.0F;
@@ -137,27 +148,24 @@ void ImguiLayer::build_fonts(float scale) {
     style.WindowPadding = ImVec2{10.0F, 10.0F};
     style.FramePadding = ImVec2{8.0F, 4.0F};
     style.ItemSpacing = ImVec2{8.0F, 6.0F};
-    style.ScaleAllSizes(scale);
+    style.ScaleAllSizes(scale_);
     ImGui::GetStyle() = style;
 }
 
-void ImguiLayer::begin_frame(gui::InputState& input) {
+void ImguiLayer::set_night(bool night) { night_ = night; }
+
+void ImguiLayer::begin_frame() {
     const float scale = window_.ui_scale();
     if (std::abs(scale - scale_) > 0.001F) {
         scale_ = scale;
         build_fonts(scale);
     }
+    if (night_ != styled_night_) {
+        styled_night_ = night_;
+        apply_style();
+    }
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
-    const ImGuiIO& io = ImGui::GetIO();
-    pointer_ = io.WantCaptureMouse;
-    keyboard_ = io.WantCaptureKeyboard || io.WantTextInput;
-    if (pointer_) {
-        input.withhold_pointer();
-    }
-    if (keyboard_) {
-        input.withhold_keyboard();
-    }
 }
 
 void ImguiLayer::end_frame(gui::UiDrawList& list) {

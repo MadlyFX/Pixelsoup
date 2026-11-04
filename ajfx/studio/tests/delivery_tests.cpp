@@ -67,7 +67,7 @@ Prepared prepared(const Document& document) {
 
 BakeRecord baked(const Document& document, const Prepared& ready, const ajfx::RigidSolver& solver,
                  std::uint32_t seed) {
-    ajfx::Result<BakeRecord> record = bake_page(document, *ready.compiled, seed, &solver);
+    ajfx::Result<BakeRecord> record = bake_scene(document, *ready.compiled, seed, &solver);
     if (!record) {
         throw std::runtime_error{record.error().message};
     }
@@ -275,7 +275,7 @@ void a_performance_is_written_as_animated_gltf() {
         }
         CHECK(found);
     }
-    // A cache of no solid layer has nothing to write.
+    // A cache of no solid world has nothing to write.
     std::cout << "  " << file.bodies << " bodies, " << file.pieces << " pieces, " << file.bin.size()
               << " bytes of keys and models\n";
 }

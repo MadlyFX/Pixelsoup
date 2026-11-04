@@ -9,11 +9,9 @@
 #include <optional>
 
 // The viewport in Dear ImGui: the preview's picture, the guides and particle
-// paths drawn over it, the handles of the block being worked on, and what the
-// pointer does over the picture. The window is transparent and sits behind
-// every other, so a panel over the picture has the pointer where it is and
-// the picture has it everywhere else; a handle has it before the camera does.
-// All in pixels.
+// paths drawn over it, the handles of the selected item, and what the
+// pointer does over the picture. It draws into the window the caller has
+// begun; a handle has the pointer before the camera does. All in pixels.
 namespace ajfx::studio {
 
 struct ViewportInputs final {
@@ -25,7 +23,7 @@ struct ViewportInputs final {
     bool show_guides{true};
     bool show_handles{true};
     bool show_paths{false};
-    // The layer being worked on: only its paths are drawn, none without one.
+    // The selected item: only its paths are drawn, none without one.
     Uid layer{};
     double frame{0.0};
 };
@@ -52,8 +50,8 @@ struct ViewportEvents final {
 
 class Viewport final {
 public:
-    // Draws the viewport over `view` (pixels) as seen from `pose`, and writes
-    // handle drags into `document`.
+    // Draws the viewport over `view` (pixels) as seen from `pose`, in the
+    // window being drawn, and writes handle drags into `document`.
     ViewportEvents draw(const gui::Rect& view, const CameraPose& pose, Document& document,
                         const ViewportInputs& inputs, float scale);
     [[nodiscard]] bool dragging() const noexcept { return drag_.has_value(); }

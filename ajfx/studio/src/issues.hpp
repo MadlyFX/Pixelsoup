@@ -23,7 +23,7 @@
 // - As it plays: drops and painted things the world refused, each with its
 //   act, its step and why (the scene's most dropped things at once, or too
 //   many in one step); particle systems that ran out of room.
-// - Its cache: baked layers whose cache is stale, missing or cannot be
+// - Its cache: baked items whose cache is stale, missing or cannot be
 //   kept, and a cache file that no longer matches the scene.
 namespace ajfx::studio {
 
@@ -43,8 +43,8 @@ enum class IssueKind : std::uint8_t {
     PropBudget,      // props of max_rigid_props
     WindIdle,        // a wind that blows on things, with nothing to blow on
     CacheStale,      // the cache holds the scene as it was
-    CacheUnbaked,    // a baked layer no cache holds yet
-    CacheTooLarge,   // a baked layer too big for a cache
+    CacheUnbaked,    // a baked item no cache holds yet
+    CacheTooLarge,   // a baked item too big for a cache
 };
 
 struct Issue final {
@@ -88,7 +88,7 @@ inline constexpr float budget_warning_share = 0.75F;
 // as they were found.
 void sort_issues(std::vector<Issue>& issues);
 
-// The item an emitter of the compiled effect was lowered from ("item_12"),
+// The item an emitter of the compiled effect was compiled from ("item_12"),
 // or 0.
 [[nodiscard]] Uid emitter_item(std::string_view emitter);
 

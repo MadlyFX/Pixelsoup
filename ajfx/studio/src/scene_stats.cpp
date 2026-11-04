@@ -56,7 +56,7 @@ SceneStats scene_stats(const Scene &scene, const Compiled *compiled,
                 out.body_kinds += physics->bodies.size();
             }
         }
-        for (const LayerReport &report : compiled->layers) {
+        for (const ItemReport &report : compiled->items) {
             if (report.included) {
                 out.state_bytes += report.bytes;
             }

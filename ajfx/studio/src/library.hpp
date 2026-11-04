@@ -12,7 +12,7 @@
 namespace ajfx::studio {
 
 struct LibraryTexture final {
-    std::string_view id;        // as the Appearance block names it
+    std::string_view id;        // its name: "dot"
     std::string_view entry;     // the package's texture name; empty draws the runtime's soft disc
     std::uint32_t columns{1U};
     std::uint32_t rows{1U};

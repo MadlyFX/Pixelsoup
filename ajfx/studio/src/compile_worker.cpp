@@ -80,8 +80,7 @@ void CompileWorker::run() {
         }
         Result result;
         result.revision = job.second;
-        result.compiled = compile(job.first, Purpose::Preview);
-        result.natural_loop = natural_loop_seconds(result.compiled);
+        result.compiled = compile(job.first);
         result.document = std::move(job.first);
         {
             const std::lock_guard lock{mutex_};

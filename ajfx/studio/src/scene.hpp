@@ -12,8 +12,9 @@
 namespace ajfx::studio {
 
 // These are authored owners, independent of the compiler's emitter packing.
-// UIDs reserve 32 internal component IDs, so lowering never allocates identities
-// according to tree order. Organization is deliberately not transform parenting.
+// UIDs reserve 32 internal component IDs, so the compiler never allocates
+// identities according to tree order. Organization is deliberately not
+// transform parenting.
 enum class ObjectMotion { Static, Dynamic, Animated };
 enum class ObjectCollider { Hull, Sphere, Box };
 // Placed: the Object is a kind only, with no body of its own; every body of it
@@ -335,8 +336,6 @@ struct Scene final {
 };
 
 struct Document;
-struct Compiled;
-enum class Purpose : std::uint8_t;
 
 [[nodiscard]] Document empty_scene();
 // Startup/New defaults, distinct from loading an existing scene's exact contents.
@@ -389,7 +388,7 @@ inline constexpr std::size_t max_relationships = 256U;
 void rebase_models(Document &document, const std::filesystem::path &from, const std::filesystem::path &to);
 // Whether a force acts on a particle system: every one, or one it names.
 [[nodiscard]] bool force_targets(const Force &force, std::uint32_t system);
-// A blast throws everything; the others each lower into the systems they
+// A blast throws everything; the others each compile into the systems they
 // act on, at most this many per system.
 inline constexpr std::size_t max_forces_per_system = 16U;
 // How a Wind that blows on things blows (ajfx::BodyWind): drag of about a
@@ -411,11 +410,6 @@ bool group_item(Document &document, std::uint32_t uid, std::uint32_t parent);
 // checks combinations and budgets. Saving an unfinished setup must stay usable.
 [[nodiscard]] std::string validate_scene(const Document &document, bool for_playback = true);
 [[nodiscard]] bool same_scene_motion(const Document &a, const Document &b);
-// Internal compiler IR only. Never saved, edited or cached as authored state.
-// `live` names a particle system whose Motion controls (live_parameters)
-// are lowered as published parameters, for a preview; 0 for none.
-[[nodiscard]] Document lower_scene(const Document &document, std::uint32_t live = 0U);
-[[nodiscard]] Compiled compile_scene(const Document &document, Purpose purpose, std::uint32_t live = 0U);
 
 // A preview compiled with a live system reads that system's Motion values --
 // speed, spread, direction, radius, gravity share and each behavior's
@@ -439,12 +433,6 @@ struct LiveParameter final {
 // particles do exactly what they do in the whole scene, so its paths can be
 // traced from this far sooner.
 [[nodiscard]] Document focus_scene(const Document &document, std::uint32_t system);
-// The block of `lowered` that viewport handles drag for an item: its Object,
-// or its particle system's spawn shape. 0 for a group.
-[[nodiscard]] std::uint32_t handle_block(const Document &document, std::uint32_t item);
-// Writes what a handle drag changed in `lowered` (lower_scene of `document`)
-// back to the item that owns it, so the authored scene stays the one owner.
-// Returns whether the item changed.
-bool adopt_handle_edit(Document &document, const Document &lowered, std::uint32_t item);
+
 
 } // namespace ajfx::studio

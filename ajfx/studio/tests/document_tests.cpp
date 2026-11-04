@@ -51,14 +51,17 @@ void studio_comes_back_as_it_was_left() {
 // change and only with one, and a mark says whether the page has moved from a
 // copy kept of it, which an edit taken back has not.
 void the_page_revision_moves_only_when_the_page_does() {
-    Document document = recipe("campfire");
-    Block& rate = block_of(layer_named(document, "Flames"), "stream");
+    Document document = starter("campfire");
+    const Uid flames = item_named(document, "Flames");
+    const auto set_rate = [&](float rate) {
+        std::get<ParticleSystem>(document.scene->item(flames)->data).sources.front().rate = rate;
+    };
     PageRevision changes;
     const std::uint64_t first = changes.observe(document);
     CHECK(changes.observe(document) == first && changes.value() == first);
 
-    const float was = number_of(rate, "rate");
-    rate.set("rate", number(was + 25.0F));
+    const float was = std::get<ParticleSystem>(document.scene->item(flames)->data).sources.front().rate;
+    set_rate(was + 25.0F);
     CHECK(changes.value() == first); // not seen until looked at
     const std::uint64_t edited = changes.observe(document);
     CHECK(edited > first && changes.observe(document) == edited);
@@ -73,14 +76,14 @@ void the_page_revision_moves_only_when_the_page_does() {
     // A mark that has never been set differs from a real page.
     CHECK(compiled.differs(document, changes.value()));
 
-    rate.set("rate", number(was));
+    set_rate(was);
     CHECK(saved.differs(document, changes.observe(document)));
     // Taken back, the page is the page it was saved as.
-    rate.set("rate", number(was + 25.0F));
+    set_rate(was + 25.0F);
     CHECK(!saved.differs(document, changes.observe(document)));
     // The answer is kept: asked again at the same number it is the same,
     // whatever the page is then, since the page is not looked at again.
-    rate.set("rate", number(was + 90.0F));
+    set_rate(was + 90.0F);
     CHECK(!saved.differs(document, changes.value()));
     CHECK(saved.differs(document, changes.observe(document)));
     // A new copy answers for itself at once.

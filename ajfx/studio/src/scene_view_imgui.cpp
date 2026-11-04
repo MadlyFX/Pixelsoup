@@ -32,9 +32,6 @@ ControlDef numeric_def(std::string_view id, std::string_view label, float fallba
     return c;
 }
 
-constexpr ImGuiWindowFlags panel_flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-                                         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
-
 ImVec4 caution() { return ImVec4{1.0F, 0.72F, 0.25F, 1.0F}; }
 
 void wrapped(const std::string& text, const ImVec4* tint = nullptr) {
@@ -93,14 +90,13 @@ struct Offer final {
 
 // ------------------------------------------------------------------ tree
 
-void SceneView::tree_panel(Document& document, ImVec2 pos, ImVec2 size) {
-    ImGui::SetNextWindowPos(pos);
-    ImGui::SetNextWindowSize(size);
-    if (!ImGui::Begin("Scene", nullptr, panel_flags)) {
+void SceneView::tree_panel(Document& document) {
+    if (!ImGui::Begin("Scene")) {
         ImGui::End();
         return;
     }
-    if (ImGui::Button("+ Add")) {
+    if (ImGui::Button("+ Add") || add_requested_) {
+        add_requested_ = false;
         ImGui::OpenPopup("add_item");
     }
     ImGui::SameLine();
@@ -843,10 +839,8 @@ void SceneView::im_over_age(SceneItem& item) {
     }
 }
 
-void SceneView::inspector_panel(Document& document, std::string_view issue, ImVec2 pos, ImVec2 size) {
-    ImGui::SetNextWindowPos(pos);
-    ImGui::SetNextWindowSize(size);
-    if (!ImGui::Begin("Inspector", nullptr, panel_flags)) {
+void SceneView::inspector_panel(Document& document, std::string_view issue) {
+    if (!ImGui::Begin("Inspector")) {
         ImGui::End();
         return;
     }

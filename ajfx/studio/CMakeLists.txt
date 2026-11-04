@@ -1,35 +1,23 @@
 # ajfx Studio: the scene workspace that authors .ajfx particle effects.
 #
-# The scene model, its lowering to the block compiler's layers, and the
-# compiler itself are plain C++ on ajfx alone (ajfx_studio_core), so they are
-# tested headless. The application
-# previews through the media server's own renderer, so an effect looks in
-# Studio exactly as it will on the wall, and draws its interface with the
-# media server's UI toolkit; it is built when the host turns on
+# The scene model and its compiler are plain C++ on ajfx alone
+# (ajfx_studio_core), so they are tested headless and driven from the command
+# line (ajfx-studio-cli). The application previews through the media server's
+# own renderer, so an effect looks in Studio exactly as it will on the wall,
+# and draws its interface with Dear ImGui; it is built when the host turns on
 # AJFX_BUILD_STUDIO_APP (the repository root does, with the GUI on).
 
 add_library(ajfx_studio_core STATIC
     src/json.cpp
-    src/document.cpp
+    src/controls.cpp
     src/scene.cpp
     src/scene_properties.cpp
     src/scene_io.cpp
     src/timeline.cpp
     src/scene_stats.cpp
-    src/catalog.cpp
-    src/catalog_birth.cpp
-    src/catalog_motion.cpp
-    src/catalog_look.cpp
-    src/catalog_contact.cpp
-    src/catalog_rigid.cpp
-    src/catalog_expert.cpp
-    src/raw_modules.cpp
     src/library.cpp
     src/compile.cpp
     src/compile_worker.cpp
-    src/layer_builder.cpp
-    src/rigid_builder.cpp
-    src/solid_world.cpp
     src/document_io.cpp
     src/guides.cpp
     src/user_assets.cpp
@@ -40,6 +28,7 @@ add_library(ajfx_studio_core STATIC
     src/stage.cpp
     src/hands.cpp
     src/kinds.cpp
+    src/starter_scenes.cpp
     src/issues.cpp
     src/delivery.cpp
     src/export_gltf.cpp
@@ -78,7 +67,6 @@ if(AJFX_BUILD_STUDIO_APP)
     # The scene's tree, inspector and controls: drawn by the application and,
     # headless of the window, by the UI tests.
     add_library(ajfx_studio_page STATIC
-        src/widgets.cpp
         src/scene_view.cpp
         src/imgui_layer.cpp
         src/stage_panel.cpp
@@ -122,14 +110,6 @@ if(AJFX_BUILD_STUDIO_APP)
     set_target_properties(ajfx-studio PROPERTIES FOLDER "ajfx")
 
     if(BUILD_TESTING)
-        # Studio's own controls and the scene workspace against synthetic
-        # input: they need the media server's UI toolkit, so they are built
-        # with the application.
-        add_executable(ajfx_studio_ui_tests tests/studio_ui_tests.cpp)
-        target_link_libraries(ajfx_studio_ui_tests PRIVATE ajfx_studio_page)
-        ajfx_set_options(ajfx_studio_ui_tests)
-        add_test(NAME ajfx.studio_ui COMMAND ajfx_studio_ui_tests)
-        set_target_properties(ajfx_studio_ui_tests PROPERTIES FOLDER "ajfx/tests")
 
         # The Dear ImGui layer and the panels drawn with it, on a context of
         # their own with synthetic pointer events.
@@ -159,31 +139,22 @@ if(BUILD_TESTING)
     add_executable(ajfx_studio_tests
         tests/studio_tests.cpp
         tests/scene_tests.cpp
-        tests/stream_object_tests.cpp
-        tests/catalog_tests.cpp
         tests/document_tests.cpp
         tests/compile_tests.cpp
-        tests/rigid_objects_tests.cpp
-        tests/rigid_break_tests.cpp
         tests/guides_tests.cpp
         tests/bake_tests.cpp
-        tests/world_tests.cpp
-        tests/solid_world_tests.cpp
         tests/stage_pick_tests.cpp
         tests/performance_tests.cpp
         tests/stage_tests.cpp
         tests/hands_tests.cpp
         tests/palette_tests.cpp
         tests/delivery_tests.cpp
-        tests/fixtures/recipes.cpp
-        tests/fixtures/blast.cpp
     )
-    # The old page recipes are kept as compiler fixtures; the rock pile is run
+    # The starter scenes are the compiler's fixtures; the solid ones run
     # through the physics engine.
-    target_include_directories(ajfx_studio_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
     target_link_libraries(ajfx_studio_tests PRIVATE ajfx_studio_core ajfx::rigid)
     if(TARGET ajfx::d3d12)
-        # Kernels for every recipe compile, where DXC is present.
+        # Kernels for every starter scene compile, where DXC is present.
         target_link_libraries(ajfx_studio_tests PRIVATE ajfx::d3d12)
         target_compile_definitions(ajfx_studio_tests PRIVATE AJFX_STUDIO_TEST_KERNELS=1)
         ajfx_copy_dxc(ajfx_studio_tests)

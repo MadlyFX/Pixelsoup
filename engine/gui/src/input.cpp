@@ -79,25 +79,6 @@ void InputState::release_held() noexcept {
     mods_ = KeyMods::None;
 }
 
-void InputState::withhold_pointer() noexcept {
-    constexpr float away = -1.0e6F;
-    mouse_x_ = away;
-    mouse_y_ = away;
-    prev_x_ = away;
-    prev_y_ = away;
-    down_.fill(false);
-    pressed_.fill(false);
-    released_.fill(false);
-    wheel_ = 0.0F;
-    file_drag_ = false;
-}
-
-void InputState::withhold_keyboard() noexcept {
-    text_.clear();
-    keys_.clear();
-    move_keys_.fill(false);
-}
-
 bool InputState::move_key_down(MoveKey key) const noexcept {
     return move_keys_[static_cast<std::size_t>(key)];
 }

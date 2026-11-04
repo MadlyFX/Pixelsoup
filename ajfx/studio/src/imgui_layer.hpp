@@ -16,9 +16,8 @@
 // window uploads. Everything is in physical pixels; the font and the style are
 // sized for the window's scale.
 //
-// Studio is being moved onto it a panel at a time, so for now the old
-// interface is drawn beneath: while ImGui has the pointer or the keyboard
-// the old one is told it has neither.
+// Everything Studio shows is drawn with it; the window's own renderer only
+// draws the triangles it makes.
 namespace ajfx::studio {
 
 class ImguiLayer final {
@@ -29,14 +28,13 @@ public:
     ImguiLayer(const ImguiLayer&) = delete;
     ImguiLayer& operator=(const ImguiLayer&) = delete;
 
-    // Starts ImGui's frame. Call straight after the window pumped its events:
-    // it also withholds from `input` whatever ImGui has taken.
-    void begin_frame(mediaserver::gui::InputState& input);
+    // Starts ImGui's frame. Call straight after the window pumped its events.
+    void begin_frame();
+    // The workspace dimmed for night.
+    void set_night(bool night);
     // Ends the frame and adds what it drew to `list`.
     void end_frame(mediaserver::gui::UiDrawList& list);
 
-    [[nodiscard]] bool wants_pointer() const noexcept { return pointer_; }
-    [[nodiscard]] bool wants_keyboard() const noexcept { return keyboard_; }
     // The texture an image names.
     [[nodiscard]] static ImTextureID texture_id(const mediaserver::rhi::Texture& texture) noexcept {
         return static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(&texture));
@@ -44,13 +42,14 @@ public:
 
 private:
     void build_fonts(float scale);
+    void apply_style();
 
     mediaserver::gui::UiWindow& window_;
     std::string ini_;
     const mediaserver::rhi::Texture* font_page_{nullptr};
     float scale_{0.0F};
-    bool pointer_{false};
-    bool keyboard_{false};
+    bool night_{false};
+    bool styled_night_{false};
 };
 
 // Adds `data` (ImGui's frame) to `list` as triangles in physical pixels,

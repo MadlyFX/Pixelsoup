@@ -1,6 +1,6 @@
 #pragma once
 
-#include "catalog.hpp"
+#include "controls.hpp"
 
 #include <imgui.h>
 

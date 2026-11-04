@@ -111,8 +111,7 @@ Edit row(const ControlDef& control, Value& value, bool mixed, unsigned mixed_axe
     };
 
     switch (control.type) {
-    case ControlType::Number:
-    case ControlType::SolidLayer: {
+    case ControlType::Number: {
         ImGui::SetNextItemWidth(box);
         float v = value.x;
         if (drag("##v", v, control, mixed, format)) {

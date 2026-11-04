@@ -146,7 +146,7 @@ GltfFile gltf_from_cache(const Effect& effect, const Cache& cache, const MeshSet
         }
     }
     if (layers.empty()) {
-        file.error = "the cache holds no solid layer, so there are no bodies to write";
+        file.error = "the cache holds no solid world, so there are no bodies to write";
         return file;
     }
     const std::uint64_t frames = options.frames == 0U ? cache.frames() : std::min(options.frames, cache.frames());

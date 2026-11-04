@@ -13,7 +13,7 @@
 #include <vector>
 
 // What the application does on its interface thread, timed: the deep scene
-// comparisons it makes to learn whether the scene changed, the lowering an
+// comparisons it makes to learn whether the scene changed, the compile an
 // edit triggers for the viewport's handles, and the compile an edit triggers. Not a test; run it to see where
 // a frame's time goes and whether a change to that work paid off.
 //
@@ -61,8 +61,6 @@ struct Row final {
     std::string name;
     std::size_t items{};
     double equal_us{};
-    double lower_us{};
-    double loop_us{};
     double compile_us{};
     double bake_us{};
     // The same questions asked through PageRevision and PageMark.
@@ -77,11 +75,9 @@ Row time_scene(const std::string& name, const Document& document, double budget)
     // scenes are walked to the end.
     const Document copy = document;
     row.equal_us = measure(budget, [&] { sink = sink + (document == copy ? 1U : 0U); });
-    const ajfx::studio::Compiled compiled = ajfx::studio::compile(document, ajfx::studio::Purpose::Preview);
-    row.lower_us = measure(budget, [&] { sink = sink + ajfx::studio::lower_scene(document).layers.size(); });
-    row.loop_us = measure(budget, [&] { sink = sink + static_cast<std::uint64_t>(ajfx::studio::natural_loop_seconds(compiled)); });
+    const ajfx::studio::Compiled compiled = ajfx::studio::compile(document);
     row.compile_us = measure(budget, [&] {
-        sink = sink + ajfx::studio::compile(document, ajfx::studio::Purpose::Preview).layers.size();
+        sink = sink + ajfx::studio::compile(document).items.size();
     });
     row.bake_us = measure(budget, [&] { sink = sink + ajfx::studio::bake_status(document, compiled, nullptr).any_baked; });
     // A frame with the scene unchanged, asked the way the application asks
@@ -128,12 +124,11 @@ int main(int argc, char** argv) {
     rows.push_back(time_scene("ten objects, two systems", scene_of(10U, 2U), budget));
     rows.push_back(time_scene("100 objects, ten systems", scene_of(100U, 10U), budget));
 
-    std::printf("%-26s %6s | %9s %9s %9s | %9s %9s | %9s\n", "scene", "items", "== (us)", "lower", "loop",
-                "compile", "bake", "tracked");
+    std::printf("%-26s %6s | %9s | %9s %9s | %9s\n", "scene", "items", "== (us)", "compile", "bake", "tracked");
     double worst_tracked = 0.0;
     for (const Row& row : rows) {
-        std::printf("%-26s %6zu | %9.2f %9.2f %9.2f | %9.1f %9.1f | %9.2f\n", row.name.c_str(), row.items,
-                    row.equal_us, row.lower_us, row.loop_us, row.compile_us, row.bake_us, row.tracked_us);
+        std::printf("%-26s %6zu | %9.2f | %9.1f %9.1f | %9.2f\n", row.name.c_str(), row.items, row.equal_us,
+                    row.compile_us, row.bake_us, row.tracked_us);
         worst_tracked = std::max(worst_tracked, row.tracked_us);
     }
     std::printf("\nper frame, scene unchanged: tracked (one look, six cached answers), worst scene %.1f us "

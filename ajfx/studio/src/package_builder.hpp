@@ -81,12 +81,12 @@ struct Analysis final {
     // only its paths. The whole scene's run follows with everything.
     Uid focus{0U};
     Bounds bounds;
-    // Most particles alive at once, by layer uid.
+    // Most particles alive at once, by item.
     std::map<Uid, std::uint64_t> peak_alive;
     // The step with the most particles alive on the whole page: where the
     // effect costs the most to simulate and draw.
     std::uint64_t peak_step{0U};
-    // Some of each layer's particles, spread evenly through its births.
+    // Some of each item's particles, spread evenly through its births.
     std::vector<ParticlePath> paths;
     std::uint64_t path_step{2U};
     // False when the effect was too large to run on the CPU: then there are
@@ -146,11 +146,11 @@ public:
     void submit_analysis(Document document, std::uint64_t revision, std::filesystem::path base = {},
                          Uid focus = 0U);
     // `bake`, the newest bake, is written beside the package as
-    // `<name>.ajfxcache` when it holds the exported page's baked layers as
+    // `<name>.ajfxcache` when it holds the exported scene's baked items as
     // they are; the result says why when it is not.
     void submit_export(Document document, std::filesystem::path path, std::filesystem::path base = {},
                        std::shared_ptr<const BakeRecord> bake = nullptr);
-    // Bakes the page's baked layers (bake.hpp) once nothing else is waiting:
+    // Bakes the scene's baked items (bake.hpp) once nothing else is waiting:
     // a preview or an export goes first, and a bake under way runs to its
     // end unless cancelled.
     void submit_bake(Document document, std::filesystem::path base = {});
@@ -228,7 +228,7 @@ private:
     BakeResult bake_request(const BakeRequest& request);
     SettleOutcome settle_request(const SettleRequest& request);
     // One CPU run of `compiled` for `steps` steps. With `focus`, only that
-    // layer's paths; otherwise everything, and it gives way to a newer
+    // item's paths; otherwise everything, and it gives way to a newer
     // request when `yield` (its focus run was quick and has been shown).
     void analyse(const Request& request, const Compiled& compiled, std::uint64_t steps, Uid focus, bool yield);
     // Compiles a request's document and reads the files it names.
@@ -248,7 +248,7 @@ private:
     std::uint32_t instance_seed_{0U};
     bool analyse_{true};
     std::unique_ptr<gpu::ShaderCompiler> compiler_;
-    // Run rigid physics layers for bakes and for the CPU analysis, each on
+    // Run the solid world for bakes and for the CPU analysis, each on
     // its own thread; made with the first.
     std::unique_ptr<RigidSolver> rigid_;
     std::unique_ptr<RigidSolver> analysis_rigid_;

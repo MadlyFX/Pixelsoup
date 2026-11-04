@@ -21,16 +21,14 @@
 #include "scene_stats.hpp"
 #include "timeline.hpp"
 #include "stage_pick.hpp"
-#include "widgets.hpp"
 
-#include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/gui/input.hpp>
-#include <mediaserver/gui/shapes.hpp>
-#include <mediaserver/gui/text.hpp>
+#include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
 #include <mediaserver/gui/window.hpp>
 #include <mediaserver/render/particle_pass.hpp>
 
+#include <imgui_internal.h>
 #include <tinyfiledialogs.h>
 
 #include <algorithm>
@@ -59,8 +57,16 @@
 namespace ajfx::studio {
 namespace {
 
-namespace editor = mediaserver::editor;
 namespace rhi = mediaserver::rhi;
+
+// A count with its thousands set apart: 12,345.
+std::string thousands(std::size_t value) {
+    std::string digits = std::to_string(value);
+    for (std::size_t at = digits.size(); at > 3U; at -= 3U) {
+        digits.insert(at - 3U, ",");
+    }
+    return digits;
+}
 
 constexpr float top_bar_height = 52.0F;
 constexpr float transport_height = 54.0F;
@@ -83,18 +89,6 @@ constexpr double auto_bake_delay = 0.8;
 // An act is stamped as the renderer expects one it need not replay for.
 static_assert(act_tick(true, 10U, preview_acting_lead) ==
               mediaserver::render::acting_tick(10U, preview_acting_lead));
-
-gui::FontAtlas load_font(float scale) {
-    constexpr std::array<const char*, 3> candidates{"C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf",
-                                                    "C:/Windows/Fonts/tahoma.ttf"};
-    constexpr std::array<float, 3> sizes{0.86F, 1.2F, 1.75F};
-    for (const char* path : candidates) {
-        if (auto atlas = gui::FontAtlas::create(path, 14U, scale, sizes)) {
-            return std::move(*atlas);
-        }
-    }
-    return gui::FontAtlas::empty();
-}
 
 std::filesystem::path preview_package_path() {
     std::error_code error;
@@ -125,9 +119,8 @@ struct Toast final {
 
 class Studio final {
 public:
-    Studio(gui::UiWindow& window, gui::FontAtlas& font, gui::InputState& input, gui::UiDrawList& list,
-           gui::UiContext& ctx)
-        : window_{window}, font_{font}, input_{input}, list_{list}, ctx_{ctx},
+    Studio(gui::UiWindow& window, gui::InputState& input, gui::UiDrawList& list)
+        : window_{window}, input_{input}, list_{list},
           builder_{preview_package_path(), preview_instance_seed()} {}
 
     ~Studio() {
@@ -165,8 +158,6 @@ public:
             frame_ = static_cast<double>(options.at) * 60.0;
             playing_ = false;
         }
-        scene_tree_split_ = session_.scene_tree_split;
-        scene_inspector_split_ = session_.scene_inspector_split;
         scene_view_.restore(session_.scene_selection, session_.scene_folded);
         std::string ini;
         if (const std::filesystem::path file = session_path(); !file.empty()) {
@@ -186,20 +177,15 @@ public:
             }
             window_.cancel_close_request();
         }
-        if (const float scale = window_.ui_scale(); std::fabs(scale - font_.scale()) > 0.001F) {
-            font_ = load_font(scale);
-            list_.set_white_texel(font_.white_u(), font_.white_v());
-            static_cast<void>(window_.set_atlas(font_));
-        }
-        list_.set_scale(window_.ui_scale());
-        imgui_->begin_frame(input_);
+        list_.reset();
+        imgui_->set_night(night_);
+        imgui_->begin_frame();
+        over_stage_ = false;
         gizmo_overlay();
         const double now = window_.time_seconds();
         take_dropped_files(now);
         const double dt = std::clamp(now - last_time_, 0.0, 0.1);
         last_time_ = now;
-        ctx_.set_theme(studio_theme(night_));
-        ctx_.new_frame(now);
 
         take_results(now);
         place_pending(now);
@@ -209,32 +195,16 @@ public:
         const float width = static_cast<float>(window_.width());
         const float height = static_cast<float>(window_.height());
         const gui::Rect window{0.0F, 0.0F, width, height};
-        const gui::Theme& theme = ctx_.theme();
-        ctx_.panel(window, theme.background);
-
-        // An open popover owns the pointer where its card is.
-        PopoverShield shield{ctx_, scene_view_.covers(ctx_.pointer_x(), ctx_.pointer_y())};
 
         draw_top_bar(gui::Rect{0.0F, 0.0F, width, top_bar_height});
-        const gui::Rect body{10.0F, top_bar_height, std::max(width - 20.0F, 10.0F), std::max(height - top_bar_height - 10.0F, 10.0F)};
-        // The viewport owns the center; tree and inspector are workspace
-        // panels with independent resize handles.
-        const gui::Split left = ctx_.split(gui::ui_id("scene.tree.split"), body, scene_tree_split_, gui::Axis::Row, 8.0F);
-        const gui::Split right = ctx_.split(gui::ui_id("scene.inspector.split"), left.second, scene_inspector_split_, gui::Axis::Row, 8.0F);
-        const float px = window_.ui_scale();
-        scene_view_.tree_panel(document_, ImVec2{left.first.x * px, left.first.y * px},
-                               ImVec2{left.first.width * px, left.first.height * px});
-        scene_view_.inspector_panel(document_,
-                                    compiled_.error.empty() ? std::string_view{build_error_} : std::string_view{compiled_.error},
-                                    ImVec2{right.second.x * px, right.second.y * px},
-                                    ImVec2{right.second.width * px, right.second.height * px});
-        draw_preview(right.first, now);
-        stage_area_ = right.first;
-        shield.release();
-        scene_view_.draw_overlays(ctx_, window, document_);
-        draw_toast(window, now);
-        ctx_.draw_overlays(window);
+        dock_host();
+        scene_view_.tree_panel(document_);
+        scene_view_.inspector_panel(document_, compiled_.error.empty() ? std::string_view{build_error_}
+                                                                       : std::string_view{compiled_.error});
         draw_stage_panel_window();
+        draw_viewport_window();
+        draw_timeline_window();
+        draw_toast(window, now);
         imgui_->end_frame(list_);
 
         // Whatever drew edited the scene in place; this is the one look at it
@@ -246,8 +216,8 @@ public:
         record_history();
         follow_document(now);
 
-        window_.set_cursor(ctx_.cursor());
-        if (!window_.present(list_, rhi::Color{theme.background.r, theme.background.g, theme.background.b, 1.0F})) {
+        const ImVec4 clear = night_ ? ImVec4{0.02F, 0.02F, 0.03F, 1.0F} : ImVec4{0.06F, 0.06F, 0.075F, 1.0F};
+        if (!window_.present(list_, rhi::Color{clear.x, clear.y, clear.z, 1.0F})) {
             // A present can fail for a moment (a minimised window); a lost
             // device never recovers, and the window would only keep its last
             // picture.
@@ -262,6 +232,84 @@ public:
     }
 
 private:
+    // The space under the top bar the panels dock in. The first time (or
+    // after Reset layout) the panels are set where an artist expects them:
+    // the scene and the stage on the left, the picture in the middle with
+    // the timeline under it, the inspector on the right.
+    void dock_host() {
+        const float s = window_.ui_scale();
+        const ImGuiViewport* main = ImGui::GetMainViewport();
+        const float top = top_bar_height * s;
+        const ImVec2 pos{main->WorkPos.x, main->WorkPos.y + top};
+        const ImVec2 size{main->WorkSize.x, std::max(main->WorkSize.y - top, 16.0F)};
+        ImGui::SetNextWindowPos(pos);
+        ImGui::SetNextWindowSize(size);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0F, 0.0F});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
+        constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                           ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
+                                           ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+                                           ImGuiWindowFlags_NoDocking;
+        ImGui::Begin("##dockhost", nullptr, flags);
+        ImGui::PopStyleVar(2);
+        const ImGuiID id = ImGui::GetID("studio.dock");
+        if (reset_layout_ || ImGui::DockBuilderGetNode(id) == nullptr) {
+            reset_layout_ = false;
+            ImGui::DockBuilderRemoveNode(id);
+            ImGui::DockBuilderAddNode(id, ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(id, size);
+            ImGuiID middle = id;
+            ImGuiID left = ImGui::DockBuilderSplitNode(middle, ImGuiDir_Left, 0.19F, nullptr, &middle);
+            ImGuiID right = ImGui::DockBuilderSplitNode(middle, ImGuiDir_Right, 0.30F, nullptr, &middle);
+            ImGuiID bottom = ImGui::DockBuilderSplitNode(middle, ImGuiDir_Down, 0.22F, nullptr, &middle);
+            ImGuiID left_low = ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.5F, nullptr, &left);
+            ImGui::DockBuilderDockWindow("Scene", left);
+            ImGui::DockBuilderDockWindow("Stage", left_low);
+            ImGui::DockBuilderDockWindow("Inspector", right);
+            ImGui::DockBuilderDockWindow("Timeline", bottom);
+            ImGui::DockBuilderDockWindow("Viewport", middle);
+            ImGui::DockBuilderFinish(id);
+        }
+        ImGui::DockSpace(id, ImVec2{0.0F, 0.0F}, ImGuiDockNodeFlags_None);
+        ImGui::End();
+    }
+
+    // The picture, in a window of its own that docks like the rest.
+    void draw_viewport_window() {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0F, 0.0F});
+        const bool open = ImGui::Begin("Viewport", nullptr,
+                                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleVar();
+        if (open) {
+            const float s = window_.ui_scale();
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const ImVec2 size = ImGui::GetContentRegionAvail();
+            over_stage_ = over_stage_ || ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+            if (size.x > 8.0F * s && size.y > 8.0F * s) {
+                draw_preview(gui::Rect{at.x / s, at.y / s, size.x / s, size.y / s});
+            }
+        }
+        ImGui::End();
+    }
+
+    // The transport and the tracks, in a window of their own.
+    void draw_timeline_window() {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0F, 0.0F});
+        const bool open = ImGui::Begin("Timeline", nullptr,
+                                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleVar();
+        if (open) {
+            const float s = window_.ui_scale();
+            over_stage_ = over_stage_ || ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+            const std::vector<Track> tracks = collect_tracks(*document_.scene, loop_seconds(document_));
+            const gui::Rect bar{0.0F, 0.0F, avail.x / s, transport_height - 8.0F};
+            const gui::Rect area{0.0F, bar.height + 2.0F, bar.width, std::max(avail.y / s - bar.height - 2.0F, 0.0F)};
+            draw_transport(bar, area, tracks);
+        }
+        ImGui::End();
+    }
+
     // ------------------------------------------------------- documents
 
     // Compiles the page for the preview, as it stands at `at`, here and now:
@@ -270,9 +318,8 @@ private:
     // the fence keeps an older compile still under way there from replacing
     // this one.
     void recompile(std::uint64_t at) {
-        compiled_ = compile(document_, Purpose::Preview);
+        compiled_ = compile(document_);
         compiled_for_.set(document_, at);
-        natural_loop_ = natural_loop_seconds(compiled_);
         ++compiled_serial_;
         compiler_.fence(at);
         compile_asked_ = at;
@@ -283,10 +330,9 @@ private:
     void take_compile() {
         if (std::optional<CompileWorker::Result> done = compiler_.take()) {
             compiled_ = std::move(done->compiled);
-            natural_loop_ = done->natural_loop;
             compiled_for_.set(done->document, done->revision);
             ++compiled_serial_;
-            // What the baked layers' cache holds is read against it.
+            // What the baked items' cache holds is read against it.
             bake_status_dirty_ = true;
         }
     }
@@ -406,8 +452,6 @@ private:
         session.figure = figure_;
         session.night = night_;
         session.looping = looping_;
-        session.scene_tree_split = scene_tree_split_;
-        session.scene_inspector_split = scene_inspector_split_;
         session.scene_selection = scene_view_.selection();
         session.scene_folded = scene_view_.folded();
         session.camera = std::array<float, 6>{orbit_.yaw,      orbit_.pitch,    orbit_.distance,
@@ -718,7 +762,7 @@ private:
         if (preview_ && !preview_->status().waiting && has_package_) {
             ++settled_frames_;
         }
-        const bool held = scene_view_.gesture_live() || ctx_.pointer_down() || viewport_.dragging();
+        const bool held = scene_view_.gesture_live() || ImGui::IsMouseDown(ImGuiMouseButton_Left) || viewport_.dragging();
         if (current && analysed_.differs(document_, at) && now - last_analysis_ >= submit_interval) {
             submit_analysis(now);
         }
@@ -753,7 +797,7 @@ private:
                 builder_.cancel_bake();
             }
         }
-        const bool held = scene_view_.gesture_live() || ctx_.pointer_down() || viewport_.dragging();
+        const bool held = scene_view_.gesture_live() || ImGui::IsMouseDown(ImGuiMouseButton_Left) || viewport_.dragging();
         const bool settled = !compile_behind && !bake_status_dirty_ && !bake_status_for_.differs(document_, at) &&
                              now - change_time_ >= auto_bake_delay && !held && !builder_.busy() &&
                              preview_shows_page_ && builder_.bake_progress() < 0.0;
@@ -761,8 +805,8 @@ private:
             bake_status_.current) {
             return;
         }
-        const bool too_large = std::any_of(bake_status_.layers.begin(), bake_status_.layers.end(),
-                                           [](const LayerBake& layer) { return layer.state == BakeState::TooLarge; });
+        const bool too_large = std::any_of(bake_status_.items.begin(), bake_status_.items.end(),
+                                           [](const ItemBake& item) { return item.state == BakeState::TooLarge; });
         if (too_large) {
             return;
         }
@@ -773,8 +817,7 @@ private:
     }
 
     void record_history() {
-        const bool gesture = scene_view_.gesture_live() || ctx_.pointer_down() || ctx_.focus() != gui::UiId{} ||
-                             ctx_.pointer_blocked();
+        const bool gesture = scene_view_.gesture_live() || ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsAnyItemActive();
         if (gesture || !history_head_.differs(document_, changes_.value())) {
             return;
         }
@@ -806,93 +849,10 @@ private:
         }
     }
 
-    void shortcuts() {
-        if (ctx_.key_pressed(gui::Key::ZoomIn)) {
-            window_.set_zoom(std::min(window_.zoom() + 0.25F, 1.5F));
-        } else if (ctx_.key_pressed(gui::Key::ZoomOut)) {
-            window_.set_zoom(std::max(window_.zoom() - 0.25F, 0.75F));
-        } else if (ctx_.key_pressed(gui::Key::ZoomReset)) {
-            window_.set_zoom(1.0F);
-        }
-        if (ctx_.key_pressed(gui::Key::Save)) {
-            static_cast<void>(save(false));
-        }
-        if (ctx_.typing()) {
-            return;
-        }
-        if (ctx_.key_pressed(gui::Key::Undo)) {
-            undo();
-        } else if (ctx_.key_pressed(gui::Key::Redo)) {
-            redo();
-        }
-        // Letters and the space bar act only with the pointer over the
-        // viewport and timeline. Typed over the tree or the inspector they
-        // were meant for a field, and a click that missed it must not turn
-        // a name into a reframed camera and looping playback.
-        const bool over_stage = stage_area_.contains(ctx_.pointer_x(), ctx_.pointer_y());
-        const std::string_view typed = over_stage ? ctx_.shortcut_text() : std::string_view{};
-        if (typed.find(' ') != std::string_view::npos) {
-            toggle_playing();
-        }
-        if (typed.find('l') != std::string_view::npos || typed.find('L') != std::string_view::npos) {
-            looping_ = !looping_;
-        }
-        if (typed.find('/') != std::string_view::npos) {
-            scene_view_.open_add(20.0F, top_bar_height + 40.0F);
-        }
-        if (typed.find('f') != std::string_view::npos || typed.find('F') != std::string_view::npos) {
-            orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
-        }
-        if (typed.find('g') != std::string_view::npos || typed.find('G') != std::string_view::npos) {
-            show_guides_ = !show_guides_;
-        }
-        if (typed.find('h') != std::string_view::npos || typed.find('H') != std::string_view::npos) {
-            show_handles_ = !show_handles_;
-        }
-        if (typed.find('p') != std::string_view::npos || typed.find('P') != std::string_view::npos) {
-            show_paths_ = !show_paths_;
-        }
-        if (typed.find('d') != std::string_view::npos || typed.find('D') != std::string_view::npos) {
-            tool_ = tool_ == StageTool::Drop ? StageTool::Select : StageTool::Drop;
-        }
-        if (typed.find('o') != std::string_view::npos || typed.find('O') != std::string_view::npos) {
-            tool_ = tool_ == StageTool::Place ? StageTool::Select : StageTool::Place;
-        }
-        if (typed.find('x') != std::string_view::npos || typed.find('X') != std::string_view::npos) {
-            tool_ = tool_ == StageTool::Delete ? StageTool::Select : StageTool::Delete;
-        }
-        if (over_stage && ctx_.key_pressed(gui::Key::Escape)) {
-            tool_ = StageTool::Select;
-        }
-        // The act picked on the timeline goes with Delete.
-        if (over_stage && selected_act_ != 0U &&
-            (ctx_.key_pressed(gui::Key::Delete) || ctx_.key_pressed(gui::Key::Backspace))) {
-            Performance& performance = document_.scene->performance;
-            const Act* picked = find_act(performance, selected_act_);
-            // A stroke of paint goes whole, as its timeline bar shows it.
-            if (picked != nullptr && picked->kind == ActKind::Paint ? remove_stroke(performance, picked->stroke)
-                                                                    : remove_act(performance, selected_act_)) {
-                toast("Taken away: the scene replays without it", true);
-            }
-            selected_act_ = 0U;
-        }
-        if (ctx_.key_pressed(gui::Key::Home)) {
-            frame_ = 0.0;
-        }
-        if (ctx_.key_pressed(gui::Key::Left)) {
-            playing_ = false;
-            frame_ = std::max(std::floor(frame_) - 1.0, 0.0);
-        }
-        if (ctx_.key_pressed(gui::Key::Right)) {
-            playing_ = false;
-            frame_ = std::fmod(std::floor(frame_) + 1.0, loop_frames());
-        }
-    }
-
     // ------------------------------------------------------- playback
 
     [[nodiscard]] double loop_frames() const {
-        return std::max(std::round(static_cast<double>(loop_seconds(document_, compiled_)) * 60.0), 30.0);
+        return std::max(std::round(static_cast<double>(loop_seconds(document_)) * 60.0), 30.0);
     }
 
     void advance_playback(double dt) {
@@ -931,7 +891,7 @@ private:
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.0F, 0.0F, 0.0F, 0.0F});
         constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
-                                           ImGuiWindowFlags_NoScrollWithMouse;
+                                           ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoDocking;
         if (!ImGui::Begin("##topbar", nullptr, flags)) {
             ImGui::End();
             ImGui::PopStyleColor();
@@ -977,8 +937,8 @@ private:
             label = "Baking " + std::to_string(static_cast<int>(std::lround(progress * 100.0))) + "%";
             baking_tip = "Working out the simulation on the CPU. Click to stop.";
         } else if (!bake_status_.any_baked) {
-            const bool smoke_only = std::any_of(bake_status_.layers.begin(), bake_status_.layers.end(),
-                                                [](const LayerBake& layer) { return layer.state == BakeState::Live && !layer.why.empty(); });
+            const bool smoke_only = std::any_of(bake_status_.items.begin(), bake_status_.items.end(),
+                                                [](const ItemBake& item) { return item.state == BakeState::Live && !item.why.empty(); });
             baking_tip = smoke_only ? "Nothing to cache: a system feeding smoke stays live, since a cache keeps particles, not what they deposit."
                                     : "Add an object or a particle system first.";
         } else if (bake_status_.current) {
@@ -1048,7 +1008,8 @@ private:
         const std::string shown = compact ? (state == "Up to date" ? "Ready" : state == "Updating" ? "Wait" : "Issue") : state;
         const float chip_w = ImGui::CalcTextSize(shown.c_str()).x + 28.0F * scale;
         const float buttons_w = ImGui::CalcTextSize("Undo").x + ImGui::CalcTextSize("Redo").x + ImGui::CalcTextSize("Night").x +
-                                ImGui::GetStyle().FramePadding.x * 6.0F + ImGui::GetStyle().ItemSpacing.x * 3.0F;
+                                ImGui::CalcTextSize("Layout").x + ImGui::GetStyle().FramePadding.x * 8.0F +
+                                ImGui::GetStyle().ItemSpacing.x * 4.0F;
         ImGui::SameLine(bar.width * scale - 18.0F * scale - buttons_w - chip_w - ImGui::GetStyle().ItemSpacing.x);
         {
             const ImVec2 at = ImGui::GetCursorScreenPos();
@@ -1062,6 +1023,11 @@ private:
             ImGui::Dummy(ImVec2{chip_w, h});
             tip(state + ": " + state_tip);
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Layout")) {
+            reset_layout_ = true;
+        }
+        tip("Put the panels back where they start");
         ImGui::SameLine();
         ImGui::BeginDisabled(history_index_ == 0U);
         if (ImGui::Button("Undo")) {
@@ -1142,39 +1108,20 @@ private:
         return bounds;
     }
 
-    void draw_preview(const gui::Rect& pane, double now) {
-        const gui::Theme& theme = ctx_.theme();
-        ctx_.rounded(pane, theme.panel, theme.radius_large);
-        const std::vector<Track> tracks = collect_tracks(*document_.scene, loop_seconds(document_, compiled_));
-        const float timeline_h =
-            tracks.empty() ? 0.0F : track_height * static_cast<float>(std::min(tracks.size(), tracks_shown)) + 10.0F;
-        const gui::Rect view{pane.x + 8.0F, pane.y + 8.0F, pane.width - 16.0F,
-                             std::max(pane.height - transport_height - timeline_h - 16.0F, 10.0F)};
+    void draw_preview(const gui::Rect& view) {
+        const struct {
+            gui::UiColor text_muted{0.62F, 0.64F, 0.70F, 1.0F};
+            gui::UiColor caution{1.0F, 0.72F, 0.25F, 1.0F};
+            gui::UiColor warning{0.95F, 0.40F, 0.35F, 1.0F};
+        } theme;
         preview_aspect_ = view.width / std::max(view.height, 1.0F);
 
         const rhi::Texture* picture = render_preview(view);
         // Guides, handles and paths over the picture. Their handles take a
         // press before the camera does.
         const Uid working = scene_view_.selected();
-        if (scene_guides_for_ != changes_.value()) {
-            scene_guides_ = lower_scene(document_);
-            scene_guides_for_ = changes_.value();
-        }
-        // A force's guides are drawn in the system it acts on: its handle's layer.
-        const SceneItem* working_item = document_.scene->item(working);
-        const bool force_selected = working_item && std::holds_alternative<Force>(working_item->data);
-        GuideOptions guide_options{.focus = handle_block(document_, working),
-                                   .layer = force_selected ? 0U : working,
-                                   .seconds = static_cast<float>(frame_ / 60.0),
-                                   .outlines = &outlines_};
-        if (analysis_ && analysis_->bounds.valid) {
-            guide_options.bounds = std::pair{analysis_->bounds.minimum, analysis_->bounds.maximum};
-        }
-        // The handles drag the lowered copy; the item takes back what moved.
-        // Only while a handle is held: the copy is lowered from the scene as
-        // the last frame left it, so taking it back otherwise would undo an
-        // edit typed into the inspector this frame.
-        const GuideSet guides = build_guides(scene_guides_, guide_options);
+        // The selected item's guides; its handles write to it directly.
+        const GuideSet guides = build_guides(document_, GuideOptions{.item = working, .outlines = &outlines_});
         const float px = window_.ui_scale();
         const gui::Rect view_px{view.x * px, view.y * px, view.width * px, view.height * px};
         ViewportInputs viewport_in{.picture = picture != nullptr ? ImguiLayer::texture_id(*picture) : ImTextureID{},
@@ -1187,10 +1134,7 @@ private:
                                    .layer = working,
                                    .frame = frame_};
         const ViewportEvents viewport_events =
-            viewport_.draw(view_px, camera_pose(orbit_), scene_guides_, viewport_in, px);
-        if (viewport_events.handle_held) {
-            static_cast<void>(adopt_handle_edit(document_, scene_guides_, working));
-        }
+            viewport_.draw(view_px, camera_pose(orbit_), document_, viewport_in, px);
         apply_viewport(viewport_events, view);
 
         // What the picture is, and anything holding it.
@@ -1250,8 +1194,8 @@ private:
         // Systems feeding smoke are never cached: said here, beside the
         // cache, rather than failing the bake.
         const auto smoke_live = static_cast<std::size_t>(std::count_if(
-            bake_status_.layers.begin(), bake_status_.layers.end(),
-            [](const LayerBake& layer) { return layer.state == BakeState::Live && !layer.why.empty(); }));
+            bake_status_.items.begin(), bake_status_.items.end(),
+            [](const ItemBake& item) { return item.state == BakeState::Live && !item.why.empty(); }));
         if (smoke_live > 0U) {
             cost += smoke_live == 1U ? ", 1 system feeding smoke stays live"
                                      : ", " + std::to_string(smoke_live) + " systems feeding smoke stay live";
@@ -1260,27 +1204,25 @@ private:
         if (hud.size() > 5U) { hud.resize(5U); }
         draw_view_chrome(view, note, note_tone, hud);
 
-        const gui::Rect bar{pane.x + 8.0F, view.bottom() + 8.0F, pane.width - 16.0F, transport_height - 8.0F};
-        draw_transport(bar, gui::Rect{bar.x, bar.bottom() + 2.0F, bar.width, timeline_h - 2.0F}, tracks);
-        static_cast<void>(now);
     }
 
     // What lies over the picture, in Dear ImGui: a note saying what it is,
     // the view toggles top right, and what the scene costs at the foot. Each
-    // is a small window of its own, so the pointer is only taken where one is.
+    // is a small child of the viewport window, so the pointer is only taken
+    // where one is.
     void draw_view_chrome(const gui::Rect& view, const std::string& note, const gui::UiColor& tone,
                           const std::vector<std::string>& hud) {
         const float s = window_.ui_scale();
-        constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                           ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                                           ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+        constexpr ImGuiChildFlags child_flags = ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AutoResizeY |
+                                                ImGuiChildFlags_AlwaysUseWindowPadding;
+        constexpr ImGuiWindowFlags child_window = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{10.0F * s, 5.0F * s});
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0F * s);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.07F, 0.07F, 0.09F, 0.94F});
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0F * s);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0F);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.07F, 0.07F, 0.09F, 0.94F});
 
-        ImGui::SetNextWindowPos(ImVec2{(view.x + 10.0F) * s, (view.y + 10.0F) * s});
-        ImGui::SetNextWindowSizeConstraints(ImVec2{0.0F, 0.0F}, ImVec2{std::max(view.width - 100.0F, 40.0F) * s, 1.0e4F});
-        if (ImGui::Begin("##viewnote", nullptr, flags)) {
+        ImGui::SetCursorScreenPos(ImVec2{(view.x + 10.0F) * s, (view.y + 10.0F) * s});
+        if (ImGui::BeginChild("##viewnote", ImVec2{0.0F, 0.0F}, child_flags, child_window)) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{tone.r, tone.g, tone.b, 1.0F});
             ImGui::TextUnformatted(note.c_str());
             ImGui::PopStyleColor();
@@ -1289,11 +1231,10 @@ private:
                                   "preserve motion caches.");
             }
         }
-        ImGui::End();
+        ImGui::EndChild();
 
-        ImGui::SetNextWindowPos(ImVec2{(view.right() - 10.0F) * s, (view.y + 10.0F) * s}, ImGuiCond_Always,
-                                ImVec2{1.0F, 0.0F});
-        if (ImGui::Begin("##viewtools", nullptr, flags)) {
+        ImGui::SetCursorScreenPos(ImVec2{(view.right() - 10.0F) * s - tools_width_, (view.y + 10.0F) * s});
+        if (ImGui::BeginChild("##viewtools", ImVec2{0.0F, 0.0F}, child_flags, child_window)) {
             const auto toggle = [&](const char* label, bool on, const char* tip) {
                 if (on) {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
@@ -1330,12 +1271,11 @@ private:
                 orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
             }
         }
-        ImGui::End();
+        ImGui::EndChild();
+        tools_width_ = ImGui::GetItemRectSize().x;
 
-        ImGui::SetNextWindowPos(ImVec2{(view.x + 10.0F) * s, (view.bottom() - 10.0F) * s}, ImGuiCond_Always,
-                                ImVec2{0.0F, 1.0F});
-        ImGui::SetNextWindowSizeConstraints(ImVec2{0.0F, 0.0F}, ImVec2{std::max(view.width - 20.0F, 40.0F) * s, 1.0e4F});
-        if (ImGui::Begin("##viewhud", nullptr, flags)) {
+        ImGui::SetCursorScreenPos(ImVec2{(view.x + 10.0F) * s, (view.bottom() - 10.0F) * s - hud_height_});
+        if (ImGui::BeginChild("##viewhud", ImVec2{0.0F, 0.0F}, child_flags, child_window)) {
             for (const std::string& line : hud) {
                 const bool warning = line.rfind("Near a limit.", 0U) == 0U;
                 ImGui::PushStyleColor(ImGuiCol_Text, warning ? ImVec4{1.0F, 0.72F, 0.25F, 1.0F}
@@ -1348,9 +1288,98 @@ private:
                                   "once it is four fifths used.");
             }
         }
-        ImGui::End();
+        ImGui::EndChild();
+        hud_height_ = ImGui::GetItemRectSize().y;
         ImGui::PopStyleColor();
-        ImGui::PopStyleVar(2);
+        ImGui::PopStyleVar(3);
+    }
+
+    void shortcuts() {
+        const ImGuiIO& io = ImGui::GetIO();
+        const auto pressed = [](ImGuiKey key) { return ImGui::IsKeyPressed(key, false); };
+        const bool ctrl = io.KeyCtrl;
+        if (ctrl && (pressed(ImGuiKey_Equal) || pressed(ImGuiKey_KeypadAdd))) {
+            window_.set_zoom(std::min(window_.zoom() + 0.25F, 1.5F));
+        } else if (ctrl && (pressed(ImGuiKey_Minus) || pressed(ImGuiKey_KeypadSubtract))) {
+            window_.set_zoom(std::max(window_.zoom() - 0.25F, 0.75F));
+        } else if (ctrl && (pressed(ImGuiKey_0) || pressed(ImGuiKey_Keypad0))) {
+            window_.set_zoom(1.0F);
+        }
+        if (ctrl && pressed(ImGuiKey_S)) {
+            static_cast<void>(save(false));
+        }
+        if (io.WantTextInput) {
+            return;
+        }
+        if (ctrl && pressed(ImGuiKey_Z) && !io.KeyShift) {
+            undo();
+        } else if (ctrl && (pressed(ImGuiKey_Y) || (io.KeyShift && pressed(ImGuiKey_Z)))) {
+            redo();
+        }
+        if (ctrl) {
+            return;
+        }
+        // Letters and the space bar act only with the pointer over the
+        // viewport and timeline. Typed over the tree or the inspector they
+        // were meant for a field, and a click that missed it must not turn
+        // a name into a reframed camera and looping playback.
+        if (over_stage_) {
+            if (pressed(ImGuiKey_Space)) {
+                toggle_playing();
+            }
+            if (pressed(ImGuiKey_L)) {
+                looping_ = !looping_;
+            }
+            if (pressed(ImGuiKey_Slash)) {
+                scene_view_.request_add();
+            }
+            if (pressed(ImGuiKey_F)) {
+                orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
+            }
+            if (pressed(ImGuiKey_G)) {
+                show_guides_ = !show_guides_;
+            }
+            if (pressed(ImGuiKey_H)) {
+                show_handles_ = !show_handles_;
+            }
+            if (pressed(ImGuiKey_P)) {
+                show_paths_ = !show_paths_;
+            }
+            if (pressed(ImGuiKey_D)) {
+                tool_ = tool_ == StageTool::Drop ? StageTool::Select : StageTool::Drop;
+            }
+            if (pressed(ImGuiKey_O)) {
+                tool_ = tool_ == StageTool::Place ? StageTool::Select : StageTool::Place;
+            }
+            if (pressed(ImGuiKey_X)) {
+                tool_ = tool_ == StageTool::Delete ? StageTool::Select : StageTool::Delete;
+            }
+            if (pressed(ImGuiKey_Escape)) {
+                tool_ = StageTool::Select;
+            }
+            // The act picked on the timeline goes with Delete.
+            if (selected_act_ != 0U && (pressed(ImGuiKey_Delete) || pressed(ImGuiKey_Backspace))) {
+                Performance& performance = document_.scene->performance;
+                const Act* picked = find_act(performance, selected_act_);
+                // A stroke of paint goes whole, as its timeline bar shows it.
+                if (picked != nullptr && picked->kind == ActKind::Paint ? remove_stroke(performance, picked->stroke)
+                                                                        : remove_act(performance, selected_act_)) {
+                    toast("Taken away: the scene replays without it", true);
+                }
+                selected_act_ = 0U;
+            }
+        }
+        if (pressed(ImGuiKey_Home)) {
+            frame_ = 0.0;
+        }
+        if (pressed(ImGuiKey_LeftArrow)) {
+            playing_ = false;
+            frame_ = std::max(std::floor(frame_) - 1.0, 0.0);
+        }
+        if (pressed(ImGuiKey_RightArrow)) {
+            playing_ = false;
+            frame_ = std::fmod(std::floor(frame_) + 1.0, loop_frames());
+        }
     }
 
     // What the pointer did over the picture: the camera orbits, pans and
@@ -1407,7 +1436,7 @@ private:
         const std::optional<StageHit> picked = pick_stage(bodies, origin, direction, stage_floor(document_));
         if (tool_ == StageTool::Select) {
             if (picked && picked->on_body) {
-                scene_view_.select(picked->layer, ctrl);
+                scene_view_.select(picked->item, ctrl);
                 // A thing put down or dropped is picked as itself, to be
                 // moved with the gizmo or timed on the timeline.
                 if (const std::optional<BodyRef> ref =
@@ -1463,9 +1492,6 @@ private:
         const StageCamera camera{camera_pose(orbit_), pixels};
         const GizmoOutcome gizmo = draw_gizmo(camera, pixels, stage_panel_.gizmo, GizmoPose{act->position, act->turn});
         gizmo_took_ = gizmo.took_pointer;
-        if (gizmo.took_pointer) {
-            input_.withhold_pointer();
-        }
         if (gizmo.moved) {
             move_placement(document_.scene->performance, selected_act_, gizmo.moved->position, gizmo.moved->turn);
         }
@@ -1479,10 +1505,10 @@ private:
         }
         const float x = input_.drop_x();
         const float y = input_.drop_y();
-        if (!stage_area_.contains(x, y)) {
+        if (!stage_view_.contains(x, y)) {
             return;
         }
-        const StageCamera camera{camera_pose(orbit_), stage_area_};
+        const StageCamera camera{camera_pose(orbit_), stage_view_};
         Vec3 origin{}, direction{};
         camera.ray(x, y, origin, direction);
         const float floor = stage_floor(document_);
@@ -1535,13 +1561,12 @@ private:
         if (!document_.scene) {
             return;
         }
-        const float scale = window_.ui_scale();
         const StagePanelIn in{.document = &document_,
                               .kind = scene_view_.selected(),
                               .settling = settling_,
                               .status = stage_status_};
         const StageRequest request = draw_stage_panel(
-            stage_panel_, in, tool_, ImVec2{(stage_area_.x + 14.0F) * scale, (stage_area_.y + 60.0F) * scale});
+            stage_panel_, in, tool_, ImVec2{});
         Performance& performance = document_.scene->performance;
         switch (request) {
         case StageRequest::Jitter: {
@@ -1685,21 +1710,7 @@ private:
         const ImVec4 warning{0.95F, 0.40F, 0.35F, 1.0F};
         const ImU32 keyframe = IM_COL32(255, 204, 77, 255);
         const ImU32 head_color = IM_COL32(255, 255, 255, 235);
-        ImGui::SetNextWindowPos(ImVec2{bar.x * s, bar.y * s});
-        ImGui::SetNextWindowSize(ImVec2{bar.width * s, (area.bottom() - bar.y) * s});
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0F, 0.0F});
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.0F, 0.0F, 0.0F, 0.0F});
-        constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                           ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
-                                           ImGuiWindowFlags_NoBackground;
-        const bool open = ImGui::Begin("##transport", nullptr, flags);
-        ImGui::PopStyleColor();
-        ImGui::PopStyleVar();
-        if (!open) {
-            ImGui::End();
-            return;
-        }
-        const ImVec2 origin = ImGui::GetWindowPos();
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
         ImDrawList* list = ImGui::GetWindowDrawList();
         const float h = ImGui::GetFrameHeight();
         const auto toggle_button = [&](const char* label, bool on, const char* tip) {
@@ -1715,7 +1726,7 @@ private:
             }
             return pressed;
         };
-        ImGui::SetCursorPos(ImVec2{0.0F, (bar.height * s - h) * 0.5F});
+        ImGui::SetCursorScreenPos(ImVec2{origin.x, origin.y + (bar.height * s - h) * 0.5F});
         if (toggle_button("|<", false, "Back to the start (Home)")) {
             frame_ = 0.0;
         }
@@ -1735,7 +1746,7 @@ private:
         const float tx = (track.x - bar.x) * s;
         const float tw = track.width * s;
         const float ty = (track.center_y() - bar.y) * s;
-        ImGui::SetCursorPos(ImVec2{tx, ty - 10.0F * s});
+        ImGui::SetCursorScreenPos(ImVec2{origin.x + tx, origin.y + ty - 10.0F * s});
         ImGui::InvisibleButton("##scrub", ImVec2{tw, 20.0F * s});
         const float t = std::clamp(static_cast<float>(frame_ / frames), 0.0F, 1.0F);
         const float x0 = origin.x + tx;
@@ -1765,12 +1776,12 @@ private:
             playing_ = false;
         }
         const std::string time = format_number(static_cast<float>(frame_ / 60.0), 1) + " / " + format_number(seconds, 1) + " s";
-        ImGui::SetCursorPos(ImVec2{tx + tw + 12.0F * s, (bar.height * s - ImGui::GetFontSize()) * 0.5F});
+        ImGui::SetCursorScreenPos(ImVec2{origin.x + tx + tw + 12.0F * s, origin.y + (bar.height * s - ImGui::GetFontSize()) * 0.5F});
         ImGui::TextDisabled("%s", time.c_str());
 
         if (!tracks.empty()) {
             const float top = (area.y - bar.y) * s;
-            ImGui::SetCursorPos(ImVec2{0.0F, top});
+            ImGui::SetCursorScreenPos(ImVec2{origin.x, origin.y + top});
             ImGui::BeginChild("##tracks", ImVec2{bar.width * s, area.height * s}, false, ImGuiWindowFlags_NoBackground);
             const ImVec2 child = ImGui::GetWindowPos();
             ImDrawList* rows = ImGui::GetWindowDrawList();
@@ -1881,7 +1892,6 @@ private:
                                 IM_COL32(255, 255, 255, 120));
             ImGui::EndChild();
         }
-        ImGui::End();
     }
 
     struct Flight final {
@@ -1889,24 +1899,21 @@ private:
     };
 
     gui::UiWindow& window_;
-    gui::FontAtlas& font_;
     gui::InputState& input_;
     gui::UiDrawList& list_;
-    gui::UiContext& ctx_;
 
     PackageBuilder builder_;
     std::unique_ptr<Preview> preview_;
     std::string preview_error_;
     SceneView scene_view_;
     float drag_grip_{}; // seconds between a dragged span's start and where it was taken
-    float scene_tree_split_{0.19F};
-    float scene_inspector_split_{0.66F};
-    Document scene_guides_;
-    std::uint64_t scene_guides_for_{};
+    bool reset_layout_{false};
+    bool over_stage_{false};
+    float tools_width_{0.0F};
+    float hud_height_{0.0F};
     Viewport viewport_;
     bool gizmo_took_{false};
     // The viewport and timeline, as last drawn: where letter shortcuts act.
-    gui::Rect stage_area_{};
     SessionState session_;
     bool show_guides_{true};
     bool show_handles_{true};
@@ -1946,7 +1953,6 @@ private:
     std::uint64_t actions_generation_{0U};
     std::uint64_t actions_from_{0U};
     std::uint64_t shown_tick_{0U};
-    editor::ClickTracker clicks_;
 
     Document document_;
     // The page as last seen to change, and the copies it is compared with:
@@ -1978,7 +1984,6 @@ private:
     CompileWorker compiler_;
     std::uint64_t compile_asked_{0U};
     // What `compiled_` came to, kept with it.
-    float natural_loop_{2.0F};
     std::uint64_t compiled_serial_{0U};
     std::vector<Document> history_;
     std::size_t history_index_{0U};
@@ -2053,16 +2058,17 @@ int run_studio(const StudioOptions& options) {
     }
     gui::UiWindow window = std::move(created).value();
     window.set_zoom(session.zoom);
-    gui::FontAtlas font = load_font(window.ui_scale());
+    // The renderer wants a glyph page before it draws; Dear ImGui has its own.
+    const gui::FontAtlas font = gui::FontAtlas::empty();
     if (!window.set_atlas(font)) {
         std::cerr << "ajfx Studio could not upload its font\n";
         return 1;
     }
     gui::InputState input;
     gui::UiDrawList list;
-    gui::UiContext ctx{input, list, font};
+    list.set_white_texel(font.white_u(), font.white_v());
     {
-        Studio studio{window, font, input, list, ctx};
+        Studio studio{window, input, list};
         if (!studio.start(options, std::move(session))) {
             return 1;
         }

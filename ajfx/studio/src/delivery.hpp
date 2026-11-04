@@ -20,7 +20,7 @@
 //
 // The cache carries the instance seed it was baked with and the performance
 // (cache.hpp), so a host places the effect anywhere and plays what was
-// performed. A scene whose baked layers have no current cache is not
+// performed. A scene whose baked items have no current cache is not
 // delivered: a host would simulate them live, from no performance, and play
 // something else.
 namespace ajfx::studio {
@@ -41,7 +41,7 @@ struct Delivery final {
 
 // The package of `compiled` (the scene compiled for export, its files read
 // and its cuts made) with `kernels`, and `bake` beside it. Fails, saying
-// why in the artist's words, when the scene bakes a layer and `bake` is
+// why in the artist's words, when the scene bakes an item and `bake` is
 // missing or holds another scene or performance, or when the host's own
 // check of the written files would refuse them.
 [[nodiscard]] Result<Delivery> deliver(const Document& document, const Compiled& compiled,

@@ -2,25 +2,19 @@
 
 #include <iostream>
 
-// ajfx Studio's page model and compiler, headless: every recipe builds a valid
-// effect within its budget, block order and unrelated edits leave an effect
-// alone, page scale scales, what blocks share is merged, pages save and load
-// unchanged, and the coach's fixes fix what it points at. The tests are in
+// ajfx Studio's scene model and compiler, headless: every starter scene
+// compiles whole and its kernels build, the effect is a function of the scene
+// alone, scenes save and load unchanged, and the performance, hands, palette,
+// bake and delivery do what they say. The tests are in
 // `<area>_tests.cpp`, one file for each part of Studio they are about.
-void add_stream_object_tests(std::vector<studio_test::Case>& cases);
-void add_catalog_tests(std::vector<studio_test::Case>& cases);
 void add_document_tests(std::vector<studio_test::Case>& cases);
 void add_compile_tests(std::vector<studio_test::Case>& cases);
-void add_rigid_objects_tests(std::vector<studio_test::Case>& cases);
-void add_rigid_break_tests(std::vector<studio_test::Case>& cases);
 void add_guides_tests(std::vector<studio_test::Case>& cases);
 void add_bake_tests(std::vector<studio_test::Case>& cases);
-void add_world_tests(std::vector<studio_test::Case>& cases);
-void add_solid_world_tests(std::vector<studio_test::Case>& cases);
 void add_stage_pick_tests(std::vector<studio_test::Case>& cases);
 
 #if AJFX_STUDIO_TEST_KERNELS
-bool kernels_compile_for_every_recipe();
+bool kernels_compile_for_every_starter_scene();
 #endif
 
 void add_scene_tests(std::vector<studio_test::Case>& cases);
@@ -30,18 +24,14 @@ void add_hands_tests(std::vector<studio_test::Case>& cases);
 void add_palette_tests(std::vector<studio_test::Case>& cases);
 void add_delivery_tests(std::vector<studio_test::Case>& cases);
 
-int main() {
+int main(int argc, char** argv) {
+    // A word on the command line runs only the cases whose names hold it.
+    const std::string only = argc > 1 ? argv[1] : "";
     std::vector<studio_test::Case> cases;
-    add_stream_object_tests(cases);
-    add_catalog_tests(cases);
     add_document_tests(cases);
     add_compile_tests(cases);
-    add_rigid_objects_tests(cases);
-    add_rigid_break_tests(cases);
     add_guides_tests(cases);
     add_bake_tests(cases);
-    add_world_tests(cases);
-    add_solid_world_tests(cases);
     add_stage_pick_tests(cases);
     add_scene_tests(cases);
     add_performance_tests(cases);
@@ -51,6 +41,9 @@ int main() {
     add_delivery_tests(cases);
     int failures = 0;
     for (const studio_test::Case& test : cases) {
+        if (!only.empty() && std::string{test.name}.find(only) == std::string::npos) {
+            continue;
+        }
         try {
             test.run();
             // Flushed, so a crash still shows the last test that passed.
@@ -61,13 +54,13 @@ int main() {
         }
     }
 #if AJFX_STUDIO_TEST_KERNELS
-    try {
-        if (kernels_compile_for_every_recipe()) {
-            std::cout << "[pass] kernels_compile_for_every_recipe\n";
+    if (only.empty()) try {
+        if (kernels_compile_for_every_starter_scene()) {
+            std::cout << "[pass] kernels_compile_for_every_starter_scene\n";
         }
     } catch (const std::exception& error) {
         ++failures;
-        std::cout << "[FAIL] kernels_compile_for_every_recipe: " << error.what() << '\n';
+        std::cout << "[FAIL] kernels_compile_for_every_starter_scene: " << error.what() << '\n';
     }
 #endif
     return failures == 0 ? 0 : 1;

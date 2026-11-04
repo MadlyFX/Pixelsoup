@@ -12,69 +12,62 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-// Turns a Studio page into an ajfx effect.
+// Turns a Studio scene into an ajfx effect (compile.cpp).
 //
-// The compiler is where Studio's hand-holding lives:
-// - Each block's modules go to the stage and slot the runtime needs (forces,
-//   then turning and collisions, then appearance over life), so block order
-//   on the page never changes the result.
-// - What several blocks say about one thing is merged: Color's "burns out"
-//   and Fade's fade-out become one colour-over-life curve.
-// - Every layer's capacity is the most particles it can ever have alive,
-//   worked out from its emitters and life, so nobody sets a budget by hand
-//   and none is exceeded.
-// - Module ids and seeds come from block and layer uids, so editing one block
-//   leaves the random streams of every other where they were.
-// - Page scale multiplies distances, sizes, speeds and accelerations.
-// A layer that cannot compile is reported and left out of the preview; the
-// rest still play.
+// - Every simulating particle system is an emitter of its own, named for its
+//   item ("item_<uid>"). Its Motion stack, the forces that act on it, the
+//   rules that feed it and the Static objects it meets become its modules,
+//   each in the stage and slot the runtime needs, so the order of the tree
+//   never changes the result.
+// - Every simulating Object is part of the scene's one solid world: one
+//   rigid physics emitter, named for its lowest-identity Object, holding
+//   every Object's bodies (a body kind each) and standing things (a prop
+//   each), so loose things of one Object knock into another's.
+// - Smoke grids are the effect's volumes and blasts its blasts, which every
+//   emitter that does not pass through answers.
+// - Module ids and seeds come from the items' reserved identities (scene.cpp),
+//   so editing one item leaves every other's random streams where they were.
+// - Every emitter's capacity is the most it can ever have alive, worked out
+//   from what bears into it and how long it lives, so no budget is set by
+//   hand and none is exceeded. Scene scale multiplies distances, sizes,
+//   speeds and accelerations.
+// A scene that cannot play whole does not play: the first item at fault is
+// named and there is no effect, so a preview is never replaced by a
+// plausible incomplete one.
 namespace ajfx::studio {
 
-enum class Purpose : std::uint8_t {
-    Preview, // honours solo
-    Export,  // every enabled layer
-};
-
-// The page's solid layers, played as one physics world: one rigid physics
-// emitter holding every playing solid layer's bodies, so loose pieces of one
-// layer knock into another's.
-// - **Each layer keeps its own look.** Its init modules, its colour and size
-//   over life and its heat are scoped (ajfx::Scope) to its own body kinds,
-//   so a layer's pieces start, live and look as they did on their own. A
-//   layer's own kind 0 becomes a kind of the world's.
-// - **Order-free and local.** The world is the lowest-uid layer's emitter
-//   (its name, seed, renderer, world settings and kind 0); every other
-//   layer's kinds and props follow in uid order, and the spawn stack is in
-//   the order of the blocks' uids, so moving layers changes nothing and
-//   adding a solid layer leaves the others' spawn sources and kinds where
-//   they were.
-// - **What is one per world** -- gravity, ground, damping, the material of
-//   the world's own pieces, how it draws -- is the lowest-uid layer's;
-//   another layer's forces and colliders that differ from it are added.
-// Particle layers meet it (BodyCollision) when it is small enough to be met,
-// and read its contacts and bodies (SpawnFromContacts, SpawnFromBodies).
+// The scene's Objects as the one physics world they play in. Particle
+// systems meet it (BodyCollision) when it is small enough to be met, and are
+// born of its contacts and bodies (SpawnFromContacts, SpawnFromBodies).
+// - **Each Object keeps its own look and launch.** Its lifetime, launch and
+//   size are scoped (ajfx::Scope) to its own body kinds.
+// - **Order-free and local.** The world is the lowest-identity Object's
+//   emitter (its name, seed, material and world settings); every other
+//   Object's kinds and props follow in identity order, so adding an Object
+//   leaves the others' spawn sources and kinds where they were.
 struct SolidWorld final {
-    // Empty when no solid layer plays.
+    // Empty when no Object plays.
     std::string emitter;
     std::uint32_t capacity{0U};
     // Whether anything in it moves: something is born in it, rather than
     // only standing there.
     bool moves{false};
     struct Member final {
-        Uid layer{};
-        // The world's particles that are this layer's: empty where the world
-        // is this layer alone.
+        Uid item{};
+        // The world's particles that are this Object's: empty where the
+        // world is this Object alone.
         Scope bodies;
 
         friend bool operator==(const Member&, const Member&) = default;
     };
-    // In the order of their layers' uids.
-    std::vector<Member> layers;
-    // Where drops are born (ajfx::SpawnActions, Document::drops): its place
-    // in the world's spawn stack, and the most dropped bodies it holds at
-    // once. None where the scene takes no drops.
+    // In identity order.
+    std::vector<Member> items;
+    // Where drops are born (ajfx::SpawnActions, ScenePhysics::max_dropped):
+    // its place in the world's spawn stack, and the most dropped bodies it
+    // holds at once. None where the scene takes no drops.
     std::optional<std::uint32_t> drops;
     std::uint32_t max_dropped{0U};
     // The dropped things one step may make: what a click a frame could ask.
@@ -84,9 +77,9 @@ struct SolidWorld final {
     [[nodiscard]] bool meetable() const noexcept {
         return !emitter.empty() && capacity <= max_body_colliders;
     }
-    [[nodiscard]] const Member* member(Uid layer) const noexcept {
-        for (const Member& m : layers) {
-            if (m.layer == layer) {
+    [[nodiscard]] const Member* member(Uid item) const noexcept {
+        for (const Member& m : items) {
+            if (m.item == item) {
                 return &m;
             }
         }
@@ -96,71 +89,50 @@ struct SolidWorld final {
     friend bool operator==(const SolidWorld&, const SolidWorld&) = default;
 };
 
-// One module of the compiled effect, and the block (or, for what the
-// compiler made from the layer itself, the layer) it came from.
-struct ModuleLine final {
-    Uid origin{};
-    RawModule module;
-};
-
-struct LayerReport final {
-    Uid layer{};
-    // The emitter it plays in. Every solid layer plays in the page's one
-    // world (SolidWorld), so several reports may name one emitter; `scope`
-    // says which of its particles are this layer's (empty: all of them).
+// What one scene item became: every Object, particle system and smoke grid
+// has one, playing or not.
+struct ItemReport final {
+    Uid item{};
+    // The emitter it plays in. Every Object plays in the scene's one world
+    // (SolidWorld), so several reports may name one emitter; `scope` says
+    // which of its particles are this item's (empty: all of them). Empty for
+    // a smoke grid, which builds no emitter.
     std::string emitter;
     Scope scope;
-    // The capacity of that emitter, which is the layer's own unless it
+    // The capacity of that emitter, which is the item's own unless it
     // shares one.
     std::uint32_t emitter_capacity{0U};
-    // Played: enabled, not muted by another layer's solo, and compiled.
+    // Played: it simulates and compiled.
     bool included{false};
+    // Its own share of that capacity, and the bytes of particle state at it.
     std::uint32_t capacity{0U};
-    // Bytes of particle state at that capacity.
     std::uint64_t bytes{0U};
-    std::vector<ModuleLine> modules;
-    SpriteRenderer renderer;
-    // The parameters its blocks publish.
-    std::vector<std::string> parameters;
-    // Baked rather than live (Layer::baked).
+    // Baked rather than live: worked out once and played back from a cache.
+    // Everything but a smoke grid and the system a preview plays live.
     bool baked{false};
-    // A published control a baked layer holds where it is set rather than
-    // publishing: the simulation reads it, and a cache cannot follow a value
-    // its simulation reads. Its playback-time controls stay published.
-    struct Held final {
-        Uid block{};
-        std::string control;
-        std::string name;
-    };
-    std::vector<Held> held;
-    // A solid layer's props (RigidPhysics::props), by the Object each one
-    // is, in the order its world lists them: what the preview picks a prop
-    // by.
-    std::vector<Uid> props;
-    // The bursts of its Objects that appear part way through ("Appears
-    // at"), by module id: each plays out as a thing let go, not as a burst
-    // that lives its whole life (natural_loop_seconds).
-    std::vector<ModuleId> appearing;
-    // Why the layer could not compile, and the block at fault when known.
+    // The ids of the spawn modules it made in its emitter, in their order.
+    std::vector<ModuleId> spawns;
+    // Whether it stands in the world as a prop (RigidPhysics::props) rather
+    // than as bodies. The world's props are its Objects' in identity order.
+    bool prop{false};
+    // Why it could not compile.
     std::string error;
-    Uid error_block{};
 };
 
 // A file of the artist's the package needs, by the entry it goes in. The
 // compiler only names it; the builder reads and prepares it off the
-// interface thread, and fills `Compiled::textures`, `meshes` and `fields`.
+// interface thread, and fills `Compiled::meshes` and `fields`.
 struct AssetRequest final {
     enum class Kind : std::uint8_t {
-        Texture, // a sprite picture
-        Mesh,    // a debris model
-        Field,   // a model to collide with, baked to a distance field
+        Mesh,  // an Object's model
+        Field, // a Static object's model to collide with, baked to a distance field
     };
-    Kind kind{Kind::Texture};
+    Kind kind{Kind::Mesh};
     std::string entry;
     std::string path;
-    Uid layer{};
-    Uid block{};
-    // A field's: the model's scale (page scale included), samples along its
+    // The item whose file it is.
+    Uid item{};
+    // A field's: the model's scale (scene scale included), samples along its
     // longest side, and whether it is solid.
     float scale{1.0F};
     std::uint32_t cells{0U};
@@ -174,18 +146,15 @@ struct AssetRequest final {
     friend bool operator==(const AssetRequest&, const AssetRequest&) = default;
 };
 
-// A Break block set to cut its model rather than to use the Part blocks
-// beside it. The compiler only names the cut, since the model's geometry is
-// not read until the builder reads it; the builder cuts and puts the cells
-// into the effect (see PackageBuilder::resolve_assets).
+// An Object that comes apart (Object::fracture), cut into pieces of its
+// model. The compiler only names the cut, since the model's geometry is not
+// read until the builder reads it; make_cuts makes it.
 struct FractureCut final {
-    Uid layer{};
-    Uid block{};
+    Uid item{};
     // The emitter whose bodies come apart, and the mesh entry to cut.
     std::string emitter;
     std::string model;
-    // The body kind that comes apart: the Object's own, since a layer may
-    // hold several and each cuts its own model.
+    // The body kind that comes apart: the Object's own.
     std::uint32_t body{0U};
     ModuleId id{};
     std::uint32_t cells{8U};
@@ -201,99 +170,54 @@ struct FractureCut final {
     friend bool operator==(const FractureCut&, const FractureCut&) = default;
 };
 
-// An Explosion on the page, as the blast it compiles to (ajfx::Blast). It is
-// the page's rather than its layer's: every layer that plays and does not
-// pass through answers it with a Shockwave, so the dust, the sparks and the
-// pieces all follow one place, time and power.
-// - Named from its block's uid (`blast_name`), so moving or adding blocks
-//   and layers renames nothing.
-// - In the order of the blocks' uids, not the page's.
-// - Page scale applies to its place, power and reach.
-// - Present while the block and its layer are switched on. Soloing another
-//   layer leaves it going off, since what is soloed is still blasted.
-struct PageBlast final {
-    Uid block{};
-    Uid layer{};
-    Blast blast;
-
-    friend bool operator==(const PageBlast&, const PageBlast&) = default;
-};
-
-[[nodiscard]] std::string blast_name(Uid block);
-// The page's blasts, at most ajfx::max_blasts of them.
-[[nodiscard]] std::vector<PageBlast> page_blasts(const Document& document, float scale);
-
-// A Smoke grid block on the page, as the grid volume it compiles to
-// (ajfx::Volume). It is the page's rather than its layer's, as a blast is:
-// any layer's particles feed it or ride it through the runtime's own
-// VolumeSource and VolumeAdvect modules naming it.
-// - Named from its block's uid (`volume_name`), so moving or adding blocks
-//   and layers renames nothing.
-// - In the order of the blocks' uids, not the page's.
-// - Page scale applies to its place and its cells; its rates and shares
-//   are left alone.
-// - Present while the block and its layer are switched on.
-// A layer holding nothing but Smoke grid blocks builds no emitter: it is
-// on the page for its guides and handles.
-struct PageVolume final {
-    Uid block{};
-    Uid layer{};
-    Volume volume;
-
-    friend bool operator==(const PageVolume&, const PageVolume&) = default;
-};
-
-[[nodiscard]] std::string volume_name(Uid block);
-// The block a volume name came from, or 0 for a name that is not one.
-[[nodiscard]] Uid volume_block(std::string_view name);
-// The Smoke grid block whose volume a runtime message names, as
-// `volume 'grid_<uid>'`, or 0 when it names none.
-[[nodiscard]] Uid grid_block_named_in(std::string_view message);
-[[nodiscard]] std::vector<PageVolume> page_volumes(const Document& document, float scale);
-// Whether the layer is Smoke grid blocks and nothing else, so it builds no
-// emitter.
-[[nodiscard]] bool volume_only(const Layer& layer);
+// The name a blast's identity has in the effect (ajfx::Blast::name).
+[[nodiscard]] std::string blast_name(Uid identity);
+// A smoke grid's volume is named from its identity (smoke_grid_volume):
+// the identity a name came from, or 0 for a name that is not one.
+[[nodiscard]] std::string volume_name(Uid identity);
+[[nodiscard]] Uid volume_identity(std::string_view name);
+// The identity whose volume a runtime message names, as `volume 'grid_<n>'`,
+// or 0 when it names none.
+[[nodiscard]] Uid volume_named_in(std::string_view message);
 
 struct Compiled final {
-    // Set when at least one layer compiled.
+    // Set when the scene compiled whole and something plays.
     std::optional<Effect> effect;
-    std::vector<LayerReport> layers;
+    // In identity order.
+    std::vector<ItemReport> items;
     // The library textures and meshes the effect names.
     TextureSet textures;
     MeshSet meshes;
     FieldSet fields;
-    // The artist's files the played layers name, for the builder to read.
+    // The artist's files the effect names, for the builder to read.
     std::vector<AssetRequest> requests;
     // The cuts the builder makes once it has the models they cut.
     std::vector<FractureCut> cuts;
-    // The page's solid layers as the one world they play in.
     SolidWorld solids;
-    // Empty when every included layer compiled; else the first problem.
+    // Empty when the scene compiled; else the first problem, naming its item.
     std::string error;
 
-    [[nodiscard]] const LayerReport* layer(Uid uid) const;
+    [[nodiscard]] const ItemReport* item(Uid uid) const;
     [[nodiscard]] std::uint32_t total_capacity() const;
 };
 
-// `live` is a scene's particle system to compile live (compile_scene).
-[[nodiscard]] Compiled compile(const Document& document, Purpose purpose, std::uint32_t live = 0U);
+// `live` names a particle system whose Motion controls are compiled as
+// published parameters (live_parameters, scene.hpp), for a preview that
+// changes them without a new package; 0 for none.
+[[nodiscard]] Compiled compile(const Document& document, std::uint32_t live = 0U);
 
 // Makes the cuts `compiled` asks for, which needs the models they cut: the
 // caller reads those into `compiled.meshes` first, so this runs after the
-// artist's files are resolved and not when the layers compile. Each cut adds
+// artist's files are resolved and not when the scene compiles. Each cut adds
 // a body kind and a mesh per cell and the Break module that scatters them. A
-// cut that cannot be made leaves its layer playing unbroken and says why in
+// cut that cannot be made leaves its Object playing unbroken and says why in
 // `issue`, and what the cuts made is validated before it goes anywhere.
 void make_cuts(Compiled& compiled, std::string& issue);
 
 // The texture, mesh and field entries a package of the compiled effect needs.
 [[nodiscard]] std::vector<PackageEntry> asset_entries(const Compiled& compiled);
 
-// The seconds the effect takes to play out, from its emitters: a burst
-// until its last particle dies, a stream long enough to build up and show a
-// whole generation at its full. At least a second, at most two minutes.
-[[nodiscard]] float natural_loop_seconds(const Compiled& compiled);
-// The preview's loop: the natural one, or the page's own when it sets one.
-[[nodiscard]] float loop_seconds(const Document& document, const Compiled& compiled);
+// The seconds the preview plays before it loops: the scene's range.
+[[nodiscard]] float loop_seconds(const Document& document);
 
 } // namespace ajfx::studio

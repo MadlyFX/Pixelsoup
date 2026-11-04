@@ -136,13 +136,12 @@ bool Viewport::handles(const StageCamera& camera, const gui::Rect& view, Documen
     bool held_any = false;
     for (const Handle& handle : guides.handles) {
         const std::optional<gui::UiPoint> at = camera.project(handle.at);
-        const bool dragged = drag_ && drag_->handle.block == handle.block && drag_->handle.control == handle.control &&
-                             drag_->handle.end == handle.end;
+        const bool dragged = drag_ && drag_->handle.same(handle);
         if (!at || (!view.contains(at->x, at->y) && !dragged)) {
             continue;
         }
-        ImGui::PushID(static_cast<int>(handle.block));
-        ImGui::PushID(handle.control.c_str());
+        ImGui::PushID(static_cast<int>(handle.item));
+        ImGui::PushID(static_cast<int>(handle.target));
         ImGui::PushID(handle.end);
         const float reach = 10.0F * scale;
         ImGui::SetCursorScreenPos(ImVec2{at->x - reach, at->y - reach});
@@ -186,8 +185,7 @@ bool Viewport::handles(const StageCamera& camera, const gui::Rect& view, Documen
             }
             drag_ = Drag{handle, grab, vertical};
         }
-        const bool mine = drag_ && drag_->handle.block == handle.block && drag_->handle.control == handle.control &&
-                          drag_->handle.end == handle.end;
+        const bool mine = drag_ && drag_->handle.same(handle);
         if (active && mine) {
             held_any = true;
             // Shift changes the plane mid-drag: the grab is taken afresh so
@@ -203,14 +201,7 @@ bool Viewport::handles(const StageCamera& camera, const gui::Rect& view, Documen
                 if (handle.motion == HandleMotion::Floor) {
                     world = vertical ? Vec3{handle.at.x, world.y, handle.at.z} : Vec3{world.x, handle.at.y, world.z};
                 }
-                if (std::optional<Value> value = handle_value(document, handle, world)) {
-                    if (const auto place = document.find_block(handle.block)) {
-                        Block& block = place->layer->blocks[place->index];
-                        if (block.find(handle.control) == nullptr || !(*block.find(handle.control) == *value)) {
-                            block.set(handle.control, std::move(*value));
-                        }
-                    }
-                }
+                static_cast<void>(drag_handle(document, handle, world));
             }
         }
 
@@ -249,21 +240,6 @@ bool Viewport::handles(const StageCamera& camera, const gui::Rect& view, Documen
 ViewportEvents Viewport::draw(const gui::Rect& view, const CameraPose& pose, Document& document,
                               const ViewportInputs& inputs, float scale) {
     ViewportEvents events;
-    ImGui::SetNextWindowPos(ImVec2{view.x, view.y});
-    ImGui::SetNextWindowSize(ImVec2{view.width, view.height});
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0F, 0.0F});
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.0F, 0.0F, 0.0F, 0.0F});
-    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
-                                       ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav;
-    const bool open = ImGui::Begin("##viewport", nullptr, flags);
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(2);
-    if (!open) {
-        ImGui::End();
-        return events;
-    }
     const float rounding = 8.0F * scale;
     ImDrawList* list = ImGui::GetWindowDrawList();
     const ImVec2 min{view.x, view.y};
@@ -325,7 +301,6 @@ ViewportEvents Viewport::draw(const gui::Rect& view, const CameraPose& pose, Doc
     } else {
         drag_.reset();
     }
-    ImGui::End();
     return events;
 }
 

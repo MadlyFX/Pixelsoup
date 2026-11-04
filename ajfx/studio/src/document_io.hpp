@@ -11,8 +11,7 @@
 #include <vector>
 
 // Studio scenes on disk: `.ajfxstudio`, JSON in the `ajfx-studio-scene`
-// format (scene_io.hpp). The layers a scene lowers to are compiler IR and are
-// never saved.
+// format (scene_io.hpp).
 namespace ajfx::studio {
 
 inline constexpr std::string_view document_extension = ".ajfxstudio";

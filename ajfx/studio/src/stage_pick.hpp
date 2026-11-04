@@ -22,16 +22,16 @@ namespace ajfx::studio {
 struct StageBody final {
     Vec3 center{};
     float radius{0.0F};
-    // The solid layer it is in, and the block that made it: the Object (or
-    // the Stream or Burst) it is, or 0 for a piece of something broken.
-    Uid layer{};
-    Uid block{};
+    // The Object it is (or, for a piece of something broken, was part of),
+    // and whether it is such a piece.
+    Uid item{};
+    bool piece{false};
     // A body's spawn index in the world (what a deletion names); none for
     // a prop, which is part of the scene rather than a body in it.
     std::optional<std::uint32_t> spawn_index;
 };
 
-// The page's solid things at one step of the preview loop.
+// The scene's solid things at one step of the preview loop.
 struct StageBodies final {
     std::uint64_t tick{0U};
     std::vector<StageBody> bodies;
@@ -41,12 +41,12 @@ struct StageBodies final {
 // pieces, and a click needs only the ones near the pointer to be right.
 inline constexpr std::size_t max_stage_bodies = 4096U;
 
-// The page's one solid world in the compiled effect (SolidWorld), by its
+// The scene's one solid world in the compiled effect (SolidWorld), by its
 // place among the emitters; nothing where none plays.
 [[nodiscard]] std::optional<std::size_t> solid_world_index(const Compiled& compiled);
 
 // Every body and prop of the solid world in `world` (its state, from a run
-// of `compiled`), each with its layer and block, in birth order and then the
+// of `compiled`), each with its item, in birth order and then the
 // props'. At most max_stage_bodies bodies.
 [[nodiscard]] std::vector<StageBody> stage_bodies(const Compiled& compiled, const EmitterState& world);
 
@@ -61,15 +61,15 @@ struct StageHit final {
     Vec3 point{};
     // The middle of the thing met; the point itself on the floor.
     Vec3 center{};
-    Uid layer{};
-    Uid block{};
+    Uid item{};
+    bool piece{false};
     bool on_body{false};
     // The body met, when it is one (StageBody::spawn_index).
     std::optional<std::uint32_t> spawn_index;
 };
 
 // The height of the floor a click lands on, in the effect's space: the
-// page's ground, or 0 with none.
+// stage's, at 0.
 [[nodiscard]] float stage_floor(const Document& document);
 
 // The thing or the floor along the ray from `origin` along `direction`

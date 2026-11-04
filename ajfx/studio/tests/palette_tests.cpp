@@ -50,7 +50,7 @@ Document reopened(const Document& document) {
     return std::move(*loaded.document);
 }
 
-// Particles born so far by the emitter a system lowered to.
+// Particles born so far by the emitter a system compiled to.
 std::uint64_t born(const Played& played, const Prepared& ready, Uid system) {
     const ajfx::Effect& effect = *ready.compiled->effect;
     for (std::size_t e = 0U; e < effect.emitters.size(); ++e) {
@@ -341,12 +341,12 @@ void issues_say_when_the_cache_is_stale() {
     auto solver = ajfx::rigid::make_jolt_solver();
     Breezy scene = breezy(true);
     Prepared ready = prepared(scene.document);
-    const ajfx::Result<BakeRecord> baked = bake_page(scene.document, *ready.compiled, 3U, solver.get());
+    const ajfx::Result<BakeRecord> baked = bake_scene(scene.document, *ready.compiled, 3U, solver.get());
     CHECK(baked.ok());
     CHECK(!cache_issue(scene.document, ready, baked.value().bytes, 3U));
     // Studio works the status out from the scene compiled for export, as it
     // is before its cuts are made.
-    const BakeStatus current = bake_status(scene.document, compile(scene.document, Purpose::Export), &baked.value());
+    const BakeStatus current = bake_status(scene.document, compile(scene.document), &baked.value());
     CHECK(current.current && bake_issues(scene.document, current).empty());
     // Another seed, another performance, another wind: each is a stale cache.
     CHECK(cache_issue(scene.document, ready, baked.value().bytes, 4U).has_value());
@@ -355,7 +355,7 @@ void issues_say_when_the_cache_is_stale() {
     const std::optional<Issue> stale = cache_issue(acted, prepared(acted), baked.value().bytes, 3U);
     CHECK(stale && stale->kind == IssueKind::CacheStale && stale->level == IssueLevel::Warning);
     const std::vector<Issue> from_status =
-        bake_issues(acted, bake_status(acted, compile(acted, Purpose::Export), &baked.value()));
+        bake_issues(acted, bake_status(acted, compile(acted), &baked.value()));
     CHECK(!from_status.empty() && from_status.front().kind == IssueKind::CacheStale);
     Document gustier = scene.document;
     std::get<Force>(gustier.scene->item(scene.wind)->data).gust = 0.5F;

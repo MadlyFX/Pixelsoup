@@ -23,6 +23,7 @@
 #include "performance.hpp"
 #include "scene.hpp"
 #include "stage.hpp"
+#include "starter_scenes.hpp"
 #include "timeline.hpp"
 
 #include <ajfx/cache.hpp>
@@ -57,10 +58,14 @@ using namespace ajfx::studio;
 constexpr const char* usage =
     "ajfx-studio-cli: acts on a scene's performance and replays it, without a window.\n"
     "\n"
-    "  ajfx-studio-cli new <logs|wall|sandbox|empty> <scene.ajfxstudio>\n"
-    "      Writes a scene to act on: logs that smoulder (a Placed log kind with a\n"
-    "      trail), a wall that breaks with a ball to throw at it, one of every\n"
-    "      starter kind standing on the stage, or just ground.\n"
+    "  ajfx-studio-cli scenes                 The scenes `new` makes.\n"
+    "  ajfx-studio-cli new <scene name> <scene.ajfxstudio>\n"
+    "      Writes a scene to start from: logs that smoulder, a wall to break, a\n"
+    "      sandbox of every starter kind, a campfire, an explosion, ... (see scenes).\n"
+    "  ajfx-studio-cli <scene> compile [--json] [--live <system>]\n"
+    "      What the scene compiles to: every emitter, what made it, its capacity and\n"
+    "      modules, the effect's simulation digest; --json prints the effect itself,\n"
+    "      --live compiles a system's Motion as parameters, as the preview does.\n"
     "  ajfx-studio-cli <scene> info           What can be acted on and what has been.\n"
     "  ajfx-studio-cli <scene> acts           Every act, one a line.\n"
     "  ajfx-studio-cli <scene> bodies <step>  The solid bodies where they stand at a step.\n"
@@ -88,7 +93,7 @@ constexpr const char* usage =
     "\n"
     "Delivery:\n"
     "  ajfx-studio-cli <scene> bake <out.ajfxcache>\n"
-    "      Bakes the scene's baked layers (its solid world and what it bears) with its\n"
+    "      Bakes the scene's baked items (its solid world and what it bears) with its\n"
     "      performance and seed, for the scene's loop: the cache a delivery carries.\n"
     "  ajfx-studio-cli <scene> deliver <out.ajfx> [--cache <file>]\n"
     "      Writes the package and its cache beside it (<out>.ajfxcache), checked as the\n"
@@ -366,8 +371,8 @@ void act(Session& session, const std::vector<std::string>& tokens) {
         }
         const StageHit hit{.point = words.text("at") ? to_vec3(*words.text("at")) : body->position,
                            .center = body->position,
-                           .layer = 0U,
-                           .block = 0U,
+                           .item = 0U,
+                           .piece = false,
                            .on_body = true,
                            .spawn_index = body->spawn_index};
         const StageAct made = poke(document, targets, hit, to_vec3(words.args[2]), words.number("speed", poke_speed),
@@ -401,8 +406,8 @@ void act(Session& session, const std::vector<std::string>& tokens) {
         // Pressed on its middle, looking at it from the camera.
         const StageHit hit{.point = body->position,
                            .center = body->position,
-                           .layer = 0U,
-                           .block = 0U,
+                           .item = 0U,
+                           .piece = false,
                            .on_body = true,
                            .spawn_index = body->spawn_index};
         const std::string grip = words.text("hold").value_or("steer");
@@ -526,7 +531,7 @@ BakeRecord bake_of(const Session& session, const std::optional<std::filesystem::
     const Compiled& compiled = *session.prepared.compiled;
     if (cache_file) {
         BakeRecord record;
-        record.page = session.document;
+        record.document = session.document;
         record.bytes = read_bytes(*cache_file);
         Result<Cache> opened = Cache::open_as_baked(record.bytes, *compiled.effect, compiled.meshes, compiled.fields);
         if (!opened) {
@@ -538,7 +543,7 @@ BakeRecord bake_of(const Session& session, const std::optional<std::filesystem::
         return record;
     }
     int shown = -1;
-    Result<BakeRecord> baked = bake_page(session.document, compiled, session.seed, session.solver.get(),
+    Result<BakeRecord> baked = bake_scene(session.document, compiled, session.seed, session.solver.get(),
                                          [&shown](double share) {
                                              const int tenth = static_cast<int>(share * 10.0);
                                              if (tenth != shown) {
@@ -572,7 +577,7 @@ void print_bake(const Effect& effect, const BakeRecord& record) {
         acted += emitter.actions != 0U ? 1U : 0U;
     }
     say("  performance " + std::string{acted != 0U ? "held" : "none"} + ", " +
-        std::to_string(effect.emitters.size()) + " layers in the effect");
+        std::to_string(effect.emitters.size()) + " emitters in the effect");
 }
 
 gpu::KernelSet kernels_of(const Effect& effect) {
@@ -689,67 +694,112 @@ int replay(const Session& session, const std::filesystem::path& package_path, st
     return 0;
 }
 
-Document make_scene(std::string_view kind) {
-    Document document = new_scene();
-    if (kind == "empty") {
-        return document;
+template <class Stage>
+std::string module_list(const std::vector<Stage>& modules) {
+    std::string text;
+    for (const Stage& module : modules) {
+        text += (text.empty() ? "" : ", ") +
+                std::visit([](const auto& typed) { return std::string{std::decay_t<decltype(typed)>::kind}; }, module);
     }
-    if (kind == "logs") {
-        // A log that is only ever painted in, which smoulders: a trail of
-        // smoke and embers behind it while it moves.
-        const Uid log = add_object(document, "slab");
-        SceneItem* item = document.scene->item(log);
-        item->name = "Log";
-        auto& object = std::get<Object>(item->data);
-        object.distribution = Distribution::Placed;
-        object.size = 0.6F;
-        object.position = {0.0F, 0.3F, 0.0F};
-        const Uid smoke = add_bound_system(document, RelationKind::TrailFrom, log);
-        if (smoke != 0U) {
-            auto& particles = std::get<ParticleSystem>(document.scene->item(smoke)->data);
-            particles.look = ParticleLook::Smoke;
-            particles.tint = {0.9F, 0.45F, 0.15F, 1.0F};
+    return text.empty() ? std::string{"none"} : text;
+}
+
+std::string what_is(const Document& document, Uid uid);
+
+// What `compile` says of a scene: every emitter with what made it, its
+// capacity and modules, and each item's report.
+int print_compiled(const Document& document, const std::vector<std::string>& rest) {
+    bool json = false;
+    Uid live = 0U;
+    for (std::size_t i = 2U; i < rest.size(); ++i) {
+        if (rest[i] == "--json") {
+            json = true;
+        } else if (rest[i] == "--live" && i + 1U < rest.size()) {
+            live = to_u32(rest[++i]);
+        } else {
+            fail("compile takes --json and --live <system>");
         }
-        return document;
     }
-    if (kind == "wall") {
-        // A wall that breaks when hit hard, and a ball (a heavy cube) to
-        // throw at it: pick the ball up, swing it, let go.
-        const Uid wall = add_object(document);
-        SceneItem* w = document.scene->item(wall);
-        w->name = "Wall";
-        auto& block = std::get<Object>(w->data);
-        block.size = 1.6F;
-        block.position = {0.0F, 0.8F, -2.0F};
-        block.fracture = true;
-        block.fragments = 8U;
-        block.fracture_speed = 4.0F;
-        const Uid ball = add_object(document);
-        SceneItem* b = document.scene->item(ball);
-        b->name = "Ball";
-        auto& thrown = std::get<Object>(b->data);
-        thrown.size = 0.4F;
-        thrown.position = {0.0F, 0.2F, 2.0F};
-        thrown.density = 3000.0F;
-        return document;
+    const Compiled compiled = compile(document, live);
+    if (!compiled.error.empty()) {
+        say("does not compile: " + compiled.error);
+        return 1;
     }
-    if (kind == "sandbox") {
-        // One of every starter kind standing on the stage, a step apart
-        // along x, each a Placed kind put down at step 0.
-        float x = -4.0F;
-        for (const StarterKindInfo& info : starter_kinds()) {
-            const Uid made = add_starter_kind(document, info.kind, Vec3{x, 0.5F, -6.0F});
-            if (made == 0U) {
-                fail("no room for " + std::string{info.name});
+    if (!compiled.effect) {
+        say("nothing plays");
+        return 0;
+    }
+    const Effect& effect = *compiled.effect;
+    if (json) {
+        std::cout << effect_to_json(effect) << '\n';
+        return 0;
+    }
+    say("effect \"" + effect.name + "\": " + std::to_string(effect.emitters.size()) + " emitters, " +
+        std::to_string(effect.blasts.size()) + " blasts, " + std::to_string(effect.volumes.size()) + " volumes, " +
+        std::to_string(effect.parameters.size()) + " parameters");
+    say("simulation digest " + hex(simulation_digest(effect, compiled.meshes, compiled.fields)));
+    for (const Emitter& emitter : effect.emitters) {
+        std::string made_by;
+        for (const ItemReport& report : compiled.items) {
+            if (report.included && report.emitter == emitter.name) {
+                made_by += (made_by.empty() ? "" : ", ") + what_is(document, report.item);
             }
-            const Object& o = std::get<Object>(document.scene->item(made)->data);
-            static_cast<void>(add_drop(document.scene->performance, 0U, made, Vec3{x, o.size * 0.5F + 0.02F, 0.0F},
-                                       o.rotation, {}));
-            x += 2.0F;
         }
-        return document;
+        say("emitter " + emitter.name + " (" + made_by + "): capacity " + std::to_string(emitter.capacity) +
+            ", seed " + std::to_string(emitter.seed));
+        say("  spawn: " + module_list(emitter.spawn));
+        say("  init: " + module_list(emitter.init));
+        say("  update: " + module_list(emitter.update));
+        if (const RigidPhysics* physics = rigid_physics(emitter)) {
+            say("  bodies: " + std::to_string(physics->bodies.size()) + " kinds, " +
+                std::to_string(physics->props.size()) + " props");
+        }
     }
-    fail("new makes logs, wall, sandbox or empty");
+    for (const ItemReport& report : compiled.items) {
+        const SceneItem* item = document.scene->item(report.item);
+        std::string line = what_is(document, report.item) + ": ";
+        if (item != nullptr && !item->simulate) {
+            line += "switched off";
+        } else if (report.emitter.empty()) {
+            line += report.included ? "plays as a volume" : "does not play";
+        } else {
+            line += (report.included ? "plays in " : "does not play in ") + report.emitter + ", " +
+                    std::to_string(report.capacity) + " at most" + (report.baked ? ", baked" : ", live");
+            if (!report.scope.kinds.empty()) {
+                std::string kinds;
+                for (const std::uint32_t kind : report.scope.kinds) {
+                    kinds += (kinds.empty() ? "" : " ") + std::to_string(kind);
+                }
+                line += ", body kinds " + kinds;
+            }
+            if (report.prop) {
+                line += ", stands as a prop";
+            }
+        }
+        say(line);
+    }
+    for (const AssetRequest& request : compiled.requests) {
+        say(std::string{request.kind == AssetRequest::Kind::Mesh ? "model " : "collision field "} + request.path +
+            " as " + request.entry);
+    }
+    for (const FractureCut& cut : compiled.cuts) {
+        say(what_is(document, cut.item) + " comes apart into " + std::to_string(cut.cells) + " pieces of " +
+            cut.model);
+    }
+    return 0;
+}
+
+Document make_scene(std::string_view kind) {
+    std::optional<Document> made = make_starter_scene(kind);
+    if (!made) {
+        std::string names;
+        for (const StarterScene& scene : starter_scenes()) {
+            names += names.empty() ? "" : ", ";
+            names += scene.id;
+        }
+        fail("new makes " + names);
+    }
+    return std::move(*made);
 }
 
 // "1.000,0.500,0.250": a colour as a script line writes it.
@@ -910,6 +960,12 @@ int run(std::vector<std::string> args) {
         }
         return 0;
     }
+    if (!rest.empty() && rest[0] == "scenes") {
+        for (const StarterScene& scene : starter_scenes()) {
+            say("  " + std::string{scene.id} + ": " + std::string{scene.description});
+        }
+        return 0;
+    }
     if (rest.size() >= 3U && rest[0] == "new") {
         write_scene(make_scene(rest[1]), rest[2]);
         say("wrote " + rest[2]);
@@ -929,6 +985,9 @@ int run(std::vector<std::string> args) {
         }
         write_scene(document, out.value_or(path));
         return 0;
+    }
+    if (command == "compile") {
+        return print_compiled(read_scene(path), rest);
     }
     if (command == "effects" && rest.size() >= 3U) {
         const Document document = read_scene(path);

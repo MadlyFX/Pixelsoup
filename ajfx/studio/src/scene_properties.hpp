@@ -1,6 +1,6 @@
 #pragma once
 
-#include "catalog.hpp"
+#include "document.hpp"
 
 #include <functional>
 #include <span>

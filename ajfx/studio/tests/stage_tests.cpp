@@ -14,7 +14,7 @@ Object& object(Document& document, Uid uid) { return std::get<Object>(document.s
 const Object& object(const Document& document, Uid uid) { return std::get<Object>(document.scene->item(uid)->data); }
 
 Compiled ready(const Document& document) {
-    Compiled compiled = compile(document, Purpose::Export);
+    Compiled compiled = compile(document);
     if (!compiled.error.empty()) {
         throw std::runtime_error{compiled.error};
     }
@@ -96,7 +96,7 @@ void a_kind_has_no_bodies_until_it_is_placed() {
     CHECK(first.serial == 1U && second.serial == 2U && first.refusal.empty());
     CHECK(stage_count(scene.document.scene->performance) == 2U);
     // A placement is a drop at step 0, so the package does not change.
-    CHECK(compile(without_performance(scene.document), Purpose::Export).effect->emitters[world].spawn.size() ==
+    CHECK(compile(without_performance(scene.document)).effect->emitters[world].spawn.size() ==
           compiled.effect->emitters[world].spawn.size());
 
     const std::shared_ptr<const ajfx::ActionList> actions =
@@ -118,7 +118,7 @@ void a_kind_that_stands_still_cannot_be_placed() {
     Scene3 scene = crate_kind();
     object(scene.document, scene.crate).motion = ObjectMotion::Static;
     // Compiles to an error that says so, rather than a silent nothing.
-    const Compiled compiled = compile(scene.document, Purpose::Export);
+    const Compiled compiled = compile(scene.document);
     CHECK(!compiled.error.empty());
     CHECK(compiled.error.find("placed by hand") != std::string::npos);
 }

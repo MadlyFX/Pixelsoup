@@ -18,14 +18,14 @@ Search with `rg`; the `CMakeLists.txt` files locate tests.
 | D3D12 reference backend and DXC compiler | `lib/backends/d3d12` |
 | Rigid physics: solver interface, Jolt solver, `RigidRunner` | `lib/include/ajfx/rigid*.hpp`, `lib/src/rigid`, `lib/src/rigid_runner.cpp`, `lib/third_party/jolt` |
 | Samples | `lib/examples/viewer`, `lib/examples/player` |
-| Studio core: scene lowering, block catalog and compiler (layer IR), bake | `studio/src` (`ajfx_studio_core`) |
+| Studio core: the scene compiler (scene to effect), starter scenes, bake | `studio/src` (`ajfx_studio_core`): `compile.*`, `starter_scenes.*`, `bake.*` |
 | Scene ownership, metadata and persistence | `studio/src/scene.*`, `scene_properties.*`, `scene_io.*` |
 | Scene tree and selected-item inspector | `studio/src/scene_view.*`, `docs/studio-scene-reference.md` |
 | Performance hands, delivery (package + cache) and glTF export, and the CLI that drives them | `studio/src/hands.*`, `delivery.*`, `export_gltf.*`, `cli.cpp` |
 | Studio application: window, preview, worker | `studio/src/studio_app.*`, `preview.*`, `package_builder.*`, `stage_overlay.*` |
 | Dear ImGui layer and the panels drawn with it | `studio/src/imgui_layer.*`, `stage_panel.*` |
 | The stage and its setup tools (place, jitter, settle, reset) | `studio/src/stage.*`, `performance.*` |
-| Compiler fixtures (old layer recipes) | `studio/tests/fixtures` |
+| Compiler fixtures: the starter scenes, and scenes generated at random | `studio/src/starter_scenes.*`, `studio/tests/compile_tests.cpp` |
 
 `lib/` has no dependency outside the C++ standard library, the platform's
 D3D12 and the vendored Jolt. Studio's core depends on `lib/` alone. Only the
@@ -52,13 +52,12 @@ Studio application links the media server's `MediaServer::Render`, `Gui` and
   [the Studio design](docs/studio-ui-architecture.md) and
   [delivery plan](next-steps-plan.md). The media server's `docs/ui-design.md`
   and shared-widget rules do not prescribe Studio's design or UI framework.
-  Reuse host UI code only where it serves Studio's workflow. Studio is moving
-  to Dear ImGui (docking, via vcpkg), drawn through the media server's
-  renderer (`studio/src/imgui_layer.*`), a panel at a time: the Stage panel
-  is on it, and the rest of the interface still uses the media server's
-  toolkit, whose font atlas is ASCII-only, until it is moved. While both are
-  drawn, ImGui is on top and withholds the pointer and keyboard from the old
-  one (`InputState::withhold_pointer`).
+  Reuse host UI code only where it serves Studio's workflow. Studio is built
+  on Dear ImGui (docking, via vcpkg), drawn through the media server's
+  renderer (`studio/src/imgui_layer.*`): every panel is an ImGui window in one
+  dock, and the media server's own widget toolkit is no longer used by it
+  (only its window, event pump and draw-list renderer). Tests drive the panels
+  on a headless ImGui context with synthetic events (`tests/imgui_tests.cpp`).
 - Test observable behaviour with independent expectations: bit-identical
   reruns, seek equivalence, CPU and GPU agreement, pixels against
   hand-computed coverage.

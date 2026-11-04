@@ -15,7 +15,7 @@
 // rather than from a second bake: what the file shows is what the cache
 // holds, and so what the wall plays.
 //
-// - Each body of a cached rigid layer is a node with an animation: its
+// - Each body of a cached solid world is a node with an animation: its
 //   translation and rotation every simulation step it stands (LINEAR), and a
 //   STEP scale that shows it from the step it is born to the step it leaves.
 //   Before and after, glTF holds the first and last pose.
@@ -24,20 +24,20 @@
 //   the step a body left, nearest it.
 // - A prop is a node of its own, animated only when it moves.
 // - Each body is drawn with its kind's model (the kind's draw mesh, else the
-//   layer's own), scaled by its size and the kind's scale, tinted with its
+//   world's own), scaled by its size and the kind's scale, tinted with its
 //   colour; one with no model is a unit cube.
 // - Units are the effect's (metres), Y up, as glTF has them.
 //
-// Particle layers are not written: a glTF has no particles. Alembic or USD
+// Particle systems are not written: a glTF has no particles. Alembic or USD
 // would carry them; neither is written yet.
 namespace ajfx::studio {
 
 struct GltfOptions final {
     // Steps written: 0 to frames - 1. 0 for every step the cache holds.
     std::uint64_t frames{0U};
-    // The name a body's node takes, by its rigid layer's place among the
-    // effect's emitters and its spawn index; empty for the default
-    // ("<layer> body <spawn index>").
+    // The name a body's node takes, by its world's place among the effect's
+    // emitters and its spawn index; empty for the default
+    // ("<emitter> body <spawn index>").
     std::function<std::string(std::size_t, std::uint32_t)> name;
     // The scene's name, for the glTF scene.
     std::string scene{"ajfx performance"};
@@ -56,9 +56,9 @@ struct GltfFile final {
     std::string error;
 };
 
-// The glTF of every cached rigid layer of `cache` (opened for `effect`),
+// The glTF of every cached solid world of `cache` (opened for `effect`),
 // drawn with `meshes` (the package's). Fails, in `error`, when the cache
-// holds no rigid layer or no step.
+// holds no solid world or no step.
 [[nodiscard]] GltfFile gltf_from_cache(const Effect& effect, const Cache& cache, const MeshSet& meshes,
                                        const GltfOptions& options = {}, std::string bin_name = "performance.bin");
 

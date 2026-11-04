@@ -18,8 +18,8 @@
 // here turns what was read into what a package carries, deterministically,
 // so the same file always exports the same bytes:
 // - a picture becomes a sprite texture with its mip chain;
-// - a model becomes a debris mesh, centred and fitted to a 1 m box so the
-//   Size block sets how big each piece is;
+// - a model becomes a mesh, centred and fitted to a 1 m box so an Object's
+//   size sets how big it is;
 // - a model to collide with becomes a distance field. The model itself never
 //   goes into the package, only the field the particles bounce off.
 namespace ajfx::studio {
@@ -41,7 +41,7 @@ struct ImportedMesh final {
 };
 
 // The package entry an artist's file is carried as: "user.<16 hex>", from
-// what it is, its path and how it was prepared, so two blocks using the same
+// what it is, its path and how it was prepared, so two items using the same
 // file the same way share one entry.
 [[nodiscard]] std::string user_asset_name(std::string_view kind, std::string_view path, std::string_view options = {});
 

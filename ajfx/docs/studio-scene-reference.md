@@ -45,7 +45,7 @@ An object whose Distribution is **Placed by hand** is a kind: it has no bodies
 of its own, and every body of it is put on the stage or dropped. The stage is
 what stands before the scene plays, and is kept as drops at step 0, so what an
 artist puts down and what they drop later are one record and replay the same.
-The **Stage panel** (Dear ImGui, floating over the viewport) holds the tools
+The **Stage panel** (a dock window under the scene tree) holds the tools
 that act in the viewport, **Select** (Esc), **Place** (O), **Drop** (D) and
 **Delete** (X), and the setup tools that act on what stands on the stage:
 
@@ -214,7 +214,7 @@ kind, the item and act it is about and the step:
 - played to a step: every refused drop or painted thing, by act and step,
   with why (the scene's most dropped things at once, or more than 16 asked
   for in one step), and every particle system that ran out of room;
-- the cache: baked layers whose cache is stale, missing or too large
+- the cache: baked items whose cache is stale, missing or too large
   (`bake_issues`), and a cache file opened against the scene as it is now,
   with its performance and seed (`cache_issue`).
 
@@ -269,10 +269,13 @@ and **Draw in** (pull, fade height, center). A behavior's strength is a
 range: each particle keeps its own share for life, so some sparks drag more
 and some smoke swirls harder. The seed picks another set of shares and, for
 Turbulence, another noise field. **Add behavior** appends one with that
-kind's defaults; a new system has an empty stack. The stack's authored order is the order the runtime
-applies the forces, so moving a row up or down is a motion edit. A switched-off
-behavior keeps its settings and lowers to nothing. Up to 16 behaviors per
-system. Behaviors have no viewport handles yet; a vortex center is typed.
+kind's defaults; a new system has an empty stack. The runtime applies the
+forces in a fixed order by kind -- gravity, wind, vortex, attract, draw in,
+turbulence, the scene's blasts, then drag, which slows what the others gave
+-- and behaviors of one kind in the stack's order, so moving a row changes
+the result only beside another of its kind. A switched-off behavior keeps
+its settings and compiles to nothing. Up to 16 behaviors per system.
+Behaviors have no viewport handles yet; a vortex center is typed.
 
 **Size over age** and **Color over age** are each **Constant** or **Keys**:
 between 2 and 16 keys followed from birth (age 0) to death (age 1). Size keys
@@ -280,7 +283,7 @@ multiply the base size; color keys multiply the particle colour, alpha
 included, so a fade-out is a key with alpha 0. Keys stay in age order: an
 edited age is held between its neighbours, and **Add key** inserts one before
 the last. A strip above the keys previews the curve, birth on the left. The
-keys lower to the runtime's size-over-life and colour-over-life modules
+keys compile to the runtime's size-over-life and colour-over-life modules
 exactly as written. Size over age is a motion edit (collision reads size);
 colour over age keeps the motion cache. Drivers from other particle
 attributes, such as speed, need runtime support and are not offered.
@@ -293,9 +296,9 @@ acts on every particle system unless **Every particle system** is switched
 off, when a switch per system names its targets; a system that is removed
 drops out of every force. A blast throws everything, objects included, and
 takes no target list. Selecting a force shows its guide and handles in the
-viewport, drawn in the first system it acts on; the drag writes back to the
-force. The force's seed is the item's seed. Each force lowers into the
-systems it acts on by identity order, at most 16 per system, so tree order,
+viewport, drawn beside the first system it acts on; a drag writes to the
+force. The force's seed is the item's seed. Each force compiles into the
+systems it acts on in identity order, at most 16 per system, so tree order,
 names and other systems never move it. Forces have no viewport handle for a
 strength, and Wind has no position.
 
@@ -366,7 +369,7 @@ that is switched off. A system cannot trail itself, and systems trailing one
 another round in a ring are refused: the system trailed steps first, so the
 puffs sit where this frame left its particles. Removing either endpoint
 removes the rule rather than re-aiming it at everything, and a rule whose
-grid is gone is diagnosed. Rules lower into the system in identity order
+grid is gone is diagnosed. Rules compile into the system in identity order
 and reach the runtime's contact, body and particle spawners and its grid
 modules. Fracture, time and threshold events are not relationships yet.
 
@@ -418,19 +421,65 @@ out of order, with serials that overlap or are not yet handed out, a grab
 whose path goes back in time or a dab of more than a step bears are
 refused. Readers refuse unknown, duplicate, malformed
 or missing authored properties and unsupported versions. Window state is not
-part of this schema. Existing layer documents retain their existing format.
+part of this schema.
 
-`lower_scene` produces transient compiler IR; it is never another authored
-copy. Items reserve component identities at creation, and lowering sorts by
-UID, including sources. Fracture is emitted beside its typed owner, so tree
-neighbors cannot capture it. A smoke grid lowers to a layer of one Smoke
-grid block, which the compiler lists on the effect as a grid volume named
-from the block (`page_volumes`) and builds no emitter from; its bindings
-lower to the runtime's `VolumeSource` and `VolumeAdvect` modules naming that
-volume, and the scene's scale applies to the grid's place and cells. A grid
-the runtime refuses is reported against the grid item, with the runtime's
-reason. Local body material values are explicit; shared
-angular damping and sleep settings always come from ScenePhysics.
+## Compiling a scene
+
+`compile` (`studio/src/compile.*`) turns the scene straight into an
+`ajfx::Effect`; there is no intermediate document. What each item becomes:
+
+- **A particle system** is an emitter of its own, `item_<uid>`: a source per
+  spawn module, its birth ball, launch, colour, size, spin and lifetime as
+  init modules, its own gravity share, its Motion stack and every force that
+  acts on it as forces, each Static object it meets as a collider (a floor
+  as a plane at its top, a ball as a sphere, an artist's model with a hull
+  collider as a distance field fitted and turned as it is drawn, anything
+  else as a box of its own bounds), the rules that feed it as spawn modules
+  or grid modules, and its age drivers as the runtime's over-life modules.
+  Its particles answer every blast and meet the solid world's bodies unless
+  it passes through things; the first floor it meets says how they bounce
+  off bodies too.
+- **Every Object** is part of the scene's one solid world, a rigid physics
+  emitter named for its lowest-identity Object. A Dynamic Object is a body
+  kind and a pile of bodies; a Static or Animated one is a prop. The world
+  takes its material and world settings from that first Object, and every
+  other Object's launch, lifetime and size are scoped to its own kinds. An
+  Object that comes apart names a cut, made once its model is read
+  (`make_cuts`). Dropped and painted things are born in the world
+  (`SpawnActions`, at most `max_dropped` at once), and a wind that blows on
+  things blows on every body (`BodyWind`).
+- **A smoke grid** is a volume of the effect, named from its identity; it
+  builds no emitter. **A blast** is a blast of the effect, present while
+  anything plays.
+
+Module ids come from items' reserved identities (32 a item; a force acting
+on a system takes one of the system's own, from 16 up), and a seed picks
+another id, so editing one item leaves every other emitter exactly as it
+was, and the effect is the same whatever order the tree lists items in. Every
+emitter is sized to the most it can have alive, and checked by the runtime
+beside the emitters before it. A scene that cannot play whole does not play:
+the first item at fault is named (a grid the runtime refuses is named, not
+the system checked beside it) and there is no effect, so a preview is never
+replaced by a plausible incomplete one. A switched-off item is not compiled
+at all, so it cannot break the scene. Each item's `ItemReport` says where it
+plays, its share of the capacity, whether it is baked and what went wrong.
+
+The world keeps two things for its kind numbers that a direct compiler would
+not need: every Object after the first holds an unused kind of its own
+material, and a system's colliders follow Static objects in identity order.
+They are kept so caches and digests from before stay valid; see the plan.
+
+`ajfx-studio-cli <scene> compile` prints what a scene compiles to: each
+emitter, the items it holds, its capacity and modules, each item's report,
+the files it needs and the cuts it makes, and the effect's simulation digest;
+`--json` prints the effect, and `--live <system>` compiles a system's Motion
+as parameters, as the preview does. The starter scenes (`starter_scenes.*`,
+`ajfx-studio-cli scenes` and `new <name>`) are the compiler's fixtures: every
+one compiles whole and its kernels build, and over hundreds of generated
+scenes the effect is a function of the scene alone (`compile_tests.cpp`).
+
+Local body material values are explicit; shared angular damping and sleep
+settings always come from ScenePhysics.
 
 Rigid objects collide in one solver world. Per-kind draw tint and mesh
 assignments feed render batches from that same simulation. Static and Animated
@@ -443,8 +492,10 @@ Exceeding the scene's compiled capacity blocks its entire replacement preview
 and export instead of publishing a partial scene.
 
 Bake covers the selected capture range. Scene export requires a matching,
-current cache for every baked unit and refuses missing assets and unsupported
-state. The cache is written successfully before publishing the package. A bake
+current cache for every baked item and refuses missing assets and unsupported
+state. An item's bake goes stale with what its emitter reads: a system born
+of a crate's hits goes stale when the crate breaks differently, and says
+which item changed; a system that passes through it does not. The cache is written successfully before publishing the package. A bake
 replays the performance and is keyed by it (`CacheIdentity`'s action
 digest): a cache opens only with the acts it was baked with, as far as its
 steps read them, so a drop or deletion inside the capture range makes it
@@ -458,11 +509,11 @@ only then writes `name.ajfx` and `name.ajfxcache` side by side (removing a
 stale cache left beside a package that now bakes nothing). The cache carries
 the instance seed it was baked with and the performance, so the media
 server plays the performance wherever the effect is placed; it reads the
-cached layers rather than simulating them, and refuses a cache that no
+cached emitters rather than simulating them, and refuses a cache that no
 longer belongs, with the reason, in readiness. `ajfx-studio-cli replay`
 plays a delivered package from its cache as a node does on a seek and
 compares it with the scene played live: bodies agree bit for bit, a cached
-particle layer within its position quantum.
+particle system within its position quantum.
 
 `export_gltf.*` writes the performance as glTF 2.0 from the cache, not from
 a second bake: a node per body with its translation and rotation at every
@@ -470,7 +521,7 @@ simulation step and a STEP scale that shows it from birth to death (glTF
 holds the first and last pose around them), a broken body as a group of the
 whole and its pieces (a piece is the body born on the step the whole left,
 nearest it), props as nodes of their own, animated only when they move, and
-one material per colour. Particle layers are not written; Alembic or USD
+one material per colour. Particle systems are not written; Alembic or USD
 would carry them. A Blender import of the wall scene stands where the cache
 has every body at the steps checked.
 
@@ -483,8 +534,8 @@ to.
 
 Studio opens only scenes. The old page editor (palette, block pages, coach,
 budget search and recipe gallery) has been removed without a conversion step,
-since no projects needed migrating. Its layers and blocks remain as the
-compiler's IR, and its recipes as compiler test fixtures.
+since no projects needed migrating, and so has its layer-and-block compiler:
+scenes compile directly.
 
 Continuous cross-population attraction/repulsion, event endpoints beyond
 collision and motion, light scene items, reusable assemblies, library

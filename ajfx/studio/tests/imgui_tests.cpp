@@ -307,8 +307,12 @@ struct Panels final {
     }
     void frame(Headless& imgui) {
         imgui.frame([&] {
-            view.tree_panel(document, ImVec2{0.0F, 0.0F}, ImVec2{300.0F, 600.0F});
-            view.inspector_panel(document, {}, ImVec2{320.0F, 0.0F}, ImVec2{450.0F, 700.0F});
+            ImGui::SetNextWindowPos(ImVec2{0.0F, 0.0F});
+            ImGui::SetNextWindowSize(ImVec2{300.0F, 600.0F});
+            view.tree_panel(document);
+            ImGui::SetNextWindowPos(ImVec2{320.0F, 0.0F});
+            ImGui::SetNextWindowSize(ImVec2{450.0F, 700.0F});
+            view.inspector_panel(document, {});
         });
     }
     void frames(Headless& imgui, int count) {
@@ -439,8 +443,7 @@ void dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest() {
     Document document = new_scene();
     const Uid uid = add_object(document);
     object_of(document, uid).position = ajfx::Vec3{0.0F, 0.5F, 0.0F};
-    Document lowered = lower_scene(document);
-    const GuideOptions options{.focus = handle_block(document, uid), .layer = uid};
+    const GuideOptions options{.item = uid};
     const gui::Rect view{0.0F, 0.0F, 800.0F, 600.0F};
     const CameraPose pose{.eye = ajfx::Vec3{0.0F, 3.0F, 6.0F}, .target = ajfx::Vec3{0.0F, 0.25F, 0.0F}};
     const StageCamera camera{pose, view};
@@ -450,10 +453,16 @@ void dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest() {
     ViewportEvents seen;
     const auto frame = [&] {
         imgui.frame([&] {
-            const GuideSet guides = build_guides(lowered, options);
+            const GuideSet guides = build_guides(document, options);
             ViewportInputs in;
             in.guides = &guides;
-            last = viewport.draw(view, pose, lowered, in, 1.0F);
+            ImGui::SetNextWindowPos(ImVec2{0.0F, 0.0F});
+            ImGui::SetNextWindowSize(ImVec2{800.0F, 600.0F});
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0F, 0.0F});
+            ImGui::Begin("viewport", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove);
+            ImGui::PopStyleVar();
+            last = viewport.draw(view, pose, document, in, 1.0F);
+            ImGui::End();
             held = held || last.handle_held;
             seen.clicked = seen.clicked || last.clicked;
             seen.orbiting = seen.orbiting || last.orbiting;
@@ -461,10 +470,10 @@ void dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest() {
             seen.wheel += last.wheel;
         });
     };
-    const GuideSet guides = build_guides(lowered, options);
+    const GuideSet guides = build_guides(document, options);
     const Handle* at = nullptr;
     for (const Handle& handle : guides.handles) {
-        if (handle.block == options.focus && handle.control == "at") {
+        if (handle.item == uid && handle.target == HandleTarget::Position) {
             at = &handle;
         }
     }
@@ -490,7 +499,6 @@ void dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest() {
     frame();
     frame();
     CHECK(held && !viewport.dragging());
-    CHECK(adopt_handle_edit(document, lowered, uid));
     const Object& moved = object_of(document, uid);
     CHECK(std::fabs(moved.position.x - goal.x) < 0.05F && std::fabs(moved.position.y - 0.5F) < 1.0e-3F &&
           std::fabs(moved.position.z - goal.z) < 0.05F);
@@ -529,26 +537,6 @@ void dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest() {
     CHECK(seen.wheel > 0.0F);
 }
 
-void the_old_interface_is_told_what_imgui_took() {
-    gui::InputState input;
-    input.set_mouse_position(120.0F, 80.0F);
-    input.set_mouse_button(gui::MouseButton::Left, true);
-    input.add_wheel(2.0F);
-    input.add_text("d");
-    input.add_key(gui::Key::Delete);
-    input.set_move_key(gui::MoveKey::W, true);
-    CHECK(input.mouse_pressed(gui::MouseButton::Left) && input.mouse_x() == 120.0F);
-
-    input.withhold_pointer();
-    CHECK(input.mouse_x() < -1.0e5F && input.mouse_y() < -1.0e5F);
-    CHECK(!input.mouse_down(gui::MouseButton::Left) && !input.mouse_pressed(gui::MouseButton::Left));
-    CHECK(input.wheel() == 0.0F);
-    // The keyboard is its own: still there until withheld too.
-    CHECK(input.text() == "d" && input.keys().size() == 1U && input.move_key_down(gui::MoveKey::W));
-    input.withhold_keyboard();
-    CHECK(input.text().empty() && input.keys().empty() && !input.move_key_down(gui::MoveKey::W));
-}
-
 } // namespace
 
 int main() {
@@ -568,7 +556,6 @@ int main() {
         {"a_value_dragged_with_two_things_selected_reaches_both", a_value_dragged_with_two_things_selected_reaches_both},
         {"a_scene_with_nothing_picked_shows_its_settings", a_scene_with_nothing_picked_shows_its_settings},
         {"dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest", dragging_a_handle_moves_the_object_and_the_camera_hears_the_rest},
-        {"the_old_interface_is_told_what_imgui_took", the_old_interface_is_told_what_imgui_took},
     };
     int failures = 0;
     for (const Case& test : cases) {
