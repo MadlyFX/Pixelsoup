@@ -67,8 +67,11 @@ struct ViewConstants final {
     std::array<core::u32, 4U> lighting{};
     std::array<std::array<float, 16U>, 4U> shadow_view_projection{};
     std::array<float, 4U> shadow_texel_depth{};
+    // x: for one depth slice of an interleaved emitter, the word of the
+    // order that holds where the slice starts in it; absent otherwise.
+    std::array<core::u32, 4U> order_slice{absent, 0U, 0U, 0U};
 };
-static_assert(sizeof(ViewConstants) == 752U);
+static_assert(sizeof(ViewConstants) == 768U);
 
 // Matches ParticleVolumeView in particle_volume.vert.hlsl.
 struct VolumeViewConstants final {
@@ -988,6 +991,7 @@ bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, 
             s.particles->copy_buffer(i.meshes[e]->args, 4U, buffers.args, buffers.draw_args_offset + 4U, 4U);
         }
     }
+    i.sorter->slice(*i.simulation);
     s.particles->end_recording();
     if (std::optional<ajfx::Error> error = s.particles->take_error()) {
         s.note(error->message);
@@ -1195,7 +1199,8 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
             first = false;
         }
     }
-    for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
+    // One emitter's draw; for an interleaved emitter, one depth slice of it.
+    const auto draw_emitter = [&](std::size_t e, const ajfx::gpu::DepthSlice* slice) {
         const ajfx::SpriteRenderer& sprite = i.effect.emitters[e].renderer;
         const ajfx::gpu::EmitterBuffers buffers = i.simulation->emitter_buffers(e);
         const rhi::StorageBuffer* records = s.particles->buffer(buffers.particles);
@@ -1241,6 +1246,7 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         if (i.orders[e].valid()) {
             constants.flags |= flag_sorted;
         }
+        constants.order_slice[0] = slice != nullptr ? slice->start_word : absent;
         const rhi::StorageBuffer* counters = s.particles->buffer(buffers.counters);
         if (counters == nullptr) {
             s.note("an emitter's counters are missing");
@@ -1306,13 +1312,14 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
                 }
                 first = false;
             }
-            continue;
+            return true;
         }
         const ParticleInstance::State::MeshUpload* uploaded = mesh ? &i.mesh_uploads[mesh->upload] : nullptr;
         const rhi::StorageBuffer* mesh_vertices = uploaded ? s.particles->buffer(uploaded->vertices) : records;
         const rhi::StorageBuffer* mesh_indices = uploaded ? s.particles->buffer(uploaded->indices) : records;
         const rhi::StorageBuffer* mesh_args = mesh ? s.particles->buffer(mesh->args) : arguments;
-        if (mesh_vertices == nullptr || mesh_indices == nullptr || mesh_args == nullptr) {
+        const rhi::StorageBuffer* slice_args = slice != nullptr ? s.particles->buffer(slice->args) : arguments;
+        if (mesh_vertices == nullptr || mesh_indices == nullptr || mesh_args == nullptr || slice_args == nullptr) {
             s.note("an emitter's mesh buffers are missing");
             return false;
         }
@@ -1328,8 +1335,9 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         draw.vertex_uniform = emitter_uniform;
         draw.fragment_textures = sampled;
         draw.batches = batches;
-        draw.indirect = mesh ? rhi::IndirectArguments{mesh_args, 0U}
-                             : rhi::IndirectArguments{arguments, static_cast<core::u32>(buffers.draw_args_offset)};
+        draw.indirect = mesh    ? rhi::IndirectArguments{mesh_args, 0U}
+                        : slice ? rhi::IndirectArguments{slice_args, static_cast<core::u32>(slice->args_offset)}
+                                : rhi::IndirectArguments{arguments, static_cast<core::u32>(buffers.draw_args_offset)};
         draw.load = motion || !first || targets.load;
         draw.store_depth = true;
         draw.viewport = targets.viewport;
@@ -1340,6 +1348,31 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
             return false;
         }
         first = false;
+        return true;
+    };
+    // Page order, except that the interleaved emitters all draw where the
+    // first of them would, slice by slice, farthest first, so particles of
+    // different emitters cover each other by depth rather than by order.
+    bool sliced = false;
+    for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
+        if (!ajfx::gpu::interleaved(i.effect, e) || !i.orders[e].valid()) {
+            if (!draw_emitter(e, nullptr)) {
+                return false;
+            }
+            continue;
+        }
+        if (sliced) {
+            continue;
+        }
+        sliced = true;
+        for (core::u32 slice = 0U; slice < ajfx::gpu::depth_slices; ++slice) {
+            for (std::size_t other = e; other < i.effect.emitters.size(); ++other) {
+                const ajfx::gpu::DepthSlice part = i.sorter->depth_slice(other, slice);
+                if (part.args.valid() && i.orders[other].valid() && !draw_emitter(other, &part)) {
+                    return false;
+                }
+            }
+        }
     }
     return true;
 }

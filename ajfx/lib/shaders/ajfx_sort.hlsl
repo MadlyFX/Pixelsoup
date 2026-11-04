@@ -15,6 +15,11 @@
 // Memory access is coalesced: thread t of a block touches elements t, t + 256,
 // t + 512, ... Each scatter reorders its block in group-shared memory first,
 // so a digit's run leaves as one contiguous write.
+//
+// Emitters drawn interleaved (ParticleSorter::interleaved) are then cut into
+// depth slices shared by all of them: sort_range finds the depth every one of
+// them spans, sort_slices where each slice starts in an emitter's order.
+// Their keys come from the same axis, so they compare across emitters.
 
 cbuffer AjfxSort : register(b0, space1) {
     uint sort_stride;     // bytes per particle record
@@ -22,7 +27,9 @@ cbuffer AjfxSort : register(b0, space1) {
     uint sort_shift;      // the low bit of this pass's digit
     uint sort_max_blocks; // blocks the capacity spans; where the offsets start in sort_digits
     float4 sort_axis;     // xyz: depth grows along this axis, in the particles' own space
-    uint4 sort_reserved0;
+    uint sort_slice_at;   // sort_slices: the word of the order where the slices' starts go
+    uint sort_slice_count;
+    uint2 sort_reserved0;
     uint4 sort_reserved1;
 };
 
@@ -33,8 +40,12 @@ RWByteAddressBuffer sort_values_in : register(u3);
 RWByteAddressBuffer sort_keys_out : register(u4);
 RWByteAddressBuffer sort_values_out : register(u5);
 RWByteAddressBuffer sort_digits : register(u6);     // per-block digit counts, then their offsets
+// The farthest and nearest keys of every interleaved emitter: the smallest
+// key, then the largest.
+RWByteAddressBuffer sort_span : register(u7);
 
 static const uint sort_block_size = 4096u;
+static const uint first_sorted_bit = 8u; // ParticleSorter's first_bit
 static const uint sort_threads = 256u;
 static const uint sort_per_thread = 16u;
 
@@ -274,5 +285,69 @@ void sort_scatter(uint3 group : SV_GroupID, uint thread : SV_GroupIndex) {
         if (j < count) {
             sort_values_out.Store(targets[k] * 4u, sort_stage[j]);
         }
+    }
+}
+
+// One thread: widens the shared span by this emitter's sorted keys (bound as
+// sort_keys_in). Minimum and maximum do not depend on the order emitters
+// arrive in.
+[numthreads(1, 1, 1)]
+void sort_range() {
+    uint alive = sort_counters.Load(0u);
+    if (alive == 0u) {
+        return;
+    }
+    uint unused;
+    sort_span.InterlockedMin(0u, sort_keys_in.Load(0u), unused);
+    sort_span.InterlockedMax(4u, sort_keys_in.Load((alive - 1u) * 4u), unused);
+}
+
+uint sort_key_of(float depth) {
+    uint bits = asuint(depth);
+    return ~((bits & 0x80000000u) != 0u ? ~bits : (bits | 0x80000000u));
+}
+
+float sort_depth_of(uint key) {
+    uint ordered = ~key;
+    return asfloat((ordered & 0x80000000u) != 0u ? (ordered & 0x7fffffffu) : ~ordered);
+}
+
+groupshared uint sort_slice_starts[65];
+
+// One group: this emitter's sorted keys (sort_keys_in) cut at depths evenly
+// spaced across the shared span, farthest slice first. Slice s starts at
+// order word sort_slice_at + s, and its sprite draw's arguments (six
+// vertices, then the slice's particle count) are sixteen bytes at s * 16 of
+// sort_values_out. Only the sorted top 24 bits of a key are compared.
+[numthreads(64, 1, 1)]
+void sort_slices(uint thread : SV_GroupIndex) {
+    uint alive = sort_counters.Load(0u);
+    if (thread <= sort_slice_count) {
+        uint start = thread == sort_slice_count ? alive : 0u;
+        if (thread > 0u && thread < sort_slice_count && alive > 0u) {
+            float far_depth = sort_depth_of(sort_span.Load(0u));
+            float near_depth = sort_depth_of(sort_span.Load(4u));
+            float t = (float)thread / (float)sort_slice_count;
+            uint bound = sort_key_of(far_depth + (near_depth - far_depth) * t) >> first_sorted_bit;
+            // The first key at or past the boundary.
+            uint low = 0u;
+            uint high = alive;
+            while (low < high) {
+                uint middle = (low + high) / 2u;
+                if ((sort_keys_in.Load(middle * 4u) >> first_sorted_bit) < bound) {
+                    low = middle + 1u;
+                } else {
+                    high = middle;
+                }
+            }
+            start = low;
+        }
+        sort_slice_starts[thread] = start;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (thread < sort_slice_count) {
+        uint start = sort_slice_starts[thread];
+        sort_values_in.Store((sort_slice_at + thread) * 4u, start);
+        sort_values_out.Store4(thread * 16u, uint4(6u, sort_slice_starts[thread + 1u] - start, 0u, 0u));
     }
 }

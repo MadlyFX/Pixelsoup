@@ -1051,7 +1051,8 @@ offered; it is reported as missing instead.
 **Particle effects** are `.ajfx` packages, exported by ajfx Studio. A
 package holds an effect, its precompiled GPU kernels, and any textures its
 sprites use. Smoke and other see-through effects draw back to front from
-every camera, so they layer correctly as you orbit. A package that is
+every camera, so they layer correctly as you orbit, and the parts of one
+effect (sparks inside smoke, say) layer by depth with each other too. A package that is
 missing a texture its effect names does not play; the Stage status names
 the texture. Drag one onto Stage to place it, then
 select it to set its **Seed** and **Start frame** in the Inspector's

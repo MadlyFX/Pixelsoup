@@ -390,6 +390,7 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
             device.copy_buffer(mesh.args, 4U, buffers.args, buffers.draw_args_offset + 4U, 4U);
         }
     }
+    sorter.slice(simulation);
 
     device.begin_rendering(target, clear_color);
     // The grid volumes first, raymarched; the particles draw over them.
@@ -423,7 +424,7 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
         draw.instance_count = 1U;
         device.draw(draw);
     }
-    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+    const auto emitter_draw = [&](std::size_t i) {
         const SpriteRenderer& settings = effect.emitters[i].renderer;
         const EmitterBuffers buffers = simulation.emitter_buffers(i);
         Draw draw;
@@ -465,7 +466,33 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
             draw.indirect = state_->meshes[i]->args;
             draw.indirect_offset = 0U;
         }
-        device.draw(draw);
+        return draw;
+    };
+    // Page order, except that the interleaved emitters all draw where the
+    // first of them would, slice by slice, farthest first.
+    bool sliced = false;
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        if (!interleaved(effect, i)) {
+            device.draw(emitter_draw(i));
+            continue;
+        }
+        if (sliced) {
+            continue;
+        }
+        sliced = true;
+        for (std::uint32_t slice = 0U; slice < depth_slices; ++slice) {
+            for (std::size_t j = i; j < effect.emitters.size(); ++j) {
+                const DepthSlice part = sorter.depth_slice(j, slice);
+                if (!part.args.valid()) {
+                    continue;
+                }
+                Draw draw = emitter_draw(j);
+                draw.constants[9] = 2U + part.start_word;
+                draw.indirect = part.args;
+                draw.indirect_offset = part.args_offset;
+                device.draw(draw);
+            }
+        }
     }
     device.end_rendering();
 }

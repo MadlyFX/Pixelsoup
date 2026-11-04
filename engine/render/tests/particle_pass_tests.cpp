@@ -2,6 +2,7 @@
 
 #include <ajfx/builder.hpp>
 #include <ajfx/d3d12.hpp>
+#include <ajfx/gpu/sort.hpp>
 #include <ajfx/presets.hpp>
 #include <ajfx/rigid.hpp>
 
@@ -304,6 +305,45 @@ void alpha_particles_draw_back_to_front_in_the_placed_effect() {
     render::ParticleInstance placed = make_instance(pass, drifting_pair(true));
     const Frame behind = render_frame(pass, placed, 8U, turned);
     PASS_CHECK(behind.red(32U, 32U) >= 200U && behind.blue(32U, 32U) <= 40U);
+}
+
+void emitters_interleave_by_depth() {
+    // A grey smoke disc four units across at z = 0 fills the view, emitted
+    // between two additive red sparks: one in front of it at x = -0.5
+    // (pixel 24), emitted first, and one behind it at x = 0.5 (pixel 40),
+    // emitted last. Emitter order would hide the near spark under the smoke
+    // and draw the far one over it; by depth it is the other way round.
+    ajfx::EffectBuilder builder{"interleaved"};
+    const ajfx::Color red{1.0F, 0.0F, 0.0F, 1.0F};
+    const auto spark = [&](const char* name, ajfx::Vec3 at) {
+        builder.emitter(name)
+            .spawn(ajfx::SpawnBurst{.count = 1U})
+            .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+            .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point, .center = at})
+            .init(ajfx::InitColor{.a = red, .b = red})
+            .init(ajfx::InitSize{.min = 0.5F, .max = 0.5F})
+            .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Additive, .sort = false});
+    };
+    spark("near", ajfx::Vec3{-0.5F, 0.0F, 0.5F});
+    const ajfx::Color grey{0.25F, 0.25F, 0.25F, 1.0F};
+    builder.emitter("smoke")
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::InitColor{.a = grey, .b = grey})
+        .init(ajfx::InitSize{.min = 4.0F, .max = 4.0F})
+        .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Alpha});
+    spark("far", ajfx::Vec3{0.5F, 0.0F, -0.5F});
+    const ajfx::Effect effect = builder.build().value();
+    PASS_CHECK(ajfx::gpu::interleaved(effect, 0U) && ajfx::gpu::interleaved(effect, 2U));
+    render::ParticlePass pass = make_pass();
+    render::ParticleInstance instance = make_instance(pass, effect);
+    const Frame frame = render_frame(pass, instance, 1U, identity());
+    // The smoke a quarter of the way out covers 1 - 1/16 of what is behind
+    // it, in a premultiplied 0.234 grey: about 60.
+    PASS_CHECK(frame.red(24U, 32U) >= 240U);
+    PASS_CHECK(frame.red(40U, 32U) >= 60U && frame.red(40U, 32U) <= 90U);
+    PASS_CHECK(frame.green(40U, 32U) >= 55U && frame.green(40U, 32U) <= 62U);
 }
 
 // Four solid 8x8 cells in a 16x16 texture: red, green, blue, white.
@@ -2041,6 +2081,7 @@ int main() {
         {"additive_particles_add_and_cover_as_they_brighten", additive_particles_add_and_cover_as_they_brighten},
         {"alpha_particles_draw_back_to_front_in_the_placed_effect",
          alpha_particles_draw_back_to_front_in_the_placed_effect},
+        {"emitters_interleave_by_depth", emitters_interleave_by_depth},
         {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
         {"moving_particles_write_their_motion", moving_particles_write_their_motion},
         {"soft_particles_fade_as_they_near_the_scene", soft_particles_fade_as_they_near_the_scene},

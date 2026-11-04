@@ -582,7 +582,9 @@ Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler
     const std::string sort = sort_kernel_source();
     for (const auto& [entry, out] : {std::pair{"sort_keys", &set.sort_keys}, std::pair{"sort_count", &set.sort_count},
                                      std::pair{"sort_scan", &set.sort_scan},
-                                     std::pair{"sort_scatter", &set.sort_scatter}}) {
+                                     std::pair{"sort_scatter", &set.sort_scatter},
+                                     std::pair{"sort_range", &set.sort_range},
+                                     std::pair{"sort_slices", &set.sort_slices}}) {
         Result<std::vector<std::uint8_t>> code =
             compiler.compile(sort, entry, ShaderStage::Compute, std::string{"ajfx "} + entry);
         if (!code) {
@@ -674,6 +676,7 @@ std::vector<std::pair<std::string, std::vector<std::uint8_t>*>> named_kernels(Ke
         {"runtime/scatter", &set.scatter},         {"runtime/finalize", &set.finalize},
         {"sort/keys", &set.sort_keys},             {"sort/count", &set.sort_count},
         {"sort/scan", &set.sort_scan},             {"sort/scatter", &set.sort_scatter},
+        {"sort/range", &set.sort_range},           {"sort/slices", &set.sort_slices},
         {"sprite/vertex", &set.sprite_vertex},     {"sprite/pixel", &set.sprite_pixel},
     };
     // The grid volumes' kernels and shaders, for an effect with volumes.
