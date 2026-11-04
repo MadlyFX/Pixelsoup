@@ -550,6 +550,15 @@ void a_cache_is_keyed_by_its_performance() {
     Result<Cache> bare = Cache::open(baked.bytes, effect, 5U);
     AJFX_CHECK(!bare.ok() && bare.error().code == ErrorCode::StaleCache);
 
+    // An empty performance is no performance: baked with one, the cache
+    // opens without any, as a host that never acted has none.
+    BakeSettings unacted = settings;
+    unacted.actions = std::make_shared<ActionList>();
+    unacted.frames = 60U;
+    const Baked quiet = must(bake(effect, 5U, options, unacted));
+    AJFX_CHECK(quiet.report.identity.emitters[0].actions == 0U);
+    AJFX_CHECK(Cache::open(quiet.bytes, effect, 5U).ok());
+
     // A state with placed bodies round-trips, hold and all.
     Simulation placed = make(effect);
     placed.reset(nullptr, list.get());

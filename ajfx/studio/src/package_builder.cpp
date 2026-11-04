@@ -3,6 +3,7 @@
 #include "catalog.hpp"
 #include "document_io.hpp"
 #include "library.hpp"
+#include "performance.hpp"
 #include "scene.hpp"
 #include "user_assets.hpp"
 
@@ -601,6 +602,12 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled, s
         return;
     }
     Simulation& simulation = created.value();
+    // The scene's performance plays in the run as it does in the preview,
+    // so a dropped body can be clicked and is framed.
+    const std::shared_ptr<const ActionList> actions =
+        request.document.scene ? performance_actions(request.document.scene->performance, act_targets(compiled))
+                               : nullptr;
+    simulation.reset(nullptr, actions.get());
     Analysis analysis;
     analysis.revision = request.revision;
     analysis.focus = focus;
@@ -637,7 +644,7 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled, s
         if (stop_analysis_.load() || (yield && analysis_waiting_.load())) {
             return;
         }
-        simulation.step();
+        simulation.step(nullptr, actions.get());
         std::uint64_t alive = 0U;
         for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
             alive += simulation.emitter(e).alive();

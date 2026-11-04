@@ -1,5 +1,6 @@
 #include "compile.hpp"
 #include "guides.hpp"
+#include "performance.hpp"
 #include "scene.hpp"
 #include "scene_view.hpp"
 #include "stage_camera.hpp"
@@ -221,6 +222,69 @@ void dragging_an_objects_handle_moves_the_object() {
     CHECK(!ajfx::studio::adopt_handle_edit(document, lowered, uid));
     CHECK(document.layers.empty());
     CHECK(ajfx::studio::compile(document, ajfx::studio::Purpose::Preview).effect);
+}
+
+// The viewport's Drop and Delete tools as the app runs them: a click is a
+// ray from the camera through the pointer, which lands on the floor or on a
+// body, and the act is stamped at the step the app gives (act_tick). A drop
+// lands above where the floor was clicked; a delete names the body clicked.
+void a_click_drops_and_deletes_through_the_viewport() {
+    Document document = ajfx::studio::new_scene();
+    const auto cube = ajfx::studio::add_object(document);
+    std::get<ajfx::studio::Object>(document.scene->item(cube)->data).position = ajfx::Vec3{0.0F, 0.5F, 0.0F};
+    const ajfx::studio::Compiled compiled = ajfx::studio::compile(document, ajfx::studio::Purpose::Preview);
+    CHECK(compiled.effect && compiled.error.empty());
+    const ajfx::studio::ActTargets targets = ajfx::studio::act_targets(compiled);
+    const gui::Rect view{0.0F, 0.0F, 800.0F, 600.0F};
+    const ajfx::studio::StageCamera camera{
+        ajfx::studio::CameraPose{.eye = ajfx::Vec3{0.0F, 3.0F, 6.0F}, .target = ajfx::Vec3{0.0F, 0.25F, 0.0F}}, view};
+    // The cube where the analysis has it standing.
+    const std::vector<ajfx::studio::StageBody> bodies{ajfx::studio::StageBody{
+        .center = ajfx::Vec3{0.0F, 0.5F, 0.0F},
+        .radius = 0.55F,
+        .layer = cube,
+        .block = cube + 2U,
+        .spawn_index = ajfx::studio::body_index(targets, ajfx::studio::BodyRef{.object = cube, .count = 0U})}};
+    const auto click = [&](ajfx::Vec3 at) {
+        const std::optional<gui::UiPoint> pointer = camera.project(at);
+        CHECK(pointer && view.contains(pointer->x, pointer->y));
+        ajfx::Vec3 origin{};
+        ajfx::Vec3 direction{};
+        camera.ray(pointer->x, pointer->y, origin, direction);
+        const std::optional<ajfx::studio::StageHit> hit =
+            ajfx::studio::pick_stage(bodies, origin, direction, ajfx::studio::stage_floor(document));
+        CHECK(hit.has_value());
+        return *hit;
+    };
+
+    // Playing at step 120 with the preview's lead of 2: the drop is at 123.
+    const std::uint64_t tick = ajfx::studio::act_tick(true, 120U, 2U);
+    const ajfx::studio::StageHit floor = click(ajfx::Vec3{1.5F, 0.0F, -1.0F});
+    CHECK(!floor.on_body);
+    const ajfx::studio::StageAct dropped =
+        ajfx::studio::act_on_stage(document, targets, ajfx::studio::StageTool::Drop, cube, floor, tick);
+    CHECK(dropped.serial != 0U);
+    const ajfx::studio::Performance& performance = document.scene->performance;
+    CHECK(performance.acts.size() == 1U && performance.acts[0].tick == 123U);
+    CHECK(performance.acts[0].kind == ajfx::studio::ActKind::Drop && performance.acts[0].object == cube);
+    CHECK(std::fabs(performance.acts[0].position.x - 1.5F) < 0.01F &&
+          std::fabs(performance.acts[0].position.z + 1.0F) < 0.01F && performance.acts[0].position.y > 0.5F);
+
+    // Paused at step 40, a click on the cube deletes it from step 40 on.
+    const ajfx::studio::StageHit on_cube = click(ajfx::Vec3{0.0F, 0.6F, 0.0F});
+    CHECK(on_cube.on_body && on_cube.layer == cube);
+    const ajfx::studio::StageAct deleted = ajfx::studio::act_on_stage(
+        document, targets, ajfx::studio::StageTool::Delete, 0U, on_cube, ajfx::studio::act_tick(false, 40U, 2U));
+    CHECK(deleted.serial == dropped.serial + 1U);
+    CHECK(performance.acts.size() == 2U && performance.acts[0].kind == ajfx::studio::ActKind::Delete);
+    CHECK(performance.acts[0].tick == 40U &&
+          performance.acts[0].target == (ajfx::studio::BodyRef{.object = cube, .count = 0U}));
+    // A click on the floor deletes nothing.
+    CHECK(ajfx::studio::act_on_stage(document, targets, ajfx::studio::StageTool::Delete, 0U, floor, 41U).serial == 0U);
+    CHECK(performance.acts.size() == 2U);
+    // And none of it is a new package.
+    const ajfx::studio::Compiled again = ajfx::studio::compile(document, ajfx::studio::Purpose::Preview);
+    CHECK(again.effect == compiled.effect);
 }
 
 // A position typed into the inspector stays. The app draws the inspector and
@@ -448,6 +512,7 @@ int main() {
         {"scene_color_picker_is_one_live_gesture", scene_color_picker_is_one_live_gesture},
         {"scene_creation_uses_the_shipping_add_menu", scene_creation_uses_the_shipping_add_menu},
         {"dragging_an_objects_handle_moves_the_object", dragging_an_objects_handle_moves_the_object},
+        {"a_click_drops_and_deletes_through_the_viewport", a_click_drops_and_deletes_through_the_viewport},
         {"an_entry_wins_over_the_control_under_the_card", an_entry_wins_over_the_control_under_the_card},
         {"without_the_shield_the_control_underneath_takes_the_click",
          without_the_shield_the_control_underneath_takes_the_click},

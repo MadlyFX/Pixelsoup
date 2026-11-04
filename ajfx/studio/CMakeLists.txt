@@ -36,6 +36,7 @@ add_library(ajfx_studio_core STATIC
     src/session.cpp
     src/bake.cpp
     src/stage_pick.cpp
+    src/performance.cpp
 )
 target_include_directories(ajfx_studio_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -130,6 +131,7 @@ if(BUILD_TESTING)
         tests/world_tests.cpp
         tests/solid_world_tests.cpp
         tests/stage_pick_tests.cpp
+        tests/performance_tests.cpp
         tests/fixtures/recipes.cpp
         tests/fixtures/blast.cpp
     )

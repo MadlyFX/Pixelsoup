@@ -158,6 +158,10 @@ struct ParticleInstance::State final {
     core::u64 target{0U};
     // Set by restart: the next advance resets the simulation first.
     bool restart{};
+    // What the artist does to it (revise), and the earliest tick revised
+    // since the last advance: a simulation past it goes back.
+    std::shared_ptr<const ajfx::ActionProvider> actions;
+    std::optional<core::u64> revised;
     std::optional<ajfx::gpu::ParticleSorter> sorter;
     // One per texture name, staged a recording's upload space at a time;
     // the texels (not the size or colour space) are dropped once they have
@@ -770,11 +774,22 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
             upload.unwritten_indices = {};
         }
     }
+    const ajfx::ActionProvider* const actions = i.actions.get();
     const core::u64 held_step = simulation.tick();
     if (i.restart) {
-        simulation.reset();
+        simulation.reset(parameters, actions);
         i.restart = false;
+        i.revised.reset();
         i.rigid_written.reset();
+    }
+    // Actions changed from a tick this simulation has stepped past: it goes
+    // back to the latest checkpoint at or before that tick (revise dropped
+    // the later ones), or to the start. Tick 0 always starts again, since
+    // its actions place bodies before the first step.
+    bool revisit = false;
+    if (i.revised) {
+        revisit = simulation.tick() > *i.revised || *i.revised == 0U;
+        i.revised.reset();
     }
     // Start from the latest checkpoint at or before the target when that is
     // closer than where the simulation is: always when going back, and when
@@ -785,11 +800,11 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
             best = slot;
         }
     }
-    if (i.target < simulation.tick()) {
+    if (i.target < simulation.tick() || revisit) {
         if (best) {
             simulation.restore(i.checkpoints[*best]);
         } else {
-            simulation.reset();
+            simulation.reset(parameters, actions);
         }
         i.rigid_written.reset();
     } else if (best && *i.saved[*best] > simulation.tick()) {
@@ -831,9 +846,9 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
             i.saved[slot] = tick;
         }
         if (next) {
-            simulation.step(parameters, *next);
+            simulation.step(parameters, *next, actions);
         } else {
-            simulation.step(parameters);
+            simulation.step(parameters, actions);
         }
         reached = std::move(next);
     }
@@ -951,6 +966,28 @@ void ParticlePass::restart(ParticleInstance& instance,
     if (i.rigid) {
         i.rigid->set_parameters(std::move(parameters));
     }
+}
+
+void ParticlePass::revise(ParticleInstance& instance, std::shared_ptr<const ajfx::ActionProvider> actions,
+                          core::u64 from) noexcept {
+    ParticleInstance::State& i = *instance.state_;
+    // A checkpoint at tick t holds what the steps before t made, which read
+    // the actions before t: one at `from` still stands.
+    for (std::optional<core::u64>& saved : i.saved) {
+        if (saved && (*saved > from || from == 0U)) {
+            saved.reset();
+        }
+    }
+    i.revised = i.revised ? std::min(*i.revised, from) : from;
+    if (i.rigid) {
+        i.rigid->set_lead(actions ? state_->settings.acting_rigid_lead : state_->settings.rigid_lead);
+        i.rigid->set_actions(actions, from);
+    }
+    i.actions = std::move(actions);
+}
+
+core::u32 ParticlePass::rigid_lead(const ParticleInstance& instance) const noexcept {
+    return instance.state_->actions ? state_->settings.acting_rigid_lead : state_->settings.rigid_lead;
 }
 
 bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, const scene::ViewMatrices& view,

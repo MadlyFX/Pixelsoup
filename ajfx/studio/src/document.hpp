@@ -309,6 +309,9 @@ struct Document final {
     float budget_ms{default_budget_ms};
     // The ground, gravity and wind every layer plays in.
     PageWorld world;
+    // Compiler IR from a scene (ScenePhysics::max_dropped): the most bodies
+    // actions may add to the solid world at once. 0 takes none.
+    std::uint32_t drops{0U};
     std::vector<Layer> layers;
     Uid next_uid{1U};
 

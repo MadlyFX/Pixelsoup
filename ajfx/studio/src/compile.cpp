@@ -315,7 +315,15 @@ Compiled compile(const Document& document, Purpose purpose, std::uint32_t live) 
         while (!members.empty()) {
             std::string why;
             std::optional<MergedSolids> merged = merge_solids(members, why);
-            if (merged && members.size() > 1U) {
+            // Dropped things are born in the world, at most the scene's
+            // budget at once, which its capacity is sized for.
+            const bool drops = merged && document.drops > 0U;
+            if (drops) {
+                merged->emitter.spawn.push_back(SpawnActions{.id = module_id(members.front().layer, 12U),
+                                                             .max_per_step = SolidWorld::drops_per_step,
+                                                             .max_alive = document.drops});
+            }
+            if (merged && (members.size() > 1U || drops)) {
                 // Sized and checked as one emitter, as a layer is.
                 Effect alone;
                 alone.name = effect.name;
@@ -340,6 +348,10 @@ Compiled compile(const Document& document, Purpose purpose, std::uint32_t live) 
                 world.emitter = merged->emitter.name;
                 world.capacity = merged->emitter.capacity;
                 world.moves = !merged->emitter.spawn.empty();
+                if (drops) {
+                    world.drops = static_cast<std::uint32_t>(merged->emitter.spawn.size() - 1U);
+                    world.max_dropped = document.drops;
+                }
                 for (std::size_t m = 0U; m < members.size(); ++m) {
                     const std::size_t at = members[m].index;
                     world.layers.push_back(SolidWorld::Member{members[m].layer, merged->scopes[m]});

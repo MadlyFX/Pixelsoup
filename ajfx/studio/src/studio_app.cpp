@@ -6,6 +6,7 @@
 #include "document_io.hpp"
 #include "package_builder.hpp"
 #include "page_revision.hpp"
+#include "performance.hpp"
 #include "preview.hpp"
 #include "scene.hpp"
 #include "scene_view.hpp"
@@ -23,6 +24,7 @@
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
 #include <mediaserver/gui/window.hpp>
+#include <mediaserver/render/particle_pass.hpp>
 
 #include <tinyfiledialogs.h>
 
@@ -73,6 +75,9 @@ constexpr double settle_timeout = 0.75;
 // A scene bakes its solid world by itself once nothing has changed for this
 // long and the preview is up to date.
 constexpr double auto_bake_delay = 0.8;
+// An act is stamped as the renderer expects one it need not replay for.
+static_assert(act_tick(true, 10U, preview_acting_lead) ==
+              mediaserver::render::acting_tick(10U, preview_acting_lead));
 
 gui::FontAtlas load_font(float scale) {
     constexpr std::array<const char*, 3> candidates{"C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf",
@@ -581,7 +586,11 @@ private:
         if (live_checked_at_ != at || live_checked_serial_ != submit_serial_) {
             live_checked_at_ = at;
             live_checked_serial_ = submit_serial_;
-            live_only_ = submitted_live_ != 0U && same_but_live(submitted_.copy(), document_, submitted_live_);
+            // Drops and deletions are inputs of the running effect, never
+            // a new package.
+            const Document then = without_performance(submitted_.copy());
+            const Document now = without_performance(document_);
+            live_only_ = then == now || (submitted_live_ != 0U && same_but_live(then, now, submitted_live_));
         }
         return live_only_;
     }
@@ -596,6 +605,9 @@ private:
             }
             if (built->written) {
                 package_live_ = built->live;
+                // Where the new package takes acts; the performance is
+                // turned into actions for it before its first frame.
+                package_targets_ = act_targets(built->compiled);
                 ++package_generation_;
                 settled_frames_ = 0U;
                 has_package_ = true;
@@ -805,6 +817,23 @@ private:
         }
         if (typed.find('p') != std::string_view::npos || typed.find('P') != std::string_view::npos) {
             show_paths_ = !show_paths_;
+        }
+        if (typed.find('d') != std::string_view::npos || typed.find('D') != std::string_view::npos) {
+            tool_ = tool_ == StageTool::Drop ? StageTool::Select : StageTool::Drop;
+        }
+        if (typed.find('x') != std::string_view::npos || typed.find('X') != std::string_view::npos) {
+            tool_ = tool_ == StageTool::Delete ? StageTool::Select : StageTool::Delete;
+        }
+        if (over_stage && ctx_.key_pressed(gui::Key::Escape)) {
+            tool_ = StageTool::Select;
+        }
+        // The act picked on the timeline goes with Delete.
+        if (over_stage && selected_act_ != 0U &&
+            (ctx_.key_pressed(gui::Key::Delete) || ctx_.key_pressed(gui::Key::Backspace))) {
+            if (remove_act(document_.scene->performance, selected_act_)) {
+                toast("Taken away: the scene replays without it", true);
+            }
+            selected_act_ = 0U;
         }
         if (ctx_.key_pressed(gui::Key::Home)) {
             frame_ = 0.0;
@@ -1110,6 +1139,8 @@ private:
         } else if (bake_quiet_ && builder_.bake_progress() >= 0.0) {
             // Quiet: it never holds anything up, and an edit stops it.
             note = "Baking... " + std::to_string(static_cast<int>(std::lround(builder_.bake_progress() * 100.0))) + "%";
+        } else if (tool_ != StageTool::Select) {
+            note = tool_hint();
         } else if (show_paths_ && analysis_ && !analysis_->traced) {
             note = "Too many particles to trace their paths";
             note_tone = theme.caution;
@@ -1164,6 +1195,26 @@ private:
                                 show_guides_ ? "Hide guides (G)" : "Show guides (G)",
                                 show_guides_)) {
             show_guides_ = !show_guides_;
+        }
+        // What a click in the picture does: select, drop or delete.
+        struct ToolButton final {
+            StageTool tool;
+            gui::Icon icon;
+            const char* tip;
+        };
+        constexpr std::array<ToolButton, 3> tools{
+            ToolButton{StageTool::Delete, gui::Icon::Trash, "Delete: click a thing to take it away from then on (X)"},
+            ToolButton{StageTool::Drop, gui::Icon::Surface,
+                       "Drop: click to drop a copy of the selected object there, while it plays (D)"},
+            ToolButton{StageTool::Select, gui::Icon::Select, "Select: click a thing to select it (Esc)"}};
+        float tool_x = guides_button.x - 12.0F;
+        for (const ToolButton& button : tools) {
+            tool_x -= 34.0F;
+            const gui::Rect at{tool_x, frame_button.y, 30.0F, 30.0F};
+            if (editor::icon_button(ctx_, part_id(static_cast<std::uint32_t>(button.tool), "studio.tool"), at,
+                                    button.icon, button.tip, tool_ == button.tool)) {
+                tool_ = button.tool;
+            }
         }
         // After the tools over the picture: the first control a press lands
         // on takes it, and the camera covers the whole view.
@@ -1267,18 +1318,78 @@ private:
 
     // A click in the preview selects the solid thing under it, where the
     // analysis's samples have it at the playhead; Ctrl adds to the selection.
+    // With Drop, it drops a copy of the selected object above where it lands;
+    // with Delete, it takes the thing under it away.
     void pick_click(const gui::Rect& view, const gui::Interaction& hit) {
-        const StageBodies* standing =
-            analysis_ ? stage_bodies_at(analysis_->bodies, static_cast<std::uint64_t>(frame_)) : nullptr;
-        if (!hit.clicked || standing == nullptr) {
+        if (!hit.clicked) {
             return;
         }
+        const StageBodies* standing =
+            analysis_ ? stage_bodies_at(analysis_->bodies, static_cast<std::uint64_t>(frame_)) : nullptr;
+        const std::span<const StageBody> bodies =
+            standing != nullptr ? std::span<const StageBody>{standing->bodies} : std::span<const StageBody>{};
         const StageCamera camera{camera_pose(orbit_), view};
         Vec3 origin{}, direction{};
         camera.ray(ctx_.pointer_x(), ctx_.pointer_y(), origin, direction);
-        if (const auto picked = pick_stage(standing->bodies, origin, direction, 0.0F); picked && picked->on_body) {
-            scene_view_.select(picked->layer, ctx_.ctrl_held());
+        const std::optional<StageHit> picked = pick_stage(bodies, origin, direction, stage_floor(document_));
+        if (tool_ == StageTool::Select) {
+            if (picked && picked->on_body) {
+                scene_view_.select(picked->layer, ctx_.ctrl_held());
+            }
+            return;
         }
+        if (!picked) {
+            toast("That click lands on nothing: aim at the floor or a thing", false);
+            return;
+        }
+        if (!has_package_) {
+            toast("Wait for the scene to finish building", false);
+            return;
+        }
+        const std::uint64_t tick = act_tick(playing_, shown_tick_, preview_acting_lead);
+        if (looping_ && static_cast<double>(tick) >= loop_frames()) {
+            toast("That is past the end of the loop: it would never play", false);
+            return;
+        }
+        const StageAct act = act_on_stage(document_, package_targets_, tool_, scene_view_.selected(), *picked, tick);
+        if (act.serial == 0U) {
+            toast(act.refusal, false);
+            return;
+        }
+        selected_act_ = act.serial;
+        if (!playing_) {
+            toast(tool_ == StageTool::Drop ? "Dropped: it falls once the scene plays on"
+                                           : "Deleted: it goes once the scene plays on",
+                  true);
+        }
+    }
+
+    // What the note over the picture says while a tool is picked.
+    [[nodiscard]] std::string tool_hint() const {
+        if (tool_ == StageTool::Delete) {
+            return "Click a thing to delete it";
+        }
+        const SceneItem* item = document_.scene->item(scene_view_.selected());
+        if (item == nullptr || !std::holds_alternative<Object>(item->data)) {
+            return "Select an object to drop copies of it";
+        }
+        const std::size_t held = dropped_count(document_.scene->performance);
+        return "Click to drop a copy of " + item->name + " (" + std::to_string(held) + " of " +
+               std::to_string(document_.scene->physics.max_dropped) + " dropped)";
+    }
+
+    // The scene's performance as actions for the package the preview plays:
+    // made again when either changes, saying from which step it differs.
+    void follow_performance() {
+        const Performance& now = document_.scene->performance;
+        const bool same_package = actions_ && actions_generation_ == package_generation_;
+        if (same_package && now == actions_of_) {
+            return;
+        }
+        actions_from_ = same_package ? first_difference(actions_of_, now).value_or(0U) : 0U;
+        actions_ = performance_actions(now, package_targets_);
+        actions_of_ = now;
+        actions_generation_ = package_generation_;
     }
 
     const rhi::Texture* render_preview(const gui::Rect& view) {
@@ -1320,6 +1431,11 @@ private:
         frame.frame = static_cast<std::uint64_t>(frame_);
         frame.revision = package_generation_;
         frame.paused = !playing_;
+        follow_performance();
+        frame.actions = actions_;
+        frame.actions_from = actions_from_;
+        // Scenes step once a show frame (scene_step_rate at 60 frames a second).
+        shown_tick_ = frame.frame;
         if (has_package_ && package_live_ != 0U) {
             for (const LiveParameter& live : live_parameters(document_, package_live_)) {
                 for (std::uint32_t c = 0U; c < live.components; ++c) {
@@ -1413,13 +1529,24 @@ private:
                 } else {
                     const float x = at_x(marker.seconds);
                     const gui::Rect hit{x - 8.0F, row.y + 2.0F, 16.0F, track_height - 4.0F};
-                    const gui::Interaction drag = marker.draggable ? ctx_.grab(part_id(track.item, "track.point", k), hit)
-                                                                   : gui::Interaction{};
+                    const bool act = marker.kind == MarkerKind::Drop || marker.kind == MarkerKind::Delete;
+                    const gui::Interaction drag =
+                        marker.draggable ? ctx_.grab(part_id(track.item, act ? "track.act" : "track.point",
+                                                             act ? marker.part : k),
+                                                     hit)
+                                         : gui::Interaction{};
                     ctx_.cursor_for(drag, gui::Cursor::ResizeHorizontal);
-                    editor::draw_diamond(ctx_, x, row.center_y(), (drag.held || drag.hovered) ? 7.0F : 6.0F,
-                                         (drag.held || drag.hovered) ? theme.accent : tone);
+                    const bool picked = act && marker.part == selected_act_;
+                    if (act && drag.pressed) {
+                        selected_act_ = marker.part;
+                    }
+                    const bool lit = drag.held || drag.hovered || picked;
+                    const gui::UiColor act_tone = marker.kind == MarkerKind::Delete ? theme.warning : theme.good;
+                    editor::draw_diamond(ctx_, x, row.center_y(), lit ? 7.0F : (act ? 5.0F : 6.0F),
+                                         lit ? theme.accent : (act ? act_tone : tone));
                     ctx_.tooltip(hit, std::string{marker.label()} + " at " + when +
-                                          (marker.draggable ? ". Drag it." : ""));
+                                          (act ? ". Drag to move it; Delete takes it away."
+                                               : marker.draggable ? ". Drag it." : ""));
                     if (drag.held) {
                         static_cast<void>(set_marker_time(document_, marker, to_seconds(ctx_.pointer_x())));
                     }
@@ -1519,6 +1646,20 @@ private:
     std::string asset_issue_;
     std::map<std::string, std::vector<Vec3>, std::less<>> outlines_;
     std::uint32_t settled_frames_{0U};
+    // What a click in the picture does, and the act last made or picked on
+    // the timeline (0 for none).
+    StageTool tool_{StageTool::Select};
+    std::uint32_t selected_act_{0U};
+    // Where the package the preview plays takes acts, the performance as
+    // actions for it, what they were made of, for which package and from
+    // which step they differ from the last; and the step the preview last
+    // drew, which an act is stamped from.
+    ActTargets package_targets_;
+    std::shared_ptr<const ActionList> actions_;
+    Performance actions_of_;
+    std::uint64_t actions_generation_{0U};
+    std::uint64_t actions_from_{0U};
+    std::uint64_t shown_tick_{0U};
     editor::ClickTracker clicks_;
 
     Document document_;

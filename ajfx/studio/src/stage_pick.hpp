@@ -26,6 +26,9 @@ struct StageBody final {
     // the Stream or Burst) it is, or 0 for a piece of something broken.
     Uid layer{};
     Uid block{};
+    // A body's spawn index in the world (what a deletion names); none for
+    // a prop, which is part of the scene rather than a body in it.
+    std::optional<std::uint32_t> spawn_index;
 };
 
 // The page's solid things at one step of the preview loop.
@@ -61,6 +64,8 @@ struct StageHit final {
     Uid layer{};
     Uid block{};
     bool on_body{false};
+    // The body met, when it is one (StageBody::spawn_index).
+    std::optional<std::uint32_t> spawn_index;
 };
 
 // The height of the floor a click lands on, in the effect's space: the

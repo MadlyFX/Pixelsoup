@@ -161,7 +161,8 @@ struct CacheIdentity final {
 
 // What the actions `provider` holds for emitter `index` and for every
 // emitter it depends on (as emitter_digest walks them) come to, as a hash;
-// 0 when none of them takes actions (SpawnActions) or there is no provider.
+// 0 when none of them takes actions (SpawnActions) or is given any, or there
+// is no provider.
 [[nodiscard]] std::uint64_t actions_digest(const Effect& effect, std::size_t index, const ActionProvider* provider);
 
 // The most bodies a cached rigid layer may hold, and particles a cached

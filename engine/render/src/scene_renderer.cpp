@@ -3768,7 +3768,7 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
         // A new package or seed starts a new instance; the old one keeps
         // drawing until retirement has room for it.
         if ((slot.package != observed.package || slot.seed != seed) && retire(slot)) {
-            slot = ParticleSlot{observed.package, seed, std::nullopt, {}};
+            slot = ParticleSlot{observed.package, seed, std::nullopt, {}, {}, {}, {}, {}};
         }
         if (!slot.instance) {
             if (!slot.error.empty()) {
@@ -3792,6 +3792,17 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
             slot.parameters = parameters_digest(effect, scene.show_rate);
             slot.provider = placed_parameters(effect, slot.package->effect, scene.show_rate);
             particle_pass_->restart(*slot.instance, slot.provider);
+            slot.actions = effect.actions;
+            if (slot.actions) {
+                particle_pass_->revise(*slot.instance, slot.actions, 0U);
+            }
+            slot.generation = ++particle_generation_;
+        }
+        // New actions change the effect's past from their first new tick on;
+        // what came before stands.
+        if (effect.actions != slot.actions) {
+            slot.actions = effect.actions;
+            particle_pass_->revise(*slot.instance, slot.actions, effect.actions_from);
             slot.generation = ++particle_generation_;
         }
         // A changed parameter changes the effect's whole past.

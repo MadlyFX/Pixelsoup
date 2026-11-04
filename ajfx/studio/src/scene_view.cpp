@@ -382,6 +382,31 @@ void SceneView::draw_settings(gui::UiContext &ctx, Document &document, float x, 
         document.scene->physics.allow_sleep = v.x != 0;
     }
     y += 32;
+    v = number(static_cast<float>(document.scene->physics.max_dropped));
+    if (field(numbers_, ctx, 0U,
+              numeric("max_dropped", "Most dropped at once", 64, 0, static_cast<float>(max_dropped_limit), {}, 0),
+              gui::Rect{x, y, width, row_height}, v)) {
+        document.scene->physics.max_dropped = static_cast<std::uint32_t>(
+            std::lround(std::clamp(v.x, 0.0F, static_cast<float>(max_dropped_limit))));
+    }
+    y += 32;
+    // What was done while the scene played, kept with it and replayed.
+    heading(ctx, "Performance", x, y, width);
+    const Performance &performance = document.scene->performance;
+    const std::size_t drops = static_cast<std::size_t>(std::count_if(
+        performance.acts.begin(), performance.acts.end(), [](const Act &act) { return act.kind == ActKind::Drop; }));
+    const std::size_t deletions = performance.acts.size() - drops;
+    const std::string summary = performance.acts.empty()
+                                    ? std::string{"Nothing yet: drop things while it plays"}
+                                    : std::to_string(drops) + (drops == 1U ? " drop, " : " drops, ") +
+                                          std::to_string(deletions) + (deletions == 1U ? " deletion" : " deletions");
+    ctx.label(gui::Rect{x, y, width - 40, 28}, summary, ctx.theme().text_muted);
+    if (!performance.acts.empty() &&
+        editor::icon_button(ctx, gui::ui_id("scene.performance.clear"), gui::Rect{x + width - 28.0F, y, 28, 28},
+                            gui::Icon::Trash, "Clear the performance: take away every drop and deletion")) {
+        document.scene->performance.acts.clear();
+    }
+    y += 36;
     heading(ctx, "Preview", x, y, width);
     // What the viewport stands the scene in: a lit stage, a dim night for
     // glowing effects, or nothing. Lit particles show the difference.

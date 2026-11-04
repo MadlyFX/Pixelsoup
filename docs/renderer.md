@@ -431,6 +431,16 @@ Basic refuses a started effect with the reason.
   model; a prop that names no model draws nothing, and one naming a model its
   package does not hold fails readiness as any missing mesh does. Props carry
   no colour or texture of their own, so a drawn one is white.
+- **Actions** (`ParticleEffect::actions`, ajfx's tick-stamped `Action`s) are a
+  host-local input for a tool that acts on the running effect (ajfx Studio's
+  Drop and Delete): never replicated or digested, so a wall plays a
+  performance from its baked cache instead. A host hands a new immutable
+  provider with `actions_from`, the first tick it differs at;
+  `ParticlePass::revise` drops the GPU and rigid checkpoints after that tick
+  and replays from the latest one at or before it, so an action stamped at
+  `render::acting_tick` of the last target replays nothing. An instance with
+  actions runs its rigid physics `ParticleSettings::acting_rigid_lead` steps
+  ahead (default 4) rather than `rigid_lead`, so that tick is soon.
 - **Limits.** One D3D12 recording may touch 1024 device buffers; a sorted
   emitter uses a dozen or more. From a 512-pixel shorter side, bloom's slice
   apron is 256 pixels and, with temporal antialiasing and occlusion, passes

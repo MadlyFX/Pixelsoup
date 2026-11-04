@@ -1,8 +1,10 @@
 #include "timeline.hpp"
 
 #include "document.hpp"
+#include "performance.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace ajfx::studio {
 
@@ -20,6 +22,10 @@ std::string_view TrackMarker::label() const {
         return "Burst";
     case MarkerKind::Blast:
         return "Blast";
+    case MarkerKind::Drop:
+        return "Dropped";
+    case MarkerKind::Delete:
+        return "Deleted";
     }
     return "";
 }
@@ -35,6 +41,19 @@ std::vector<Track> collect_tracks(const Scene &scene, float loop_seconds) {
             if (object->motion == ObjectMotion::Animated) {
                 track.markers.push_back(
                     {MarkerKind::Move, item.uid, 0U, object->move_at, std::max(object->move_over, 0.01F), true});
+            }
+            // What was done to it while the scene played: its copies
+            // dropped, and its bodies (or those copies) deleted.
+            for (const Act &act : scene.performance.acts) {
+                const float at = static_cast<float>(act.tick) / static_cast<float>(scene_step_rate);
+                if (act.kind == ActKind::Drop && act.object == item.uid) {
+                    track.markers.push_back({MarkerKind::Drop, item.uid, act.serial, at, 0.0F, true});
+                } else if (act.kind == ActKind::Delete) {
+                    const Act *dropped = act.target.drop != 0U ? find_act(scene.performance, act.target.drop) : nullptr;
+                    if (act.target.object == item.uid || (dropped != nullptr && dropped->object == item.uid)) {
+                        track.markers.push_back({MarkerKind::Delete, item.uid, act.serial, at, 0.0F, true});
+                    }
+                }
             }
         } else if (const auto *system = std::get_if<ParticleSystem>(&item.data)) {
             std::vector<ParticleSource> sources = system->sources;
@@ -72,6 +91,14 @@ bool set_marker_time(Document &document, const TrackMarker &marker, float second
         return false;
     }
     seconds = std::clamp(seconds, 0.0F, 3600.0F);
+    if (marker.kind == MarkerKind::Drop || marker.kind == MarkerKind::Delete) {
+        const Act *act = find_act(document.scene->performance, marker.part);
+        const auto tick = static_cast<std::uint64_t>(std::llround(seconds * static_cast<float>(scene_step_rate)));
+        if (act == nullptr || act->tick == tick) {
+            return false;
+        }
+        return retime_act(document.scene->performance, marker.part, tick);
+    }
     if (auto *object = std::get_if<Object>(&item->data)) {
         float &target = marker.kind == MarkerKind::Release ? object->release : object->move_at;
         if (marker.kind != MarkerKind::Release && marker.kind != MarkerKind::Move) {

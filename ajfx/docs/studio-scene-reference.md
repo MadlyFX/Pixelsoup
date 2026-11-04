@@ -39,6 +39,35 @@ inspector, vectors drop under their label and then take one axis to a row,
 and the tree's Import and the inspector's Duplicate and Delete keep only
 their icons.
 
+### Drop and Delete: the performance
+
+Three tools top right of the viewport say what a click does: **Select**
+(Esc), **Drop** (D) and **Delete** (X). With Drop, a click drops a copy of
+the selected Dynamic object with its bottom 0.75 m above where the click
+lands on the floor or on a thing, turned as the object is; with Delete, a
+click takes away the thing under it, one of an object's own bodies or a
+dropped copy. Each is an act of the scene's **performance**: stamped with
+the simulation step it happens in, saved with the scene, and replayed
+exactly, since the runtime takes acts as inputs of its step
+(`ajfx::Action`) rather than as a new package. While the scene plays, an act
+is stamped just past the steps the preview's physics may have worked out
+(two ahead, `act_tick`), so it shows about three frames after the click and
+nothing is simulated again; paused, it is stamped at the step shown and
+happens as the scene plays on. An act past the end of a looping range is
+refused, as it would never play.
+
+Copies are born in the solid world, each of its object's body kind with the
+act's serial as its spawn count, so a copy breaks, sheds trails and is hit
+as the object is, and taking an earlier drop away leaves every later copy's
+variation as it was. Scene settings > Simulation sets **Most dropped at
+once** (64 by default, 0 for none): the world's room for copies is reserved
+up front, and a drop past it is refused and said, never made room for.
+Scene settings > Performance counts the drops and deletions and clears them.
+Acts on the timeline are diamonds on the object's track, green for a drop
+and red for a deletion; dragging one moves it, and a click picks it so
+Delete takes it away (a drop takes its deletions with it). Undo covers
+acts as it covers edits. Removing an object removes its acts.
+
 Ctrl-click tree rows to extend a selection. Common inspector values apply to
 the selection in one undoable gesture; `*` marks mixed values. Each property
 has its own reset. The Group control changes organization, never transform
@@ -204,7 +233,8 @@ Under the transport, the **timeline** shows a track for every item with
 time in it and nothing for the rest: an object's release and, when
 Animated, its move as a bar from its start for its duration; a particle
 system's sources, Initial at 0, Continuous as a bar across the range, Burst
-at its time; a blast at the moment it goes off. Points are diamonds and
+at its time; a blast at the moment it goes off; its object's drops and
+deletions (see the performance above). Points are diamonds and
 spans bars, lined up under the scrub bar with the playhead running through
 them. Dragging a release, burst, blast or move writes that one authored
 value, and dragging a move's end sets its duration; Initial and Continuous
@@ -217,7 +247,8 @@ non-looping scene playback can continue beyond it. Looping is an explicit
 transport choice. The current editing policy is **Initial setup**: a motion
 edit keeps the playhead and playback and simulates again from the initial
 setup up to the playhead, while visual edits preserve motion-cache validity.
-Record actions and checkpoint adoption are not implemented.
+An act replays from the latest checkpoint at or before its step, so moving
+or taking one away costs the steps from there to the playhead.
 
 ## Ownership, determinism and delivery
 
@@ -225,7 +256,10 @@ The authored scene is `Document::scene`. `scene.hpp` defines typed owners;
 `scene_properties.cpp` defines property metadata, defaults, bounds, units,
 resets, storage and motion invalidation. New scene files use
 `ajfx-studio-scene`, schema 2 (schema 1 lacked the Motion stack and drivers
-and is refused). Readers refuse unknown, duplicate, malformed
+and is refused). The performance is the root key `performance`
+(`next_serial` and `acts`, each a drop or a deletion with its serial and
+step); a scene saved without one opens with none, and acts out of order or
+with a serial not yet handed out are refused. Readers refuse unknown, duplicate, malformed
 or missing authored properties and unsupported versions. Window state is not
 part of this schema. Existing layer documents retain their existing format.
 
@@ -253,7 +287,10 @@ and export instead of publishing a partial scene.
 
 Bake covers the selected capture range. Scene export requires a matching,
 current cache for every baked unit and refuses missing assets and unsupported
-state. The cache is written successfully before publishing the package.
+state. The cache is written successfully before publishing the package. A bake
+replays the performance and is keyed by it (`CacheIdentity`'s action
+digest): a cache opens only with the acts it was baked with, and a drop or
+deletion since makes it stale.
 The current viewport still simulates: a green cache band means the cache is
 available, not that the viewport is reading it. Cache-backed preview and host
 cache adoption still need their own end-to-end integration.
@@ -267,7 +304,8 @@ compiler's IR, and its recipes as compiler test fixtures.
 
 Continuous cross-population attraction/repulsion, event endpoints beyond
 collision and motion, light scene items, reusable assemblies, library
-organization, authored checkpoints, captured actions, simulation-independent
+organization, authored checkpoints, grabbing, painting and blasting by hand,
+simulation-independent
 visibility/isolation, controls publishing and the full export review panel
 are not implemented in the scene workspace. Flow coupling is a smoke grid
 fed and ridden by systems; the smoke casts no shadow on the particles and

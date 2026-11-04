@@ -1375,6 +1375,110 @@ void seeks_hold_until_caught_up_then_match_playing_through() {
     PASS_CHECK(instance.simulation().read_particle_bytes(0U).value() == reference_records(effect, 490U));
 }
 
+// Dust born only of actions (SpawnActions), each where its action says.
+[[nodiscard]] ajfx::Effect painted_dust() {
+    ajfx::EffectBuilder builder{"paint"};
+    builder.emitter("dust")
+        .capacity(2048U)
+        .seed(4U)
+        .spawn(ajfx::SpawnActions{.max_per_step = 8U})
+        .init(ajfx::Lifetime{.min = 3.0F, .max = 3.0F})
+        .init(ajfx::Velocity{.direction = ajfx::Vec3{0.0F, 1.0F, 0.0F}, .speed_min = 0.2F, .speed_max = 0.6F,
+                             .spread = 30.0F})
+        .init(ajfx::InitSize{.min = 0.05F, .max = 0.1F})
+        .update(ajfx::Gravity{.acceleration = ajfx::Vec3{0.0F, -1.0F, 0.0F}});
+    ajfx::Result<ajfx::Effect> built = builder.build();
+    if (!built) {
+        std::cout << built.error().message << '\n';
+    }
+    PASS_CHECK(built);
+    return std::move(built).value();
+}
+
+[[nodiscard]] ajfx::Action painted_at(core::u64 tick, core::u32 serial, float x) {
+    ajfx::Action spawn;
+    spawn.tick = tick;
+    spawn.serial = serial;
+    spawn.position = ajfx::Vec3{x, 0.5F, 0.0F};
+    spawn.velocity = ajfx::Vec3{0.2F, 0.0F, 0.0F};
+    return spawn;
+}
+
+// A host revising what an artist did (ParticlePass::revise): an action past
+// what the instance holds changes nothing it holds, one in its past replays
+// from the checkpoint before it, and both draw the reference's particles.
+void revised_actions_replay_from_their_tick() {
+    render::ParticleSettings settings;
+    // A small budget, so how far an advance had to step shows as frames held.
+    settings.step_budget = 4U;
+    settings.checkpoint_interval = 30U;
+    settings.checkpoint_count = 4U;
+    render::ParticlePass pass = make_pass(settings);
+    const ajfx::Effect effect = painted_dust();
+    render::ParticleInstance instance = make_instance(pass, effect);
+    const auto advance = [&](core::u64 frame) {
+        auto acquired = g_device->acquire_commands();
+        PASS_CHECK(acquired);
+        rhi::CommandList commands = std::move(acquired).value();
+        const bool reached = pass.advance(commands, instance, frame, 24U, 1U);
+        auto submitted = g_device->submit(std::move(commands));
+        PASS_CHECK(submitted);
+        PASS_CHECK(std::move(submitted).value().wait());
+        PASS_CHECK(!pass.take_error());
+        return reached;
+    };
+    const auto frames_to = [&](core::u64 frame) {
+        int frames = 1;
+        while (!advance(frame)) {
+            ++frames;
+            PASS_CHECK(frames < 100);
+        }
+        return frames;
+    };
+    const auto reference = [&](const ajfx::ActionList& actions, core::u64 step) {
+        const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+        ajfx::gpu::GpuSimulation sim = ajfx::gpu::GpuSimulation::create(*g_reference, effect, kernels, 3U).value();
+        sim.advance_to(step, nullptr, &actions);
+        return sim.read_particle_bytes(0U).value();
+    };
+
+    auto first = std::make_shared<ajfx::ActionList>();
+    first->add("dust", painted_at(12U, 1U, -1.0F));
+    pass.revise(instance, first, 0U);
+    // Frame 20 of 24 fps is step 50, with checkpoints at 0 and 30.
+    for (core::u64 frame = 0U; frame <= 20U; ++frame) {
+        PASS_CHECK(advance(frame));
+    }
+    PASS_CHECK(instance.step() == 50U);
+
+    // Painted at the acting tick: nothing held changes, so the frame is
+    // reached again at once and plays on with the new particle.
+    auto later = std::make_shared<ajfx::ActionList>(*first);
+    const core::u64 stamp = render::acting_tick(50U, pass.rigid_lead(instance));
+    later->add("dust", painted_at(stamp, 2U, 0.5F));
+    pass.revise(instance, later, stamp);
+    PASS_CHECK(frames_to(20U) == 1);
+    for (core::u64 frame = 21U; frame <= 24U; ++frame) {
+        PASS_CHECK(advance(frame));
+    }
+    PASS_CHECK(instance.step() == 60U);
+    PASS_CHECK(instance.simulation().read_particle_bytes(0U).value() == reference(*later, 60U));
+
+    // Painted in the past, at step 35: the checkpoint at 30 stands, and the
+    // 30 steps from it to 60 take eight frames of four.
+    auto earlier = std::make_shared<ajfx::ActionList>(*later);
+    earlier->add("dust", painted_at(35U, 3U, 1.0F));
+    pass.revise(instance, earlier, 35U);
+    PASS_CHECK(frames_to(24U) == 8);
+    PASS_CHECK(instance.simulation().read_particle_bytes(0U).value() == reference(*earlier, 60U));
+    PASS_CHECK(instance.simulation().read_particle_bytes(0U).value() != reference(*later, 60U));
+
+    // Taken away again: back to the state with only the first two.
+    pass.revise(instance, later, 35U);
+    PASS_CHECK(frames_to(24U) == 8);
+    PASS_CHECK(instance.simulation().read_particle_bytes(0U).value() == reference(*later, 60U));
+}
+
 // 120 balls heaped on a floor and held for a quarter of a second.
 [[nodiscard]] ajfx::Effect rigid_heap() {
     ajfx::EffectBuilder builder{"heap"};
@@ -1451,6 +1555,85 @@ void rigid_physics_holds_until_its_thread_has_the_step() {
     PASS_CHECK(matches(0U));
     std::cout << "  held " << first << " frames to start, " << playing << " while playing, " << back
               << " going back\n";
+}
+
+// A body dropped into the heap while it plays, as ajfx Studio's Drop tool
+// does: stamped at the acting tick of the frame it was asked in, it lands on
+// a tick the rigid physics thread has not stepped, and the instance plays on
+// to the reference's bodies, the dropped one among them.
+void a_body_dropped_while_playing_joins_the_heap() {
+    render::ParticleSettings settings;
+    settings.rigid_lead = 12U;
+    settings.acting_rigid_lead = 4U;
+    render::ParticlePass pass = make_pass(settings);
+    ajfx::EffectBuilder builder{"heap"};
+    builder.emitter("stones")
+        .capacity(192U)
+        .seed(7U)
+        .spawn(ajfx::SpawnPile{.count = 120U, .jitter = 0.25F, .release = 0.25F})
+        .spawn(ajfx::SpawnActions{.max_per_step = 4U, .max_alive = 16U})
+        .init(ajfx::Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ajfx::InitSize{.min = 0.1F, .max = 0.2F})
+        .init(ajfx::InitColor{.a = ajfx::Color{0.4F, 0.4F, 0.4F, 1.0F}, .b = ajfx::Color{0.7F, 0.6F, 0.5F, 1.0F}})
+        .update(ajfx::Gravity{})
+        .update(ajfx::RigidPhysics{.shape = ajfx::RigidShape::Sphere, .friction = 0.7F})
+        .update(ajfx::PlaneCollision{.friction = 0.8F});
+    const ajfx::Effect effect = builder.build().value();
+    render::ParticleInstance instance = make_instance(pass, effect);
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+    // As Studio: the instance follows the (empty) performance from the start.
+    auto none = std::make_shared<ajfx::ActionList>();
+    pass.revise(instance, none, 0U);
+    PASS_CHECK(pass.rigid_lead(instance) == 4U);
+
+    const auto advance = [&](core::u64 frame) {
+        auto acquired = g_device->acquire_commands();
+        PASS_CHECK(acquired);
+        rhi::CommandList commands = std::move(acquired).value();
+        const bool reached = pass.advance(commands, instance, frame, 24U, 1U);
+        auto submitted = g_device->submit(std::move(commands));
+        PASS_CHECK(submitted);
+        PASS_CHECK(std::move(submitted).value().wait());
+        PASS_CHECK(!pass.take_error());
+        return reached;
+    };
+    const auto reach = [&](core::u64 frame) {
+        int held = 0;
+        while (!advance(frame)) {
+            ++held;
+            PASS_CHECK(held < 5000);
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return held;
+    };
+    for (core::u64 frame = 0U; frame <= 24U; ++frame) {
+        static_cast<void>(reach(frame));
+    }
+    PASS_CHECK(instance.step() == 60U);
+
+    auto dropped = std::make_shared<ajfx::ActionList>();
+    ajfx::Action drop;
+    drop.tick = render::acting_tick(instance.target_step(), pass.rigid_lead(instance));
+    drop.serial = 1U;
+    drop.position = ajfx::Vec3{0.1F, 3.0F, 0.0F};
+    drop.velocity = ajfx::Vec3{0.0F, -1.0F, 0.0F};
+    dropped->add("stones", drop);
+    pass.revise(instance, dropped, drop.tick);
+    int held = 0;
+    for (core::u64 frame = 25U; frame <= 48U; ++frame) {
+        held += reach(frame);
+    }
+    PASS_CHECK(instance.step() == 120U);
+    ajfx::Simulation reference =
+        ajfx::Simulation::create(effect, 3U, ajfx::SimulationOptions{.rigid = solver.get()}).value();
+    reference.advance_to(120U, nullptr, dropped.get());
+    const ajfx::EmitterState drawn = instance.simulation().read_emitter(0U).value();
+    const ajfx::EmitterState& expected = reference.emitter(0U);
+    PASS_CHECK(expected.alive() == 121U);
+    PASS_CHECK(drawn.alive() == expected.alive() && drawn.position == expected.position &&
+               drawn.orientation == expected.orientation && drawn.velocity == expected.velocity &&
+               drawn.spawn_index == expected.spawn_index);
+    std::cout << "  held " << held << " frames playing on after the drop\n";
 }
 
 // A rigid physics emitter holding one cube prop that collides as `shape` and
@@ -2056,6 +2239,8 @@ int main() {
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"rigid_physics_holds_until_its_thread_has_the_step", rigid_physics_holds_until_its_thread_has_the_step},
+        {"revised_actions_replay_from_their_tick", revised_actions_replay_from_their_tick},
+        {"a_body_dropped_while_playing_joins_the_heap", a_body_dropped_while_playing_joins_the_heap},
         {"body_kinds_draw_as_their_own_models", body_kinds_draw_as_their_own_models},
         {"body_kind_surface_tint_reaches_pixels", body_kind_surface_tint_reaches_pixels},
         {"a_body_kinds_scale_reaches_its_draw", a_body_kinds_scale_reaches_its_draw},
@@ -2068,7 +2253,8 @@ int main() {
     for (const Case& test : cases) {
         try {
             test.run();
-            std::cout << "[pass] " << test.name << '\n';
+            // Flushed, so a crash in the next case still shows which it was.
+            std::cout << "[pass] " << test.name << std::endl;
         } catch (const std::exception& error) {
             ++failures;
             std::cout << "[FAIL] " << test.name << ": " << error.what() << '\n';

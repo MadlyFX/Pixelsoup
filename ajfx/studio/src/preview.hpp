@@ -8,6 +8,8 @@
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <ajfx/actions.hpp>
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -62,7 +64,17 @@ struct PreviewFrame final {
     // Values for the effect's published parameters, as a placement's own;
     // anything left out takes the package's default.
     std::vector<ms::scene::ParticleParameter> parameters;
+    // What the artist did to the running effect (the scene's performance),
+    // and the first tick at which it differs from the last frame's.
+    std::shared_ptr<const ajfx::ActionProvider> actions;
+    std::uint64_t actions_from{0U};
 };
+
+// Steps the preview's rigid physics runs ahead while it is acted on
+// (ParticleSettings::acting_rigid_lead). It plays one step a frame, so two
+// keep each step ready; an act stamped at acting_tick of the frame's step
+// lands just past them.
+inline constexpr std::uint32_t preview_acting_lead = 2U;
 
 struct PreviewStatus final {
     bool drawing{false};

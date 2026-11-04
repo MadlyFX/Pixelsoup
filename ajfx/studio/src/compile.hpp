@@ -72,6 +72,13 @@ struct SolidWorld final {
     };
     // In the order of their layers' uids.
     std::vector<Member> layers;
+    // Where drops are born (ajfx::SpawnActions, Document::drops): its place
+    // in the world's spawn stack, and the most dropped bodies it holds at
+    // once. None where the scene takes no drops.
+    std::optional<std::uint32_t> drops;
+    std::uint32_t max_dropped{0U};
+    // The dropped things one step may make: what a click a frame could ask.
+    static constexpr std::uint32_t drops_per_step = 16U;
 
     // Whether particles can meet its bodies (ajfx::max_body_colliders).
     [[nodiscard]] bool meetable() const noexcept {

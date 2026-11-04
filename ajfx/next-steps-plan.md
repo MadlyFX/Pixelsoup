@@ -30,8 +30,11 @@ in [the design](docs/studio-ui-architecture.md#delivery-sequence-and-acceptance)
    units, checkpoints, CPU/GPU agreement, overflow diagnosis, tree-order
    invariance and the two-merging-systems acceptance scene.
 4. Integrate cache-backed viewport playback; keep simulation, bake and drawing
-   state distinct. Add complete initial-state adoption, checkpoint restore and
-   frame-stamped actions with deterministic replay and explicit invalidation.
+   state distinct. Add complete initial-state adoption. Frame-stamped actions
+   (Drop and Delete, the scene's performance) replay deterministically and
+   revise from their tick; still to come are grabbing, painting and blasting
+   by hand, a Setup mode at tick 0 that freezes settled bodies as the stage,
+   and exporting a performance to glTF.
 5. Finish scene controls, target/resource reporting, dependency-aware assembly
    export and export review. Verify the shipping host's cache consumption
    before describing sidecar delivery as host cache playback.

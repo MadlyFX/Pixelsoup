@@ -24,6 +24,7 @@ bool kernels_compile_for_every_recipe();
 #endif
 
 void add_scene_tests(std::vector<studio_test::Case>& cases);
+void add_performance_tests(std::vector<studio_test::Case>& cases);
 
 int main() {
     std::vector<studio_test::Case> cases;
@@ -39,6 +40,7 @@ int main() {
     add_solid_world_tests(cases);
     add_stage_pick_tests(cases);
     add_scene_tests(cases);
+    add_performance_tests(cases);
     int failures = 0;
     for (const studio_test::Case& test : cases) {
         try {

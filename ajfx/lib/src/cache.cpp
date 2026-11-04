@@ -1414,13 +1414,20 @@ std::uint64_t actions_digest(const Effect& effect, std::size_t index, const Acti
     };
     bool any = false;
     std::uint64_t hash = fnv_basis;
+    // An emitter given no actions plays as one given no provider, so a host
+    // with an empty performance and one with none open the same cache.
+    const std::uint64_t none = action_digest({});
     const auto mix_in = [&](const Emitter& emitter) {
         if (!takes(emitter)) {
             return;
         }
+        const std::uint64_t given = provider->digest(emitter.name);
+        if (given == none) {
+            return;
+        }
         any = true;
         hash = fnv_text(emitter.name, hash);
-        hash = fnv_u64(provider->digest(emitter.name), hash);
+        hash = fnv_u64(given, hash);
     };
     mix_in(effect.emitters[index]);
     const auto depend_on = [&](const std::string& name) {

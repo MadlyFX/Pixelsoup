@@ -4,6 +4,7 @@
 #include "compile.hpp"
 #include "document.hpp"
 #include "library.hpp"
+#include "performance.hpp"
 #include "scene_properties.hpp"
 
 #include <algorithm>
@@ -539,6 +540,8 @@ bool remove_item(Document &document, Uid uid) {
     // A rule with an endpoint gone is gone too, never re-aimed at everything.
     std::erase_if(document.scene->relationships,
                   [uid](const Relationship &r) { return r.system == uid || r.object == uid; });
+    // So are its drops, and the deletions of its bodies.
+    forget_object(document.scene->performance, uid);
     std::erase_if(document.scene->items, [uid](const SceneItem &i) { return i.uid == uid; });
     return true;
 }
@@ -605,6 +608,12 @@ std::string validate_scene(const Document &document, bool for_playback) {
         !std::isfinite(scene.physics.angular_damping) || scene.physics.angular_damping < 0 ||
         scene.physics.angular_damping > 1) {
         return "Scene / Simulation: invalid gravity or angular damping";
+    }
+    if (scene.physics.max_dropped > max_dropped_limit) {
+        return "Scene / Simulation: at most " + std::to_string(max_dropped_limit) + " dropped things";
+    }
+    if (const std::string error = validate_performance(scene); !error.empty()) {
+        return "Scene / Performance: " + error;
     }
     if (for_playback && scene.items.size() > 4096U) {
         return "Scene: item capacity exceeded (4096)";
@@ -1025,6 +1034,7 @@ Document lower_scene(const Document &document, Uid live) {
     out.scene.reset();
     out.layers.clear();
     out.world = PageWorld{.ground = false, .gravity = document.scene->physics.gravity};
+    out.drops = document.scene->physics.max_dropped;
     std::vector<const SceneItem *> ordered;
     for (const SceneItem &item : document.scene->items) {
         ordered.push_back(&item);

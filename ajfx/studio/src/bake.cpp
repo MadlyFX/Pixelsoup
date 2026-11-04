@@ -1,6 +1,7 @@
 #include "bake.hpp"
 
 #include "catalog.hpp"
+#include "performance.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -314,7 +315,19 @@ BakeStatus bake_status(const Document& document, const Compiled& compiled, const
             lowered.frames = record->frames;
             lowered.seconds = record->seconds;
             lowered.page = lower_scene(record->page);
-            return bake_status(lower_scene(document), compiled, &lowered, peaks);
+            BakeStatus status = bake_status(lower_scene(document), compiled, &lowered, peaks);
+            // The bake replays the drops and deletions it was taken with; a
+            // cache of another performance holds another scene.
+            if (record->page.scene->performance != document.scene->performance) {
+                for (LayerBake& layer : status.layers) {
+                    if (layer.state == BakeState::Current) {
+                        layer.state = BakeState::Stale;
+                        layer.why = "things were dropped or deleted since the bake";
+                    }
+                }
+                status.current = false;
+            }
+            return status;
         }
         return bake_status(lower_scene(document), compiled, record, peaks);
     }
@@ -469,6 +482,10 @@ Result<BakeRecord> bake_page(const Document& document, const Compiled& compiled,
     // A keyframe a second, and a checkpoint every two, as the preview seeks.
     settings.keyframe_interval = compiled.effect->simulation_rate;
     settings.checkpoint_interval = 2U * compiled.effect->simulation_rate;
+    // The scene's performance, which the cache is keyed by (CacheIdentity).
+    if (document.scene) {
+        settings.actions = performance_actions(document.scene->performance, act_targets(compiled));
+    }
     if (progress) {
         const double frames = static_cast<double>(settings.frames);
         settings.progress = [&progress, frames](std::uint64_t tick) {

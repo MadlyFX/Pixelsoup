@@ -97,7 +97,21 @@ struct ParticleSettings final {
     // Steps the rigid physics thread works ahead of the show frame, so
     // playback finds each step ready.
     core::u32 rigid_lead{30U};
+    // The lead instead while a host acts on the instance (revise with
+    // actions): short, so an action stamped just past it (acting_tick) lands
+    // on a tick the thread has not stepped and invalidates nothing, yet long
+    // enough that playback still finds each step ready: more than a show
+    // frame's steps (one at 60 fps and 60 steps a second, two or three at 24).
+    core::u32 acting_rigid_lead{4U};
 };
+
+// The first tick an action may be stamped with so that it changes nothing
+// an instance already holds, when the last advance asked for `target` and
+// its rigid physics runs `lead` steps ahead (ParticleSettings): one past
+// what the rigid physics thread may have stepped.
+[[nodiscard]] constexpr core::u64 acting_tick(core::u64 target, core::u32 lead) noexcept {
+    return target + lead + 1U;
+}
 
 class ParticlePass;
 
@@ -232,7 +246,8 @@ public:
     // rate_num / rate_den frames a second, within the step budget, and returns
     // whether it got there. Parameter values come from `parameters` (a pure
     // function of the step) or the effect's defaults; the rigid physics
-    // thread uses the ones `restart` gave it, which must be the same.
+    // thread uses the ones `restart` gave it, which must be the same. Actions
+    // are the ones `revise` last gave it.
     [[nodiscard]] bool advance(rhi::CommandList& commands, ParticleInstance& instance, core::u64 show_frame,
                                core::u32 rate_num, core::u32 rate_den,
                                const ajfx::ParameterProvider* parameters = nullptr);
@@ -275,6 +290,19 @@ public:
     // rigid physics thread: pass what advance will be given.
     void restart(ParticleInstance& instance,
                  std::shared_ptr<const ajfx::ParameterProvider> parameters = nullptr) noexcept;
+
+    // Has `instance` follow `actions` (none for none) from now on, its GPU
+    // simulation and its rigid physics thread alike, where they differ from
+    // the old ones only at `from` and later. What it holds up to `from`
+    // stands: checkpoints after it are dropped, and a simulation past it
+    // comes back to the latest one at or before it on the next advance. An
+    // action stamped at acting_tick of the last target therefore costs
+    // nothing; one in the past replays from a checkpoint. With actions, its
+    // rigid physics runs the acting lead.
+    void revise(ParticleInstance& instance, std::shared_ptr<const ajfx::ActionProvider> actions,
+                core::u64 from) noexcept;
+    // The rigid physics lead `instance` runs now (ParticleSettings).
+    [[nodiscard]] core::u32 rigid_lead(const ParticleInstance& instance) const noexcept;
 
     // The first device failure since the last call, for frame diagnostics.
     [[nodiscard]] std::optional<ParticleError> take_error() noexcept;

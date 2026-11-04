@@ -8,9 +8,14 @@
 #include <mediaserver/scene/math.hpp>
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+
+namespace ajfx {
+class ActionProvider;
+} // namespace ajfx
 
 // The evaluated scene: what the renderer draws, and the last place the answer
 // is still a number rather than a pixel.
@@ -2428,6 +2433,16 @@ struct ParticleEffect final {
     // key. Components a package publishes and the node leaves alone take the
     // package's defaults.
     std::vector<ParticleParameter> parameters;
+    // Host-local, never replicated or digested: what an artist does to the
+    // running effect in a tool that hosts it live (ajfx Studio's Drop and
+    // Delete), as tick-stamped inputs of its simulation (ajfx::Action). A
+    // wall plays a performance from its baked cache instead. Null for none.
+    // A provider is immutable: a host that adds or changes actions hands a
+    // new one, with `actions_from` the first tick at which it differs from
+    // the one it replaces, and the renderer keeps the effect's past up to
+    // that tick.
+    std::shared_ptr<const ajfx::ActionProvider> actions;
+    core::u64 actions_from{};
 
     bool operator==(const ParticleEffect&) const = default;
 };

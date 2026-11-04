@@ -134,7 +134,8 @@ std::vector<StageBody> stage_bodies(const Compiled& compiled, const EmitterState
         out.push_back(StageBody{.center = p,
                                 .radius = std::max(0.5F * size * scale * 1.15F, 0.03F),
                                 .layer = layer_of(spawn_index, kind),
-                                .block = block});
+                                .block = block,
+                                .spawn_index = spawn_index});
     }
     if (physics != nullptr) {
         // The props, by the Object each is: the world's lists its members'
@@ -199,7 +200,8 @@ std::optional<StageHit> pick_stage(std::span<const StageBody> bodies, Vec3 origi
                         .center = met->center,
                         .layer = met->layer,
                         .block = met->block,
-                        .on_body = true};
+                        .on_body = true,
+                        .spawn_index = met->spawn_index};
     }
     if (ground) {
         const Vec3 point = origin + direction * *ground;

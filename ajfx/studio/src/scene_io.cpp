@@ -133,6 +133,7 @@ std::string save_scene(const Document &document) {
     physics.add("gravity", numeric(document.scene->physics.gravity));
     physics.add("angular_damping", numeric(document.scene->physics.angular_damping));
     physics.add("allow_sleep", Json::of(document.scene->physics.allow_sleep));
+    physics.add("max_dropped", numeric(document.scene->physics.max_dropped));
     root.add("physics", std::move(physics));
     Json items = Json::array();
     for (const SceneItem &item : document.scene->items) {
@@ -228,13 +229,37 @@ std::string save_scene(const Document &document) {
         rules.push(std::move(rule));
     }
     root.add("relationships", std::move(rules));
+    const Performance &performance = document.scene->performance;
+    Json acts = Json::array();
+    for (const Act &act : performance.acts) {
+        Json a = Json::object();
+        a.add("serial", numeric(act.serial));
+        a.add("tick", numeric(static_cast<double>(act.tick)));
+        if (act.kind == ActKind::Drop) {
+            a.add("kind", Json::of("drop"));
+            a.add("object", numeric(act.object));
+            a.add("position", numbers({act.position.x, act.position.y, act.position.z}));
+            a.add("turn", numbers({act.turn.x, act.turn.y, act.turn.z}));
+            a.add("velocity", numbers({act.velocity.x, act.velocity.y, act.velocity.z}));
+        } else {
+            a.add("kind", Json::of("delete"));
+            a.add("object", numeric(act.target.object));
+            a.add("count", numeric(act.target.count));
+            a.add("drop", numeric(act.target.drop));
+        }
+        acts.push(std::move(a));
+    }
+    Json saved = Json::object();
+    saved.add("next_serial", numeric(performance.next_serial));
+    saved.add("acts", std::move(acts));
+    root.add("performance", std::move(saved));
     return json::write(root);
 }
 
 Loaded load_scene(const Json &root) {
     const auto fail = [](std::string reason) { return Loaded{{}, "Scene: " + std::move(reason)}; };
     if (!keys(root, {"format", "version", "name", "next_uid", "range_seconds", "scale", "backdrop", "physics",
-                     "items", "relationships"})) {
+                     "items", "relationships", "performance"})) {
         return fail("unknown or duplicate document field");
     }
     if (root.number_or("version", 0) != 2) {
@@ -274,7 +299,7 @@ Loaded load_scene(const Json &root) {
     const Json *physics = root.find("physics");
     const Json *items = root.find("items");
     if (!physics || !items || items->type != Json::Type::Array ||
-        !keys(*physics, {"gravity", "angular_damping", "allow_sleep"})) {
+        !keys(*physics, {"gravity", "angular_damping", "allow_sleep", "max_dropped"})) {
         return fail("invalid physics settings or items");
     }
     Scene &scene = *document.scene;
@@ -286,6 +311,10 @@ Loaded load_scene(const Json &root) {
     scene.physics.gravity = static_cast<float>(physics->number_or("gravity", 1));
     scene.physics.angular_damping = static_cast<float>(physics->number_or("angular_damping", 0.05));
     scene.physics.allow_sleep = physics->bool_or("allow_sleep", true);
+    // A scene saved before drops existed takes the default budget.
+    if (physics->find("max_dropped") && !integer(*physics, "max_dropped", scene.physics.max_dropped)) {
+        return fail("invalid simulation setting");
+    }
     for (const Json &in : items->items) {
         if (!keys(in, {"uid", "parent", "name", "seed", "simulate", "type", "properties", "sources", "motion",
                        "over_age", "targets"})) {
@@ -469,6 +498,50 @@ Loaded load_scene(const Json &root) {
             }
         }
         scene.relationships.push_back(r);
+    }
+    // What was done while it played; a scene saved before there was any
+    // has none.
+    if (const Json *saved = root.find("performance")) {
+        const Json *acts = saved->find("acts");
+        if (saved->type != Json::Type::Object || !keys(*saved, {"next_serial", "acts"}) ||
+            !integer(*saved, "next_serial", scene.performance.next_serial) || !acts ||
+            acts->type != Json::Type::Array) {
+            return fail("invalid performance");
+        }
+        for (const Json &a : acts->items) {
+            Act act;
+            const Json *tick = a.find("tick");
+            if (!tick || tick->type != Json::Type::Number || !std::isfinite(tick->number) || tick->number < 0.0 ||
+                tick->number > 9.0e15 || std::floor(tick->number) != tick->number || !integer(a, "serial", act.serial)) {
+                return fail("invalid act");
+            }
+            act.tick = static_cast<std::uint64_t>(tick->number);
+            const std::string kind = a.string_or("kind", "");
+            if (kind == "drop") {
+                std::array<float, 3> position{};
+                std::array<float, 3> turn{};
+                std::array<float, 3> velocity{};
+                if (!keys(a, {"serial", "tick", "kind", "object", "position", "turn", "velocity"}) ||
+                    !integer(a, "object", act.object) || !numbers(a.find("position"), position) ||
+                    !numbers(a.find("turn"), turn) || !numbers(a.find("velocity"), velocity)) {
+                    return fail("invalid drop");
+                }
+                act.kind = ActKind::Drop;
+                act.position = {position[0], position[1], position[2]};
+                act.turn = {turn[0], turn[1], turn[2]};
+                act.velocity = {velocity[0], velocity[1], velocity[2]};
+            } else if (kind == "delete") {
+                if (!keys(a, {"serial", "tick", "kind", "object", "count", "drop"}) ||
+                    !integer(a, "object", act.target.object) || !integer(a, "count", act.target.count) ||
+                    !integer(a, "drop", act.target.drop)) {
+                    return fail("invalid deletion");
+                }
+                act.kind = ActKind::Delete;
+            } else {
+                return fail("unsupported act");
+            }
+            scene.performance.acts.push_back(act);
+        }
     }
     if (const std::string error = validate_scene(document, false); !error.empty()) {
         return fail(error);

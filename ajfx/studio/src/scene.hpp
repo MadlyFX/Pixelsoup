@@ -218,13 +218,59 @@ struct ScenePhysics final {
     float gravity{1.0F}; // g, along -Y
     float angular_damping{0.05F};
     bool allow_sleep{true};
+    // The most dropped things the solid world holds at once. A budget fixed
+    // up front: a drop past it is refused and said, never made room for.
+    // 0 takes no drops.
+    std::uint32_t max_dropped{64U};
     friend bool operator==(const ScenePhysics &, const ScenePhysics &) = default;
 };
+
+// What the artist did while the scene played: drops and deletions, each at
+// the simulation step it happened in. Saved with the scene and replayed
+// exactly, since the simulation takes them as inputs (ajfx::Action) beside
+// its own; changing them changes no package. See performance.hpp.
+enum class ActKind : std::uint8_t { Drop, Delete };
+// A body an act is done to: one of an Object's own (the ones it stands with
+// at the start), by its count among them, or one a drop made, by the drop's
+// serial.
+struct BodyRef final {
+    std::uint32_t object{}; // the Object item; 0 for a dropped body
+    std::uint32_t count{};  // its place among the Object's own
+    std::uint32_t drop{};   // the drop's serial; 0 for an Object's own body
+    friend bool operator==(const BodyRef &, const BodyRef &) = default;
+};
+struct Act final {
+    // Never reused, even once the act is taken away: a dropped body's
+    // random variation is drawn by its serial, so removing or moving one act
+    // leaves every other body as it was.
+    std::uint32_t serial{};
+    ActKind kind{ActKind::Drop};
+    std::uint64_t tick{};      // simulation step it is applied in
+    std::uint32_t object{};    // Drop: the Object whose copy is dropped
+    Vec3 position{};           // Drop: where, metres in the scene
+    Vec3 turn{};               // Drop: degrees, as an Object's rotation
+    Vec3 velocity{};           // Drop: m/s
+    BodyRef target{};          // Delete: the body taken away
+    friend bool operator==(const Act &, const Act &) = default;
+};
+struct Performance final {
+    std::vector<Act> acts; // by tick, then as they were done
+    std::uint32_t next_serial{1U};
+    friend bool operator==(const Performance &, const Performance &) = default;
+};
+inline constexpr std::uint32_t max_dropped_limit = 4096U;
+inline constexpr std::size_t max_acts = 65536U;
+struct Scene;
+// Empty when the performance is well formed: acts in tick order, serials
+// unique and below next_serial, drops of Objects in the scene, deletions of
+// a body. Says what is wrong otherwise.
+[[nodiscard]] std::string validate_performance(const Scene &scene);
 
 struct Scene final {
     ScenePhysics physics;
     std::vector<SceneItem> items;
     std::vector<Relationship> relationships;
+    Performance performance;
     [[nodiscard]] SceneItem *item(std::uint32_t uid);
     [[nodiscard]] const SceneItem *item(std::uint32_t uid) const;
     friend bool operator==(const Scene &, const Scene &) = default;

@@ -1040,6 +1040,8 @@ private:
         // The placement's parameters as the simulation asks for them, made
         // when the digest changes and shared with the rigid physics thread.
         std::shared_ptr<const ajfx::ParameterProvider> provider;
+        // The host's actions the instance follows (ParticleEffect::actions).
+        std::shared_ptr<const ajfx::ActionProvider> actions;
     };
     std::unique_ptr<ParticlePass> particle_pass_;
     std::string particles_unsupported_;

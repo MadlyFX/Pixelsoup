@@ -42,6 +42,7 @@ render::RendererLimits preview_limits() {
     limits.particles.step_budget = 1200U;
     limits.particles.checkpoint_interval = 120U;
     limits.particles.checkpoint_count = 12U;
+    limits.particles.acting_rigid_lead = preview_acting_lead;
     return limits;
 }
 
@@ -110,6 +111,8 @@ scene::ParticleEffect preview_placement(const PreviewFrame& frame) {
     effect.source_node = ms::doc::NodeId{prop_identity + 1000U};
     effect.seed = 1U;
     effect.parameters = frame.parameters;
+    effect.actions = frame.actions;
+    effect.actions_from = frame.actions_from;
     return effect;
 }
 
