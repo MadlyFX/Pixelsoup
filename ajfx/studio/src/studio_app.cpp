@@ -1228,66 +1228,6 @@ private:
             note = "Paths of " + thousands(count) + " particles" +
                    (item != nullptr && !item->name.empty() ? " in " + item->name : std::string{});
         }
-        const float note_w = std::min(ctx_.font_width(note) + 24.0F, view.width - 100.0F);
-        const gui::Rect note_rect{view.x + 10.0F, view.y + 10.0F, note_w, 24.0F};
-        // Nearly opaque: the guides drawn before it must not show through
-        // its words.
-        ctx_.rounded(note_rect, gui::fade(theme.background, 0.94F), note_rect.height * 0.5F);
-        ctx_.label(gui::Rect{note_rect.x + 12.0F, note_rect.y, note_rect.width - 16.0F, note_rect.height}, note, note_tone);
-        ctx_.tooltip(note_rect, "Motion edits simulate again from the initial setup up to the playhead. Color edits preserve motion caches. Preview is simulating; cache playback is not connected yet.");
-
-        // View tools, top right.
-        const gui::Rect frame_button{view.right() - 38.0F, view.y + 8.0F, 30.0F, 30.0F};
-        if (editor::icon_button(ctx_, gui::ui_id("studio.frame"), frame_button, gui::Icon::Fit, "Frame the selection, or the scene (F)")) {
-            orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
-        }
-        const gui::Rect figure_button{frame_button.x - 34.0F, frame_button.y, 30.0F, 30.0F};
-        if (editor::icon_button(ctx_, gui::ui_id("studio.figure"), figure_button, gui::Icon::Measure,
-                                figure_ ? "Hide the 1.8 m figure" : "Show a 1.8 m figure for scale", figure_)) {
-            figure_ = !figure_;
-        }
-        const gui::Rect paths_button{figure_button.x - 34.0F, frame_button.y, 30.0F, 30.0F};
-        if (editor::icon_button(ctx_, gui::ui_id("studio.paths"), paths_button, gui::Icon::Paths,
-                                show_paths_ ? "Hide particle paths (P)"
-                                            : "Show the whole path of some particles at once (P)",
-                                show_paths_)) {
-            show_paths_ = !show_paths_;
-        }
-        const gui::Rect handles_button{paths_button.x - 34.0F, frame_button.y, 30.0F, 30.0F};
-        if (editor::icon_button(ctx_, gui::ui_id("studio.handles"), handles_button, gui::Icon::Gizmo,
-                                show_handles_ ? "Hide the handles that drag the selected item (H)"
-                                              : "Show handles to drag the selected item (H)",
-                                show_handles_)) {
-            show_handles_ = !show_handles_;
-        }
-        const gui::Rect guides_button{handles_button.x - 34.0F, frame_button.y, 30.0F, 30.0F};
-        if (editor::icon_button(ctx_, gui::ui_id("studio.guides"), guides_button, gui::Icon::Guides,
-                                show_guides_ ? "Hide guides (G)" : "Show guides (G)",
-                                show_guides_)) {
-            show_guides_ = !show_guides_;
-        }
-        // What a click in the picture does: select, drop or delete.
-        struct ToolButton final {
-            StageTool tool;
-            gui::Icon icon;
-            const char* tip;
-        };
-        constexpr std::array<ToolButton, 4> tools{
-            ToolButton{StageTool::Delete, gui::Icon::Trash, "Delete: click a thing to take it away from then on (X)"},
-            ToolButton{StageTool::Drop, gui::Icon::Surface,
-                       "Drop: click to drop a copy of the selected object there, while it plays (D)"},
-            ToolButton{StageTool::Place, gui::Icon::Plus,
-                       "Place: click to put a copy of the selected object on the stage, standing there from the start (O)"},
-            ToolButton{StageTool::Select, gui::Icon::Select, "Select: click a thing to select it (Esc)"}};
-        float tool_x = guides_button.x - 12.0F;
-        for (const ToolButton& button : tools) {
-            tool_x -= 34.0F;
-            const gui::Rect at{tool_x, frame_button.y, 30.0F, 30.0F};
-            if (editor::icon_button(ctx_, part_id(static_cast<std::uint32_t>(button.tool), "studio.tool"), at,
-                                    button.icon, button.tip, tool_ == button.tool)) {
-                tool_ = button.tool;
-            }
-        }
         // After the tools over the picture: the first control a press lands
         // on takes it, and the camera covers the whole view.
         camera_input(view);
@@ -1317,23 +1257,100 @@ private:
         }
         hud.insert(hud.begin(), cost);
         if (hud.size() > 5U) { hud.resize(5U); }
-        float hud_w = 0.0F;
-        for (const std::string& line : hud) { hud_w = std::max(hud_w, ctx_.font_width(line) + 24.0F); }
-        hud_w = std::min(hud_w, view.width - 20.0F);
-        const float line_h = 20.0F;
-        const gui::Rect hud_rect{view.x + 10.0F, view.bottom() - 10.0F - line_h * static_cast<float>(hud.size()) - 8.0F, hud_w,
-                                 line_h * static_cast<float>(hud.size()) + 8.0F};
-        ctx_.rounded(hud_rect, gui::fade(theme.background, 0.94F), 10.0F);
-        for (std::size_t k = 0U; k < hud.size(); ++k) {
-            const bool warning = hud[k].rfind("Near a limit.", 0U) == 0U;
-            ctx_.label(gui::Rect{hud_rect.x + 12.0F, hud_rect.y + 4.0F + line_h * static_cast<float>(k), hud_rect.width - 16.0F, line_h},
-                       hud[k], warning ? theme.caution : theme.text_muted);
-        }
-        ctx_.tooltip(hud_rect, "GPU time for the whole preview frame, then what the scene costs. A limit is named once it is four fifths used.");
+        draw_view_chrome(view, note, note_tone, hud);
 
         const gui::Rect bar{pane.x + 8.0F, view.bottom() + 8.0F, pane.width - 16.0F, transport_height - 8.0F};
         draw_transport(bar, gui::Rect{bar.x, bar.bottom() + 2.0F, bar.width, timeline_h - 2.0F}, tracks);
         static_cast<void>(now);
+    }
+
+    // What lies over the picture, in Dear ImGui: a note saying what it is,
+    // the view toggles top right, and what the scene costs at the foot. Each
+    // is a small window of its own, so the pointer is only taken where one is.
+    void draw_view_chrome(const gui::Rect& view, const std::string& note, const gui::UiColor& tone,
+                          const std::vector<std::string>& hud) {
+        const float s = window_.ui_scale();
+        constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                           ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                           ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+                                           ImGuiWindowFlags_NoBringToFrontOnFocus;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{10.0F * s, 5.0F * s});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0F * s);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.07F, 0.07F, 0.09F, 0.94F});
+
+        ImGui::SetNextWindowPos(ImVec2{(view.x + 10.0F) * s, (view.y + 10.0F) * s});
+        ImGui::SetNextWindowSizeConstraints(ImVec2{0.0F, 0.0F}, ImVec2{std::max(view.width - 100.0F, 40.0F) * s, 1.0e4F});
+        if (ImGui::Begin("##viewnote", nullptr, flags)) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{tone.r, tone.g, tone.b, 1.0F});
+            ImGui::TextUnformatted(note.c_str());
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Motion edits simulate again from the initial setup up to the playhead. Color edits "
+                                  "preserve motion caches.");
+            }
+        }
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2{(view.right() - 10.0F) * s, (view.y + 10.0F) * s}, ImGuiCond_Always,
+                                ImVec2{1.0F, 0.0F});
+        if (ImGui::Begin("##viewtools", nullptr, flags)) {
+            const auto toggle = [&](const char* label, bool on, const char* tip) {
+                if (on) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                }
+                const bool pressed = ImGui::Button(label);
+                if (on) {
+                    ImGui::PopStyleColor();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", tip);
+                }
+                return pressed;
+            };
+            if (toggle("Guides", show_guides_, show_guides_ ? "Hide guides (G)" : "Show guides (G)")) {
+                show_guides_ = !show_guides_;
+            }
+            ImGui::SameLine();
+            if (toggle("Handles", show_handles_,
+                       show_handles_ ? "Hide the handles that drag the selected item (H)"
+                                     : "Show handles to drag the selected item (H)")) {
+                show_handles_ = !show_handles_;
+            }
+            ImGui::SameLine();
+            if (toggle("Paths", show_paths_,
+                       show_paths_ ? "Hide particle paths (P)" : "Show the whole path of some particles at once (P)")) {
+                show_paths_ = !show_paths_;
+            }
+            ImGui::SameLine();
+            if (toggle("Figure", figure_, figure_ ? "Hide the 1.8 m figure" : "Show a 1.8 m figure for scale")) {
+                figure_ = !figure_;
+            }
+            ImGui::SameLine();
+            if (toggle("Frame", false, "Frame the selection, or the scene (F)")) {
+                orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
+            }
+        }
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2{(view.x + 10.0F) * s, (view.bottom() - 10.0F) * s}, ImGuiCond_Always,
+                                ImVec2{0.0F, 1.0F});
+        ImGui::SetNextWindowSizeConstraints(ImVec2{0.0F, 0.0F}, ImVec2{std::max(view.width - 20.0F, 40.0F) * s, 1.0e4F});
+        if (ImGui::Begin("##viewhud", nullptr, flags)) {
+            for (const std::string& line : hud) {
+                const bool warning = line.rfind("Near a limit.", 0U) == 0U;
+                ImGui::PushStyleColor(ImGuiCol_Text, warning ? ImVec4{1.0F, 0.72F, 0.25F, 1.0F}
+                                                             : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextUnformatted(line.c_str());
+                ImGui::PopStyleColor();
+            }
+            if (ImGui::IsWindowHovered()) {
+                ImGui::SetTooltip("GPU time for the whole preview frame, then what the scene costs. A limit is named "
+                                  "once it is four fifths used.");
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
     }
 
     void camera_input(const gui::Rect& view) {
