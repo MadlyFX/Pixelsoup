@@ -8,8 +8,11 @@ reusable effects and captured ranges are delivery choices. Studio exports
 a tree, central viewport and selected-item inspector. **Add > Floor** creates
 another editable ground surface, and **Add** lists forces (Wind, Vortex,
 Attract, Draw in, Blast) that are placed items acting on the particle
-systems they name. A relationship binds an object to a particle system:
-particles born where it hits, or shed behind it as it moves. Objects own geometry, visual and physical
+systems they name, and under Smoke a smoke grid: a box of air that particle
+systems fill with smoke and ride. A relationship binds an object to a
+particle system (particles born where it hits, or shed behind it as it
+moves), a system to another system's particles, or a system to a smoke grid
+(feeding it, riding it, or both). Objects own geometry, visual and physical
 properties and fracture; Scene settings own shared physics. Import accepts
 multiple models. Particle systems own their sources, a Motion stack of typed
 behaviors (Drag, Turbulence, Vortex, Wind, Attract, Draw in) in the order

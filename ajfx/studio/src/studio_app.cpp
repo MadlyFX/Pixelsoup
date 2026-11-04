@@ -819,7 +819,10 @@ private:
                 label = "Baking " + std::to_string(static_cast<int>(std::lround(progress * 100.0))) + "%";
                 tip = "Working out the simulation on the CPU. Click to stop.";
             } else if (!bake_status_.any_baked) {
-                tip = "Add an object or a particle system first.";
+                const bool smoke_only = std::any_of(bake_status_.layers.begin(), bake_status_.layers.end(),
+                                                    [](const LayerBake& layer) { return layer.state == BakeState::Live && !layer.why.empty(); });
+                tip = smoke_only ? "Nothing to cache: a system feeding smoke stays live, since a cache keeps particles, not what they deposit."
+                                 : "Add an object or a particle system first.";
             } else if (bake_status_.current) {
                 tip = "Cache is up to date. Baking again: " + bake_cost_text() + ".";
             } else {
@@ -944,6 +947,9 @@ private:
                 if (force->kind == ForceKind::Wind) { continue; }
                 at = force->position;
                 radius = std::max({force->kind == ForceKind::Blast ? force->radius : force->reach, 0.5F});
+            } else if (const auto* grid = std::get_if<SmokeGrid>(&item.data)) {
+                at = grid->position;
+                radius = std::max({grid->size.x, grid->size.y, grid->size.z, 0.2F});
             } else { continue; }
             const Vec3 r{radius, radius, radius};
             const Vec3 low = (at - r) * document_.scale;
@@ -1096,6 +1102,15 @@ private:
                                          : ", cache stale";
         } else {
             cost += ", no cache";
+        }
+        // Systems feeding smoke are never cached: said here, beside the
+        // cache, rather than failing the bake.
+        const auto smoke_live = static_cast<std::size_t>(std::count_if(
+            bake_status_.layers.begin(), bake_status_.layers.end(),
+            [](const LayerBake& layer) { return layer.state == BakeState::Live && !layer.why.empty(); }));
+        if (smoke_live > 0U) {
+            cost += smoke_live == 1U ? ", 1 system feeding smoke stays live"
+                                     : ", " + std::to_string(smoke_live) + " systems feeding smoke stay live";
         }
         hud.insert(hud.begin(), cost);
         if (hud.size() > 5U) { hud.resize(5U); }

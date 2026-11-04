@@ -70,6 +70,9 @@ enum class BlockKind : std::uint8_t {
     Physics,
     // Light
     Light,
+    // Air: a smoke grid the page's particles feed and ride. The page's, as
+    // an Explosion is: the compiler lists it on the effect (page_volumes).
+    SmokeGrid,
     // Expert: one raw ajfx module.
     Module,
 };
@@ -81,7 +84,7 @@ inline constexpr std::array<std::string_view, block_kind_count> block_kind_ids{
     "stream", "burst",  "shape",  "launch", "hit_puffs", "hit_sparks", "trail", "gravity",      "rise",   "wind",   "turbulence", "drag",
     "swirl",  "draw_in", "attract", "explosion", "push", "stirred", "appearance", "color",       "size",   "spin",   "fade", "heat", "ground",
     "passes_through", "sphere", "box",    "mesh_collider", "tumble",    "object", "break",  "part",       "physics",
-    "light",  "module",
+    "light",  "smoke_grid", "module",
 };
 
 [[nodiscard]] constexpr std::string_view block_kind_id(BlockKind kind) noexcept {

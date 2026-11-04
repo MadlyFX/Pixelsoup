@@ -324,6 +324,8 @@ const std::vector<RawKindDef>& raw_kinds() {
         {SizeOverLife::kind, "Size over life", "update", make_module<UpdateModule, SizeOverLife>},
         {Heat::kind, "Heat", "update", make_module<UpdateModule, Heat>},
         {Wake::kind, "Wake", "update", make_module<UpdateModule, Wake>},
+        {VolumeAdvect::kind, "Volume advect", "update", make_module<UpdateModule, VolumeAdvect>},
+        {VolumeSource::kind, "Volume source", "update", make_module<UpdateModule, VolumeSource>},
     };
     return kinds;
 }

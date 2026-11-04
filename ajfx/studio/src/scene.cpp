@@ -261,6 +261,33 @@ Uid add_force(Document &document, ForceKind kind) {
         SceneItem{.uid = uid, .name = std::string{force_name(kind)}, .seed = uid, .data = std::move(force)});
     return uid;
 }
+Uid add_smoke_grid(Document &document) {
+    if (!document.scene) {
+        return 0U;
+    }
+    const Uid uid = reserve(document);
+    if (uid == 0U) {
+        return 0U;
+    }
+    document.scene->items.push_back(SceneItem{.uid = uid, .name = "Smoke grid", .seed = uid, .data = SmokeGrid{}});
+    return uid;
+}
+std::array<std::uint32_t, 3> grid_resolution(const SmokeGrid &grid) {
+    const auto along = [&grid](float extent) {
+        const float cell = std::isfinite(grid.cell) && grid.cell > 0.0F ? grid.cell : 0.01F;
+        // A box that is a whole number of cells, give or take a rounding
+        // error, is that many cells rather than one more.
+        const double count = std::ceil(static_cast<double>(extent) / static_cast<double>(cell) - 1.0e-4);
+        return static_cast<std::uint32_t>(std::clamp(count, 2.0, 1.0e9));
+    };
+    return {along(grid.size.x), along(grid.size.y), along(grid.size.z)};
+}
+std::uint64_t grid_cells(const SmokeGrid &grid) {
+    const std::array<std::uint32_t, 3> n = grid_resolution(grid);
+    return std::uint64_t{n[0]} * n[1] * n[2];
+}
+std::string smoke_grid_volume(Uid item) { return volume_name(item + 1U); }
+bool relation_births(RelationKind kind) { return kind != RelationKind::FeedSmoke && kind != RelationKind::RideSmoke; }
 std::string_view force_name(ForceKind kind) {
     switch (kind) {
     case ForceKind::Wind:
@@ -291,6 +318,17 @@ Uid add_relationship(Document &document, RelationKind kind, Uid object, Uid syst
     if (kind == RelationKind::TrailFromSystem) {
         // Another system's particles, never its own.
         if (source == nullptr || object == system || !std::holds_alternative<ParticleSystem>(source->data)) {
+            return 0U;
+        }
+    } else if (!relation_births(kind)) {
+        // A smoke grid, and one rule of each kind between a system and a grid.
+        if (source == nullptr || !std::holds_alternative<SmokeGrid>(source->data)) {
+            return 0U;
+        }
+        const bool already = std::any_of(
+            document.scene->relationships.begin(), document.scene->relationships.end(),
+            [&](const Relationship &r) { return r.kind == kind && r.object == object && r.system == system; });
+        if (already) {
             return 0U;
         }
     } else if (object != 0U && (source == nullptr || !std::holds_alternative<Object>(source->data))) {
@@ -352,6 +390,10 @@ bool relationship_active(const Scene &scene, const Relationship &relationship) {
         const SceneItem *source = scene.item(relationship.object);
         return source != nullptr && source->simulate && std::holds_alternative<ParticleSystem>(source->data);
     }
+    if (!relation_births(relationship.kind)) {
+        const SceneItem *grid = scene.item(relationship.object);
+        return grid != nullptr && grid->simulate && std::holds_alternative<SmokeGrid>(grid->data);
+    }
     if (relationship.object != 0U) {
         const SceneItem *object = scene.item(relationship.object);
         return object != nullptr && dynamic(*object);
@@ -366,6 +408,10 @@ std::string_view relation_name(RelationKind kind) {
         return "Trail";
     case RelationKind::TrailFromSystem:
         return "Trail from system";
+    case RelationKind::FeedSmoke:
+        return "Feed smoke";
+    case RelationKind::RideSmoke:
+        return "Ride smoke";
     }
     return "Relationship";
 }
@@ -554,8 +600,12 @@ std::string validate_scene(const Document &document, bool for_playback) {
                 return where + "repeated Static or Animated objects are not supported by this target";
             }
         } else if (const auto *system = std::get_if<ParticleSystem>(&item.data)) {
-            const bool bound = std::any_of(scene.relationships.begin(), scene.relationships.end(),
-                                           [&item](const Relationship &r) { return r.system == item.uid; });
+            // Fed by a rule that gives it particles; a smoke rule binds the
+            // particles it has, so a system that only rides smoke still
+            // needs a source.
+            const bool bound = std::any_of(
+                scene.relationships.begin(), scene.relationships.end(),
+                [&item](const Relationship &r) { return r.system == item.uid && relation_births(r.kind); });
             if (for_playback && system->sources.empty() && !bound) {
                 return where + "Initial state / Sources: add a source or a relationship";
             }
@@ -618,6 +668,33 @@ std::string validate_scene(const Document &document, bool for_playback) {
             if (force->targets.size() > 4096U) {
                 return where + "Targets: too many";
             }
+        } else if (const auto *grid = std::get_if<SmokeGrid>(&item.data)) {
+            // The runtime's budget, named here with the item so the artist
+            // can raise the cell size or shrink the box: compile would
+            // refuse the same grid, naming the volume rather than the item.
+            if (for_playback) {
+                const std::array<std::uint32_t, 3> n = grid_resolution(*grid);
+                constexpr std::string_view axes[] = {"width", "height", "depth"};
+                for (std::size_t k = 0U; k < 3U; ++k) {
+                    if (n[k] > max_volume_size) {
+                        return where + "Smoke: its " + std::string{axes[k]} + " is " + std::to_string(n[k]) +
+                               " cells, more than the " + std::to_string(max_volume_size) +
+                               " a grid may have along a side: raise the cell size or shrink the box";
+                    }
+                }
+                if (const std::uint64_t cells = grid_cells(*grid); cells > max_volume_cells) {
+                    return where + "Smoke: " + std::to_string(cells) + " cells (" + std::to_string(n[0]) + " x " +
+                           std::to_string(n[1]) + " x " + std::to_string(n[2]) + "), more than the " +
+                           std::to_string(max_volume_cells) +
+                           " a grid may hold: raise the cell size or shrink the box";
+                }
+            }
+            const auto grids = static_cast<std::size_t>(
+                std::count_if(scene.items.begin(), scene.items.end(),
+                              [](const SceneItem &other) { return std::holds_alternative<SmokeGrid>(other.data); }));
+            if (for_playback && grids > max_smoke_grids) {
+                return where + "more than " + std::to_string(max_smoke_grids) + " smoke grids in the scene";
+            }
         }
     }
     if (scene.relationships.size() > max_relationships) {
@@ -640,12 +717,18 @@ std::string validate_scene(const Document &document, bool for_playback) {
             if (r.object == r.system) {
                 return where + "a system cannot trail itself";
             }
+        } else if (!relation_births(r.kind)) {
+            if (object == nullptr || !std::holds_alternative<SmokeGrid>(object->data)) {
+                return where + system->name + ": its smoke grid is missing";
+            }
         } else if (r.object != 0U && (object == nullptr || !std::holds_alternative<Object>(object->data))) {
             return where + "its object is missing";
         }
         if (!within(r.hardness, 0.0F, 10000.0F) || !within(r.per_hit, 0.0F, 100000.0F) ||
             !within(r.per_speed, 0.0F, 100000.0F) || !within(r.spread, 0.0F, 180.0F) ||
-            !within(r.min_speed, 0.0F, 10000.0F) || !within(r.rate, 0.0F, 100000.0F) || r.seed > 1000000U) {
+            !within(r.min_speed, 0.0F, 10000.0F) || !within(r.rate, 0.0F, 100000.0F) ||
+            !within(r.density, 0.0F, 1000.0F) || !within(r.heat, 0.0F, 1000.0F) || !within(r.push, 0.0F, 100.0F) ||
+            !within(r.strength, 0.0F, 1000.0F) || r.seed > 1000000U) {
             return where + "a value is outside its supported range";
         }
     }
@@ -763,6 +846,33 @@ Document lower_scene(const Document &document) {
     Uid host = 0U; // the first simulating layer holds every blast; a blast throws everything
     for (const SceneItem *item : ordered) {
         if (std::holds_alternative<Group>(item->data) || std::holds_alternative<Force>(item->data)) {
+            continue;
+        }
+        if (const auto *grid = std::get_if<SmokeGrid>(&item->data)) {
+            // A smoke grid is a layer of one block, so its box has guides
+            // and handles as any block does; the compiler lists it on the
+            // effect (page_volumes) and builds no emitter from it. Nothing
+            // of it is cached, so it is never baked.
+            Layer layer;
+            layer.uid = item->uid;
+            layer.name = "item_" + std::to_string(item->uid);
+            layer.enabled = item->simulate;
+            layer.seed = item->seed;
+            layer.baked = false;
+            layer.blocks.push_back(block(item->uid + 1U, "smoke_grid",
+                                         {{"center", value(grid->position)},
+                                          {"size", value(grid->size)},
+                                          {"cell", number(grid->cell)},
+                                          {"rises", number(grid->rises)},
+                                          {"sinks", number(grid->sinks)},
+                                          {"swirl", number(grid->swirl)},
+                                          {"fades", number(grid->fades)},
+                                          {"calms", number(grid->calms)},
+                                          {"solve", number(static_cast<float>(grid->solve))},
+                                          {"thickness", number(grid->thickness)},
+                                          {"color", color(grid->color.r, grid->color.g, grid->color.b, grid->color.a)},
+                                          {"brightness", number(grid->brightness)}}));
+            out.layers.push_back(std::move(layer));
             continue;
         }
         if (host == 0U && item->simulate) {
@@ -906,6 +1016,11 @@ Document lower_scene(const Document &document) {
                       {{"material", choice(system->look == ParticleLook::Glow    ? "glow"
                                            : system->look == ParticleLook::Smoke ? "smoke"
                                                                                  : "solid")},
+                       {"lighting", choice(system->lighting == ParticleLighting::Lit ? "lit" : "unlit")},
+                       {"curvature", number(system->curvature)},
+                       {"wrap", number(system->wrap)},
+                       {"ambient", number(system->ambient)},
+                       {"shadowed", toggle(system->shadowed)},
                        {"tint", color(system->tint.r, system->tint.g, system->tint.b, system->tint.a)}}));
             layer.blocks.push_back(block(item->uid + 3U, "color",
                                          {{"color", color(1.0F, 1.0F, 1.0F)}, {"brightness", value(system->brightness)}}));
@@ -995,6 +1110,28 @@ Document lower_scene(const Document &document) {
                                                   {"min_speed", number(r->min_speed)},
                                                   {"rate", number(r->rate)},
                                                   {"seed", seed}}));
+                } else if (!relation_births(r->kind)) {
+                    // The runtime's own grid modules, naming the grid's
+                    // volume. A grid that is switched off is not on the
+                    // effect, so a rule on it lowers to nothing rather than
+                    // to a module naming a volume the effect has none of.
+                    // The amounts are rates and shares, so the scene's scale
+                    // leaves them alone.
+                    if (!relationship_active(*document.scene, *r)) {
+                        continue;
+                    }
+                    const std::string volume = smoke_grid_volume(r->object);
+                    if (r->kind == RelationKind::FeedSmoke) {
+                        layer.blocks.push_back(raw_block(
+                            r->uid, RawModule{UpdateModule{VolumeSource{.volume = volume,
+                                                                         .density = FloatInput{r->density},
+                                                                         .temperature = FloatInput{r->heat},
+                                                                         .velocity = FloatInput{r->push}}}}));
+                    } else {
+                        layer.blocks.push_back(raw_block(
+                            r->uid, RawModule{UpdateModule{VolumeAdvect{.volume = volume,
+                                                                         .strength = FloatInput{r->strength}}}}));
+                    }
                 } else {
                     // Shed behind another system's particles: the runtime
                     // module itself, naming that system's layer emitter.
@@ -1097,7 +1234,16 @@ Compiled compile_scene(const Document &document, Purpose purpose) {
     if (!out.error.empty()) {
         for (const LayerReport &report : out.layers) {
             if (!report.error.empty()) {
-                if (const SceneItem *item = document.scene->item(report.layer)) {
+                const SceneItem *item = document.scene->item(report.layer);
+                // The runtime refuses a grid by its volume's name, from
+                // whichever emitter it was checked beside: the item at
+                // fault is the grid.
+                if (const Uid grid = grid_block_named_in(report.error); grid != 0U) {
+                    if (const SceneItem *owner = document.scene->item(grid - 1U)) {
+                        item = owner;
+                    }
+                }
+                if (item != nullptr) {
                     out.error = item->name + ": " + report.error;
                 }
                 break;
@@ -1164,6 +1310,9 @@ Uid handle_block(const Document &document, Uid item) {
     if (std::holds_alternative<ParticleSystem>(owner->data)) {
         return item + 7U;
     }
+    if (std::holds_alternative<SmokeGrid>(owner->data)) {
+        return item + 1U;
+    }
     if (const auto *force = std::get_if<Force>(&owner->data)) {
         if (force->kind == ForceKind::Blast) {
             return item + 1U;
@@ -1186,6 +1335,12 @@ bool adopt_handle_edit(Document &document, const Document &lowered, Uid item) {
         object->position = as_vec3(get(*dragged, "at"));
         object->size = get(*dragged, "size").x;
         return before != *object;
+    }
+    if (auto *grid = std::get_if<SmokeGrid>(&owner->data)) {
+        SmokeGrid before = *grid;
+        grid->position = as_vec3(get(*dragged, "center"));
+        grid->size = as_vec3(get(*dragged, "size"));
+        return before != *grid;
     }
     if (auto *force = std::get_if<Force>(&owner->data)) {
         Force before = *force;

@@ -211,6 +211,37 @@ struct PageBlast final {
 // The page's blasts, at most ajfx::max_blasts of them.
 [[nodiscard]] std::vector<PageBlast> page_blasts(const Document& document, float scale);
 
+// A Smoke grid block on the page, as the grid volume it compiles to
+// (ajfx::Volume). It is the page's rather than its layer's, as a blast is:
+// any layer's particles feed it or ride it through the runtime's own
+// VolumeSource and VolumeAdvect modules naming it.
+// - Named from its block's uid (`volume_name`), so moving or adding blocks
+//   and layers renames nothing.
+// - In the order of the blocks' uids, not the page's.
+// - Page scale applies to its place and its cells; its rates and shares
+//   are left alone.
+// - Present while the block and its layer are switched on.
+// A layer holding nothing but Smoke grid blocks builds no emitter: it is
+// on the page for its guides and handles.
+struct PageVolume final {
+    Uid block{};
+    Uid layer{};
+    Volume volume;
+
+    friend bool operator==(const PageVolume&, const PageVolume&) = default;
+};
+
+[[nodiscard]] std::string volume_name(Uid block);
+// The block a volume name came from, or 0 for a name that is not one.
+[[nodiscard]] Uid volume_block(std::string_view name);
+// The Smoke grid block whose volume a runtime message names, as
+// `volume 'grid_<uid>'`, or 0 when it names none.
+[[nodiscard]] Uid grid_block_named_in(std::string_view message);
+[[nodiscard]] std::vector<PageVolume> page_volumes(const Document& document, float scale);
+// Whether the layer is Smoke grid blocks and nothing else, so it builds no
+// emitter.
+[[nodiscard]] bool volume_only(const Layer& layer);
+
 struct Compiled final {
     // Set when at least one layer compiled.
     std::optional<Effect> effect;

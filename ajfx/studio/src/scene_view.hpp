@@ -39,6 +39,7 @@ class SceneView final {
                             float width);
     // A force's targets: a switch per particle system, when it does not act on every one.
     void draw_targets(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y, float width);
+    void draw_grid_cells(gui::UiContext &ctx, const SceneItem &item, float x, float &y, float width);
     // The Motion stack: typed behaviors in the order their forces run.
     void draw_motion_stack(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y, float width);
     // Size and colour over age: a driver choice, then editable keys.

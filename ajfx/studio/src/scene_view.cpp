@@ -222,7 +222,8 @@ void SceneView::open_add(float x, float y) {
                {"Forces", "Vortex", "Spins particles around an axis", true, {}},
                {"Forces", "Attract", "Pulls to a point, or pushes from it", true, {}},
                {"Forces", "Draw in", "Pulls toward a line, like a fire's draught", true, {}},
-               {"Forces", "Blast", "Throws everything out from a point, once", true, {}}},
+               {"Forces", "Blast", "Throws everything out from a point, once", true, {}},
+               {"Smoke", "Smoke grid", "A box of air that particle systems fill with smoke and ride", true, {}}},
               false);
 }
 void SceneView::import_models(Document &document) {
@@ -311,10 +312,11 @@ void SceneView::tree_children(gui::UiContext &ctx, Document &document, Uid paren
         }
         ctx.label(gui::Rect{row.x + (group ? 30 : 10), row.y, row.width - 34, row.height}, label,
                   item.simulate ? theme.text : theme.text_muted);
-        ctx.tooltip(row, group                                       ? "Organizational group"
-                         : std::holds_alternative<Object>(item.data) ? "Mesh object"
-                         : std::holds_alternative<Force>(item.data)  ? "Force"
-                                                                     : "Particle system");
+        ctx.tooltip(row, group                                          ? "Organizational group"
+                         : std::holds_alternative<Object>(item.data)    ? "Mesh object"
+                         : std::holds_alternative<Force>(item.data)     ? "Force"
+                         : std::holds_alternative<SmokeGrid>(item.data) ? "Smoke grid"
+                                                                        : "Particle system");
         if (hit.clicked && (!group || ctx.pointer_x() >= row.x + 28)) {
             select(item.uid, ctx.ctrl_held());
         }
@@ -355,6 +357,20 @@ void SceneView::draw_settings(gui::UiContext &ctx, Document &document, float x, 
         document.scene->physics.allow_sleep = v.x != 0;
     }
     y += 32;
+    heading(ctx, "Preview", x, y, width);
+    // What the viewport stands the scene in: a lit stage, a dim night for
+    // glowing effects, or nothing. Lit particles show the difference.
+    ControlDef backdrop;
+    backdrop.id = "backdrop";
+    backdrop.label = "Backdrop";
+    backdrop.type = ControlType::Choice;
+    backdrop.choices = {{"studio", "Studio"}, {"night", "Night"}, {"void", "Void"}};
+    backdrop.fallback = number(0.0F);
+    v = number(static_cast<float>(document.backdrop));
+    if (field(numbers_, ctx, 0U, backdrop, gui::Rect{x, y, width, row_height}, v)) {
+        document.backdrop = static_cast<Backdrop>(std::clamp(static_cast<int>(v.x), 0, 2));
+    }
+    y += 32;
     heading(ctx, "Capture range", x, y, width);
     v = number(document.loop_seconds);
     if (field(numbers_, ctx, 0U, numeric("range", "Duration", 6, 0.5F, 3600, "s"), gui::Rect{x, y, width, row_height},
@@ -384,7 +400,8 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
                                    float &y, float width) {
     const bool system = item != nullptr && std::holds_alternative<ParticleSystem>(item->data);
     const bool object = item != nullptr && std::holds_alternative<Object>(item->data);
-    if (item != nullptr && !system && !object) {
+    const bool grid = item != nullptr && std::holds_alternative<SmokeGrid>(item->data);
+    if (item != nullptr && !system && !object && !grid) {
         return;
     }
     const auto name_of = [&document](Uid uid) {
@@ -396,22 +413,30 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
     std::size_t shown = 0U;
     for (Relationship &r : document.scene->relationships) {
         const bool from_system = r.kind == RelationKind::TrailFromSystem;
+        const bool smoke = !relation_births(r.kind);
         const bool touches = item == nullptr || r.system == item->uid ||
-                             (object && !from_system && (r.object == item->uid || r.object == 0U)) ||
-                             (system && from_system && r.object == item->uid);
+                             (object && !from_system && !smoke && (r.object == item->uid || r.object == 0U)) ||
+                             (system && from_system && r.object == item->uid) || (grid && smoke && r.object == item->uid);
         if (!touches) {
             continue;
         }
         ++shown;
-        // The rule as a sentence: what the source does, and what the system does about it.
-        const std::string title = (r.object == 0U ? std::string{"Every object"} : name_of(r.object)) +
-                                  (r.kind == RelationKind::EmitOnHit ? " / Hit -> " : " / Moving -> ") +
-                                  name_of(r.system) + (r.kind == RelationKind::EmitOnHit ? " / Emit" : " / Trail");
+        // The rule as a sentence: what the source does, and what the system
+        // does about it; for smoke, what the system does to the grid.
+        const std::string title =
+            smoke ? name_of(r.system) + (r.kind == RelationKind::FeedSmoke ? " / Feeds -> " : " / Rides -> ") +
+                        name_of(r.object)
+                  : (r.object == 0U ? std::string{"Every object"} : name_of(r.object)) +
+                        (r.kind == RelationKind::EmitOnHit ? " / Hit -> " : " / Moving -> ") + name_of(r.system) +
+                        (r.kind == RelationKind::EmitOnHit ? " / Emit" : " / Trail");
         ctx.label(gui::Rect{x, y, width - 32.0F, row_height}, title, ctx.theme().text);
         ctx.tooltip(gui::Rect{x, y, width - 32.0F, row_height},
                     r.kind == RelationKind::EmitOnHit ? "Particles are born where the object hits something."
-                    : from_system                     ? "Particles are shed behind that system's particles while they move."
-                                                      : "Particles are shed behind the object while it moves.");
+                    : r.kind == RelationKind::FeedSmoke
+                        ? "Its particles leave smoke, heat and their motion in the grid's air as they pass through it."
+                    : r.kind == RelationKind::RideSmoke ? "Its particles are carried by the grid's air while inside it."
+                    : from_system ? "Particles are shed behind that system's particles while they move."
+                                  : "Particles are shed behind the object while it moves.");
         if (editor::icon_button(ctx, part_id(r.uid, "relation.remove"), gui::Rect{x + width - 28.0F, y, 28, 28},
                                 gui::Icon::Trash, "Remove this relationship")) {
             remove = r.uid;
@@ -420,8 +445,9 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
         if (!relationship_active(*document.scene, r)) {
             for (const std::string &part :
                  wrap_text(ctx,
-                           from_system ? "Nothing is born: the system it trails is switched off."
-                                       : "Nothing is born: hits and trails come from Dynamic objects.",
+                           smoke       ? "Nothing happens: the smoke grid is switched off."
+                           : from_system ? "Nothing is born: the system it trails is switched off."
+                                         : "Nothing is born: hits and trails come from Dynamic objects.",
                            width)) {
                 ctx.label(gui::Rect{x, y, width, 22}, part, ctx.theme().caution);
                 y += 22;
@@ -436,6 +462,18 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
             }
             y += 32.0F;
         };
+        if (r.kind == RelationKind::FeedSmoke) {
+            number_row(numeric("density", "Smoke", 1.0F, 0.0F, 20.0F, "/s"), r.density);
+            number_row(numeric("heat", "Heat", 0.5F, 0.0F, 20.0F, "/s"), r.heat);
+            number_row(numeric("push", "Push", 1.0F, 0.0F, 10.0F, "x"), r.push);
+            y += 4.0F;
+            continue;
+        }
+        if (r.kind == RelationKind::RideSmoke) {
+            number_row(numeric("strength", "Strength", 10.0F, 0.0F, 100.0F, "/s", 1), r.strength);
+            y += 4.0F;
+            continue;
+        }
         if (r.kind == RelationKind::EmitOnHit) {
             number_row(numeric("hardness", "Hits from", 1.0F, 0.0F, 10.0F, "m/s", 1), r.hardness);
             number_row(numeric("per_hit", "Per hit", 2.0F, 0.0F, 50.0F, {}, 0), r.per_hit);
@@ -468,7 +506,8 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
     }
     if (shown == 0U) {
         ctx.label(gui::Rect{x, y, width, row_height},
-                  item == nullptr ? "None. Add one from an object or a particle system."
+                  item == nullptr ? "None. Add one from an object, a particle system or a smoke grid."
+                  : grid          ? "None yet: no particle system feeds or rides it."
                                   : "None yet.",
                   ctx.theme().text_muted);
         y += 32.0F;
@@ -477,6 +516,41 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
         return;
     }
     const bool worded = width >= 300.0F;
+    if (grid) {
+        // A smoke grid is fed and ridden by particle systems: each is
+        // offered under both kinds, less what already binds it.
+        if (editor::pill_button(ctx, part_id(item->uid, "relation.add"), gui::Rect{x, y + 4, worded ? 160.0F : 34.0F, 28},
+                                gui::Icon::Plus, worded ? "Add relationship" : "",
+                                "Have a particle system feed this smoke, or ride it")) {
+            relation_target_ = item->uid;
+            relation_from_system_ = false;
+            relation_choices_.clear();
+            std::vector<ListEntry> entries;
+            for (const RelationKind kind : {RelationKind::FeedSmoke, RelationKind::RideSmoke}) {
+                for (const SceneItem &other : document.scene->items) {
+                    if (!std::holds_alternative<ParticleSystem>(other.data)) {
+                        continue;
+                    }
+                    const bool bound = std::any_of(
+                        document.scene->relationships.begin(), document.scene->relationships.end(),
+                        [&](const Relationship &r) { return r.kind == kind && r.object == item->uid && r.system == other.uid; });
+                    relation_choices_.emplace_back(kind, other.uid);
+                    entries.push_back({std::string{relation_name(kind)}, other.name,
+                                       bound ? std::string{"Already does"}
+                                       : kind == RelationKind::FeedSmoke
+                                           ? std::string{"Its particles leave smoke and heat in the air"}
+                                           : std::string{"Its particles are carried by the air"},
+                                       !bound, {}});
+                }
+            }
+            if (entries.empty()) {
+                entries.push_back({"", "No particle systems in the scene", "", false, {}});
+            }
+            relation_add_.open(x, y + 36, "Add relationship", std::move(entries), false);
+        }
+        y += 36.0F;
+        return;
+    }
     // Only a Dynamic object hits or moves, so only one can feed a rule: an
     // object that is not one has no button, and a system is offered only
     // the Dynamic objects, the rest shown but not takeable.
@@ -528,7 +602,7 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
     if (editor::pill_button(ctx, part_id(item->uid, "relation.add"), gui::Rect{x, y + 4, worded ? 160.0F : 34.0F, 28},
                             gui::Icon::Plus, worded ? "Add relationship" : "",
                             system ? "Have particles born where a Dynamic object hits, shed behind it, or shed "
-                                     "behind another system's particles"
+                                     "behind another system's particles; or feed a smoke grid, or ride one"
                                    : "Have a particle system react to this object")) {
         relation_target_ = item->uid;
         relation_from_system_ = system;
@@ -565,6 +639,25 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
                 if (other.uid != item->uid && std::holds_alternative<ParticleSystem>(other.data)) {
                     relation_choices_.emplace_back(RelationKind::TrailFromSystem, other.uid);
                     entries.push_back({group, other.name, "Shed behind its particles as they move", true, {}});
+                }
+            }
+            // The scene's smoke grids, to feed and to ride; a system may do
+            // both, once each.
+            for (const RelationKind kind : {RelationKind::FeedSmoke, RelationKind::RideSmoke}) {
+                for (const SceneItem &other : document.scene->items) {
+                    if (!std::holds_alternative<SmokeGrid>(other.data)) {
+                        continue;
+                    }
+                    const bool bound = std::any_of(
+                        document.scene->relationships.begin(), document.scene->relationships.end(),
+                        [&](const Relationship &r) { return r.kind == kind && r.object == other.uid && r.system == item->uid; });
+                    relation_choices_.emplace_back(kind, other.uid);
+                    entries.push_back({std::string{relation_name(kind)}, other.name,
+                                       bound ? std::string{"Already does"}
+                                       : kind == RelationKind::FeedSmoke
+                                           ? std::string{"Its particles leave smoke and heat in the air"}
+                                           : std::string{"Its particles are carried by the air"},
+                                       !bound, {}});
                 }
             }
         }
@@ -650,6 +743,38 @@ void SceneView::draw_sources(gui::UiContext &ctx, Document &document, SceneItem 
             add_source(document, item.uid, system->persistent ? SourceMode::Initial : SourceMode::Continuous));
     }
     y += 36;
+}
+
+void SceneView::draw_grid_cells(gui::UiContext &ctx, const SceneItem &item, float x, float &y, float width) {
+    const auto *grid = std::get_if<SmokeGrid>(&item.data);
+    if (!grid) {
+        return;
+    }
+    const std::array<std::uint32_t, 3> n = grid_resolution(*grid);
+    const std::uint64_t cells = grid_cells(*grid);
+    const auto count = [](std::uint64_t value) {
+        std::string digits = std::to_string(value);
+        for (std::size_t at = digits.size(); at > 3U; at -= 3U) {
+            digits.insert(at - 3U, ",");
+        }
+        return digits;
+    };
+    const bool too_long = std::max({n[0], n[1], n[2]}) > max_volume_size;
+    const bool too_many = cells > max_volume_cells;
+    std::string text = std::to_string(n[0]) + " x " + std::to_string(n[1]) + " x " + std::to_string(n[2]) + " cells, " +
+                       count(cells) + " of " + count(max_volume_cells);
+    if (too_long) {
+        text += ". A side may be at most " + std::to_string(max_volume_size) + " cells: raise the cell size.";
+    } else if (too_many) {
+        text += ". Too many for one grid: raise the cell size or shrink the box.";
+    }
+    for (const std::string &part : wrap_text(ctx, text, width)) {
+        ctx.label(gui::Rect{x, y, width, 22}, part, too_long || too_many ? ctx.theme().caution : ctx.theme().text_muted);
+        y += 22;
+    }
+    ctx.tooltip(gui::Rect{x, y - 22.0F, width, 22.0F},
+                "The box cut into cells of the cell size, at least two a side. About 108 bytes a cell on the GPU.");
+    y += 6.0F;
 }
 
 void SceneView::draw_targets(gui::UiContext &ctx, Document &document, SceneItem &item, float x, float &y,
@@ -1026,9 +1151,10 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
             const auto *force = std::get_if<Force>(&item->data);
             const std::string fallback =
                 object ? (object->mesh == "cube" ? "Object" : std::filesystem::path{object->mesh}.stem().string())
-                : force                                     ? std::string{force_name(force->kind)}
-                : std::holds_alternative<Group>(item->data) ? "Group"
-                                                            : "Particle system";
+                : force                                         ? std::string{force_name(force->kind)}
+                : std::holds_alternative<Group>(item->data)     ? "Group"
+                : std::holds_alternative<SmokeGrid>(item->data) ? "Smoke grid"
+                                                                : "Particle system";
             if (item->name != fallback &&
                 editor::reset_button(ctx, part_id(item->uid, "name.reset"), gui::Rect{x + width - 20, y + 4, 18, 22},
                                      "Reset name to " + fallback)) {
@@ -1172,8 +1298,15 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
                 color_live_ = color_live_ || ctx.color_open(part_id(item->uid, p.control.id));
             }
             y += height + 4.0F;
-            if (selection_.size() == 1U && p.control.id == "look") {
+            // The key editors follow the last Appearance row, after the light.
+            if (selection_.size() == 1U && p.control.id == "shadowed") {
                 draw_over_age(ctx, *item, x, y, width);
+            }
+            // What the box and cell size come to, under the last Smoke row,
+            // and the limit when it is past: the number is there so the
+            // artist can decide, nothing is thinned to fit.
+            if (selection_.size() == 1U && p.control.id == "solve") {
+                draw_grid_cells(ctx, *item, x, y, width);
             }
         }
         if (selection_.size() == 1U && section == "Motion") {
@@ -1212,6 +1345,8 @@ void SceneView::draw_overlays(gui::UiContext &ctx, const gui::Rect &window, Docu
             select(group);
         } else if (*chosen == 4U) {
             select(add_floor(document));
+        } else if (*chosen == 10U) {
+            select(add_smoke_grid(document));
         } else if (*chosen >= 5U) {
             select(add_force(document, static_cast<ForceKind>(*chosen - 5U)));
         } else {

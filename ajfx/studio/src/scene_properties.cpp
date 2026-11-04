@@ -128,7 +128,13 @@ const std::vector<SceneProperty> &system_properties() {
             property("brightness", "Brightness", "Appearance", &ParticleSystem::brightness, 0, 64, "x"),
             property("size", "Size", "Appearance", &ParticleSystem::size, 0.001F, 100, "m"),
             property("spin", "Spin", "Appearance", &ParticleSystem::spin, 0, 7200, "deg/s"),
-            property("look", "Renderer", "Appearance", &ParticleSystem::look, 0, 2, {}, {"Glow", "Smoke", "Solid"})};
+            property("look", "Renderer", "Appearance", &ParticleSystem::look, 0, 2, {}, {"Glow", "Smoke", "Solid"}),
+            property("lighting", "Light", "Appearance", &ParticleSystem::lighting, 0, 1, {},
+                     {"Glows on its own", "Lit by the scene"}),
+            property("curvature", "Rounded", "Appearance", &ParticleSystem::curvature, 0, 1),
+            property("wrap", "Light wraps", "Appearance", &ParticleSystem::wrap, 0, 1),
+            property("ambient", "Takes ambient", "Appearance", &ParticleSystem::ambient, 0, 16, "x"),
+            property("shadowed", "Takes shadows", "Appearance", &ParticleSystem::shadowed)};
         out.push_back(property("collide", "Collide with objects", "Interactions", &ParticleSystem::collide));
         for (SceneProperty &p : out) {
             if (p.control.id == "tint" || p.control.id == "look") {
@@ -162,6 +168,35 @@ const std::vector<SceneProperty> &force_properties() {
     }();
     return properties;
 }
+// A smoke grid, in the artist's words. The runtime's own names for the
+// fluid settings are in scene.hpp beside each field. Look settings are
+// read when the smoke is drawn, never by the simulation, so they keep a
+// motion cache.
+const std::vector<SceneProperty> &smoke_grid_properties() {
+    static const std::vector<SceneProperty> properties = [] {
+        std::vector<SceneProperty> out{
+            property("position", "Position", "Transform", &SmokeGrid::position, -10000, 10000, "m"),
+            property("size", "Size", "Transform", &SmokeGrid::size, 0.02F, 1000, "m"),
+            property("cell", "Cell size", "Smoke", &SmokeGrid::cell, 0.01F, 100, "m"),
+            property("rises", "Rises", "Smoke", &SmokeGrid::rises, 0, 100),
+            property("sinks", "Sinks", "Smoke", &SmokeGrid::sinks, 0, 100),
+            property("swirl", "Swirl", "Smoke", &SmokeGrid::swirl, 0, 100),
+            property("fades", "Fades", "Smoke", &SmokeGrid::fades, 0, 100, "/s"),
+            property("calms", "Calms", "Smoke", &SmokeGrid::calms, 0, 100, "/s"),
+            property("solve", "Solve quality", "Smoke", &SmokeGrid::solve, 1,
+                     static_cast<float>(max_volume_pressure_iterations)),
+            property("thickness", "Thickness", "Look", &SmokeGrid::thickness, 0, 100),
+            property("color", "Color", "Look", &SmokeGrid::color, 0, 1),
+            property("brightness", "Brightness", "Look", &SmokeGrid::brightness, 0, 1)};
+        for (SceneProperty &p : out) {
+            if (p.section == "Look") {
+                p.control.timing = ParameterTiming::Playback;
+            }
+        }
+        return out;
+    }();
+    return properties;
+}
 } // namespace
 
 std::span<const SceneProperty> scene_properties(const SceneItem &item) {
@@ -173,6 +208,9 @@ std::span<const SceneProperty> scene_properties(const SceneItem &item) {
     }
     if (std::holds_alternative<Force>(item.data)) {
         return force_properties();
+    }
+    if (std::holds_alternative<SmokeGrid>(item.data)) {
+        return smoke_grid_properties();
     }
     return {};
 }

@@ -171,7 +171,7 @@ private:
         // goes off, which is what everything near it answers.
         return kind == BlockKind::Shape || kind == BlockKind::Sphere || kind == BlockKind::Box || kind == BlockKind::MeshCollider ||
                kind == BlockKind::Object || kind == BlockKind::Explosion || kind == BlockKind::Push ||
-               (kind == BlockKind::Ground && number_of(block, "height") != 0.0F);
+               kind == BlockKind::SmokeGrid || (kind == BlockKind::Ground && number_of(block, "height") != 0.0F);
     }
 
     void handle(const Block& block, std::string control, HandleMotion motion, Vec3 at, Vec3 origin, std::string label,
@@ -413,6 +413,17 @@ private:
             box(guide, centre, half);
             handle(block, "size", HandleMotion::Corner, centre + half, centre, "Size");
             handle(block, "center", HandleMotion::Floor, centre, centre, "Center");
+        } else if (kind == BlockKind::SmokeGrid) {
+            // The box of air, drawn as a field: a corner sizes it and its
+            // centre moves it, as a box collider's do.
+            guide.kind = GuideKind::Field;
+            const Vec3 centre = to_vec3(get(block, "center")) * s_;
+            const Value size = get(block, "size");
+            const Vec3 half = Vec3{std::fabs(size.x), std::fabs(size.y), std::fabs(size.z)} * (0.5F * s_);
+            box(guide, centre, half);
+            drop(guide, centre);
+            handle(block, "size", HandleMotion::Corner, centre + half, centre, "Size");
+            handle(block, "center", HandleMotion::Floor, centre, centre, "Position");
         } else if (kind == BlockKind::MeshCollider) {
             guide.kind = GuideKind::Collider;
             const Vec3 at = to_vec3(get(block, "position")) * s_;

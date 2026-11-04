@@ -29,6 +29,13 @@ struct SceneStats final {
     std::size_t body_kinds{};      // of ajfx::max_rigid_body_kinds
     std::size_t blasts{};          // of ajfx::max_blasts
     std::uint64_t state_bytes{};   // particle state at capacity
+    // Smoke grids: how many of ajfx::max_volumes, their cells in all, the
+    // most in one grid of ajfx::max_volume_cells, and the GPU memory their
+    // working buffers take (about 108 bytes a cell).
+    std::size_t grids{};
+    std::uint64_t grid_cells{};
+    std::uint64_t largest_grid_cells{};
+    std::uint64_t grid_bytes{};
     // Limits within reach, each one short line: "Body kinds: 230 of 256".
     std::vector<std::string> near_limits;
     friend bool operator==(const SceneStats &, const SceneStats &) = default;

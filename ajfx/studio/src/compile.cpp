@@ -131,6 +131,104 @@ std::vector<PageBlast> page_blasts(const Document& document, float scale) {
     return out;
 }
 
+std::string volume_name(Uid block) {
+    return "grid_" + std::to_string(block);
+}
+
+Uid volume_block(std::string_view name) {
+    constexpr std::string_view prefix = "grid_";
+    if (!name.starts_with(prefix) || name.size() == prefix.size()) {
+        return 0U;
+    }
+    Uid block = 0U;
+    for (const char c : name.substr(prefix.size())) {
+        if (c < '0' || c > '9' || block > 0x0fffffffU) {
+            return 0U;
+        }
+        block = block * 10U + static_cast<Uid>(c - '0');
+    }
+    return block;
+}
+
+Uid grid_block_named_in(std::string_view message) {
+    // The runtime quotes names in single quotes (ajfx::validate).
+    constexpr std::string_view lead = "volume '";
+    const std::size_t at = message.find(lead);
+    if (at == std::string_view::npos) {
+        return 0U;
+    }
+    const std::size_t from = at + lead.size();
+    const std::size_t end = message.find('\'', from);
+    if (end == std::string_view::npos) {
+        return 0U;
+    }
+    return volume_block(message.substr(from, end - from));
+}
+
+bool volume_only(const Layer& layer) {
+    bool any = false;
+    for (const Block& block : layer.blocks) {
+        if (!block.enabled) {
+            continue;
+        }
+        if (block.kind != BlockKind::SmokeGrid) {
+            return false;
+        }
+        any = true;
+    }
+    return any;
+}
+
+std::vector<PageVolume> page_volumes(const Document& document, float scale) {
+    std::vector<PageVolume> volumes;
+    for (const Layer& layer : document.layers) {
+        if (!layer.enabled) {
+            continue;
+        }
+        for (const Block& block : layer.blocks) {
+            if (!block.enabled || block.kind != BlockKind::SmokeGrid) {
+                continue;
+            }
+            const Value centre = get(block, "center");
+            const Value size = get(block, "size");
+            const Value tint = get(block, "color");
+            const float cell = std::max(number_of(block, "cell"), 0.0001F);
+            // As many cells as the box takes at that size, at least two a
+            // side: a whole number of cells, give or take a rounding error,
+            // is that many and not one more. The grid stands centred on the
+            // block's centre, so a box that is not a whole number of cells
+            // grows evenly by less than one.
+            const auto along = [cell](float extent) {
+                const double count = std::ceil(static_cast<double>(std::fabs(extent)) / static_cast<double>(cell) - 1.0e-4);
+                return static_cast<std::uint32_t>(std::clamp(count, 2.0, 1.0e9));
+            };
+            Volume volume;
+            volume.name = volume_name(block.uid);
+            volume.nx = along(size.x);
+            volume.ny = along(size.y);
+            volume.nz = along(size.z);
+            volume.cell_size = cell * scale;
+            volume.origin = Vec3{centre.x * scale - 0.5F * static_cast<float>(volume.nx) * volume.cell_size,
+                                 centre.y * scale - 0.5F * static_cast<float>(volume.ny) * volume.cell_size,
+                                 centre.z * scale - 0.5F * static_cast<float>(volume.nz) * volume.cell_size};
+            volume.buoyancy = number_of(block, "rises");
+            volume.weight = number_of(block, "sinks");
+            volume.vorticity = number_of(block, "swirl");
+            volume.pressure_iterations = static_cast<std::uint32_t>(std::lround(std::max(number_of(block, "solve"), 0.0F)));
+            volume.density_dissipation = number_of(block, "fades");
+            volume.temperature_dissipation = number_of(block, "fades");
+            volume.velocity_dissipation = number_of(block, "calms");
+            volume.extinction = number_of(block, "thickness");
+            volume.albedo = number_of(block, "brightness");
+            volume.color = Vec3{tint.x, tint.y, tint.z};
+            volumes.push_back(PageVolume{block.uid, layer.uid, std::move(volume)});
+        }
+    }
+    std::sort(volumes.begin(), volumes.end(),
+              [](const PageVolume& a, const PageVolume& b) { return a.block < b.block; });
+    return volumes;
+}
+
 Compiled compile(const Document& document, Purpose purpose) {
     if (document.scene) { return compile_scene(document, purpose); }
     Compiled compiled;
@@ -150,12 +248,17 @@ Compiled compile(const Document& document, Purpose purpose) {
     for (const PageBlast& blast : blasts) {
         effect.blasts.push_back(blast.blast);
     }
+    // And its smoke grids, which a layer's particles feed or ride by name.
+    const std::vector<PageVolume> volumes = page_volumes(document, scale);
+    for (const PageVolume& grid : volumes) {
+        effect.volumes.push_back(grid.volume);
+    }
 
     // Every published range first: a parameter two layers share has to be
     // sized for both before either layer's budget is worked out.
     std::vector<ParameterDesc> parameters;
     for (const Layer& layer : document.layers) {
-        if (wanted(layer)) {
+        if (wanted(layer) && !volume_only(layer)) {
             LayerReport scratch;
             static_cast<void>(LayerBuilder{layer, scale, parameters, document.world}.build(scratch));
         }
@@ -218,6 +321,7 @@ Compiled compile(const Document& document, Purpose purpose) {
                 alone.name = effect.name;
                 alone.simulation_rate = effect.simulation_rate;
                 alone.blasts = effect.blasts;
+                alone.volumes = effect.volumes;
                 alone.parameters = parameters;
                 const std::uint64_t bound = particle_bound(alone, merged->emitter) + merged->extra;
                 if (bound > max_emitter_capacity) {
@@ -280,6 +384,18 @@ Compiled compile(const Document& document, Purpose purpose) {
         }
         LayerReport report;
         report.layer = layer.uid;
+        if (volume_only(layer)) {
+            // Its grids are on the effect already; there is no emitter to
+            // build. A grid the runtime refused beside an earlier emitter
+            // has written its report already (grid_block_named_in), which
+            // is kept.
+            report.included = wanted(layer);
+            report.baked = false;
+            report.error = reports[layer_index].error;
+            report.error_block = reports[layer_index].error_block;
+            reports[layer_index] = std::move(report);
+            continue;
+        }
         report.emitter = emitter_names[layer_index];
         // A layer that will not play still compiles, against its own copy,
         // so what it publishes never widens what the playing layers see.
@@ -304,6 +420,7 @@ Compiled compile(const Document& document, Purpose purpose) {
             alone.name = effect.name;
             alone.simulation_rate = effect.simulation_rate;
             alone.blasts = effect.blasts;
+            alone.volumes = effect.volumes;
             alone.parameters = wanted(layer) ? parameters : own;
             alone.emitters = so_far;
             // What its objects come apart into is room the layer needs: a
@@ -355,6 +472,23 @@ Compiled compile(const Document& document, Purpose purpose) {
         }
         if (!report.error.empty() && wanted(layer) && compiled.error.empty()) {
             compiled.error = layer.name + ": " + report.error;
+            // A grid refused by the runtime is the grid's fault, not the
+            // emitter's it happened to be checked beside: its own layer
+            // carries the report too, so the page names the right thing.
+            if (const Uid grid = grid_block_named_in(report.error); grid != 0U) {
+                for (const PageVolume& volume : volumes) {
+                    if (volume.block != grid) {
+                        continue;
+                    }
+                    for (std::size_t i = 0U; i < document.layers.size(); ++i) {
+                        if (document.layers[i].uid == volume.layer && reports[i].error.empty()) {
+                            reports[i].error = report.error;
+                            reports[i].error_block = grid;
+                            compiled.error = document.layers[i].name + ": " + report.error;
+                        }
+                    }
+                }
+            }
         }
         reports[layer_index] = std::move(report);
     }

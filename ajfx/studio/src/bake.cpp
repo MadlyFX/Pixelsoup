@@ -221,6 +221,15 @@ const LayerBake* BakeStatus::layer(Uid uid) const {
     return nullptr;
 }
 
+namespace {
+// Whether the emitter deposits into a grid volume (VolumeSource), which no
+// cache can hold.
+bool feeds_smoke(const Emitter& emitter) {
+    return std::any_of(emitter.update.begin(), emitter.update.end(),
+                       [](const UpdateModule& module) { return std::holds_alternative<VolumeSource>(module); });
+}
+} // namespace
+
 std::vector<CacheMode> bake_modes(const Document& document, const Compiled& compiled) {
     if (document.scene) { return bake_modes(lower_scene(document), compiled); }
     std::vector<CacheMode> modes;
@@ -244,6 +253,12 @@ std::vector<CacheMode> bake_modes(const Document& document, const Compiled& comp
         }
         if (any && all) {
             modes[i] = rigid_physics(emitter) != nullptr ? CacheMode::Rigid : CacheMode::Particles;
+        }
+        // An emitter feeding a smoke grid stays live: a cache keeps its
+        // particles, not what they deposit, and the runtime refuses to
+        // cache it (ajfx::bake).
+        if (feeds_smoke(emitter)) {
+            modes[i] = CacheMode::Live;
         }
     }
     // A live layer cannot be born of cached bodies or stirred by them (a
@@ -323,15 +338,25 @@ BakeStatus bake_status(const Document& document, const Compiled& compiled, const
             status.layers.push_back(bake);
             continue;
         }
-        status.any_baked = true;
         const std::optional<std::size_t> index = emitter_index(compiled, report->emitter);
         if (!index) {
+            status.any_baked = true;
             bake.state = BakeState::Unbaked;
             status.layers.push_back(bake);
             all_current = false;
             continue;
         }
         const Emitter& emitter = compiled.effect->emitters[*index];
+        if (feeds_smoke(emitter)) {
+            // Live, and says why: it is not waiting for a bake, and the
+            // cache is current without it.
+            bake.state = BakeState::Live;
+            bake.mode = CacheMode::Live;
+            bake.why = "it feeds smoke, which a cache cannot keep, so it stays live";
+            status.layers.push_back(bake);
+            continue;
+        }
+        status.any_baked = true;
         const bool rigid = rigid_physics(emitter) != nullptr;
         bake.mode = rigid ? CacheMode::Rigid : CacheMode::Particles;
         // The page's solid layers are one world, cached whole: a live one

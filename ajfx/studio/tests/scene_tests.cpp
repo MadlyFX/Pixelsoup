@@ -141,17 +141,43 @@ void typed_scene_roundtrip_and_strict_fields() {
     system.size_over_age = {{0.0F, 0.25F}, {0.4F, 2.0F}, {1.0F, 0.0F}};
     system.tint_driver = Driver::Age;
     system.tint_over_age = {{0.0F, {1.0F, 0.5F, 0.25F, 1.0F}}, {1.0F, {0.1F, 0.2F, 0.3F, 0.0F}}};
+    system.lighting = ParticleLighting::Lit;
+    system.curvature = 0.35F;
+    system.wrap = 0.65F;
+    system.ambient = 1.75F;
+    system.shadowed = false;
     document.scene->physics.gravity = 0.37F;
     document.scene->physics.angular_damping = 0.19F;
     document.loop_seconds = 11.5F;
+    document.backdrop = Backdrop::Night;
     const std::string saved = save_document(document);
     const Loaded loaded = load_document(saved);
     if (!loaded.document) {
         throw std::runtime_error{loaded.error};
     }
     CHECK(*loaded.document == document);
+    CHECK(loaded.document->backdrop == Backdrop::Night);
     CHECK(save_document(*loaded.document) == saved);
     CHECK(saved.find("\"layers\"") == std::string::npos);
+    // The light settings reach the renderer through the Appearance block.
+    {
+        Document lit_scene = empty_scene();
+        const Uid puff = add_particle_system(lit_scene);
+        auto &lit = std::get<ParticleSystem>(lit_scene.scene->item(puff)->data);
+        lit.look = ParticleLook::Smoke;
+        lit.lighting = ParticleLighting::Lit;
+        lit.curvature = 0.35F;
+        lit.wrap = 0.65F;
+        lit.ambient = 1.75F;
+        lit.shadowed = false;
+        const Compiled compiled = compile(lit_scene, Purpose::Export);
+        CHECK(compiled.effect && compiled.effect->emitters.size() == 1U);
+        const ajfx::SpriteRenderer &r = compiled.effect->emitters[0].renderer;
+        CHECK(r.lighting == ajfx::Lighting::Lit && r.curvature == 0.35F && r.wrap == 0.65F && r.ambient == 1.75F &&
+              !r.shadowed);
+        lit.lighting = ParticleLighting::Glows;
+        CHECK(compile(lit_scene, Purpose::Export).effect->emitters[0].renderer.lighting == ajfx::Lighting::Unlit);
+    }
     std::string bad = saved;
     bad.insert(bad.find("\"position\""), "\"invented\": 1, ");
     CHECK(!load_document(bad).document);
@@ -1015,7 +1041,218 @@ void a_bound_system_is_born_only_of_its_object() {
     CHECK(validate_scene(document, false).empty());
 }
 
+// A smoke grid is a scene item: a box of air that particle systems feed and
+// ride through relationships. It reaches the effect as a grid volume, its
+// bindings as the runtime's own modules, scaled as every metre is.
+void smoke_grids_are_fed_and_ridden_by_systems() {
+    Document document = empty_scene();
+    document.scale = 2.0F;
+    const Uid embers = add_particle_system(document);
+    const Uid ash = add_particle_system(document);
+    const Uid grid = add_smoke_grid(document);
+    CHECK(grid != 0U && document.scene->item(grid)->name == "Smoke grid");
+    auto &smoke = std::get<SmokeGrid>(document.scene->item(grid)->data);
+    smoke.position = {1.0F, 2.0F, -0.5F};
+    smoke.size = {1.0F, 1.5F, 2.0F};
+    smoke.cell = 0.25F;
+    smoke.rises = 1.5F;
+    smoke.sinks = 0.1F;
+    smoke.swirl = 0.3F;
+    smoke.fades = 0.4F;
+    smoke.calms = 0.05F;
+    smoke.solve = 12U;
+    smoke.thickness = 2.5F;
+    smoke.color = {0.2F, 0.4F, 0.6F, 1.0F};
+    smoke.brightness = 0.7F;
+    CHECK((grid_resolution(smoke) == std::array<std::uint32_t, 3>{4U, 6U, 8U}) && grid_cells(smoke) == 192U);
+    // Born inside the box, so the grid is fed.
+    std::get<ParticleSystem>(document.scene->item(embers)->data).position = smoke.position;
+    std::get<ParticleSystem>(document.scene->item(ash)->data).position = smoke.position;
+
+    // One system feeds and rides; another only rides. Once each, and only a
+    // grid can be fed or ridden.
+    const Uid feed = add_relationship(document, RelationKind::FeedSmoke, grid, embers);
+    const Uid ride = add_relationship(document, RelationKind::RideSmoke, grid, embers);
+    const Uid ride_ash = add_relationship(document, RelationKind::RideSmoke, grid, ash);
+    CHECK(feed != 0U && ride != 0U && ride_ash != 0U);
+    CHECK(add_relationship(document, RelationKind::FeedSmoke, grid, embers) == 0U);
+    CHECK(add_relationship(document, RelationKind::FeedSmoke, embers, ash) == 0U);
+    CHECK(add_relationship(document, RelationKind::EmitOnHit, grid, ash) == 0U);
+    CHECK(add_relationship(document, RelationKind::TrailFromSystem, grid, ash) == 0U);
+    const auto rule = [&document](Uid uid) -> Relationship & {
+        for (Relationship &r : document.scene->relationships) {
+            if (r.uid == uid) {
+                return r;
+            }
+        }
+        throw std::runtime_error{"no rule"};
+    };
+    rule(feed).density = 3.0F;
+    rule(feed).heat = 0.75F;
+    rule(feed).push = 0.5F;
+    rule(ride).strength = 4.0F;
+    CHECK(validate_scene(document).empty());
+    CHECK(relationship_active(*document.scene, rule(feed)));
+    // Riding smoke gives a system no particles: it still needs a source.
+    auto &ash_system = std::get<ParticleSystem>(document.scene->item(ash)->data);
+    const std::vector<ParticleSource> ash_sources = ash_system.sources;
+    ash_system.sources.clear();
+    CHECK(!validate_scene(document).empty());
+    ash_system.sources = ash_sources;
+    CHECK(validate_scene(document).empty());
+
+    // Lowering: the grid is a layer of one block (so it has handles), and
+    // the bindings are the runtime's modules naming its volume.
+    Document lowered = lower_scene(document);
+    CHECK(lowered.layers.size() == 3U);
+    const Block *box = lowered.block(grid + 1U);
+    CHECK(box && box->kind == "smoke_grid" && get(*box, "size") == vec3(1.0F, 1.5F, 2.0F) &&
+          get(*box, "center").x == 1.0F && get(*box, "solve").x == 12.0F && get(*box, "cell").x == 0.25F);
+    CHECK(handle_block(document, grid) == grid + 1U);
+    const Block *feeding = lowered.block(feed);
+    CHECK(feeding && feeding->raw);
+    const auto *source = feeding ? std::get_if<ajfx::VolumeSource>(&std::get<ajfx::UpdateModule>(*feeding->raw)) : nullptr;
+    CHECK(source && source->volume == smoke_grid_volume(grid) && source->density.value == 3.0F &&
+          source->temperature.value == 0.75F && source->velocity.value == 0.5F);
+    const Block *riding = lowered.block(ride_ash);
+    const auto *advect = riding && riding->raw ? std::get_if<ajfx::VolumeAdvect>(&std::get<ajfx::UpdateModule>(*riding->raw)) : nullptr;
+    CHECK(advect && advect->volume == smoke_grid_volume(grid) && advect->strength.value == 10.0F);
+    // A handle drag on the box writes back to the item.
+    lowered.block(grid + 1U)->set("center", vec3(3.0F, 2.0F, -0.5F));
+    lowered.block(grid + 1U)->set("size", vec3(1.0F, 1.5F, 4.0F));
+    CHECK(adopt_handle_edit(document, lowered, grid));
+    CHECK(smoke.position.x == 3.0F && smoke.size.z == 4.0F);
+    smoke.position.x = 1.0F;
+    smoke.size.z = 2.0F;
+
+    // Compiled: one volume, scaled, with the authored values; the grid
+    // builds no emitter of its own.
+    const Compiled compiled = ready(document);
+    CHECK(compiled.effect->volumes.size() == 1U && compiled.effect->emitters.size() == 2U);
+    const ajfx::Volume &v = compiled.effect->volumes.front();
+    CHECK(v.name == smoke_grid_volume(grid) && v.nx == 4U && v.ny == 6U && v.nz == 8U && near(v.cell_size, 0.5F));
+    CHECK(near(v.origin.x, 1.0F) && near(v.origin.y, 2.5F) && near(v.origin.z, -3.0F));
+    CHECK(v.buoyancy == 1.5F && v.weight == 0.1F && v.vorticity == 0.3F && v.pressure_iterations == 12U);
+    CHECK(v.density_dissipation == 0.4F && v.temperature_dissipation == 0.4F && v.velocity_dissipation == 0.05F);
+    CHECK(v.extinction == 2.5F && v.albedo == 0.7F && v.color.x == 0.2F && v.color.y == 0.4F && v.color.z == 0.6F);
+    CHECK(ajfx::validate(*compiled.effect).ok());
+    const LayerReport *grid_report = compiled.layer(grid);
+    CHECK(grid_report && grid_report->included && grid_report->emitter.empty() && !grid_report->baked);
+    const ajfx::Emitter *fed = nullptr;
+    const ajfx::Emitter *carried = nullptr;
+    for (const ajfx::Emitter &emitter : compiled.effect->emitters) {
+        if (emitter.name == compiled.layer(embers)->emitter) { fed = &emitter; }
+        if (emitter.name == compiled.layer(ash)->emitter) { carried = &emitter; }
+    }
+    CHECK(fed && carried);
+    const auto *fed_source = find_module<ajfx::VolumeSource>(*fed);
+    const auto *fed_advect = find_module<ajfx::VolumeAdvect>(*fed);
+    CHECK(fed_source && fed_source->density.value == 3.0F && fed_source->temperature.value == 0.75F &&
+          fed_source->velocity.value == 0.5F);
+    CHECK(fed_advect && fed_advect->strength.value == 4.0F);
+    CHECK(find_module<ajfx::VolumeSource>(*carried) == nullptr && find_module<ajfx::VolumeAdvect>(*carried) != nullptr);
+    // Exported, the package carries the volume.
+    const auto bytes = ajfx::write_package(*compiled.effect, asset_entries(compiled));
+    CHECK(bytes);
+    const auto package = ajfx::read_package(bytes.value());
+    CHECK(package && package.value().volumes == compiled.effect->volumes);
+
+    // Played, the grid takes smoke from the particles born in it.
+    auto run = simulation(compiled);
+    run.advance_to(60U);
+    float density = 0.0F;
+    for (const float d : run.volume(0).density) {
+        density += d;
+    }
+    CHECK(density > 0.0F);
+
+    // Baking: the system feeding smoke stays live, said so, and the bake
+    // still takes the rest.
+    const std::vector<ajfx::CacheMode> modes = bake_modes(document, compiled);
+    CHECK(modes.size() == 2U);
+    for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
+        CHECK(modes[e] == (&compiled.effect->emitters[e] == fed ? ajfx::CacheMode::Live : ajfx::CacheMode::Particles));
+    }
+    const BakeStatus status = bake_status(document, compiled, nullptr);
+    CHECK(status.any_baked && !status.current);
+    CHECK(status.layer(embers) && status.layer(embers)->state == BakeState::Live &&
+          status.layer(embers)->why.find("feeds smoke") != std::string::npos);
+    CHECK(status.layer(ash) && status.layer(ash)->state == BakeState::Unbaked);
+    CHECK(status.layer(grid) && status.layer(grid)->state == BakeState::Live);
+    const ajfx::Result<BakeRecord> baked = bake_page(document, compiled, 71U, nullptr);
+    CHECK(baked);
+    CHECK(bake_status(document, compiled, &baked.value()).current);
+
+    // Statistics count the grid and its cells.
+    const SceneStats stats = scene_stats(*document.scene, &compiled, nullptr);
+    CHECK(stats.grids == 1U && stats.grid_cells == 192U && stats.largest_grid_cells == 192U && stats.near_limits.empty());
+    const std::vector<std::string> lines = stat_lines(stats);
+    CHECK(std::any_of(lines.begin(), lines.end(), [](const std::string &line) { return line == "Smoke: 1 grid, 192 cells, 1 MiB on the GPU"; }));
+    CHECK(lines.back().find("1 smoke grid") != std::string::npos);
+
+    // Saved and read back exactly; unknown fields refused; a rule saved
+    // before the smoke amounts existed keeps their defaults.
+    const std::string saved = save_document(document);
+    const Loaded loaded = load_document(saved);
+    if (!loaded.document) {
+        throw std::runtime_error{loaded.error};
+    }
+    CHECK(*loaded.document == document);
+    CHECK(save_document(*loaded.document) == saved);
+    std::string bad = saved;
+    bad.insert(bad.find("\"thickness\""), "\"invented\": 1, ");
+    CHECK(!load_document(bad).document);
+    bad = saved;
+    bad.replace(bad.find("\"kind\": 3"), 9U, "\"kind\": 7");
+    CHECK(!load_document(bad).document);
+    std::string older = saved;
+    const std::size_t at = older.find("\"density\": 3");
+    CHECK(at != std::string::npos);
+    older.erase(at, older.find("\"heat\"", at) - at);
+    const Loaded old_rules = load_document(older);
+    CHECK(old_rules.document && *old_rules.document != document && old_rules.document->scene->relationships.size() == 3U);
+
+    // A grid that is switched off is not on the effect, and nothing feeds
+    // or rides it.
+    document.scene->item(grid)->simulate = false;
+    CHECK(!relationship_active(*document.scene, rule(feed)));
+    const Compiled off = compile(document, Purpose::Export);
+    CHECK(off.effect && off.effect->volumes.empty());
+    for (const ajfx::Emitter &emitter : off.effect->emitters) {
+        CHECK(find_module<ajfx::VolumeSource>(emitter) == nullptr && find_module<ajfx::VolumeAdvect>(emitter) == nullptr);
+    }
+    document.scene->item(grid)->simulate = true;
+
+    // The runtime's budgets, named with the item and the limit before the
+    // compiler is reached; storage keeps the unfinished grid.
+    smoke.cell = 0.01F;
+    smoke.size.x = 10.0F;
+    std::string error = validate_scene(document);
+    CHECK(error.find("Smoke grid") == 0U && error.find("width is 1000 cells") != std::string::npos &&
+          error.find(std::to_string(ajfx::max_volume_size)) != std::string::npos);
+    CHECK(validate_scene(document, false).empty());
+    CHECK(!compile(document, Purpose::Export).effect);
+    smoke.size = {2.5F, 2.5F, 2.5F};
+    error = validate_scene(document);
+    CHECK(error.find("15,625,000") == std::string::npos && error.find("15625000 cells") != std::string::npos &&
+          error.find(std::to_string(ajfx::max_volume_cells)) != std::string::npos);
+    const SceneStats crowded = scene_stats(*document.scene, nullptr, nullptr);
+    CHECK(crowded.near_limits.size() == 1U && crowded.near_limits.front().rfind("Cells in one smoke grid: ", 0U) == 0U);
+    smoke.cell = 0.25F;
+    smoke.size = {1.0F, 1.5F, 2.0F};
+    CHECK(validate_scene(document).empty());
+
+    // Removing the grid removes the rules on it; a rule left pointing at
+    // nothing is diagnosed.
+    CHECK(remove_item(document, grid));
+    CHECK(document.scene->relationships.empty());
+    CHECK(validate_scene(document).empty());
+    document.scene->relationships.push_back(Relationship{.uid = feed, .kind = RelationKind::FeedSmoke, .object = grid, .system = embers});
+    CHECK(validate_scene(document).find("its smoke grid is missing") != std::string::npos);
+}
+
 void add_scene_tests(std::vector<studio_test::Case> &cases) {
+    cases.push_back({"smoke_grids_are_fed_and_ridden_by_systems", smoke_grids_are_fed_and_ridden_by_systems});
     cases.push_back({"a_bound_system_is_born_only_of_its_object", a_bound_system_is_born_only_of_its_object});
     cases.push_back({"particles_meet_static_objects", particles_meet_static_objects});
     cases.push_back({"statistics_count_the_scene_and_name_limits_in_reach", statistics_count_the_scene_and_name_limits_in_reach});

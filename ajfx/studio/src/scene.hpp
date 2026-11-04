@@ -2,6 +2,7 @@
 
 #include <ajfx/modules.hpp>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <variant>
@@ -17,6 +18,9 @@ enum class ObjectCollider { Hull, Sphere, Box };
 enum class Distribution { Single, Grid, Pile };
 enum class SourceMode { Initial, Continuous, Burst };
 enum class ParticleLook { Glow, Smoke, Solid };
+// Glows: the particle's colour as it is. Lit: the scene's lights and shadows
+// fall on it, as a rounded puff (see ajfx::Lighting::Lit).
+enum class ParticleLighting { Glows, Lit };
 // A behavior in a system's Motion stack. Each is a typed owner of one runtime
 // force; the stack's order is authored and is the order the forces run in.
 // A value each particle picks for itself, between the two, once at birth.
@@ -104,6 +108,13 @@ struct ParticleSystem final {
     Range size{0.05F, 0.05F};
     Range spin{0.0F, 0.0F}; // degrees per second, either way
     ParticleLook look{ParticleLook::Glow};
+    // How the scene's light reaches it (SpriteRenderer::lighting, curvature,
+    // wrap, ambient and shadowed).
+    ParticleLighting lighting{ParticleLighting::Glows};
+    float curvature{0.6F}; // 0 flat, 1 a full ball
+    float wrap{0.25F};     // light reaching round the dark side
+    float ambient{1.0F};   // its share of the sky and ground light
+    bool shadowed{true};
     // Size and colour over age multiply the base size and the colour. Keys
     // are sorted by age; values hold beyond the ends.
     Driver size_driver{Driver::Constant};
@@ -136,26 +147,48 @@ struct Group final {
     friend bool operator==(const Group &, const Group &) = default;
 };
 
+// A box of air (a grid volume, ajfx::Volume) that particle systems fill with
+// smoke and ride: a placed scene item with a position and a size in metres,
+// cut into cells of `cell` metres. Its fluid settings are in the artist's
+// words; the runtime's names are beside them.
+struct SmokeGrid final {
+    Vec3 position{0.0F, 1.5F, 0.0F}; // the centre of the box
+    Vec3 size{2.0F, 3.0F, 2.0F};     // width, height, depth, metres
+    float cell{0.1F};                // metres a cell; the resolution follows (grid_resolution)
+    float rises{1.0F};               // buoyancy: lift per unit of heat
+    float sinks{0.0F};               // weight: fall per unit of smoke
+    float swirl{0.0F};               // vorticity confinement; 0 is off
+    float fades{0.2F};               // smoke and heat lost per second (dissipation)
+    float calms{0.0F};               // motion lost per second (velocity dissipation)
+    std::uint32_t solve{20U};        // pressure iterations
+    float thickness{1.0F};           // extinction: how much light a unit of smoke takes
+    Color color{1.0F, 1.0F, 1.0F, 1.0F};
+    float brightness{0.8F};          // albedo: the share of that light scattered to the camera
+    friend bool operator==(const SmokeGrid &, const SmokeGrid &) = default;
+};
+
 struct SceneItem final {
     std::uint32_t uid{};
     std::uint32_t parent{}; // organizational group only; 0 is the scene root
     std::string name;
     std::uint32_t seed{1U};
     bool simulate{true};
-    std::variant<Object, ParticleSystem, Group, Force> data;
+    std::variant<Object, ParticleSystem, Group, Force, SmokeGrid> data;
     friend bool operator==(const SceneItem &, const SceneItem &) = default;
 };
 
-// One rule feeding a particle system: particles born where an object hits
-// something, shed behind it while it moves, or shed behind another particle
-// system's particles while they move. It lives on the scene, is shown from
-// either endpoint, and is stored once.
-enum class RelationKind { EmitOnHit, TrailFrom, TrailFromSystem };
+// One rule binding a particle system to something else on the scene: born
+// where an object hits something, shed behind it while it moves, shed
+// behind another particle system's particles while they move, or feeding or
+// riding a smoke grid. It lives on the scene, is shown from either endpoint,
+// and is stored once.
+enum class RelationKind { EmitOnHit, TrailFrom, TrailFromSystem, FeedSmoke, RideSmoke };
 struct Relationship final {
     std::uint32_t uid{};
     RelationKind kind{RelationKind::EmitOnHit};
-    // The source: an object (0 is every object), or for Trail from system
-    // the particle system whose particles are trailed. Never `system`.
+    // The source: an object (0 is every object), for Trail from system the
+    // particle system whose particles are trailed, or for Feed smoke and
+    // Ride smoke the smoke grid. Never `system`.
     std::uint32_t object{};
     std::uint32_t system{};
     float hardness{1.0F};  // Emit on hit: softer hits make none, m/s
@@ -165,6 +198,10 @@ struct Relationship final {
     float min_speed{0.5F}; // Trails: slower objects or particles shed none, m/s
     float rate{0.0F};      // Trails: per second while moving, whatever the speed
     bool pieces{false};    // Trail: only the pieces a broken object became
+    float density{1.0F};   // Feed smoke: smoke each particle adds per second
+    float heat{0.5F};      // Feed smoke: heat each particle adds per second
+    float push{1.0F};      // Feed smoke: the share of its own velocity each particle gives the air per second
+    float strength{10.0F}; // Ride smoke: how quickly a particle takes up the air's motion, per second
     std::uint32_t seed{0U};
     friend bool operator==(const Relationship &, const Relationship &) = default;
 };
@@ -197,11 +234,25 @@ enum class Purpose : std::uint8_t;
 [[nodiscard]] std::uint32_t add_particle_system(Document &document);
 [[nodiscard]] std::uint32_t add_group(Document &document);
 [[nodiscard]] std::uint32_t add_force(Document &document, ForceKind kind);
-// Binds a source to a particle system: an object (0 for every object), or
-// for Trail from system another particle system. 0 when the endpoints are
-// not what the kind takes, or a system would feed itself.
+[[nodiscard]] std::uint32_t add_smoke_grid(Document &document);
+// How many cells a smoke grid has along each side at its cell size: its
+// size divided by the cell, rounded up, at least 2. Whether that fits the
+// runtime's budget (ajfx::max_volume_size a side, ajfx::max_volume_cells in
+// all) is validate_scene's to say.
+[[nodiscard]] std::array<std::uint32_t, 3> grid_resolution(const SmokeGrid &grid);
+[[nodiscard]] std::uint64_t grid_cells(const SmokeGrid &grid);
+// The name a smoke grid's volume has in the effect, from its identity.
+[[nodiscard]] std::string smoke_grid_volume(std::uint32_t item);
+inline constexpr std::size_t max_smoke_grids = max_volumes;
+// Binds a source to a particle system: an object (0 for every object), for
+// Trail from system another particle system, or for Feed smoke and Ride
+// smoke a smoke grid. 0 when the endpoints are not what the kind takes, a
+// system would feed itself, or the system already feeds or rides that grid.
 [[nodiscard]] std::uint32_t add_relationship(Document &document, RelationKind kind, std::uint32_t object,
                                              std::uint32_t system);
+// Whether a rule of this kind gives a system particles (hits and trails),
+// rather than binding the particles it has to a smoke grid.
+[[nodiscard]] bool relation_births(RelationKind kind);
 bool remove_relationship(Document &document, std::uint32_t uid);
 // A particle system that lives only on a rule from `object` (an object, or
 // for Trail from system a particle system): no source of its own, so nothing
@@ -211,7 +262,7 @@ bool remove_relationship(Document &document, std::uint32_t uid);
 // Whether a rule can ever fire: hits and trails come from Dynamic objects,
 // so a rule on a Static or Animated one, or on every object when none is
 // Dynamic, is born nothing; a trail from a system that does not simulate is
-// born nothing.
+// born nothing; a smoke rule on a grid that does not simulate does nothing.
 [[nodiscard]] bool relationship_active(const Scene &scene, const Relationship &relationship);
 [[nodiscard]] std::string_view relation_name(RelationKind kind);
 inline constexpr std::size_t max_relationships = 256U;

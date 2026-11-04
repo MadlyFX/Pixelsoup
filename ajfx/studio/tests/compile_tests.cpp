@@ -601,7 +601,63 @@ void model_colliders_bake_to_distance_fields() {
 
 } // namespace
 
+// A Smoke grid block is the page's, as an Explosion is: listed on the effect
+// as a grid volume, scaled with the page, named from its block so a layer's
+// raw module can feed it. A layer of nothing but grids builds no emitter.
+void smoke_grid_blocks_become_the_effects_volumes() {
+    Document document;
+    document.scale = 3.0F;
+    Layer dust = make_layer(document, LayerKind::Particles, "Dust");
+    insert_block(dust, 0U, *make_block(document, "stream"));
+    insert_block(dust, 1U, *make_block(document, "shape"));
+    Block grid = *make_block(document, BlockKind::SmokeGrid);
+    grid.set("center", vec3(0.0F, 1.0F, 0.0F));
+    grid.set("size", vec3(1.0F, 2.0F, 1.0F));
+    grid.set("cell", number(0.5F));
+    grid.set("swirl", number(0.25F));
+    const Uid grid_uid = insert_block(dust, 2U, grid);
+    insert_block(dust, 3U,
+                 make_raw_block(document, RawModule{ajfx::UpdateModule{ajfx::VolumeSource{.volume = volume_name(grid_uid)}}}));
+    document.layers.push_back(std::move(dust));
+    Layer air = make_layer(document, LayerKind::Particles, "Air");
+    Block second = *make_block(document, BlockKind::SmokeGrid);
+    second.set("size", vec3(4.0F, 4.0F, 4.0F));
+    second.set("cell", number(1.0F));
+    const Uid second_uid = insert_block(air, 0U, second);
+    document.layers.push_back(std::move(air));
+    CHECK(volume_only(document.layers[1]) && !volume_only(document.layers[0]));
+    CHECK(volume_block(volume_name(second_uid)) == second_uid && volume_block("grid_") == 0U && volume_block("dust") == 0U);
+    CHECK(grid_block_named_in("emitter 'dust' names volume '" + volume_name(grid_uid) + "', which this effect has none of") == grid_uid);
+
+    const Compiled compiled = compile(document, Purpose::Export);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    CHECK(compiled.effect->emitters.size() == 1U && compiled.effect->volumes.size() == 2U);
+    const ajfx::Volume& first = compiled.effect->volumes[0];
+    CHECK(first.name == volume_name(grid_uid) && first.nx == 2U && first.ny == 4U && first.nz == 2U);
+    CHECK(near(first.cell_size, 1.5F) && near(first.origin.x, -1.5F) && near(first.origin.y, 0.0F) && near(first.origin.z, -1.5F));
+    CHECK(first.vorticity == 0.25F && compiled.effect->volumes[1].nx == 4U);
+    CHECK(find_module<ajfx::VolumeSource>(compiled.effect->emitters.front()) != nullptr);
+    const LayerReport* report = compiled.layer(document.layers[1].uid);
+    CHECK(report && report->included && report->emitter.empty() && report->error.empty());
+    CHECK(ajfx::validate(*compiled.effect).ok());
+
+    // A grid the runtime refuses is the grid's layer's fault, named by its
+    // block, not the emitter's it was checked beside.
+    document.layers[1].blocks.front().set("cell", number(0.01F));
+    const Compiled refused = compile(document, Purpose::Export);
+    CHECK(!refused.error.empty() && refused.error.rfind("Air: ", 0U) == 0U);
+    const LayerReport* air_report = refused.layer(document.layers[1].uid);
+    CHECK(air_report && !air_report->error.empty() && air_report->error_block == second_uid);
+    // A module naming a grid the page has none of is refused with the
+    // runtime's own reason.
+    document.layers[1].blocks.front().set("cell", number(1.0F));
+    document.layers[0].blocks[3].raw = RawModule{ajfx::UpdateModule{ajfx::VolumeSource{.volume = "nowhere"}}};
+    const Compiled missing = compile(document, Purpose::Export);
+    CHECK(!missing.error.empty() && missing.error.find("nowhere") != std::string::npos);
+}
+
 void add_compile_tests(std::vector<studio_test::Case>& cases) {
+    cases.push_back({"smoke_grid_blocks_become_the_effects_volumes", smoke_grid_blocks_become_the_effects_volumes});
     cases.push_back({"every_recipe_compiles_within_its_budget", every_recipe_compiles_within_its_budget});
     cases.push_back({"block_order_does_not_change_the_effect", block_order_does_not_change_the_effect});
     cases.push_back({"a_new_block_leaves_the_others_alone", a_new_block_leaves_the_others_alone});

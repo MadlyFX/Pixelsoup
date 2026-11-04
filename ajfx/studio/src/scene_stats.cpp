@@ -35,6 +35,12 @@ SceneStats scene_stats(const Scene &scene, const Compiled *compiled,
             out.forces_on_busiest = std::max(out.forces_on_busiest, acting);
         } else if (std::holds_alternative<Force>(item.data)) {
             ++out.forces;
+        } else if (const auto *grid = std::get_if<SmokeGrid>(&item.data)) {
+            ++out.grids;
+            const std::uint64_t cells = grid_cells(*grid);
+            out.grid_cells += cells;
+            out.largest_grid_cells = std::max(out.largest_grid_cells, cells);
+            out.grid_bytes += cells * 108U;
         } else {
             ++out.groups;
         }
@@ -78,6 +84,12 @@ SceneStats scene_stats(const Scene &scene, const Compiled *compiled,
     if (out.body_capacity * 5U >= max_rigid_capacity * 4U) {
         out.near_limits.push_back("Bodies: " + of(out.body_capacity, max_rigid_capacity));
     }
+    if (out.grids * 5U >= max_smoke_grids * 4U) {
+        out.near_limits.push_back("Smoke grids: " + of(out.grids, max_smoke_grids));
+    }
+    if (out.largest_grid_cells * 5U >= max_volume_cells * 4U) {
+        out.near_limits.push_back("Cells in one smoke grid: " + of(out.largest_grid_cells, max_volume_cells));
+    }
     return out;
 }
 
@@ -96,12 +108,19 @@ std::vector<std::string> stat_lines(const SceneStats &stats) {
     if (stats.state_bytes > 0U) {
         lines.push_back("State: " + count((stats.state_bytes + 1023U) / 1024U) + " KiB");
     }
-    const std::size_t items = stats.objects + stats.systems + stats.forces + stats.groups;
+    if (stats.grids > 0U) {
+        lines.push_back("Smoke: " + count(stats.grids) + (stats.grids == 1U ? " grid, " : " grids, ") +
+                        count(stats.grid_cells) + " cells, " + count((stats.grid_bytes + 1048575U) / 1048576U) +
+                        " MiB on the GPU");
+    }
+    const std::size_t items = stats.objects + stats.systems + stats.forces + stats.groups + stats.grids;
     lines.push_back(count(items) + (items == 1U ? " item: " : " items: ") + count(stats.objects) +
                     (stats.objects == 1U ? " object, " : " objects, ") + count(stats.systems) +
                     (stats.systems == 1U ? " system, " : " systems, ") + count(stats.forces) +
                     (stats.forces == 1U ? " force, " : " forces, ") + count(stats.relationships) +
-                    (stats.relationships == 1U ? " relationship" : " relationships"));
+                    (stats.relationships == 1U ? " relationship" : " relationships") +
+                    (stats.grids == 0U ? std::string{}
+                                       : ", " + count(stats.grids) + (stats.grids == 1U ? " smoke grid" : " smoke grids")));
     for (const std::string &line : stats.near_limits) {
         lines.push_back("Near a limit. " + line);
     }

@@ -95,6 +95,7 @@ RigidScope rigid_scope(BlockKind kind) noexcept {
     // world rather than with any one piece.
     case BlockKind::Explosion:
     case BlockKind::Push:
+    case BlockKind::SmokeGrid:
         return RigidScope::World;
     case BlockKind::Module:
         return RigidScope::Hood;

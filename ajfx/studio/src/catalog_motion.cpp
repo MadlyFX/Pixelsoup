@@ -42,6 +42,37 @@ void add_motion_blocks(std::vector<BlockDef>& blocks) {
                      seed_control()},
         .keywords = "breeze push sideways direction",
     });
+    // A box of air the layer's particles fill with smoke and ride: the
+    // runtime's grid volume (ajfx::Volume), in the artist's words. Look
+    // settings are read when the smoke is drawn, never by the simulation;
+    // none of these publishes, since a volume's fields are not inputs.
+    blocks.push_back(BlockDef{
+        .kind = BlockKind::SmokeGrid,
+        .title = "Smoke grid",
+        .description = "A box of air that particles fill with smoke and ride.",
+        .category = Category::Motion,
+        .controls = {vec3_control("center", "Position", vec3(0.0F, 1.5F, 0.0F), "m", "The centre of the box."),
+                     vec3_control("size", "Size", vec3(2.0F, 3.0F, 2.0F), "m", "Width, height, depth."),
+                     number_control("cell", "Cell size", 0.1F, 0.02F, 1.0F, "m", 3,
+                                    "Smaller cells, finer smoke, more to compute.", 0.01F, 100.0F),
+                     number_control("rises", "Rises", 1.0F, 0.0F, 10.0F, "", 2, "Lift per unit of heat.", 0.0F, 100.0F),
+                     detail(number_control("sinks", "Sinks", 0.0F, 0.0F, 10.0F, "", 2, "Fall per unit of smoke.", 0.0F, 100.0F)),
+                     number_control("swirl", "Swirl", 0.0F, 0.0F, 10.0F, "", 2, "Sharpens the eddies; 0 is off.", 0.0F, 100.0F),
+                     number_control("fades", "Fades", 0.2F, 0.0F, 10.0F, "/s", 2, "Smoke and heat lost each second.", 0.0F, 100.0F),
+                     detail(number_control("calms", "Calms", 0.0F, 0.0F, 10.0F, "/s", 2, "Motion lost each second.", 0.0F, 100.0F)),
+                     detail(number_control("solve", "Solve quality", 20.0F, 1.0F, 80.0F, "", 0,
+                                           "Pressure iterations: more keeps the air from piling up.", 1.0F,
+                                           static_cast<float>(max_volume_pressure_iterations))),
+                     number_control("thickness", "Thickness", 1.0F, 0.0F, 10.0F, "", 2,
+                                    "How much light a unit of smoke takes.", 0.0F, 100.0F),
+                     color_control("color", "Color", color(1.0F, 1.0F, 1.0F, 1.0F), "The smoke's colour."),
+                     number_control("brightness", "Brightness", 0.8F, 0.0F, 1.0F, "", 2,
+                                    "The share of the light it takes that it scatters back.", 0.0F, 1.0F)},
+        .keywords = "smoke air fluid volume grid gas fog plume",
+        .detachable = false,
+        .layers = in_particles,
+        .only_in = "A rigid physics layer's bodies feed no smoke.",
+    });
     blocks.push_back(BlockDef{
         .kind = BlockKind::Turbulence,
         .title = "Turbulence",

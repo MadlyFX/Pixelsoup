@@ -588,6 +588,10 @@ private:
         case BlockKind::Light:
             compile_light(block);
             break;
+        case BlockKind::SmokeGrid:
+            // The page's: listed on the effect by the compiler
+            // (page_volumes), never a module of this emitter.
+            break;
         case BlockKind::Module:
             compile_module(block);
             break;

@@ -126,6 +126,9 @@ std::string save_scene(const Document &document) {
     root.add("next_uid", numeric(document.next_uid));
     root.add("range_seconds", numeric(document.loop_seconds));
     root.add("scale", numeric(document.scale));
+    root.add("backdrop", Json::of(document.backdrop == Backdrop::Studio  ? "studio"
+                                  : document.backdrop == Backdrop::Night ? "night"
+                                                                         : "void"));
     Json physics = Json::object();
     physics.add("gravity", numeric(document.scene->physics.gravity));
     physics.add("angular_damping", numeric(document.scene->physics.angular_damping));
@@ -142,6 +145,7 @@ std::string save_scene(const Document &document) {
         out.add("type", Json::of(std::holds_alternative<Object>(item.data)           ? "object"
                                  : std::holds_alternative<ParticleSystem>(item.data) ? "particles"
                                  : std::holds_alternative<Force>(item.data)          ? "force"
+                                 : std::holds_alternative<SmokeGrid>(item.data)      ? "smoke"
                                                                                      : "group"));
         Json properties = Json::object();
         for (const SceneProperty &p : scene_properties(item)) {
@@ -216,6 +220,10 @@ std::string save_scene(const Document &document) {
         rule.add("min_speed", numeric(r.min_speed));
         rule.add("rate", numeric(r.rate));
         rule.add("pieces", Json::of(r.pieces));
+        rule.add("density", numeric(r.density));
+        rule.add("heat", numeric(r.heat));
+        rule.add("push", numeric(r.push));
+        rule.add("strength", numeric(r.strength));
         rule.add("seed", numeric(r.seed));
         rules.push(std::move(rule));
     }
@@ -225,8 +233,8 @@ std::string save_scene(const Document &document) {
 
 Loaded load_scene(const Json &root) {
     const auto fail = [](std::string reason) { return Loaded{{}, "Scene: " + std::move(reason)}; };
-    if (!keys(root, {"format", "version", "name", "next_uid", "range_seconds", "scale", "physics", "items",
-                     "relationships"})) {
+    if (!keys(root, {"format", "version", "name", "next_uid", "range_seconds", "scale", "backdrop", "physics",
+                     "items", "relationships"})) {
         return fail("unknown or duplicate document field");
     }
     if (root.number_or("version", 0) != 2) {
@@ -252,6 +260,17 @@ Loaded load_scene(const Json &root) {
     }
     document.loop_seconds = static_cast<float>(range);
     document.scale = static_cast<float>(scale);
+    // The preview backdrop, Studio when a scene has not said.
+    document.backdrop = Backdrop::Studio;
+    if (const Json *backdrop = root.find("backdrop")) {
+        if (backdrop->type != Json::Type::String ||
+            (backdrop->text != "studio" && backdrop->text != "night" && backdrop->text != "void")) {
+            return fail("invalid backdrop");
+        }
+        document.backdrop = backdrop->text == "night" ? Backdrop::Night
+                            : backdrop->text == "void" ? Backdrop::Void
+                                                       : Backdrop::Studio;
+    }
     const Json *physics = root.find("physics");
     const Json *items = root.find("items");
     if (!physics || !items || items->type != Json::Type::Array ||
@@ -290,6 +309,8 @@ Loaded load_scene(const Json &root) {
             item.data = Group{};
         } else if (type == "force") {
             item.data = Force{};
+        } else if (type == "smoke") {
+            item.data = SmokeGrid{};
         } else {
             return fail(item.name + ": unsupported item type");
         }
@@ -306,9 +327,8 @@ Loaded load_scene(const Json &root) {
                 return fail(item.name + ": invalid or unsupported property " + key);
             }
         }
-        if (seen.size() != scene_properties(item).size()) {
-            return fail(item.name + ": missing authored property");
-        }
+        // A property a scene has not said keeps the item's default: a scene
+        // saved before a property existed still opens as it was authored.
         if (auto *system = std::get_if<ParticleSystem>(&item.data)) {
             const Json *sources = in.find("sources");
             if (!sources || sources->type != Json::Type::Array) {
@@ -418,8 +438,8 @@ Loaded load_scene(const Json &root) {
         Relationship r;
         std::uint32_t kind{};
         if (!keys(rule, {"uid", "kind", "object", "system", "hardness", "per_hit", "per_speed", "spread", "min_speed",
-                         "rate", "pieces", "seed"}) ||
-            !integer(rule, "uid", r.uid) || !integer(rule, "kind", kind) || kind > 2U ||
+                         "rate", "pieces", "density", "heat", "push", "strength", "seed"}) ||
+            !integer(rule, "uid", r.uid) || !integer(rule, "kind", kind) || kind > 4U ||
             !integer(rule, "object", r.object) || !integer(rule, "system", r.system) || !integer(rule, "seed", r.seed) ||
             !has_type(rule, "pieces", Json::Type::Bool)) {
             return fail("invalid relationship");
@@ -437,6 +457,17 @@ Loaded load_scene(const Json &root) {
         r.min_speed = static_cast<float>(rule.number_or("min_speed", 0));
         r.rate = static_cast<float>(rule.number_or("rate", 0));
         r.pieces = rule.bool_or("pieces", false);
+        // The smoke amounts came after the rest: a rule saved without them
+        // keeps their defaults, as an item's properties do.
+        for (const auto [key, value] : {std::pair{"density", &r.density}, std::pair{"heat", &r.heat},
+                                        std::pair{"push", &r.push}, std::pair{"strength", &r.strength}}) {
+            if (const Json *v = rule.find(key)) {
+                if (v->type != Json::Type::Number || !std::isfinite(v->number)) {
+                    return fail("invalid relationship");
+                }
+                *value = static_cast<float>(v->number);
+            }
+        }
         scene.relationships.push_back(r);
     }
     if (const std::string error = validate_scene(document, false); !error.empty()) {

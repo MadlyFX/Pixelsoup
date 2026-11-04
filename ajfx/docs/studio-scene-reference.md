@@ -51,7 +51,15 @@ Repeated Static and
 Animated objects, and fracture on either, are diagnosed as unsupported.
 
 A particle system owns its sources, launch direction and speed, gravity
-share, a Motion stack, appearance and object-collision switch. Radius,
+share, a Motion stack, appearance and object-collision switch. Its
+Appearance section also says how the scene's light reaches it: **Light** is
+"Glows on its own" (the colour as authored, for sparks and fire) or "Lit by
+the scene" (the preview's lights and sun shadows fall on it, as a rounded
+puff), with **Rounded** (flat to a ball), **Light wraps** (light reaching
+round the dark side), **Takes ambient** and **Takes shadows**. The scene
+settings choose the preview **Backdrop**: Studio (a lit stage), Night (a dim
+moonlit rig, for glowing effects) or Void (no light at all), which is the
+quickest way to see lit and glowing systems differ. Radius,
 lifetime, speed, size, brightness and spin are **ranges**: two values, and
 each particle picks its own between them once, at birth. A range whose two
 values are equal is a constant. The system's seed, and each behavior's seed,
@@ -101,6 +109,31 @@ systems it acts on by identity order, at most 16 per system, so tree order,
 names and other systems never move it. Forces have no viewport handle for a
 strength, and Wind has no position.
 
+A **smoke grid** is a scene item too: a box of air that particle systems
+fill with smoke and ride, the runtime's grid volume. **Add** lists it under
+Smoke. It has a position (the centre of the box) and a size in metres, and
+is cut into cells of **Cell size**; the inspector says what that comes to
+("20 x 30 x 20 cells, 12,000 of 1,048,576"), in the caution colour once
+past what one grid may hold (at most 256 cells along a side and 1,048,576 in
+all), and the scene is refused for playback until the cell size is raised or
+the box shrunk; saving keeps it. The air's settings are **Rises** (lift per
+unit of heat), **Sinks** (fall per unit of smoke), **Swirl** (sharper eddies;
+0 is off), **Fades** (smoke and heat lost each second), **Calms** (motion
+lost each second) and **Solve quality** (pressure iterations); its look is
+**Thickness** (light a unit of smoke takes), **Color** and **Brightness** (the
+share scattered back), which the simulation never reads, so they keep a
+cache. Selecting a grid draws its box in the viewport, with a corner handle
+for its size and a centre handle for its position. A grid starts empty: a
+particle system fills it through a relationship (below). The preview draws
+the smoke with the media server's own volume pass; export writes the volume
+in the `.ajfx` package. A switched-off grid is not on the effect, so rules
+on it do nothing and say so. At most 16 grids in a scene. The HUD and
+Statistics count them ("Smoke: 1 grid, 12,000 cells, 2 MiB on the GPU") and
+name the limit once a grid is four fifths of the way to it. A system that
+feeds smoke is never cached (a cache keeps particles, not what they deposit):
+the bake takes the rest and the HUD says how many systems feeding smoke stay
+live, rather than failing.
+
 Particles with **Collide with objects** on meet loose (Dynamic) objects
 through the shared world, and each Static object as its own shape: the
 floor as a plane at its top, a Sphere collider as a sphere, and a Box or
@@ -108,21 +141,29 @@ Convex hull collider as the box of the object's longest side, without its
 rotation. Animated objects are not met by particles yet. Switching the
 collision off lets particles pass through everything.
 
-A **relationship** is one rule on the scene feeding a particle system from
-an object (or every object) or from another particle system, stored once
-and shown from either endpoint and under Scene settings: `Crate / Hit ->
-Dust / Emit` has particles born where the object hits something (hits from,
-per hit, per m/s, spread), `Crate / Moving -> Smoke / Trail` sheds them
-behind it while it moves (per m/s, moving from, base amount, broken pieces
-only), and `Embers / Moving -> Smoke / Trail` sheds them behind another
-system's particles while those move (per m/s, moving from, base amount),
-each puff born along the step's stretch of the particle's path. Each rule
-has a seed. **Add relationship** on a particle system offers the Dynamic
-objects, the rest listed but not takeable, and under **Trail from system**
-the other particle systems; on a Dynamic object it offers the particle
-systems, and an object that is not Dynamic has no button. A system fed by a
-rule needs no source of its own, and its last source can be removed; a
-persistent population cannot be fed by one. A Dynamic object's inspector
+A **relationship** is one rule on the scene binding a particle system to
+an object (or every object), to another particle system or to a smoke
+grid, stored once and shown from either endpoint and under Scene settings:
+`Crate / Hit -> Dust / Emit` has particles born where the object hits
+something (hits from, per hit, per m/s, spread), `Crate / Moving -> Smoke /
+Trail` sheds them behind it while it moves (per m/s, moving from, base
+amount, broken pieces only), and `Embers / Moving -> Smoke / Trail` sheds
+them behind another system's particles while those move (per m/s, moving
+from, base amount), each puff born along the step's stretch of the
+particle's path. Each of those rules has a seed. `Embers / Feeds -> Smoke
+grid` has the system's particles leave smoke, heat and their own motion in
+the grid's air as they pass through it (smoke and heat per second, push: the
+share of their velocity), and `Ash / Rides -> Smoke grid` has them carried
+by the air while inside it (strength: how quickly they take up its motion).
+A system may feed and ride the same grid, once each; a system that only
+rides smoke still needs a source. **Add relationship** on a particle system
+offers the Dynamic objects, the rest listed but not takeable, under **Trail
+from system** the other particle systems, and under **Feed smoke** and
+**Ride smoke** the scene's grids; on a Dynamic object it offers the particle
+systems, and an object that is not Dynamic has no button; on a smoke grid it
+offers the particle systems under both smoke kinds. A system fed by a hit
+or trail rule needs no source of its own, and its last source can be
+removed; a persistent population cannot be fed by one. A Dynamic object's inspector
 offers **New system born of its hits** and **New system trailing it**, and a
 particle system's **New system trailing its particles**: one edit that
 creates a particle system with no source and the rule that feeds it, so
@@ -132,18 +173,18 @@ when none is Dynamic, is marked as born nothing, as is a trail from a system
 that is switched off. A system cannot trail itself, and systems trailing one
 another round in a ring are refused: the system trailed steps first, so the
 puffs sit where this frame left its particles. Removing either endpoint
-removes the rule rather than re-aiming it at everything. Rules lower into
-the system in identity order and reach the runtime's contact, body and
-particle spawners. Fracture, time and threshold events are not relationships
-yet.
+removes the rule rather than re-aiming it at everything, and a rule whose
+grid is gone is diagnosed. Rules lower into the system in identity order
+and reach the runtime's contact, body and particle spawners and its grid
+modules. Fracture, time and threshold events are not relationships yet.
 
 At the foot of the viewport a **HUD** says what the frame costs and what
 the scene is: GPU time and the cache's state, particles (the most alive at
 once through the loop when the CPU traced it, and the room reserved),
-bodies (room, things standing, kinds of 256), particle state in KiB, and
-the item counts. A limit is named in the caution colour once four fifths of
-it is used: body kinds, forces on one system, blasts, relationships and
-bodies. The same lines appear under Scene settings as Statistics. Nothing
+bodies (room, things standing, kinds of 256), particle state in KiB, smoke
+(grids, cells and GPU memory) and the item counts. A limit is named in the
+caution colour once four fifths of it is used: body kinds, forces on one
+system, blasts, relationships, bodies, smoke grids and cells in one grid. The same lines appear under Scene settings as Statistics. Nothing
 is thinned or dropped to stay inside a limit; the number is there so the
 artist can decide.
 
@@ -179,7 +220,13 @@ part of this schema. Existing layer documents retain their existing format.
 `lower_scene` produces transient compiler IR; it is never another authored
 copy. Items reserve component identities at creation, and lowering sorts by
 UID, including sources. Fracture is emitted beside its typed owner, so tree
-neighbors cannot capture it. Local body material values are explicit; shared
+neighbors cannot capture it. A smoke grid lowers to a layer of one Smoke
+grid block, which the compiler lists on the effect as a grid volume named
+from the block (`page_volumes`) and builds no emitter from; its bindings
+lower to the runtime's `VolumeSource` and `VolumeAdvect` modules naming that
+volume, and the scene's scale applies to the grid's place and cells. A grid
+the runtime refuses is reported against the grid item, with the runtime's
+reason. Local body material values are explicit; shared
 angular damping and sleep settings always come from ScenePhysics.
 
 Rigid objects collide in one solver world. Per-kind draw tint and mesh
@@ -206,12 +253,15 @@ budget search and recipe gallery) has been removed without a conversion step,
 since no projects needed migrating. Its layers and blocks remain as the
 compiler's IR, and its recipes as compiler test fixtures.
 
-Continuous cross-population attraction/repulsion or flow coupling, event
-endpoints beyond collision and motion, light scene items, reusable assemblies, library
+Continuous cross-population attraction/repulsion, event endpoints beyond
+collision and motion, light scene items, reusable assemblies, library
 organization, authored checkpoints, captured actions, simulation-independent
 visibility/isolation, controls publishing and the full export review panel
-are not implemented in the scene workspace. There are no decorative controls
-claiming these capabilities.
+are not implemented in the scene workspace. Flow coupling is a smoke grid
+fed and ridden by systems; the smoke casts no shadow on the particles and
+takes none from them, it is not met by objects or their bodies, and the
+grid's detail is one cell size rather than a choice. There are no decorative
+controls claiming these capabilities.
 
 The scene acceptance tests exercise strict save/load, independent surfaces in
 one colliding world, package round trips, tint/collider cache invalidation,
