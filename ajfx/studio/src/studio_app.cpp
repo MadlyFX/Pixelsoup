@@ -911,161 +911,195 @@ private:
 
     // ------------------------------------------------------- top bar
 
+    // The bar across the top, in Dear ImGui: the file actions, the bake, the
+    // scene's file and whether it changed, history, night, and the state of
+    // the preview as a dot and a word.
     void draw_top_bar(const gui::Rect& bar) {
-        const gui::Theme& theme = ctx_.theme();
-        const bool compact = bar.width < 1100.0F;
-        float x = bar.x + 18.0F;
-        label_sized(ctx_, gui::Rect{x, bar.y, 60.0F, bar.height}, "ajfx", theme.text, 1.2F);
-        x += text_width_sized(ctx_, "ajfx", 1.2F) + 6.0F;
-        if (!compact) {
-            ctx_.label(gui::Rect{x, bar.y + 2.0F, 60.0F, bar.height}, "Studio", theme.text_muted);
-            x += 70.0F;
+        const float scale = window_.ui_scale();
+        const ImVec4 good{0.36F, 0.80F, 0.52F, 1.0F};
+        const ImVec4 caution{1.0F, 0.72F, 0.25F, 1.0F};
+        const ImVec4 warning{0.95F, 0.40F, 0.35F, 1.0F};
+        ImGui::SetNextWindowPos(ImVec2{bar.x * scale, bar.y * scale});
+        ImGui::SetNextWindowSize(ImVec2{bar.width * scale, bar.height * scale});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{18.0F * scale, 8.0F * scale});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0F);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.0F, 0.0F, 0.0F, 0.0F});
+        constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                           ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                           ImGuiWindowFlags_NoScrollWithMouse;
+        if (!ImGui::Begin("##topbar", nullptr, flags)) {
+            ImGui::End();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar(2);
+            return;
         }
-
-        const float y = bar.y + 11.0F;
-        const float file_button_w = compact ? 64.0F : 84.0F;
-        if (editor::pill_button(ctx_, gui::ui_id("studio.new"), gui::Rect{x, y, file_button_w, 30.0F}, gui::Icon::Plus, "New",
-                                "Start a new scene with a Ground object")) {
+        const bool compact = bar.width < 1100.0F;
+        const auto tip = [](const std::string& text) {
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("%s", text.c_str());
+            }
+        };
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(compact ? "ajfx" : "ajfx Studio");
+        ImGui::SameLine();
+        if (ImGui::Button("New")) {
             if (confirm_discard("start a new scene")) { replace_document(new_scene(), {}); }
         }
-        x += file_button_w + 6.0F;
-        if (editor::pill_button(ctx_, gui::ui_id("studio.open"), gui::Rect{x, y, file_button_w, 30.0F}, gui::Icon::Import,
-                                "Open", "Open an ajfx Studio scene")) {
+        tip("Start a new scene with a Ground object");
+        ImGui::SameLine();
+        if (ImGui::Button("Open")) {
             open_dialog();
         }
-        x += file_button_w + 6.0F;
-        if (editor::pill_button(ctx_, gui::ui_id("studio.save"), gui::Rect{x, y, file_button_w, 30.0F}, std::nullopt, "Save",
-                                "Save the scene (Ctrl+S)")) {
+        tip("Open an ajfx Studio scene");
+        ImGui::SameLine();
+        if (ImGui::Button("Save")) {
             static_cast<void>(save(false));
         }
-        x += file_button_w + 6.0F;
-        const float export_w = compact ? 118.0F : 150.0F;
-        if (editor::pill_button(ctx_, gui::ui_id("studio.export"), gui::Rect{x, y, export_w, 30.0F}, gui::Icon::Publish,
-                                "Export .ajfx", "Export a package the media server plays, kernels included",
-                                editor::ButtonTone::Primary)) {
+        tip("Save the scene (Ctrl+S)");
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        if (ImGui::Button("Export .ajfx")) {
             export_dialog();
         }
-        x += export_w + (compact ? 6.0F : 16.0F);
-        {
-            const double progress = builder_.bake_progress();
-            const bool baking = progress >= 0.0;
-            // Kept on the Studio, so they outlive the frame whatever the
-            // button keeps of them.
-            std::string& label = bake_label_;
-            std::string& tip = bake_tip_;
-            label = "Bake";
-            tip.clear();
-            if (baking) {
-                label = "Baking " + std::to_string(static_cast<int>(std::lround(progress * 100.0))) + "%";
-                tip = "Working out the simulation on the CPU. Click to stop.";
-            } else if (!bake_status_.any_baked) {
-                const bool smoke_only = std::any_of(bake_status_.layers.begin(), bake_status_.layers.end(),
-                                                    [](const LayerBake& layer) { return layer.state == BakeState::Live && !layer.why.empty(); });
-                tip = smoke_only ? "Nothing to cache: a system feeding smoke stays live, since a cache keeps particles, not what they deposit."
-                                 : "Add an object or a particle system first.";
-            } else if (bake_status_.current) {
-                tip = "Cache is up to date. Baking again: " + bake_cost_text() + ".";
-            } else {
-                tip = "Cache the simulation: " + bake_cost_text() + ".";
-            }
-            if (editor::pill_button(ctx_, gui::ui_id("studio.bake"), gui::Rect{x, y, 110.0F, 30.0F}, std::nullopt,
-                                    label.c_str(), tip.c_str())) {
-                bake_or_cancel();
-            }
-            if (bake_status_.any_baked && !baking) {
-                // A dot on the button: green when the cache holds the scene,
-                // amber when it needs taking (again).
-                ctx_.rounded(gui::Rect{x + 96.0F, y + 12.0F, 6.0F, 6.0F},
-                             bake_status_.current ? theme.good : theme.caution, 3.0F);
-            }
-            x += 120.0F;
+        ImGui::PopStyleColor();
+        tip("Export a package the media server plays, kernels included");
+
+        const double progress = builder_.bake_progress();
+        const bool baking = progress >= 0.0;
+        std::string label = "Bake";
+        std::string baking_tip;
+        if (baking) {
+            label = "Baking " + std::to_string(static_cast<int>(std::lround(progress * 100.0))) + "%";
+            baking_tip = "Working out the simulation on the CPU. Click to stop.";
+        } else if (!bake_status_.any_baked) {
+            const bool smoke_only = std::any_of(bake_status_.layers.begin(), bake_status_.layers.end(),
+                                                [](const LayerBake& layer) { return layer.state == BakeState::Live && !layer.why.empty(); });
+            baking_tip = smoke_only ? "Nothing to cache: a system feeding smoke stays live, since a cache keeps particles, not what they deposit."
+                                    : "Add an object or a particle system first.";
+        } else if (bake_status_.current) {
+            baking_tip = "Cache is up to date. Baking again: " + bake_cost_text() + ".";
+        } else {
+            baking_tip = "Cache the simulation: " + bake_cost_text() + ".";
+        }
+        ImGui::SameLine();
+        if (bake_status_.any_baked && !baking) {
+            label += "   ";
+        }
+        const ImVec2 bake_at = ImGui::GetCursorScreenPos();
+        if (ImGui::Button(label.c_str())) {
+            bake_or_cancel();
+        }
+        const ImVec2 bake_size = ImGui::GetItemRectSize();
+        tip(baking_tip);
+        if (bake_status_.any_baked && !baking) {
+            // A dot on the button: green when the cache holds the scene,
+            // amber when it needs taking (again).
+            ImGui::GetWindowDrawList()->AddCircleFilled(
+                ImVec2{bake_at.x + bake_size.x - 10.0F * scale, bake_at.y + bake_size.y * 0.5F}, 3.5F * scale,
+                ImGui::ColorConvertFloat4ToU32(bake_status_.current ? good : caution));
         }
 
         // The scene's file, and whether it has unsaved changes.
-        std::string file = path_.empty() ? std::string{"Not saved yet"} : path_.filename().string();
-        const bool dirty = saved_.differs(document_, changes_.value());
-        const gui::Rect file_rect{x, bar.y, std::max(bar.right() - x - (compact ? 210.0F : 330.0F), 0.0F), bar.height};
-        ctx_.label(file_rect, file, theme.text_muted);
-        if (dirty) {
-            const float fw = ctx_.font_width(file);
-            if (fw + 16.0F < file_rect.width) {
-                ctx_.rounded(gui::Rect{file_rect.x + fw + 8.0F, bar.center_y() - 3.0F, 6.0F, 6.0F}, theme.caution, 3.0F);
-                ctx_.tooltip(gui::Rect{file_rect.x, bar.y, fw + 16.0F, bar.height}, "Changed since it was saved");
-            }
-        }
-
-        // Right: what the build is doing, history, and night dim.
-        float rx = bar.right() - 16.0F;
-        rx -= 30.0F;
-        if (editor::icon_button(ctx_, gui::ui_id("studio.night"), gui::Rect{rx, y + 1.0F, 28.0F, 28.0F},
-                                gui::Icon::Night, night_ ? "Turn off night dim" : "Dim the workspace for night",
-                                night_)) {
-            night_ = !night_;
-        }
-        rx -= 32.0F;
-        if (editor::icon_button(ctx_, gui::ui_id("studio.redo"), gui::Rect{rx, y + 1.0F, 28.0F, 28.0F}, gui::Icon::Restart,
-                                "Redo (Ctrl+Y)", false, history_index_ + 1U < history_.size())) {
-            redo();
-        }
-        rx -= 32.0F;
-        if (editor::icon_button(ctx_, gui::ui_id("studio.undo"), gui::Rect{rx, y + 1.0F, 28.0F, 28.0F}, gui::Icon::Reset,
-                                "Undo (Ctrl+Z)", false, history_index_ > 0U)) {
-            undo();
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        const std::string file = path_.empty() ? std::string{"Not saved yet"} : path_.filename().string();
+        ImGui::TextDisabled("%s", file.c_str());
+        if (saved_.differs(document_, changes_.value())) {
+            ImGui::SameLine(0.0F, 6.0F * scale);
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2{at.x + 3.0F * scale, at.y + ImGui::GetFrameHeight() * 0.5F},
+                                                        3.0F * scale, ImGui::ColorConvertFloat4ToU32(caution));
+            ImGui::Dummy(ImVec2{6.0F * scale, 1.0F});
+            tip("Changed since it was saved");
         }
 
         // The state of the effect, as a dot and a word.
         std::string state = "Up to date";
-        gui::UiColor tone = theme.good;
-        std::string tip = "The preview shows this scene.";
+        ImVec4 tone = good;
+        std::string state_tip = "The preview shows this scene.";
         if (!preview_error_.empty()) {
             state = "No preview";
-            tone = theme.warning;
-            tip = preview_error_;
+            tone = warning;
+            state_tip = preview_error_;
         } else if (!build_error_.empty()) {
             state = "Cannot build";
-            tone = theme.warning;
-            tip = build_error_;
+            tone = warning;
+            state_tip = build_error_;
         } else if (builder_.busy() || !preview_shows_page_) {
             state = "Updating";
-            tone = theme.caution;
-            tip = "Building the preview from your latest change.";
+            tone = caution;
+            state_tip = "Building the preview from your latest change.";
         } else if (!compiled_.error.empty()) {
             state = "Cannot play";
-            tone = theme.warning;
-            tip = compiled_.error;
+            tone = warning;
+            state_tip = compiled_.error;
         } else if (!asset_issue_.empty()) {
             state = "A file cannot be used";
-            tone = theme.caution;
-            tip = asset_issue_ + ". Export waits for it.";
+            tone = caution;
+            state_tip = asset_issue_ + ". Export waits for it.";
         } else if (kernel_ms_ > 0.0) {
-            tip += " Its kernels compiled in " + format_number(static_cast<float>(kernel_ms_), 0) + " ms.";
+            state_tip += " Its kernels compiled in " + format_number(static_cast<float>(kernel_ms_), 0) + " ms.";
         }
-        const std::string_view compact_state = state == "Up to date" ? "Ready" : state == "Updating" ? "Wait" : "Issue";
-        const float state_w = compact ? ctx_.font_width(compact_state) + 16.0F : ctx_.font_width(state) + 28.0F;
-        const gui::Rect chip{rx - state_w - 12.0F, y + 2.0F, state_w, 26.0F};
-        ctx_.rounded(chip, theme.track, chip.height * 0.5F);
-        if (!compact) { ctx_.rounded(gui::Rect{chip.x + 10.0F, chip.center_y() - 3.5F, 7.0F, 7.0F}, tone, 3.5F); }
-        if (!compact) {
-            ctx_.label(gui::Rect{chip.x + 22.0F, chip.y, chip.width - 22.0F, chip.height}, state, theme.text);
-        } else {
-            // A state is never color alone, even when the bar is compact.
-            ctx_.label_centered(chip, compact_state, tone);
+        const std::string shown = compact ? (state == "Up to date" ? "Ready" : state == "Updating" ? "Wait" : "Issue") : state;
+        const float chip_w = ImGui::CalcTextSize(shown.c_str()).x + 28.0F * scale;
+        const float buttons_w = ImGui::CalcTextSize("Undo").x + ImGui::CalcTextSize("Redo").x + ImGui::CalcTextSize("Night").x +
+                                ImGui::GetStyle().FramePadding.x * 6.0F + ImGui::GetStyle().ItemSpacing.x * 3.0F;
+        ImGui::SameLine(bar.width * scale - 18.0F * scale - buttons_w - chip_w - ImGui::GetStyle().ItemSpacing.x);
+        {
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const float h = ImGui::GetFrameHeight();
+            ImDrawList* list = ImGui::GetWindowDrawList();
+            list->AddRectFilled(at, ImVec2{at.x + chip_w, at.y + h}, ImGui::GetColorU32(ImGuiCol_FrameBg), h * 0.5F);
+            list->AddCircleFilled(ImVec2{at.x + 12.0F * scale, at.y + h * 0.5F}, 3.5F * scale,
+                                  ImGui::ColorConvertFloat4ToU32(tone));
+            list->AddText(ImVec2{at.x + 22.0F * scale, at.y + (h - ImGui::GetFontSize()) * 0.5F},
+                          ImGui::GetColorU32(ImGuiCol_Text), shown.c_str());
+            ImGui::Dummy(ImVec2{chip_w, h});
+            tip(state + ": " + state_tip);
         }
-        ctx_.tooltip(chip, state + ": " + tip);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(history_index_ == 0U);
+        if (ImGui::Button("Undo")) {
+            undo();
+        }
+        ImGui::EndDisabled();
+        tip("Undo (Ctrl+Z)");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(history_index_ + 1U >= history_.size());
+        if (ImGui::Button("Redo")) {
+            redo();
+        }
+        ImGui::EndDisabled();
+        tip("Redo (Ctrl+Y)");
+        ImGui::SameLine();
+        if (ImGui::Button(night_ ? "Day" : "Night")) {
+            night_ = !night_;
+        }
+        tip(night_ ? "Turn off night dim" : "Dim the workspace for night");
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
     }
 
+    // What was just done or refused, over the bottom of the window for a few
+    // seconds.
     void draw_toast(const gui::Rect& window, double now) {
         if (toast_.text.empty() || now > toast_.until) {
             return;
         }
-        const gui::Theme& theme = ctx_.theme();
-        const float w = std::min(ctx_.font_width(toast_.text) + 44.0F, window.width - 40.0F);
-        const gui::Rect card{window.center_x() - w * 0.5F, window.bottom() - 70.0F, w, 36.0F};
-        ctx_.shadow(card, theme.radius_large);
-        ctx_.rounded(card, theme.widget, card.height * 0.5F);
-        ctx_.rounded(gui::Rect{card.x + 14.0F, card.center_y() - 3.5F, 7.0F, 7.0F}, toast_.ok ? theme.good : theme.warning,
-                     3.5F);
-        ctx_.label(gui::Rect{card.x + 28.0F, card.y, card.width - 36.0F, card.height}, toast_.text, theme.text);
+        const float scale = window_.ui_scale();
+        ImDrawList* list = ImGui::GetForegroundDrawList();
+        const ImVec2 text = ImGui::CalcTextSize(toast_.text.c_str());
+        const float w = std::min(text.x + 44.0F * scale, (window.width - 40.0F) * scale);
+        const float h = 36.0F * scale;
+        const ImVec2 min{window.center_x() * scale - w * 0.5F, (window.bottom() - 70.0F) * scale};
+        list->AddRectFilled(ImVec2{min.x + 2.0F, min.y + 4.0F}, ImVec2{min.x + w + 2.0F, min.y + h + 4.0F},
+                            IM_COL32(0, 0, 0, 80), h * 0.5F);
+        list->AddRectFilled(min, ImVec2{min.x + w, min.y + h}, ImGui::GetColorU32(ImGuiCol_PopupBg), h * 0.5F);
+        list->AddCircleFilled(ImVec2{min.x + 17.0F * scale, min.y + h * 0.5F}, 3.5F * scale,
+                              toast_.ok ? IM_COL32(92, 204, 133, 255) : IM_COL32(242, 102, 89, 255));
+        list->AddText(ImVec2{min.x + 28.0F * scale, min.y + (h - text.y) * 0.5F}, ImGui::GetColorU32(ImGuiCol_Text),
+                      toast_.text.c_str());
     }
 
     // ------------------------------------------------------- preview
