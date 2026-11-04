@@ -8,7 +8,9 @@
 #include <mediaserver/gui/ui_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 
+#include <functional>
 #include <memory>
+#include <span>
 #include <string>
 
 // The window the bespoke UI lives in: an SDL3 window claimed by the RHI, an
@@ -92,6 +94,14 @@ public:
     // operator has asked to close the window.
     [[nodiscard]] bool pump(InputState& input);
 
+    // Hears every operating-system event pump() drains, before it is
+    // translated: an `SDL_Event`, passed as `const void*` so this header names
+    // no toolkit. A UI library that wants the raw events (Dear ImGui's SDL3
+    // backend) takes them here; pass an empty function to stop.
+    void set_event_tap(std::function<void(const void* sdl_event)> tap);
+    // The native `SDL_Window*`, for the same libraries.
+    [[nodiscard]] void* native_window() const noexcept;
+
     // A close request only latches this wrapper; SDL has not destroyed the
     // native window yet. An editor that asks about unsaved work can clear that
     // latch when the operator cancels the close.
@@ -137,6 +147,13 @@ public:
     // Hands the glyph atlas to the renderer. Call once after create(); calling
     // it again re-uploads, which is what a re-baked atlas needs.
     [[nodiscard]] bool set_atlas(const FontAtlas& atlas);
+
+    // A texture of the caller's own, in RGBA8, for draw lists to sample
+    // (UiDrawList::add_triangles, add_image): a UI library's font page. It is
+    // uploaded on the next present. The pointer stays good until
+    // release_texture, which waits for the GPU to be done with it.
+    [[nodiscard]] const rhi::Texture* upload_texture(std::span<const core::u8> rgba, core::u32 width, core::u32 height);
+    void release_texture(const rhi::Texture* texture);
 
     // Draws `list` over `clear` and presents it. Returns true when the frame
     // reached the screen; false is a skipped present - a minimised or occluded

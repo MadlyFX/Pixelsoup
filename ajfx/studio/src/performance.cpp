@@ -1,5 +1,7 @@
 #include "performance.hpp"
 
+#include "stage.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -253,6 +255,17 @@ StageAct act_on_stage(Document& document, const ActTargets& targets, StageTool t
         return StageAct{0U, "Only a scene can be acted on"};
     }
     Scene& scene = *document.scene;
+    if (tool == StageTool::Place) {
+        const SceneItem* item = scene.item(selected);
+        const auto* object = item != nullptr ? std::get_if<Object>(&item->data) : nullptr;
+        if (object == nullptr) {
+            return StageAct{0U, "Select an object to place copies of it"};
+        }
+        const float scale = std::isfinite(document.scale) && document.scale > 0.0F ? document.scale : 1.0F;
+        // Standing where it lands: its middle half its size above the point.
+        const Vec3 at = hit.point + Vec3{0.0F, object->size * scale * 0.5F, 0.0F};
+        return place(document, targets, selected, at, object->rotation);
+    }
     if (tool == StageTool::Drop) {
         const SceneItem* item = scene.item(selected);
         const auto* object = item != nullptr ? std::get_if<Object>(&item->data) : nullptr;

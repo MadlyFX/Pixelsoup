@@ -654,6 +654,28 @@ bool UiDrawList::begin_run(const rhi::Texture* texture, bool nearest) {
     return true;
 }
 
+void UiDrawList::add_triangles(
+    std::span<const UiVertex> vertices, const rhi::Texture* texture,
+    float clip_min_x, float clip_min_y, float clip_max_x, float clip_max_y) {
+    if (vertices.empty() || clip_min_x >= clip_max_x
+        || clip_min_y >= clip_max_y) {
+        return;
+    }
+    const bool same_run = !batches_.empty()
+        && batches_.back().clip_min_x == clip_min_x
+        && batches_.back().clip_min_y == clip_min_y
+        && batches_.back().clip_max_x == clip_max_x
+        && batches_.back().clip_max_y == clip_max_y
+        && batches_.back().texture == texture && !batches_.back().nearest;
+    if (!same_run) {
+        batches_.push_back(UiBatch{
+            static_cast<core::u32>(vertices_.size()), 0U, clip_min_x,
+            clip_min_y, clip_max_x, clip_max_y, texture, false});
+    }
+    vertices_.insert(vertices_.end(), vertices.begin(), vertices.end());
+    batches_.back().vertex_count += static_cast<core::u32>(vertices.size());
+}
+
 void UiDrawList::push_solid(float x, float y, UiColor color) {
     vertices_.push_back(UiVertex{
         x * scale_, y * scale_, white_u_, white_v_, color.r, color.g, color.b,

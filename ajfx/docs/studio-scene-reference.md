@@ -39,10 +39,37 @@ inspector, vectors drop under their label and then take one axis to a row,
 and the tree's Import and the inspector's Duplicate and Delete keep only
 their icons.
 
+### The stage and the Stage panel
+
+An object whose Distribution is **Placed by hand** is a kind: it has no bodies
+of its own, and every body of it is put on the stage or dropped. The stage is
+what stands before the scene plays, and is kept as drops at step 0, so what an
+artist puts down and what they drop later are one record and replay the same.
+The **Stage panel** (Dear ImGui, floating over the viewport) holds the tools
+that act in the viewport, **Select** (Esc), **Place** (O), **Drop** (D) and
+**Delete** (X), and the setup tools that act on what stands on the stage:
+
+- **Place** puts a copy of the selected kind where it stands on the floor or a
+  thing, at step 0, whether or not the scene is playing.
+- **Settle** lets everything on the stage fall and come to rest, with the
+  scene's own piles and props too, on the builder's worker thread, and keeps
+  each thing where it lands. Anything still moving after eight seconds of
+  simulated time is left where it was put and counted. The result is kept only
+  if the scene's performance is the one the settle began with.
+- **Jitter** shifts every thing on the stage by up to Shift metres each way and
+  tilts it by up to Tilt degrees about each axis, drawn from the Seed and the
+  thing's own serial, so the same seed does the same and taking a thing away
+  moves no other.
+- **Reset** puts everything Settle or Jitter moved back where it was put.
+
+A kind placed by hand has to be Dynamic, since it is dropped; a Static or
+Animated one is diagnosed. Placements count against **Most dropped at once**
+with the drops.
+
 ### Drop and Delete: the performance
 
-Three tools top right of the viewport say what a click does: **Select**
-(Esc), **Drop** (D) and **Delete** (X). With Drop, a click drops a copy of
+Four tools top right of the viewport say what a click does: **Select**
+(Esc), **Place** (O), **Drop** (D) and **Delete** (X). With Drop, a click drops a copy of
 the selected Dynamic object with its bottom 0.75 m above where the click
 lands on the floor or on a thing, turned as the object is; with Delete, a
 click takes away the thing under it, one of an object's own bodies or a
@@ -79,7 +106,8 @@ density, friction, restitution, initial velocity, release time and fracture.
 Static, Dynamic and Animated have their usual collision meanings. Animated
 uses the runtime's supported single move, with start, duration and target
 pose. Collider choices are explicit convex hull, sphere or box. Distribution
-creates a Single object or one Grid/Pile instance set. A Single object of
+creates a Single object, one Grid/Pile instance set, or a kind placed by hand
+(see the stage above). A Single object of
 any motion starts with its middle at its Position, where its handle is.
 Repeated Static and
 Animated objects, and fracture on either, are diagnosed as unsupported.
@@ -258,7 +286,8 @@ resets, storage and motion invalidation. New scene files use
 `ajfx-studio-scene`, schema 2 (schema 1 lacked the Motion stack and drivers
 and is refused). The performance is the root key `performance`
 (`next_serial` and `acts`, each a drop or a deletion with its serial and
-step); a scene saved without one opens with none, and acts out of order or
+step; a drop that Settle or Jitter moved also keeps the `home` and `home_turn`
+it was put at); a scene saved without one opens with none, and acts out of order or
 with a serial not yet handed out are refused. Readers refuse unknown, duplicate, malformed
 or missing authored properties and unsupported versions. Window state is not
 part of this schema. Existing layer documents retain their existing format.

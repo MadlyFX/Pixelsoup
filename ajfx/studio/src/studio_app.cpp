@@ -9,7 +9,10 @@
 #include "performance.hpp"
 #include "preview.hpp"
 #include "scene.hpp"
+#include "imgui_layer.hpp"
 #include "scene_view.hpp"
+#include "stage.hpp"
+#include "stage_panel.hpp"
 #include "session.hpp"
 #include "stage_camera.hpp"
 #include "stage_overlay.hpp"
@@ -163,6 +166,11 @@ public:
         scene_tree_split_ = session_.scene_tree_split;
         scene_inspector_split_ = session_.scene_inspector_split;
         scene_view_.restore(session_.scene_selection, session_.scene_folded);
+        std::string ini;
+        if (const std::filesystem::path file = session_path(); !file.empty()) {
+            ini = (file.parent_path() / "windows.ini").string();
+        }
+        imgui_ = std::make_unique<ImguiLayer>(window_, std::move(ini));
         return true;
     }
 
@@ -182,13 +190,16 @@ public:
             static_cast<void>(window_.set_atlas(font_));
         }
         list_.set_scale(window_.ui_scale());
+        imgui_->begin_frame(input_);
         const double now = window_.time_seconds();
+        take_dropped_files(now);
         const double dt = std::clamp(now - last_time_, 0.0, 0.1);
         last_time_ = now;
         ctx_.set_theme(studio_theme(night_));
         ctx_.new_frame(now);
 
         take_results(now);
+        place_pending(now);
         advance_playback(dt);
         lose_device_if_asked(now);
 
@@ -215,6 +226,8 @@ public:
         scene_view_.draw_overlays(ctx_, window, document_);
         draw_toast(window, now);
         ctx_.draw_overlays(window);
+        draw_stage_panel_window();
+        imgui_->end_frame(list_);
 
         // Whatever drew edited the scene in place; this is the one look at it
         // each frame, and what follows asks the number it leaves.
@@ -638,6 +651,19 @@ private:
         if (std::optional<ExportResult> exported = builder_.take_export()) {
             toast(exported->message, exported->ok);
         }
+        if (std::optional<SettleOutcome> settled = builder_.take_settle()) {
+            settling_ = false;
+            // Kept only if the scene's performance is the one it began with:
+            // anything done meanwhile would be written over.
+            if (settled->ok && document_.scene && document_.scene->performance == settled->before) {
+                document_.scene->performance = std::move(settled->after);
+                stage_status_ = settled->message;
+            } else if (settled->ok) {
+                stage_status_ = "The scene changed while it settled: settle again";
+            } else {
+                stage_status_ = settled->message;
+            }
+        }
         if (std::optional<BakeResult> baked = builder_.take_bake()) {
             // A bake Studio took by itself says nothing unless it failed for
             // a reason of its own; one an edit stopped is simply taken again.
@@ -820,6 +846,9 @@ private:
         }
         if (typed.find('d') != std::string_view::npos || typed.find('D') != std::string_view::npos) {
             tool_ = tool_ == StageTool::Drop ? StageTool::Select : StageTool::Drop;
+        }
+        if (typed.find('o') != std::string_view::npos || typed.find('O') != std::string_view::npos) {
+            tool_ = tool_ == StageTool::Place ? StageTool::Select : StageTool::Place;
         }
         if (typed.find('x') != std::string_view::npos || typed.find('X') != std::string_view::npos) {
             tool_ = tool_ == StageTool::Delete ? StageTool::Select : StageTool::Delete;
@@ -1202,10 +1231,12 @@ private:
             gui::Icon icon;
             const char* tip;
         };
-        constexpr std::array<ToolButton, 3> tools{
+        constexpr std::array<ToolButton, 4> tools{
             ToolButton{StageTool::Delete, gui::Icon::Trash, "Delete: click a thing to take it away from then on (X)"},
             ToolButton{StageTool::Drop, gui::Icon::Surface,
                        "Drop: click to drop a copy of the selected object there, while it plays (D)"},
+            ToolButton{StageTool::Place, gui::Icon::Plus,
+                       "Place: click to put a copy of the selected object on the stage, standing there from the start (O)"},
             ToolButton{StageTool::Select, gui::Icon::Select, "Select: click a thing to select it (Esc)"}};
         float tool_x = guides_button.x - 12.0F;
         for (const ToolButton& button : tools) {
@@ -1346,8 +1377,9 @@ private:
             toast("Wait for the scene to finish building", false);
             return;
         }
-        const std::uint64_t tick = act_tick(playing_, shown_tick_, preview_acting_lead);
-        if (looping_ && static_cast<double>(tick) >= loop_frames()) {
+        const std::uint64_t tick =
+            tool_ == StageTool::Place ? 0U : act_tick(playing_, shown_tick_, preview_acting_lead);
+        if (tool_ != StageTool::Place && looping_ && static_cast<double>(tick) >= loop_frames()) {
             toast("That is past the end of the loop: it would never play", false);
             return;
         }
@@ -1358,9 +1390,104 @@ private:
         }
         selected_act_ = act.serial;
         if (!playing_) {
-            toast(tool_ == StageTool::Drop ? "Dropped: it falls once the scene plays on"
-                                           : "Deleted: it goes once the scene plays on",
+            toast(tool_ == StageTool::Drop    ? "Dropped: it falls once the scene plays on"
+                  : tool_ == StageTool::Place ? "Placed: it stands there when the scene starts"
+                                              : "Deleted: it goes once the scene plays on",
                   true);
+        }
+    }
+
+    // Model files let go over the viewport become kinds placed by hand, and
+    // the tool becomes Place so more copies are a click each.
+    void take_dropped_files(double now) {
+        if (!document_.scene || input_.dropped_files().empty()) {
+            return;
+        }
+        const float x = input_.drop_x();
+        const float y = input_.drop_y();
+        if (!stage_area_.contains(x, y)) {
+            return;
+        }
+        const StageCamera camera{camera_pose(orbit_), stage_area_};
+        Vec3 origin{}, direction{};
+        camera.ray(x, y, origin, direction);
+        const float floor = stage_floor(document_);
+        // Where the ray meets the floor, or a little in front of the camera
+        // when it never does.
+        const Vec3 where = direction.y < -1.0e-4F ? origin + direction * ((floor - origin.y) / direction.y)
+                                                   : origin + direction * 3.0F;
+        std::size_t added = 0U;
+        for (const Uid uid : add_dropped_models(document_, input_.dropped_files())) {
+            // Several at once are set side by side rather than in one spot.
+            pending_places_.push_back(PendingPlace{uid, where + Vec3{0.6F * static_cast<float>(added), 0.0F, 0.0F}, now});
+            scene_view_.select(uid, false);
+            ++added;
+        }
+        if (added != 0U) {
+            tool_ = StageTool::Place;
+            toast(added == 1U ? "Placed on the stage once it has built: click to place more"
+                              : "Placed on the stage once they have built: click to place more",
+                  true);
+        }
+    }
+
+    // Puts the first copy of each dropped model on the stage once the
+    // package that has its kind has been built; gives up on one that never
+    // is, saying why.
+    void place_pending(double now) {
+        for (auto at = pending_places_.begin(); at != pending_places_.end();) {
+            if (document_.scene && has_package_ && package_targets_.kinds.contains(at->kind)) {
+                StageHit hit;
+                hit.point = at->at;
+                const StageAct act =
+                    act_on_stage(document_, package_targets_, StageTool::Place, at->kind, hit, 0U);
+                if (act.serial == 0U) {
+                    toast(act.refusal, false);
+                } else {
+                    selected_act_ = act.serial;
+                }
+                at = pending_places_.erase(at);
+            } else if (now - at->since > 30.0 || !document_.scene || document_.scene->item(at->kind) == nullptr) {
+                toast("A dropped model could not be placed: its object did not build", false);
+                at = pending_places_.erase(at);
+            } else {
+                ++at;
+            }
+        }
+    }
+
+    // The Stage panel (Dear ImGui), and what its setup buttons ask for.
+    void draw_stage_panel_window() {
+        if (!document_.scene) {
+            return;
+        }
+        const float scale = window_.ui_scale();
+        const StagePanelIn in{.document = &document_,
+                              .kind = scene_view_.selected(),
+                              .settling = settling_,
+                              .status = stage_status_};
+        const StageRequest request = draw_stage_panel(
+            stage_panel_, in, tool_, ImVec2{(stage_area_.x + 14.0F) * scale, (stage_area_.y + 60.0F) * scale});
+        Performance& performance = document_.scene->performance;
+        switch (request) {
+        case StageRequest::Jitter: {
+            const std::size_t moved = jitter_stage(performance, static_cast<std::uint32_t>(stage_panel_.seed),
+                                                   stage_panel_.shift, stage_panel_.tilt);
+            stage_status_ = "Jittered " + std::to_string(moved) + (moved == 1U ? " thing" : " things");
+            break;
+        }
+        case StageRequest::Reset: {
+            const std::size_t moved = reset_stage(performance);
+            stage_status_ = "Put " + std::to_string(moved) + (moved == 1U ? " thing" : " things") + " back";
+            break;
+        }
+        case StageRequest::Settle:
+            settling_ = true;
+            stage_status_.clear();
+            builder_.submit_settle(document_, path_.empty() ? std::filesystem::path{} : path_.parent_path());
+            break;
+        case StageRequest::None:
+            break;
         }
     }
 
@@ -1371,7 +1498,12 @@ private:
         }
         const SceneItem* item = document_.scene->item(scene_view_.selected());
         if (item == nullptr || !std::holds_alternative<Object>(item->data)) {
-            return "Select an object to drop copies of it";
+            return tool_ == StageTool::Place ? "Select an object to place copies of it"
+                                             : "Select an object to drop copies of it";
+        }
+        if (tool_ == StageTool::Place) {
+            return "Click to place " + item->name + " on the stage (" +
+                   std::to_string(stage_count(document_.scene->performance)) + " there)";
         }
         const std::size_t held = dropped_count(document_.scene->performance);
         return "Click to drop a copy of " + item->name + " (" + std::to_string(held) + " of " +
@@ -1644,6 +1776,21 @@ private:
     bool show_handles_{true};
     bool show_paths_{false};
     std::string asset_issue_;
+    // Dear ImGui, drawn over the rest while Studio is moved onto it a panel
+    // at a time (imgui_layer.hpp), and what the Stage panel keeps.
+    std::unique_ptr<ImguiLayer> imgui_;
+    StagePanelState stage_panel_;
+    bool settling_{false};
+    std::string stage_status_;
+    // Models dropped on the viewport from the desktop: each is a kind placed
+    // by hand, and a first copy goes on the stage where it was let go once
+    // the package that has the kind is built.
+    struct PendingPlace final {
+        Uid kind{};
+        Vec3 at{};
+        double since{};
+    };
+    std::vector<PendingPlace> pending_places_;
     std::map<std::string, std::vector<Vec3>, std::less<>> outlines_;
     std::uint32_t settled_frames_{0U};
     // What a click in the picture does, and the act last made or picked on

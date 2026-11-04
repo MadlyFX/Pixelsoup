@@ -22,6 +22,8 @@ Search with `rg`; the `CMakeLists.txt` files locate tests.
 | Scene ownership, metadata and persistence | `studio/src/scene.*`, `scene_properties.*`, `scene_io.*` |
 | Scene tree and selected-item inspector | `studio/src/scene_view.*`, `docs/studio-scene-reference.md` |
 | Studio application: window, preview, worker | `studio/src/studio_app.*`, `preview.*`, `package_builder.*`, `stage_overlay.*` |
+| Dear ImGui layer and the panels drawn with it | `studio/src/imgui_layer.*`, `stage_panel.*` |
+| The stage and its setup tools (place, jitter, settle, reset) | `studio/src/stage.*`, `performance.*` |
 | Compiler fixtures (old layer recipes) | `studio/tests/fixtures` |
 
 `lib/` has no dependency outside the C++ standard library, the platform's
@@ -49,9 +51,13 @@ Studio application links the media server's `MediaServer::Render`, `Gui` and
   [the Studio design](docs/studio-ui-architecture.md) and
   [delivery plan](next-steps-plan.md). The media server's `docs/ui-design.md`
   and shared-widget rules do not prescribe Studio's design or UI framework.
-  Reuse host UI code only where it serves Studio's workflow. The current
-  application still uses that toolkit, whose font atlas is ASCII-only;
-  framework replacement is a planned decision, not an implemented change.
+  Reuse host UI code only where it serves Studio's workflow. Studio is moving
+  to Dear ImGui (docking, via vcpkg), drawn through the media server's
+  renderer (`studio/src/imgui_layer.*`), a panel at a time: the Stage panel
+  is on it, and the rest of the interface still uses the media server's
+  toolkit, whose font atlas is ASCII-only, until it is moved. While both are
+  drawn, ImGui is on top and withholds the pointer and keyboard from the old
+  one (`InputState::withhold_pointer`).
 - Test observable behaviour with independent expectations: bit-identical
   reruns, seek equivalence, CPU and GPU agreement, pixels against
   hand-computed coverage.

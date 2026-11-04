@@ -80,9 +80,10 @@ void forget_object(Performance& performance, Uid object);
 // ------------------------------------------------------- acting in the viewport
 
 // What a click in the viewport does: selects what it lands on, drops a copy
-// of the selected Object above where it lands, or deletes the body it lands
-// on.
-enum class StageTool : std::uint8_t { Select, Drop, Delete };
+// of the selected Object above where it lands, deletes the body it lands on,
+// or places a copy of the selected Object on the stage where it lands, to
+// stand there from the first step (stage.hpp).
+enum class StageTool : std::uint8_t { Select, Drop, Delete, Place };
 
 // How far above where a click lands a dropped thing's bottom starts, metres.
 inline constexpr float drop_height = 0.75F;
@@ -106,7 +107,8 @@ struct StageAct final {
     // Why it was refused, in the artist's words.
     std::string refusal;
 };
-// Does what `tool` does at `hit` at step `tick`: a Drop of the `selected`
+// Does what `tool` does at `hit` at step `tick` (a Place is always at the
+// first step): a Drop of the `selected`
 // Object, its bottom drop_height above the point, turned as the Object is;
 // a Delete of the body hit. Refused, changing nothing, where it cannot be
 // done: nothing selected to drop, an Object that is not loose, a scene that

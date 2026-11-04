@@ -363,6 +363,15 @@ struct UiWindow::Impl final {
     std::optional<rhi::Swapchain> swapchain;
     std::optional<UiRenderer> renderer;
     rhi::Texture target;
+    // Textures the caller asked for (UiWindow::upload_texture), uploaded on
+    // the next present. After the device, so they go before it.
+    struct Extra final {
+        std::unique_ptr<rhi::Texture> texture;
+        std::vector<core::u8> pixels;
+        bool uploaded{};
+        bool dead{};
+    };
+    std::vector<Extra> extras;
 
     SDL_Window* window{};
     bool sdl_video{};
@@ -376,6 +385,7 @@ struct UiWindow::Impl final {
     // in pixels; below one where the platform reports points.
     float pixel_density{1.0F};
     bool closed{};
+    std::function<void(const void*)> event_tap;
 
     std::array<SDL_Cursor*, static_cast<std::size_t>(Cursor::Count)> cursors{};
     Cursor cursor{Cursor::Arrow};
@@ -582,6 +592,9 @@ bool UiWindow::pump(InputState& input) {
     const float to_logical = impl_->pixel_density / impl_->ui_scale();
     SDL_Event event{};
     while (SDL_PollEvent(&event)) {
+        if (impl_->event_tap) {
+            impl_->event_tap(&event);
+        }
         if (!translate_event(&event, input, to_logical)) {
             impl_->closed = true;
         }
@@ -589,6 +602,14 @@ bool UiWindow::pump(InputState& input) {
     impl_->refresh_metrics();
 
     return !impl_->closed;
+}
+
+void UiWindow::set_event_tap(std::function<void(const void*)> tap) {
+    impl_->event_tap = std::move(tap);
+}
+
+void* UiWindow::native_window() const noexcept {
+    return impl_->window;
 }
 
 void UiWindow::cancel_close_request() noexcept {
@@ -709,9 +730,41 @@ bool UiWindow::set_atlas(const FontAtlas& atlas) {
     return true;
 }
 
+const rhi::Texture* UiWindow::upload_texture(std::span<const core::u8> rgba, core::u32 width, core::u32 height) {
+    if (rgba.size() != static_cast<std::size_t>(width) * height * 4U || width == 0U || height == 0U) {
+        return nullptr;
+    }
+    rhi::TextureDesc desc{};
+    desc.width = width;
+    desc.height = height;
+    desc.format = rhi::TextureFormat::Rgba8Unorm;
+    desc.sampled = true;
+    auto created = impl_->device->create_texture(desc);
+    if (!created) {
+        return nullptr;
+    }
+    UiWindow::Impl::Extra extra;
+    extra.texture = std::make_unique<rhi::Texture>(std::move(created).value());
+    extra.pixels.assign(rgba.begin(), rgba.end());
+    impl_->extras.push_back(std::move(extra));
+    return impl_->extras.back().texture.get();
+}
+
+void UiWindow::release_texture(const rhi::Texture* texture) {
+    for (auto& extra : impl_->extras) {
+        if (extra.texture.get() == texture) {
+            extra.dead = true;
+        }
+    }
+}
+
 bool UiWindow::present(const UiDrawList& list, rhi::Color clear) {
     if (!impl_->ensure_target()) {
         return false;
+    }
+    if (std::any_of(impl_->extras.begin(), impl_->extras.end(), [](const auto& e) { return e.dead; })) {
+        impl_->device->wait_idle();
+        std::erase_if(impl_->extras, [](const auto& e) { return e.dead; });
     }
     if (impl_->atlas_pending && impl_->atlas_uploaded) {
         // A re-bake (the scale changed) replaces a texture earlier frames may
@@ -733,6 +786,14 @@ bool UiWindow::present(const UiDrawList& list, rhi::Color clear) {
             impl_->atlas_width,
             impl_->atlas_height);
         impl_->atlas_uploaded = impl_->atlas_uploaded || !impl_->atlas_pending;
+    }
+
+    for (auto& extra : impl_->extras) {
+        if (!extra.uploaded && commands.upload(*extra.texture, extra.pixels)) {
+            extra.uploaded = true;
+            extra.pixels.clear();
+            extra.pixels.shrink_to_fit();
+        }
     }
 
     bool presented = false;

@@ -267,6 +267,15 @@ public:
         float v1,
         UiColor tint = UiColor{1.0F, 1.0F, 1.0F, 1.0F});
 
+    // Triangles already in physical pixels, each vertex with its own uv and
+    // straight colour, drawn as one run clipped to the rectangle given (also
+    // physical pixels) and sampling `texture`, or the glyph atlas when null.
+    // The clip is not intersected with the stack: how another UI library's
+    // draw data (Dear ImGui) reaches the screen through this renderer.
+    void add_triangles(std::span<const UiVertex> vertices,
+                       const rhi::Texture* texture, float clip_min_x,
+                       float clip_min_y, float clip_max_x, float clip_max_y);
+
     // Scales everything drawn since vertex `first` about (centre_x,
     // centre_y) - logical units - by `factor`. A whole compound mark grows
     // or shrinks as one, text included, without redrawing it: how a dragged

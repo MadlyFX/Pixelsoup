@@ -21,6 +21,15 @@
         "tinyobjloader",
         "tinyfiledialogs",
         {
+          "name": "imgui",
+          "features": [
+            "docking-experimental",
+            "sdl3-binding",
+            "freetype"
+          ]
+        },
+        "imguizmo",
+        {
           "name": "ffmpeg",
           "features": [
             "nvcodec"

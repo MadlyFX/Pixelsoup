@@ -4,7 +4,9 @@
 #include <ajfx/simulation.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <filesystem>
 #include <numbers>
 #include <vector>
 
@@ -58,6 +60,30 @@ Vec3 turn_of(Quat q) noexcept {
         roll = std::atan2(-m01, m11);
     }
     return Vec3{pitch * degrees, yaw * degrees, roll * degrees};
+}
+
+std::vector<Uid> add_dropped_models(Document& document, std::span<const std::string> files) {
+    std::vector<Uid> kinds;
+    if (!document.scene) {
+        return kinds;
+    }
+    for (const std::string& file : files) {
+        std::string extension = std::filesystem::path{file}.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension != ".obj" && extension != ".gltf" && extension != ".glb") {
+            continue;
+        }
+        const Uid uid = add_object(document, std::filesystem::path{file}.generic_string());
+        if (uid == 0U) {
+            continue;
+        }
+        Object& object = std::get<Object>(document.scene->item(uid)->data);
+        object.distribution = Distribution::Placed;
+        object.motion = ObjectMotion::Dynamic;
+        kinds.push_back(uid);
+    }
+    return kinds;
 }
 
 StageAct place(Document& document, const ActTargets& targets, Uid kind, Vec3 position, Vec3 turn) {

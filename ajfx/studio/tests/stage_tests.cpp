@@ -248,6 +248,24 @@ void settling_leaves_later_acts_and_refuses_an_empty_stage() {
     CHECK(*find_act(scene.document.scene->performance, later) == before);
 }
 
+void dropped_model_files_become_kinds_placed_by_hand() {
+    Document document = new_scene();
+    const std::size_t before = document.scene->items.size();
+    const std::vector<std::string> files{"C:/models/Helmet.GLB", "C:/models/notes.txt", "C:/models/rock.obj",
+                                         "C:/models/arch.gltf", "C:/models/photo.png", "C:/models/noextension"};
+    const std::vector<Uid> kinds = add_dropped_models(document, files);
+    CHECK(kinds.size() == 3U && document.scene->items.size() == before + 3U);
+    const char* meshes[] = {"C:/models/Helmet.GLB", "C:/models/rock.obj", "C:/models/arch.gltf"};
+    for (std::size_t i = 0U; i < kinds.size(); ++i) {
+        const Object& kind = object(document, kinds[i]);
+        CHECK(kind.mesh == meshes[i]);
+        CHECK(kind.distribution == Distribution::Placed && kind.motion == ObjectMotion::Dynamic);
+    }
+    CHECK(add_dropped_models(document, std::vector<std::string>{"a.txt"}).empty());
+    Document none;
+    CHECK(add_dropped_models(none, files).empty());
+}
+
 void placements_are_saved_with_their_home() {
     Scene3 scene = crate_kind();
     const Compiled compiled = ready(scene.document);
@@ -275,5 +293,6 @@ void add_stage_tests(std::vector<studio_test::Case>& cases) {
     cases.push_back({"jitter_is_bounded_exact_and_taken_back_by_reset", jitter_is_bounded_exact_and_taken_back_by_reset});
     cases.push_back({"settling_keeps_where_things_came_to_rest", settling_keeps_where_things_came_to_rest});
     cases.push_back({"settling_leaves_later_acts_and_refuses_an_empty_stage", settling_leaves_later_acts_and_refuses_an_empty_stage});
+    cases.push_back({"dropped_model_files_become_kinds_placed_by_hand", dropped_model_files_become_kinds_placed_by_hand});
     cases.push_back({"placements_are_saved_with_their_home", placements_are_saved_with_their_home});
 }

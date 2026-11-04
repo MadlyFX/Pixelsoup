@@ -4,6 +4,7 @@
 #include "document_io.hpp"
 #include "library.hpp"
 #include "performance.hpp"
+#include "stage.hpp"
 #include "scene.hpp"
 #include "user_assets.hpp"
 
@@ -244,6 +245,21 @@ void PackageBuilder::submit_bake(Document document, std::filesystem::path base) 
     wake_.notify_all();
 }
 
+void PackageBuilder::submit_settle(Document document, std::filesystem::path base) {
+    {
+        std::lock_guard lock{mutex_};
+        pending_settle_ = SettleRequest{std::move(document), std::move(base)};
+    }
+    wake_.notify_all();
+}
+
+std::optional<SettleOutcome> PackageBuilder::take_settle() {
+    std::lock_guard lock{mutex_};
+    std::optional<SettleOutcome> out = std::move(settled_);
+    settled_.reset();
+    return out;
+}
+
 void PackageBuilder::cancel_bake() {
     std::lock_guard lock{mutex_};
     cancel_bake_.store(true);
@@ -297,9 +313,12 @@ void PackageBuilder::run() {
         std::optional<Request> request;
         std::optional<ExportRequest> export_request;
         std::optional<BakeRequest> bake_request_taken;
+        std::optional<SettleRequest> settle_request_taken;
         {
             std::unique_lock lock{mutex_};
-            wake_.wait(lock, [&] { return stopping_ || pending_ || pending_export_ || pending_bake_; });
+            wake_.wait(lock, [&] {
+                return stopping_ || pending_ || pending_export_ || pending_settle_ || pending_bake_;
+            });
             if (stopping_) {
                 return;
             }
@@ -311,6 +330,9 @@ void PackageBuilder::run() {
             } else if (pending_export_) {
                 export_request = std::move(pending_export_);
                 pending_export_.reset();
+            } else if (pending_settle_) {
+                settle_request_taken = std::move(pending_settle_);
+                pending_settle_.reset();
             } else {
                 bake_request_taken = std::move(pending_bake_);
                 pending_bake_.reset();
@@ -351,6 +373,10 @@ void PackageBuilder::run() {
             ExportResult result = export_package(*export_request);
             std::lock_guard lock{mutex_};
             exported_ = std::move(result);
+        } else if (settle_request_taken) {
+            SettleOutcome outcome = settle_request(*settle_request_taken);
+            std::lock_guard lock{mutex_};
+            settled_ = std::move(outcome);
         } else if (bake_request_taken) {
             BakeResult result = bake_request(*bake_request_taken);
             std::lock_guard lock{mutex_};
@@ -796,6 +822,44 @@ ExportResult PackageBuilder::export_package(const ExportRequest& request) {
                           "Bake, then export";
     }
     return result;
+}
+
+SettleOutcome PackageBuilder::settle_request(const SettleRequest& request) {
+    SettleOutcome outcome;
+    if (!request.document.scene) {
+        outcome.message = "Only a scene has a stage";
+        return outcome;
+    }
+    outcome.before = request.document.scene->performance;
+    // As a bake does: the exported effect with its files read and its cuts
+    // made, since that is the world the stage stands in.
+    Compiled compiled = compile(request.document, Purpose::Export);
+    if (!compiled.error.empty()) {
+        outcome.message = "Not settled. " + compiled.error;
+        return outcome;
+    }
+    std::string issue;
+    resolve_assets(compiled, request.base, issue, nullptr);
+    if (!issue.empty()) {
+        outcome.message = "Not settled: " + issue;
+        return outcome;
+    }
+    if (compiled.effect && has_rigid_physics(*compiled.effect) && !rigid_) {
+        rigid_ = rigid::make_jolt_solver();
+    }
+    Document settled = request.document;
+    outcome.result = settle_stage(settled, compiled, rigid_.get(), SettleOptions{.instance_seed = instance_seed_});
+    if (!outcome.result.refusal.empty()) {
+        outcome.message = outcome.result.refusal;
+        return outcome;
+    }
+    outcome.after = settled.scene->performance;
+    outcome.ok = true;
+    outcome.message = "Settled " + std::to_string(outcome.result.settled) + (outcome.result.settled == 1U ? " thing" : " things");
+    if (outcome.result.moving != 0U) {
+        outcome.message += "; " + std::to_string(outcome.result.moving) + " still moving after the time allowed";
+    }
+    return outcome;
 }
 
 BakeResult PackageBuilder::bake_request(const BakeRequest& request) {

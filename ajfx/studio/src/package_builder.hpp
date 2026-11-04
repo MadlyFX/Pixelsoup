@@ -3,6 +3,7 @@
 #include "bake.hpp"
 #include "compile.hpp"
 #include "document.hpp"
+#include "stage.hpp"
 #include "stage_pick.hpp"
 
 #include <ajfx/gpu/kernels.hpp>
@@ -109,6 +110,18 @@ struct BakeResult final {
     std::shared_ptr<const BakeRecord> record;
 };
 
+// The stage settled (stage.hpp), worked out off the interface thread: the
+// scene's performance with the things on the stage where they came to rest.
+struct SettleOutcome final {
+    bool ok{false};
+    std::string message;
+    // The performance the settle began with, and with the stage settled: the
+    // one to compare with before adopting it.
+    Performance before;
+    Performance after;
+    SettleResult result;
+};
+
 class PackageBuilder final {
 public:
     // `instance_seed` is the preview placement's, for the CPU runs. Without
@@ -142,6 +155,12 @@ public:
     // end unless cancelled.
     void submit_bake(Document document, std::filesystem::path base = {});
     void cancel_bake();
+    // Lets the things on the stage fall and come to rest (settle_stage), once
+    // nothing else is waiting. The outcome holds the stage as it ended up;
+    // the caller adopts it if the scene's performance is still what it began
+    // with.
+    void submit_settle(Document document, std::filesystem::path base = {});
+    [[nodiscard]] std::optional<SettleOutcome> take_settle();
 
     [[nodiscard]] std::optional<BuildResult> take_build();
     [[nodiscard]] std::optional<Analysis> take_analysis();
@@ -174,6 +193,10 @@ private:
         Document document;
         std::filesystem::path base;
     };
+    struct SettleRequest final {
+        Document document;
+        std::filesystem::path base;
+    };
     struct AnalysisRequest final {
         Request request;
         Compiled compiled;
@@ -203,6 +226,7 @@ private:
     BuildResult build(const Request& request);
     ExportResult export_package(const ExportRequest& request);
     BakeResult bake_request(const BakeRequest& request);
+    SettleOutcome settle_request(const SettleRequest& request);
     // One CPU run of `compiled` for `steps` steps. With `focus`, only that
     // layer's paths; otherwise everything, and it gives way to a newer
     // request when `yield` (its focus run was quick and has been shown).
@@ -245,6 +269,8 @@ private:
     std::optional<ExportResult> exported_;
     std::optional<BakeRequest> pending_bake_;
     std::optional<BakeResult> baked_;
+    std::optional<SettleRequest> pending_settle_;
+    std::optional<SettleOutcome> settled_;
     std::atomic<double> bake_progress_{-1.0};
     std::atomic<bool> cancel_bake_{false};
     bool working_{false};

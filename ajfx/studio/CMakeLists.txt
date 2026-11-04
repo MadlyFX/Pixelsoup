@@ -52,12 +52,16 @@ if(AJFX_BUILD_STUDIO_APP)
                             "build it from the repository root")
     endif()
     find_package(tinyfiledialogs CONFIG REQUIRED)
+    find_package(imgui CONFIG REQUIRED)
+    find_package(imguizmo CONFIG REQUIRED)
 
     # The scene's tree, inspector and controls: drawn by the application and,
     # headless of the window, by the UI tests.
     add_library(ajfx_studio_page STATIC
         src/widgets.cpp
         src/scene_view.cpp
+        src/imgui_layer.cpp
+        src/stage_panel.cpp
                             src/stage_camera.cpp
         )
     target_link_libraries(ajfx_studio_page PUBLIC
@@ -65,6 +69,8 @@ if(AJFX_BUILD_STUDIO_APP)
         MediaServer::Gui
         MediaServer::Editor
         tinyfiledialogs::tinyfiledialogs
+        imgui::imgui
+        imguizmo::imguizmo
     )
     ajfx_set_options(ajfx_studio_page)
     set_target_properties(ajfx_studio_page PROPERTIES FOLDER "ajfx")
@@ -100,6 +106,14 @@ if(AJFX_BUILD_STUDIO_APP)
         ajfx_set_options(ajfx_studio_ui_tests)
         add_test(NAME ajfx.studio_ui COMMAND ajfx_studio_ui_tests)
         set_target_properties(ajfx_studio_ui_tests PROPERTIES FOLDER "ajfx/tests")
+
+        # The Dear ImGui layer and the panels drawn with it, on a context of
+        # their own with synthetic pointer events.
+        add_executable(ajfx_studio_imgui_tests tests/imgui_tests.cpp)
+        target_link_libraries(ajfx_studio_imgui_tests PRIVATE ajfx_studio_page)
+        ajfx_set_options(ajfx_studio_imgui_tests)
+        add_test(NAME ajfx.studio_imgui COMMAND ajfx_studio_imgui_tests)
+        set_target_properties(ajfx_studio_imgui_tests PROPERTIES FOLDER "ajfx/tests")
 
         # The preview's builder, with the kernel compiler and CPU reference:
         # builds keep pace while the CPU run of an earlier one finishes.

@@ -2,6 +2,7 @@
 #include "scene.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <ctime>
 #include <cstdio>
@@ -157,10 +158,50 @@ void the_selected_systems_paths_come_first() {
     std::filesystem::remove_all(folder, ignored);
 }
 
+// The stage settles on the builder's own thread, with the files the scene
+// names read as an export does, and what it learned comes back whole: the
+// performance as it began and as it ended, for the caller to adopt only if
+// nothing else was done meanwhile.
+void settling_the_stage_comes_back_from_the_worker() {
+    Document document = new_scene();
+    const Uid crate = add_object(document);
+    std::get<Object>(document.scene->item(crate)->data).distribution = Distribution::Placed;
+    std::get<Object>(document.scene->item(crate)->data).size = 1.0F;
+    // Two crates a metre and a half up and three up, side by side.
+    const std::uint32_t low = add_drop(document.scene->performance, 0U, crate, {-1.0F, 1.5F, 0.0F}, {}, {});
+    const std::uint32_t high = add_drop(document.scene->performance, 0U, crate, {1.0F, 3.0F, 0.0F}, {0.0F, 30.0F, 0.0F}, {});
+    const Performance began = document.scene->performance;
+
+    PackageBuilder builder{std::filesystem::temp_directory_path() / "ajfx-settle-test.ajfx", 71U, false};
+    builder.submit_settle(document);
+    const std::optional<SettleOutcome> outcome = wait_for([&] { return builder.take_settle(); }, 60.0);
+    CHECK(outcome.has_value());
+    CHECK(outcome->ok && outcome->message == "Settled 2 things");
+    CHECK(outcome->result.settled == 2U && outcome->result.moving == 0U);
+    CHECK(outcome->before == began);
+    // The scene itself is untouched; the outcome holds the settled stage.
+    CHECK(document.scene->performance == began);
+    for (const std::uint32_t serial : {low, high}) {
+        const Act* act = find_act(outcome->after, serial);
+        CHECK(act != nullptr && act->touched);
+        // On the ground: its middle half a metre above the floor, give or take a skin.
+        CHECK(std::abs(act->position.y - (stage_floor(document) + 0.5F)) < 0.06F);
+    }
+    CHECK(!builder.take_settle());
+
+    // A scene with nothing on the stage says so rather than doing nothing.
+    Document empty = new_scene();
+    builder.submit_settle(empty);
+    const std::optional<SettleOutcome> refused = wait_for([&] { return builder.take_settle(); }, 60.0);
+    CHECK(refused && !refused->ok && !refused->message.empty());
+}
+
 } // namespace
 
 int main() {
     try {
+        settling_the_stage_comes_back_from_the_worker();
+        std::cout << "[pass] settling the stage comes back from the worker\n";
         a_build_does_not_wait_for_the_cpu_run_before_it();
         std::cout << "[pass] a build does not wait for the CPU run before it, and that run is not thrown away\n";
         the_selected_systems_paths_come_first();

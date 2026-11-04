@@ -7,7 +7,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <span>
 #include <string>
+#include <vector>
 
 // The stage: what stands in the scene before it plays. A thing on the stage
 // is a drop at step 0 (a Place), so there is one kind of record for what an
@@ -26,6 +28,12 @@ namespace ajfx::studio {
 // The degrees (x, y, z as an Object's rotation) that prop_orientation turns
 // into `q`; the inverse, up to the several turns that make one pose.
 [[nodiscard]] Vec3 turn_of(Quat q) noexcept;
+
+// Makes a kind placed by hand of each model file in `files` (an OBJ, glTF or
+// GLB, whatever the case of its extension; anything else is left alone) and
+// returns the kinds in the order of the files. Dynamic, as a placed thing has
+// to be.
+[[nodiscard]] std::vector<Uid> add_dropped_models(Document& document, std::span<const std::string> files);
 
 // Puts a copy of the Object `kind` on the stage with its middle at
 // `position`. Refused, changing nothing, for an Object that is not a kind
