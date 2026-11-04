@@ -46,9 +46,9 @@ namespace ajfx {
 
 // Version of the saved simulation state (write_state) this library reads and
 // writes.
-inline constexpr std::uint32_t state_format_version = 3U;
+inline constexpr std::uint32_t state_format_version = 4U;
 // Version of the cache file this library reads and writes.
-inline constexpr std::uint32_t cache_format_version = 2U;
+inline constexpr std::uint32_t cache_format_version = 3U;
 
 // The whole state as bytes: deterministic, so equal states give equal bytes.
 [[nodiscard]] std::vector<std::uint8_t> write_state(const SimulationState& state);
@@ -105,11 +105,14 @@ enum class CacheMode : std::uint8_t {
 
 [[nodiscard]] std::string_view cache_mode_name(CacheMode mode) noexcept;
 
-// One emitter a cache holds, by name, and the digest it was baked from.
+// One emitter a cache holds, by name, the digest it was baked from, and
+// the digest of the actions it and the emitters it depends on were baked
+// with (actions_digest; 0 where none takes actions).
 struct CachedEmitter final {
     std::string emitter;
     CacheMode mode{CacheMode::Rigid};
     std::uint64_t digest{0U};
+    std::uint64_t actions{0U};
 
     friend bool operator==(const CachedEmitter&, const CachedEmitter&) = default;
 };
@@ -153,7 +156,13 @@ struct CacheIdentity final {
 // to their ranges), with the meshes and fields it is played with.
 [[nodiscard]] CacheIdentity cache_identity(const Effect& effect, std::span<const CacheMode> modes,
                                            std::uint32_t instance_seed, std::span<const ParameterValue> values = {},
-                                           const MeshSet& meshes = {}, const FieldSet& fields = {});
+                                           const MeshSet& meshes = {}, const FieldSet& fields = {},
+                                           const ActionProvider* actions = nullptr);
+
+// What the actions `provider` holds for emitter `index` and for every
+// emitter it depends on (as emitter_digest walks them) come to, as a hash;
+// 0 when none of them takes actions (SpawnActions) or there is no provider.
+[[nodiscard]] std::uint64_t actions_digest(const Effect& effect, std::size_t index, const ActionProvider* provider);
 
 // The most bodies a cached rigid layer may hold, and particles a cached
 // particle layer: refused up front, before anything is stepped, by the
@@ -201,6 +210,9 @@ struct BakeSettings final {
     // A particle layer's position quantum, in effect units.
     float position_step{1.0F / 1024.0F};
     CacheBudget budget{};
+    // The actions the bake runs with (none for none): the performance the
+    // cache is of, keyed into its identity.
+    std::shared_ptr<const ActionProvider> actions;
     // Called after each step baked with the step reached; returning false
     // stops the bake, which then fails.
     std::function<bool(std::uint64_t)> progress;
@@ -260,7 +272,8 @@ public:
     // start as they would without a cache.
     [[nodiscard]] static Result<Cache> open(std::vector<std::uint8_t> bytes, const Effect& effect,
                                             std::uint32_t instance_seed, std::span<const ParameterValue> values = {},
-                                            const MeshSet& meshes = {}, const FieldSet& fields = {});
+                                            const MeshSet& meshes = {}, const FieldSet& fields = {},
+                                            const ActionProvider* actions = nullptr);
 
     Cache(Cache&&) noexcept;
     Cache& operator=(Cache&&) noexcept;

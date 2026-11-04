@@ -255,6 +255,11 @@ void check_module(const Effect&, const SpawnPile& m, FieldChecker& check) {
     check.require(m.shape != PileShape::Single || m.count == 1U, "count", "must be 1 for a single body");
 }
 
+void check_module(const Effect&, const SpawnActions& m, FieldChecker& check) {
+    check.require(m.max_per_step >= 1U, "max_per_step", "must be at least 1");
+    check.require(m.max_alive >= 1U, "max_alive", "must be at least 1");
+}
+
 void check_module(const Effect& e, const SpawnRate& m, FieldChecker& check) {
     check.require(range(e, m.rate).lo >= 0.0F, "rate", "must not be negative");
 }
@@ -1028,6 +1033,8 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
     std::size_t breaks = 0U;
     std::size_t glues = 0U;
     std::uint64_t piled = 0U;
+    std::size_t action_sources = 0U;
+    std::uint32_t action_alive = 0U;
     const auto visit_module = [&](const auto& module) {
         if (error) {
             return;
@@ -1054,6 +1061,9 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
             ++spins;
         } else if constexpr (std::is_same_v<M, SpawnPile>) {
             piled += module.count;
+        } else if constexpr (std::is_same_v<M, SpawnActions>) {
+            ++action_sources;
+            action_alive = module.max_alive;
         }
         error = check_module_fields(effect, emitter, module);
     };
@@ -1126,6 +1136,16 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
         return Error{ErrorCode::InvalidEffect, where +
                                                    " has a 'break' module but no 'rigid_physics' module: only a "
                                                    "body in a physics world can come apart"};
+    }
+    if (action_sources > 1U) {
+        return Error{ErrorCode::InvalidEffect,
+                     where + " has more than one 'spawn_actions' module: an emitter takes its actions through one"};
+    }
+    if (action_sources == 1U && rigid_physics == 1U && action_alive > emitter.capacity) {
+        return Error{ErrorCode::InvalidEffect, where + " module 'spawn_actions' keeps up to " +
+                                                   std::to_string(action_alive) +
+                                                   " bodies alive, more than its capacity of " +
+                                                   std::to_string(emitter.capacity)};
     }
     if (piled > 0U && rigid_physics == 0U) {
         return Error{ErrorCode::InvalidEffect,
@@ -1317,6 +1337,10 @@ std::uint64_t particle_bound(const Effect& effect, const Emitter& emitter) {
             bound += occurrences * static_cast<double>(burst->count);
         } else if (const SpawnPile* pile = std::get_if<SpawnPile>(&module)) {
             bound += static_cast<double>(pile->count);
+        } else if (const SpawnActions* actions = std::get_if<SpawnActions>(&module);
+                   actions != nullptr && rigid_physics(emitter) != nullptr) {
+            // Bodies born of actions are refused past max_alive.
+            bound += static_cast<double>(actions->max_alive);
         } else {
             // Contacts and moving bodies bear at most their cap a step, in
             // every step the window holds and the one it starts in.
@@ -1447,7 +1471,7 @@ std::uint32_t required_attributes(const Emitter& emitter) {
         // A particle born of a contact, a moving body or a moving particle
         // may be thrown by it.
         if (std::holds_alternative<SpawnFromContacts>(module) || std::holds_alternative<SpawnFromBodies>(module) ||
-            std::holds_alternative<SpawnFromParticles>(module)) {
+            std::holds_alternative<SpawnFromParticles>(module) || std::holds_alternative<SpawnActions>(module)) {
             add(Attribute::Velocity);
         }
     }

@@ -3,6 +3,7 @@
 
 #include "check.hpp"
 
+#include <ajfx/actions.hpp>
 #include <ajfx/builder.hpp>
 #include <ajfx/d3d12.hpp>
 #include <ajfx/gpu/simulation.hpp>
@@ -429,6 +430,58 @@ void trails_shed_the_same_particles_on_the_gpu() {
     }
 }
 
+// Particles born of actions (SpawnActions) beside a stream of their own:
+// each starts where its action says, offset by the init modules, thrown by
+// the action beside its launch, with the action's serial as its count. The
+// GPU is handed the same births the reference makes.
+void painted_particles_match_the_reference() {
+    EffectBuilder builder{"paint"};
+    builder.emitter("dust")
+        .capacity(4096U)
+        .seed(4U)
+        .spawn(SpawnRate{.rate = 30.0F})
+        .spawn(SpawnActions{.max_per_step = 8U})
+        .init(Lifetime{.min = 1.0F, .max = 2.0F})
+        .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 0.5F, 0.0F}, .radius_min = 0.0F,
+                            .radius_max = 0.1F})
+        .init(Velocity{.direction = Vec3{0.0F, 1.0F, 0.0F}, .speed_min = 0.5F, .speed_max = 1.0F, .spread = 30.0F})
+        .init(InitSize{.min = 0.02F, .max = 0.05F})
+        .update(Gravity{.acceleration = Vec3{0.0F, -2.0F, 0.0F}})
+        .update(Drag{.coefficient = 0.3F});
+    Result<Effect> built = builder.build();
+    AJFX_CHECK(built.ok());
+    const Effect effect = built.value();
+    ActionList actions;
+    std::uint32_t serial = 100U;
+    for (std::uint64_t tick = 5U; tick < 120U; tick += 3U) {
+        for (std::uint32_t n = 0U; n < 1U + static_cast<std::uint32_t>(tick % 4U); ++n) {
+            Action spawn;
+            spawn.tick = tick;
+            spawn.serial = serial++;
+            spawn.position = Vec3{static_cast<float>(tick) * 0.01F, 1.0F, static_cast<float>(n) * 0.2F};
+            spawn.velocity = Vec3{0.3F, 0.0F, -0.2F};
+            actions.add("dust", spawn);
+        }
+    }
+    Simulation cpu = make_cpu(effect, 4U);
+    gpu::GpuSimulation gpu = make_gpu(effect, 4U);
+    std::uint32_t painted = 0U;
+    for (const std::uint64_t tick : {1U, 6U, 61U, 90U, 150U}) {
+        cpu.advance_to(tick, nullptr, &actions);
+        gpu.advance_to(tick, nullptr, &actions);
+        const EmitterState g = read(gpu);
+        const EmitterState& c = cpu.emitter(0);
+        AJFX_CHECK(g.alive() == c.alive());
+        AJFX_CHECK(g.spawn_index == c.spawn_index);
+        AJFX_CHECK(compare(c, g, 1.0e-3F) == 1.0F);
+        for (const std::uint32_t index : c.spawn_index) {
+            painted += spawn_source(index) == 1U ? 1U : 0U;
+        }
+    }
+    AJFX_CHECK(painted > 20U);
+    AJFX_CHECK(cpu.emitter(0).spawn_counts[1] == 0U); // serials, not a running count
+}
+
 void trails_rerun_and_restore_bit_identically_on_the_gpu() {
     const Effect effect = embers_and_smoke(false);
     gpu::GpuSimulation a = make_gpu(effect, 1U);
@@ -828,6 +881,7 @@ int main() {
         {"reruns_are_bit_identical", reruns_are_bit_identical},
         {"checkpoints_and_reset_reproduce_the_timeline", checkpoints_and_reset_reproduce_the_timeline},
         {"trails_shed_the_same_particles_on_the_gpu", trails_shed_the_same_particles_on_the_gpu},
+        {"painted_particles_match_the_reference", painted_particles_match_the_reference},
         {"trails_rerun_and_restore_bit_identically_on_the_gpu", trails_rerun_and_restore_bit_identically_on_the_gpu},
         {"compaction_spans_many_blocks", compaction_spans_many_blocks},
         {"buffers_expose_the_live_particles", buffers_expose_the_live_particles},

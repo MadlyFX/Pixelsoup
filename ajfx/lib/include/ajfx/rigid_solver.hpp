@@ -270,13 +270,13 @@ public:
     // before step, which then moves whatever the prop has moved into. Fixed
     // and Loose props are never given a pose.
     virtual void set_prop_pose(std::size_t index, Vec3 position, Quat orientation) = 0;
-    // Adds `change` to the velocity of one of the emitter's bodies (its
-    // slot) or of a Loose prop (its index), waking it if it sleeps: a
-    // blast's throw, which is a change of speed whatever the mass. Called
-    // before step, in a fixed order (bodies in birth order, then props in
-    // order), so the step carries it. Fixed and Driven props, statics and
-    // slots holding no body are left alone.
-    virtual void push(RigidSide side, std::uint32_t index, Vec3 change) = 0;
+    // Adds `change` to the velocity, and `twist` to the angular velocity,
+    // of one of the emitter's bodies (its slot) or of a Loose prop (its
+    // index), waking it if it sleeps: a blast's throw, which is a change of
+    // speed whatever the mass. Called before step, in a fixed order (bodies
+    // in birth order, then props in order), so the step carries it. Fixed
+    // and Driven props, statics and slots holding no body are left alone.
+    virtual void push(RigidSide side, std::uint32_t index, Vec3 change, Vec3 twist = {}) = 0;
     // Advances by the world's step under `gravity`.
     virtual void step(Vec3 gravity) = 0;
     [[nodiscard]] virtual RigidBodyState body(std::uint32_t slot) const = 0;

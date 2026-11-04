@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ajfx/actions.hpp>
 #include <ajfx/effect.hpp>
 #include <ajfx/mesh.hpp>
 #include <ajfx/result.hpp>
@@ -71,12 +72,14 @@ public:
     ~RigidRunner();
 
     // A track of `effect`'s rigid physics emitters with `instance_seed`, the
-    // hull meshes in `meshes`, and `parameters` (none for the defaults),
-    // which must be a pure function of the tick and callable from the
-    // runner's thread. Its worlds are built on that thread when a tick is
-    // first asked for; a failure there is reported by RigidTrack::error.
+    // hull meshes in `meshes`, `parameters` (none for the defaults) and
+    // `actions` (none for no actions), each a pure function of the tick and
+    // callable from the runner's thread. Its worlds are built on that thread
+    // when a tick is first asked for; a failure there is reported by
+    // RigidTrack::error.
     [[nodiscard]] std::unique_ptr<RigidTrack> track(const Effect& effect, std::uint32_t instance_seed, MeshSet meshes,
-                                                    std::shared_ptr<const ParameterProvider> parameters = nullptr);
+                                                    std::shared_ptr<const ParameterProvider> parameters = nullptr,
+                                                    std::shared_ptr<const ActionProvider> actions = nullptr);
 
     // Blocks until every track has the tick it last asked for and its lead
     // (or has failed). For tests and tools.
@@ -107,6 +110,18 @@ public:
     // old parameters' past, so it is dropped and worked out again, unless the
     // track's emitters read no parameter: then their past is the same.
     void set_parameters(std::shared_ptr<const ParameterProvider> parameters);
+    // Follow `actions` from now on, which differ from the old ones only at
+    // `from` and later: the frames and checkpoints up to `from` stand (the
+    // state at `from` is what the steps before it made), and what is held
+    // past it is dropped and worked out again. A host appending at a tick
+    // the runner has not reached (lead 0 while it plays) loses nothing;
+    // `from` 0 drops everything, since actions there place bodies before
+    // the first step.
+    void set_actions(std::shared_ptr<const ActionProvider> actions, std::uint64_t from);
+    // Steps this track runs ahead of the tick asked of it, instead of the
+    // runner's (RigidRunnerOptions::lead): 0 while a host acts on the
+    // running effect, so each action lands on a tick not yet stepped.
+    void set_lead(std::uint32_t lead);
     // Why the runner could not build this track's worlds, once it has tried.
     [[nodiscard]] std::optional<Error> error() const;
 

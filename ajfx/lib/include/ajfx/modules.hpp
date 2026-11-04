@@ -321,8 +321,40 @@ struct SpawnFromParticles final {
     friend bool operator==(const SpawnFromParticles&, const SpawnFromParticles&) = default;
 };
 
-using SpawnModule =
-    std::variant<SpawnRate, SpawnBurst, SpawnPile, SpawnFromContacts, SpawnFromBodies, SpawnFromParticles>;
+// Particles born of actions (ajfx/actions.hpp): what an artist placed,
+// dropped or painted into the running effect, step by step. The module only
+// declares that the emitter takes actions and how many; the actions
+// themselves come from an ActionProvider the host gives the simulation, so
+// acting never changes the effect. Its births take the module's place in
+// the stack as their source, and each action's own serial as its count, so
+// an action taken away or moved leaves every other one's particles as they
+// were.
+// - **Rigid physics emitters:** a Spawn action puts a body exactly where it
+//   says, of the kind it names, moving as it says, asleep until its release;
+//   Push, Remove and Steer act on any of the emitter's bodies. At most
+//   `max_alive` of its births are alive at once: past that a spawn is
+//   refused and counted (EmitterState::refused), never squeezed in.
+// - **Particle emitters:** a Spawn action bears a particle at its position,
+//   offset by the init modules, thrown by its velocity beside theirs. The
+//   GPU runtime bears them too. Push, Remove and Steer act on bodies alone.
+// - At most `max_per_step` births a step, whatever the actions ask.
+// - At most one per emitter.
+struct SpawnActions final {
+    static constexpr std::string_view kind = "spawn_actions";
+    ModuleId id{};
+    std::uint32_t max_per_step{64U};
+    std::uint32_t max_alive{1024U};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("max_per_step", self.max_per_step);
+        visit("max_alive", self.max_alive);
+    }
+    friend bool operator==(const SpawnActions&, const SpawnActions&) = default;
+};
+
+using SpawnModule = std::variant<SpawnRate, SpawnBurst, SpawnPile, SpawnFromContacts, SpawnFromBodies,
+                                 SpawnFromParticles, SpawnActions>;
 
 // The body kind a spawn module's newborns are: its `body`, or 0 for a module
 // that has none (it bears particles, not bodies).

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ajfx/actions.hpp>
 #include <ajfx/effect.hpp>
 #include <ajfx/field.hpp>
 #include <ajfx/math.hpp>
@@ -63,6 +64,10 @@ struct EmitterState final {
     // they were joined. A join goes when either of its bodies does, or when
     // a step pulls it apart.
     std::vector<RigidJoin> joins;
+    // Rigid physics emitters only: the tick each body sleeps until, where
+    // an action put it down to wait (0 for a body not held that way; a
+    // pile's hold is its module's release).
+    std::vector<std::uint64_t> held_until;
     std::vector<std::uint8_t> solver_state;
     // Rigid physics emitters only: where each of the emitter's props stands,
     // in the order RigidPhysics lists them, so a host can draw them. A prop
@@ -235,19 +240,23 @@ public:
     [[nodiscard]] std::uint64_t tick() const noexcept { return state_.tick; }
     [[nodiscard]] float step_seconds() const noexcept { return step_seconds_; }
 
-    // Advances one step. Without a provider every parameter is its default.
-    void step(const ParameterProvider* parameters = nullptr);
+    // Advances one step. Without a provider every parameter is its default,
+    // and without `actions` nothing acts on it (SpawnActions bears nothing).
+    void step(const ParameterProvider* parameters = nullptr, const ActionProvider* actions = nullptr);
     // Steps until tick() == target; does nothing if target is behind.
-    void advance_to(std::uint64_t target, const ParameterProvider* parameters = nullptr);
-    // Back to step 0, holding only the bodies of its piles (SpawnPile), set
-    // up with the parameters' values at step 0. Creating a simulation resets
-    // it with the defaults; if a provider gives other values at step 0, the
-    // first step sets the piles up again with those, so stepping from
+    void advance_to(std::uint64_t target, const ParameterProvider* parameters = nullptr,
+                    const ActionProvider* actions = nullptr);
+    // Back to step 0, holding only the bodies of its piles (SpawnPile) and
+    // those its actions place at tick 0, set up with the parameters' values
+    // at step 0. Creating a simulation resets it with the defaults and no
+    // actions; if a provider gives other values at step 0, or other actions
+    // there, the first step sets them up again with those, so stepping from
     // creation and seeking agree.
-    void reset(const ParameterProvider* parameters = nullptr);
-    // At step 0, sets the piles up again if `parameters` give other values
-    // there than they were set up with; elsewhere does nothing.
-    void prepare(const ParameterProvider* parameters);
+    void reset(const ParameterProvider* parameters = nullptr, const ActionProvider* actions = nullptr);
+    // At step 0, sets the piles and placed bodies up again if `parameters`
+    // give other values there, or `actions` other tick-0 spawns, than they
+    // were set up with; elsewhere does nothing.
+    void prepare(const ParameterProvider* parameters, const ActionProvider* actions = nullptr);
 
     // The whole state, rigid physics solver state included: saving that
     // costs a little, so call it for checkpoints rather than every step.
@@ -295,7 +304,7 @@ private:
 
     Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fields);
 
-    void step_emitter(std::size_t index, std::span<const ParameterValue> values);
+    void step_emitter(std::size_t index, std::span<const ParameterValue> values, const ActionProvider* actions);
     // The step's values: resolve_values, then the cache's bake-time values.
     void resolve(const ParameterProvider* parameters, std::uint64_t tick, std::vector<ParameterValue>& values) const;
     // Whether emitter `index` is read from the cache rather than simulated.
@@ -305,12 +314,17 @@ private:
     // A fresh world for each rigid physics emitter, holding the bodies its
     // particles in state_ have (none after a reset).
     void rebuild_worlds();
-    // Step 0 with `values`: no particles but the piles'.
-    void start(std::span<const ParameterValue> values);
-    void prespawn(std::size_t index, std::span<const ParameterValue> values);
-    // Whether the particle with `spawn_index` in emitter `index` is a pile
-    // body still held at the current tick.
-    [[nodiscard]] bool held(std::size_t index, std::uint32_t spawn_index) const;
+    // Step 0 with `values` and `actions`: no particles but the piles' and
+    // the bodies actions place at tick 0.
+    void start(std::span<const ParameterValue> values, const ActionProvider* actions);
+    void prespawn(std::size_t index, std::span<const ParameterValue> values, const ActionProvider* actions);
+    // Whether particle `i` of emitter `index` is a body still held at the
+    // current tick: a pile's before its release, or one an action put down
+    // to wait.
+    [[nodiscard]] bool held(std::size_t index, std::size_t i) const;
+    // A hash of the rigid physics bodies `actions` place at tick 0, which
+    // is what start() stands them up from.
+    [[nodiscard]] std::uint64_t placed_digest(const ActionProvider* actions) const;
 
     Effect effect_;
     std::uint32_t instance_seed_{0U};
@@ -329,8 +343,13 @@ private:
     // Props, like piles, stand in their worlds before step 0, so creating
     // the simulation has to start it once the worlds exist.
     bool has_props_{false};
+    // Whether any rigid physics emitter takes actions, whose tick-0 spawns
+    // stand before step 0 too.
+    bool has_placed_{false};
     // The values step 0's piles were set up with.
     std::vector<ParameterValue> pile_values_;
+    // The tick-0 spawns step 0's bodies were set up with (placed_digest).
+    std::uint64_t placed_{0U};
     std::shared_ptr<const Cache> cache_;
     // Per parameter, the value the cache pins it to (bake-time ones only).
     std::vector<std::optional<ParameterValue>> pinned_;
@@ -347,12 +366,18 @@ public:
     // Moves `simulation` to `target`, forwards or backwards, from the nearest
     // usable checkpoint (or its current state when that is closer), and
     // records checkpoints passed on the way.
-    void seek(Simulation& simulation, std::uint64_t target, const ParameterProvider* parameters = nullptr);
+    void seek(Simulation& simulation, std::uint64_t target, const ParameterProvider* parameters = nullptr,
+              const ActionProvider* actions = nullptr);
 
     [[nodiscard]] std::size_t size() const noexcept { return checkpoints_.size(); }
     // Must be called when the effect, instance seed or parameter history
     // changes; checkpoints from before describe a different timeline.
     void clear() noexcept { checkpoints_.clear(); }
+    // Must be called when the actions stamped `tick` or later change: the
+    // checkpoints past that tick describe another performance. The one at
+    // `tick` itself stands, being the state before that step, unless `tick`
+    // is 0, where the actions place bodies before any step.
+    void clear_from(std::uint64_t tick) noexcept;
 
 private:
     void record(const Simulation& simulation);
@@ -360,6 +385,10 @@ private:
     std::uint64_t interval_;
     std::size_t capacity_;
     std::vector<SimulationState> checkpoints_;
+    // The tick clear_from was last given, until the next seek: a simulation
+    // past it holds the old performance, so that seek starts from a
+    // checkpoint instead of from where it stands.
+    std::optional<std::uint64_t> stale_from_;
 };
 
 } // namespace ajfx

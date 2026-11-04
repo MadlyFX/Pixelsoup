@@ -529,7 +529,7 @@ inline void pack_emitter(const Emitter& emitter, const PackContext& context, std
 inline bool has_birth_origins(const Emitter& emitter) {
     return std::any_of(emitter.spawn.begin(), emitter.spawn.end(), [](const SpawnModule& module) {
         return std::holds_alternative<SpawnFromContacts>(module) || std::holds_alternative<SpawnFromBodies>(module) ||
-               std::holds_alternative<SpawnFromParticles>(module);
+               std::holds_alternative<SpawnFromParticles>(module) || std::holds_alternative<SpawnActions>(module);
     });
 }
 

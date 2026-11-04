@@ -61,6 +61,7 @@ void compact(EmitterState& s, Dead dead) {
     const std::size_t count = s.alive();
     const bool bodies = s.body.size() == count && count > 0U;
     const bool kinds = s.body_kind.size() == count && count > 0U;
+    const bool holds = s.held_until.size() == count && count > 0U;
     std::size_t kept = 0U;
     for (std::size_t i = 0U; i < count; ++i) {
         if (dead(i)) {
@@ -86,6 +87,9 @@ void compact(EmitterState& s, Dead dead) {
             if (kinds) {
                 s.body_kind[kept] = s.body_kind[i];
             }
+            if (holds) {
+                s.held_until[kept] = s.held_until[i];
+            }
         }
         ++kept;
     }
@@ -94,6 +98,9 @@ void compact(EmitterState& s, Dead dead) {
     }
     if (kinds) {
         s.body_kind.resize(kept);
+    }
+    if (holds) {
+        s.held_until.resize(kept);
     }
     s.position.resize(kept);
     s.velocity.resize(kept);
@@ -831,7 +838,8 @@ void move_rigid(Step& step, const Emitter& emitter, const RigidPhysics& physics,
 }
 
 // Bodies for the newborns [first, alive), in birth order, each in the lowest
-// slot no older particle holds; asleep if `asleep`.
+// slot no older particle holds; asleep if `asleep`, or if an action put the
+// body down to wait (held_until).
 void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, RigidWorld& world, bool asleep = false) {
     std::vector<bool> used(capacity, false);
     for (std::size_t i = 0U; i < first; ++i) {
@@ -839,6 +847,7 @@ void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, Rigi
     }
     s.body.resize(s.alive());
     s.body_kind.resize(s.alive());
+    s.held_until.resize(s.alive(), 0U);
     std::uint32_t next = 0U;
     for (std::size_t i = first; i < s.alive(); ++i) {
         while (used[next]) {
@@ -847,7 +856,127 @@ void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, Rigi
         used[next] = true;
         s.body[i] = next;
         world.add(next, s.body_kind[i], s.size[i],
-                  RigidBodyState{s.position[i], s.orientation[i], s.velocity[i], s.angular_velocity[i]}, asleep);
+                  RigidBodyState{s.position[i], s.orientation[i], s.velocity[i], s.angular_velocity[i]},
+                  asleep || s.held_until[i] != 0U);
+    }
+}
+
+// The particle of `s` whose spawn index is `target`, if one is alive.
+std::optional<std::size_t> find_target(const EmitterState& s, std::uint32_t target) {
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        if (s.spawn_index[i] == target) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+// `v` no longer than `limit`.
+Vec3 clamp_length(Vec3 v, float limit) {
+    const float length_squared = dot(v, v);
+    if (limit <= 0.0F || length_squared <= limit * limit) {
+        return v;
+    }
+    return v * (limit / std::sqrt(length_squared));
+}
+
+// A Steer action on body `i`, before the world steps: its velocity is
+// changed towards the one that reaches the target in 1 / gain seconds, and
+// its spin towards the one that turns it there in the same time, neither
+// faster than max_speed. The world keeps the body, so what it meets stops
+// it as it would stop anything.
+void steer_body(const Action& action, const EmitterState& s, std::size_t i, RigidWorld& world) {
+    const Vec3 wanted = clamp_length((action.position - s.position[i]) * action.gain, action.max_speed);
+    const Vec3 change = wanted - s.velocity[i];
+    const Quat c = s.orientation[i];
+    Quat d = times(action.orientation, Quat{-c.x, -c.y, -c.z, c.w});
+    if (d.w < 0.0F) {
+        d = Quat{-d.x, -d.y, -d.z, -d.w};
+    }
+    const float sin_half = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    const float angle = 2.0F * std::atan2(sin_half, d.w);
+    const Vec3 axis = sin_half > 1.0e-6F ? Vec3{d.x, d.y, d.z} * (1.0F / sin_half) : Vec3{};
+    const Vec3 spin = clamp_length(axis * (angle * action.gain), action.max_speed);
+    world.push(RigidSide::Body, s.body[i], change, spin - s.angular_velocity[i]);
+}
+
+// The Push and Steer actions of the step on a rigid physics emitter's
+// bodies, in the provider's order, before the world steps so the step
+// carries them.
+void push_bodies(std::span<const Action> actions, const EmitterState& s, RigidWorld& world) {
+    for (const Action& action : actions) {
+        if (action.kind != ActionKind::Push && action.kind != ActionKind::Steer) {
+            continue;
+        }
+        const std::optional<std::size_t> i = find_target(s, action.target);
+        if (!i) {
+            continue;
+        }
+        if (action.kind == ActionKind::Push) {
+            world.push(RigidSide::Body, s.body[*i], action.push, action.twist);
+        } else {
+            // A hand keeps what it holds awake: a body held still in the air
+            // would otherwise be put to sleep by the engine and hang there
+            // when let go.
+            const std::uint32_t slot = s.body[*i];
+            world.wake(std::span<const std::uint32_t>{&slot, 1U});
+            steer_body(action, s, *i, world);
+        }
+    }
+}
+
+// Remove actions end a particle's life where it stands: it is retired as
+// one whose life ran out, in this step.
+void remove_targets(std::span<const Action> actions, EmitterState& s) {
+    for (const Action& action : actions) {
+        if (action.kind != ActionKind::Remove) {
+            continue;
+        }
+        if (const std::optional<std::size_t> i = find_target(s, action.target)) {
+            s.lifetime[*i] = s.age[*i];
+        }
+    }
+}
+
+// The action-born particles of `s` alive now (those of source `source`).
+std::uint32_t action_born(const EmitterState& s, std::uint32_t source) {
+    std::uint32_t count = 0U;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        if (spawn_source(s.spawn_index[i]) == source) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// The SpawnActions module of the emitter and its place in the spawn stack,
+// if it has one.
+std::optional<std::pair<const SpawnActions*, std::uint32_t>> action_module(const Emitter& emitter) {
+    for (std::size_t slot = 0U; slot < emitter.spawn.size(); ++slot) {
+        if (const auto* actions = std::get_if<SpawnActions>(&emitter.spawn[slot])) {
+            return std::pair{actions, static_cast<std::uint32_t>(slot)};
+        }
+    }
+    return std::nullopt;
+}
+
+// Where a newborn born of an origin starts: a body born of an action takes
+// the pose and motion exactly, at the action's size when it gives one;
+// anything else starts from the origin, offset and thrown by what its init
+// modules gave it.
+void take_origin(EmitterState& s, std::size_t i, const detail::BirthOrigin& origin) {
+    if (origin.exact) {
+        s.position[i] = origin.position;
+        s.velocity[i] = origin.velocity;
+        s.orientation[i] = origin.orientation;
+        s.angular_velocity[i] = origin.angular_velocity;
+        if (origin.size > 0.0F) {
+            s.base_size[i] = origin.size;
+            s.size[i] = origin.size;
+        }
+    } else {
+        s.position[i] = origin.position + s.position[i];
+        s.velocity[i] = s.velocity[i] + origin.velocity;
     }
 }
 
@@ -1469,6 +1598,9 @@ Simulation::Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fiel
         const RigidPhysics* physics = rigid_physics(emitter);
         return physics != nullptr && !physics->props.empty();
     });
+    has_placed_ = std::any_of(effect_.emitters.begin(), effect_.emitters.end(), [](const Emitter& emitter) {
+        return rigid_physics(emitter) != nullptr && action_module(emitter).has_value();
+    });
     reset();
 }
 
@@ -1683,24 +1815,37 @@ void adjust_for_drawing(const DrawAdjustment& adjustment, EmitterState& particle
     }
 }
 
-void Simulation::reset(const ParameterProvider* parameters) {
+void Simulation::reset(const ParameterProvider* parameters, const ActionProvider* actions) {
     std::vector<ParameterValue> values;
     resolve(parameters, 0U, values);
-    start(values);
+    start(values, actions);
 }
 
-void Simulation::prepare(const ParameterProvider* parameters) {
-    if (!has_piles_ || state_.tick != 0U) {
+void Simulation::prepare(const ParameterProvider* parameters, const ActionProvider* actions) {
+    if (state_.tick != 0U || (!has_piles_ && !has_placed_)) {
         return;
     }
     std::vector<ParameterValue> values;
     resolve(parameters, 0U, values);
-    if (values != pile_values_) {
-        start(values);
+    if ((has_piles_ && values != pile_values_) || (has_placed_ && placed_digest(actions) != placed_)) {
+        start(values, actions);
     }
 }
 
-void Simulation::start(std::span<const ParameterValue> values) {
+std::uint64_t Simulation::placed_digest(const ActionProvider* actions) const {
+    std::uint64_t hash = 0xcbf29ce484222325ULL;
+    if (actions == nullptr) {
+        return hash;
+    }
+    for (const Emitter& emitter : effect_.emitters) {
+        if (rigid_physics(emitter) != nullptr && action_module(emitter)) {
+            hash = action_digest(actions->actions_at(emitter.name, 0U), hash);
+        }
+    }
+    return hash;
+}
+
+void Simulation::start(std::span<const ParameterValue> values, const ActionProvider* actions) {
     state_ = SimulationState{};
     state_.emitters.resize(effect_.emitters.size());
     for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
@@ -1732,9 +1877,10 @@ void Simulation::start(std::span<const ParameterValue> values) {
         }
     }
     pile_values_.assign(values.begin(), values.end());
-    if (has_piles_) {
+    placed_ = placed_digest(actions);
+    if (has_piles_ || has_placed_) {
         for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
-            prespawn(i, values);
+            prespawn(i, values, actions);
         }
         solver_state_stale_ = std::any_of(rigid_.begin(), rigid_.end(),
                                           [](const RigidEmitter& r) { return r.world != nullptr; });
@@ -1745,7 +1891,7 @@ void Simulation::start(std::span<const ParameterValue> values) {
 // Each pile's bodies, born at age 0 before step 0 and set up by the init
 // modules as any newborn, then put on the pile still and, until released,
 // asleep.
-void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> values) {
+void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> values, const ActionProvider* actions) {
     const Emitter& emitter = effect_.emitters[index];
     EmitterState& s = state_.emitters[index];
     RigidWorld* world = rigid_[index].world.get();
@@ -1801,11 +1947,58 @@ void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> val
             s.orientation[i] = body.orientation;
         }
     }
+    // The bodies actions place at tick 0 stand before the first step, each
+    // set up as any newborn and then put exactly where its action says,
+    // asleep until its release. They are joined to nothing (Glue holds
+    // bodies born together in a step; these are placed one by one).
+    const auto placing = action_module(emitter);
+    if (actions == nullptr || !placing) {
+        return;
+    }
+    const auto& [module, source] = *placing;
+    std::uint32_t made = 0U;
+    for (const Action& action : actions->actions_at(emitter.name, 0U)) {
+        if (action.kind != ActionKind::Spawn) {
+            continue;
+        }
+        ++s.spawned;
+        if (made >= module->max_alive || action.serial > spawn_count_mask || s.alive() >= emitter.capacity) {
+            ++s.refused;
+            continue;
+        }
+        const detail::BirthOrigin origin = detail::action_origin(action, 0U, true);
+        step.first = s.alive();
+        append(s, 0.0F, spawn_index_of(source, action.serial));
+        s.body_kind.push_back(action.body);
+        s.held_until.push_back(origin.held_until);
+        step.last = s.alive();
+        for (const InitModule& init : emitter.init) {
+            std::visit(run, init);
+        }
+        take_origin(s, step.first, origin);
+        s.color[step.first] = s.base_color[step.first];
+        s.size[step.first] = s.base_size[step.first];
+        for (const UpdateModule& over_life : emitter.update) {
+            if (std::holds_alternative<ColorOverLife>(over_life)) {
+                std::visit(run, over_life);
+            }
+        }
+        detail::glow(emitter, s, step.first, step.last);
+        add_bodies(s, step.first, emitter.capacity, *world);
+        const RigidBodyState body = world->body(s.body[step.first]);
+        s.position[step.first] = body.position;
+        s.orientation[step.first] = body.orientation;
+        ++made;
+    }
 }
 
-bool Simulation::held(std::size_t index, std::uint32_t spawn_index) const {
+bool Simulation::held(std::size_t index, std::size_t i) const {
+    const EmitterState& s = state_.emitters[index];
+    if (i < s.held_until.size() && state_.tick < s.held_until[i]) {
+        return true;
+    }
     const std::vector<SpawnModule>& spawn = effect_.emitters[index].spawn;
-    const std::uint32_t source = spawn_source(spawn_index);
+    const std::uint32_t source = spawn_source(s.spawn_index[i]);
     if (source >= spawn.size()) {
         return false;
     }
@@ -1830,7 +2023,7 @@ void Simulation::rebuild_worlds() {
         for (std::size_t p = 0U; p < s.alive() && p < s.body.size(); ++p) {
             rigid.world->add(s.body[p], p < s.body_kind.size() ? s.body_kind[p] : 0U, s.size[p],
                              RigidBodyState{s.position[p], s.orientation[p], s.velocity[p], s.angular_velocity[p]},
-                             held(i, s.spawn_index[p]));
+                             held(i, p));
         }
         // The joins the state holds, made again in the order they were, so
         // a restored world holds them as the saved one did. The solver
@@ -1933,10 +2126,11 @@ void Simulation::restore(const SimulationState& state) {
     solver_state_stale_ = stale;
 }
 
-void Simulation::step(const ParameterProvider* parameters) {
+void Simulation::step(const ParameterProvider* parameters, const ActionProvider* actions) {
     resolve(parameters, state_.tick, values_);
-    if (has_piles_ && state_.tick == 0U && values_ != pile_values_) {
-        start(values_);
+    if (state_.tick == 0U &&
+        ((has_piles_ && values_ != pile_values_) || (has_placed_ && placed_digest(actions) != placed_))) {
+        start(values_, actions);
     }
     // Rigid physics emitters step first, all of them, then the rest, each
     // after the emitters it sheds particles from (step_order). A particle
@@ -1954,7 +2148,7 @@ void Simulation::step(const ParameterProvider* parameters) {
         if (cached(i)) {
             cache_->advance(i, state_.tick + 1U, state_.emitters[i]);
         } else {
-            step_emitter(i, values_);
+            step_emitter(i, values_, actions);
         }
     }
     // Then every grid, in the effect's order, on what this step deposited:
@@ -1970,13 +2164,15 @@ void Simulation::step(const ParameterProvider* parameters) {
                                                  });
 }
 
-void Simulation::advance_to(std::uint64_t target, const ParameterProvider* parameters) {
+void Simulation::advance_to(std::uint64_t target, const ParameterProvider* parameters,
+                            const ActionProvider* actions) {
     while (state_.tick < target) {
-        step(parameters);
+        step(parameters, actions);
     }
 }
 
-void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue> values) {
+void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue> values,
+                              const ActionProvider* actions) {
     const Emitter& emitter = effect_.emitters[index];
     EmitterState& s = state_.emitters[index];
     const double rate = static_cast<double>(effect_.simulation_rate);
@@ -2002,12 +2198,22 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
         }
     }
 
+    // The step's actions, if the emitter takes any (SpawnActions). What is
+    // removed goes with the dead; the rest act before the world steps, and
+    // the spawns are born with the step's births.
+    const std::optional<std::pair<const SpawnActions*, std::uint32_t>> acting = action_module(emitter);
+    const std::span<const Action> acts =
+        acting && actions != nullptr ? actions->actions_at(emitter.name, state_.tick) : std::span<const Action>{};
+    RigidWorld* world = rigid_[index].world.get();
+    if (world != nullptr) {
+        remove_targets(acts, s);
+    }
+
     // Age, and retire particles whose life is over. A rigid physics body
     // leaves its world with its particle, oldest first.
     for (float& age : s.age) {
         age += step.dt;
     }
-    RigidWorld* world = rigid_[index].world.get();
     if (world != nullptr) {
         for (std::size_t i = 0U; i < s.alive(); ++i) {
             if (!(s.age[i] < s.lifetime[i])) {
@@ -2065,12 +2271,21 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
                 }
             }
         }
+        // So do the bodies actions put down to wait until this tick.
+        for (std::size_t i = 0U; i < s.alive() && i < s.held_until.size(); ++i) {
+            if (s.held_until[i] != 0U && s.held_until[i] == state_.tick) {
+                waking.push_back(s.body[i]);
+            }
+        }
         if (!waking.empty()) {
             std::sort(waking.begin(), waking.end());
+            waking.erase(std::unique(waking.begin(), waking.end()), waking.end());
             world->wake(waking);
         }
         const RigidPhysics& physics = *rigid_physics(emitter);
-        // A blast goes off before the world steps, so the step carries it.
+        // Hands and blasts act before the world steps, so the step carries
+        // them: the actions first, then the blasts.
+        push_bodies(acts, s, *world);
         blast_bodies(step, emitter, physics, *world);
         step.last = s.alive();
         move_rigid(step, emitter, physics, *world);
@@ -2157,11 +2372,12 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     std::vector<std::optional<detail::BirthOrigin>> origins;
     const auto birth = [&s, &emitter, &origins, world](double age, std::uint32_t kind, std::uint32_t,
                                                        std::uint32_t spawn_index,
-                                                       const detail::BirthOrigin* origin) {
-        if (s.alive() < emitter.capacity) {
+                                                       const detail::BirthOrigin* origin, bool refused) {
+        if (!refused && s.alive() < emitter.capacity) {
             append(s, static_cast<float>(age), spawn_index);
             if (world != nullptr) {
                 s.body_kind.push_back(kind);
+                s.held_until.push_back(origin != nullptr ? origin->held_until : 0U);
             }
             origins.push_back(origin != nullptr ? std::optional<detail::BirthOrigin>{*origin} : std::nullopt);
         } else {
@@ -2169,7 +2385,19 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
         }
         ++s.spawned;
     };
-    const detail::BirthContext context{state_.tick, step.random.seed, step.dt, &sources, &shed_from};
+    detail::BirthContext context{state_.tick, step.random.seed, step.dt, &sources, &shed_from};
+    if (acting) {
+        context.actions = actions;
+        context.emitter = emitter.name;
+        context.rigid = world != nullptr;
+        // A rigid emitter keeps at most max_alive action-born bodies; a
+        // particle emitter's room is its step's cap.
+        const std::uint32_t born = world != nullptr ? action_born(s, acting->second) : 0U;
+        context.action_room = world != nullptr
+                                  ? (born < acting->first->max_alive ? acting->first->max_alive - born : 0U)
+                                  : acting->first->max_per_step;
+        context.skip_spawns = world != nullptr && state_.tick == 0U;
+    }
     detail::for_each_birth(emitter, step.in, s.rate_carry, s.spawn_counts, step.start, step.end, rate, context,
                            birth);
 
@@ -2188,8 +2416,7 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     // it was given. As ajfx's spawn kernel does it.
     for (std::size_t i = step.first; i < step.last; ++i) {
         if (const std::optional<detail::BirthOrigin>& origin = origins[i - step.first]) {
-            s.position[i] = origin->position + s.position[i];
-            s.velocity[i] = s.velocity[i] + origin->velocity;
+            take_origin(s, i, *origin);
         }
     }
     for (std::size_t i = step.first; i < step.last; ++i) {
@@ -2228,7 +2455,13 @@ void CheckpointRing::record(const Simulation& simulation) {
     checkpoints_.push_back(simulation.state());
 }
 
-void CheckpointRing::seek(Simulation& simulation, std::uint64_t target, const ParameterProvider* parameters) {
+void CheckpointRing::clear_from(std::uint64_t tick) noexcept {
+    std::erase_if(checkpoints_, [tick](const SimulationState& c) { return c.tick > tick || tick == 0U; });
+    stale_from_ = stale_from_ ? std::min(*stale_from_, tick) : tick;
+}
+
+void CheckpointRing::seek(Simulation& simulation, std::uint64_t target, const ParameterProvider* parameters,
+                          const ActionProvider* actions) {
     const SimulationState* best = nullptr;
     for (const SimulationState& checkpoint : checkpoints_) {
         if (checkpoint.tick <= target && (best == nullptr || checkpoint.tick > best->tick)) {
@@ -2246,7 +2479,12 @@ void CheckpointRing::seek(Simulation& simulation, std::uint64_t target, const Pa
     }
     const bool any = best != nullptr || cached_tick.has_value();
     const std::uint64_t best_tick = cached_tick ? *cached_tick : (best != nullptr ? best->tick : 0U);
-    const bool keep_current = simulation.tick() <= target && (!any || simulation.tick() >= best_tick);
+    // Where it stands is of the old performance if it is past the tick the
+    // actions changed at (or that tick was 0, which placed its bodies).
+    const bool current_stale = stale_from_ && (simulation.tick() > *stale_from_ || *stale_from_ == 0U);
+    stale_from_.reset();
+    const bool keep_current =
+        !current_stale && simulation.tick() <= target && (!any || simulation.tick() >= best_tick);
     if (!keep_current) {
         std::optional<SimulationState> from_cache;
         if (cached_tick) {
@@ -2257,10 +2495,10 @@ void CheckpointRing::seek(Simulation& simulation, std::uint64_t target, const Pa
         } else if (best != nullptr) {
             simulation.restore(*best);
         } else {
-            simulation.reset(parameters);
+            simulation.reset(parameters, actions);
         }
     }
-    simulation.prepare(parameters);
+    simulation.prepare(parameters, actions);
     while (true) {
         if (simulation.tick() % interval_ == 0U) {
             record(simulation);
@@ -2268,7 +2506,7 @@ void CheckpointRing::seek(Simulation& simulation, std::uint64_t target, const Pa
         if (simulation.tick() >= target) {
             break;
         }
-        simulation.step(parameters);
+        simulation.step(parameters, actions);
     }
 }
 

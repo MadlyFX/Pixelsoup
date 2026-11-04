@@ -39,6 +39,7 @@ if(NOT _ajfx_previous STREQUAL _ajfx_embedded)
 endif()
 
 add_library(ajfx STATIC
+    src/actions.cpp
     src/builder.cpp
     src/cache.cpp
     src/effect.cpp
@@ -234,6 +235,14 @@ if(BUILD_TESTING)
         ajfx_set_options(ajfx_contact_spawn_tests)
         add_test(NAME ajfx.contact_spawn COMMAND ajfx_contact_spawn_tests)
         set_target_properties(ajfx_contact_spawn_tests PROPERTIES FOLDER "ajfx/tests")
+        # Actions on a running effect: placed, dropped, pushed, steered and
+        # removed bodies, painted particles, runner revisions and the
+        # performance a cache is keyed by.
+        add_executable(ajfx_action_tests tests/action_tests.cpp)
+        target_link_libraries(ajfx_action_tests PRIVATE ajfx::rigid)
+        ajfx_set_options(ajfx_action_tests)
+        add_test(NAME ajfx.action COMMAND ajfx_action_tests)
+        set_target_properties(ajfx_action_tests PROPERTIES FOLDER "ajfx/tests")
         # Step cost, checkpoint size and a state digest; run by hand.
         add_executable(ajfx_rigid_bench tests/rigid_bench.cpp)
         target_link_libraries(ajfx_rigid_bench PRIVATE ajfx::rigid)

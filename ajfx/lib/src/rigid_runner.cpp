@@ -32,6 +32,12 @@ struct RigidRunner::Job final {
     bool asked{false};
     std::uint64_t generation{0U};
     std::shared_ptr<const ParameterProvider> parameters;
+    std::shared_ptr<const ActionProvider> actions;
+    // Set by set_actions: the first tick whose actions changed since the
+    // generation the simulation follows, so the next turn keeps what stands
+    // before it rather than starting over.
+    std::optional<std::uint64_t> revise_from;
+    std::optional<std::uint32_t> lead;
     // Ascending ticks, all from `generation`, none before `wanted`.
     std::deque<std::shared_ptr<const RigidFrame>> frames;
     std::optional<Error> error;
@@ -69,8 +75,10 @@ struct RigidRunner::Shared final {
         return tick;
     }
 
+    [[nodiscard]] std::uint32_t lead_of(const Job& job) const { return job.lead.value_or(options.lead); }
+
     [[nodiscard]] bool wants_work(const Job& job) const {
-        return job.asked && !job.dropped && !job.error && first_missing(job) <= job.wanted + options.lead;
+        return job.asked && !job.dropped && !job.error && first_missing(job) <= job.wanted + lead_of(job);
     }
 
     // The frame path is waiting on it.
@@ -82,8 +90,16 @@ struct RigidRunner::Shared final {
     }
 
     void run();
-    [[nodiscard]] std::optional<Error> turn(Job& job, std::uint64_t from, std::uint64_t wanted,
-                                            std::uint64_t generation, const ParameterProvider* parameters,
+    struct Turn final {
+        std::uint64_t from{0U};
+        std::uint64_t wanted{0U};
+        std::uint64_t generation{0U};
+        std::uint32_t lead{0U};
+        std::optional<std::uint64_t> revise_from;
+        const ParameterProvider* parameters{nullptr};
+        const ActionProvider* actions{nullptr};
+    };
+    [[nodiscard]] std::optional<Error> turn(Job& job, const Turn& take,
                                             std::vector<std::shared_ptr<const RigidFrame>>& produced) const;
 };
 
@@ -109,6 +125,9 @@ EmitterState particles_of(const EmitterState& s) {
     out.body = s.body;
     // Which kind each body is: a host draws a kind by its own model.
     out.body_kind = s.body_kind;
+    // Which bodies wait asleep for an action's release: the state a frame is
+    // compared with holds it.
+    out.held_until = s.held_until;
     // The props' poses: a host draws them, so they travel with the particles.
     out.props = s.props;
     out.spawned = s.spawned;
@@ -120,9 +139,13 @@ EmitterState particles_of(const EmitterState& s) {
 
 } // namespace
 
-std::optional<Error> RigidRunner::Shared::turn(Job& job, std::uint64_t from, std::uint64_t wanted,
-                                               std::uint64_t generation, const ParameterProvider* parameters,
+std::optional<Error> RigidRunner::Shared::turn(Job& job, const Turn& take,
                                                std::vector<std::shared_ptr<const RigidFrame>>& produced) const {
+    const std::uint64_t from = take.from;
+    const std::uint64_t wanted = take.wanted;
+    const std::uint64_t generation = take.generation;
+    const ParameterProvider* parameters = take.parameters;
+    const ActionProvider* actions = take.actions;
     if (!job.simulation) {
         Result<Simulation> made = Simulation::create(job.part, job.seed,
                                                      SimulationOptions{.meshes = job.meshes,
@@ -136,10 +159,19 @@ std::optional<Error> RigidRunner::Shared::turn(Job& job, std::uint64_t from, std
     }
     Simulation& simulation = *job.simulation;
     // New parameters (or none followed yet): what is held describes another
-    // past.
+    // past. New actions from a tick on: what is held up to that tick stands,
+    // and a simulation past it has to come back to a checkpoint before it.
+    bool stale = false;
     if (job.built != generation) {
-        job.checkpoints.clear();
-        simulation.reset(parameters);
+        if (take.revise_from && job.built) {
+            const std::uint64_t revised = *take.revise_from;
+            std::erase_if(job.checkpoints,
+                          [revised](const SimulationState& c) { return c.tick > revised || revised == 0U; });
+            stale = simulation.tick() > revised || revised == 0U;
+        } else {
+            job.checkpoints.clear();
+            simulation.reset(parameters, actions);
+        }
         job.built = generation;
     }
 
@@ -156,17 +188,18 @@ std::optional<Error> RigidRunner::Shared::turn(Job& job, std::uint64_t from, std
             best = &checkpoint;
         }
     }
-    if (simulation.tick() > from) {
+    if (simulation.tick() > from || stale) {
         if (best != nullptr) {
             simulation.restore(*best);
         } else {
-            simulation.reset(parameters);
+            simulation.reset(parameters, actions);
         }
     } else if (best != nullptr && best->tick > simulation.tick()) {
         simulation.restore(*best);
     }
+    simulation.prepare(parameters, actions);
 
-    const std::uint64_t horizon = wanted + options.lead;
+    const std::uint64_t horizon = wanted + take.lead;
     const std::uint64_t interval = std::max<std::uint64_t>(options.checkpoint_interval, 1U);
     const std::size_t keep = std::max<std::size_t>(options.checkpoint_count, 1U);
     for (std::uint32_t steps = 0U;; ++steps) {
@@ -195,7 +228,7 @@ std::optional<Error> RigidRunner::Shared::turn(Job& job, std::uint64_t from, std
         if (tick >= horizon || steps == std::max(options.turn, 1U)) {
             break;
         }
-        simulation.step(parameters);
+        simulation.step(parameters, actions);
     }
     return std::nullopt;
 }
@@ -240,21 +273,28 @@ void RigidRunner::Shared::run() {
         }
 
         pick->busy = true;
-        const std::uint64_t wanted = pick->wanted;
-        const std::uint64_t from = first_missing(*pick);
-        const std::uint64_t generation = pick->generation;
+        Turn take;
+        take.wanted = pick->wanted;
+        take.from = first_missing(*pick);
+        take.generation = pick->generation;
+        take.lead = lead_of(*pick);
+        take.revise_from = pick->revise_from;
         const std::shared_ptr<const ParameterProvider> parameters = pick->parameters;
+        const std::shared_ptr<const ActionProvider> actions = pick->actions;
+        take.parameters = parameters.get();
+        take.actions = actions.get();
         lock.unlock();
 
         std::vector<std::shared_ptr<const RigidFrame>> produced;
-        std::optional<Error> failed = turn(*pick, from, wanted, generation, parameters.get(), produced);
+        std::optional<Error> failed = turn(*pick, take, produced);
 
         lock.lock();
         pick->busy = false;
         if (failed) {
             pick->error = std::move(failed);
         }
-        if (pick->generation == generation) {
+        if (pick->generation == take.generation) {
+            pick->revise_from.reset();
             for (std::shared_ptr<const RigidFrame>& frame : produced) {
                 if (frame->tick < pick->wanted) {
                     continue;
@@ -296,7 +336,8 @@ RigidRunner::~RigidRunner() {
 }
 
 std::unique_ptr<RigidTrack> RigidRunner::track(const Effect& effect, std::uint32_t instance_seed, MeshSet meshes,
-                                               std::shared_ptr<const ParameterProvider> parameters) {
+                                               std::shared_ptr<const ParameterProvider> parameters,
+                                               std::shared_ptr<const ActionProvider> actions) {
     auto job = std::make_shared<Job>();
     job->part = rigid_physics_part(effect);
     for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
@@ -311,6 +352,7 @@ std::unique_ptr<RigidTrack> RigidRunner::track(const Effect& effect, std::uint32
     job->seed = instance_seed;
     job->meshes = std::move(meshes);
     job->parameters = std::move(parameters);
+    job->actions = std::move(actions);
     {
         const std::lock_guard lock{shared_->mutex};
         if (!shared_->stopping) {
@@ -368,6 +410,31 @@ void RigidTrack::set_parameters(std::shared_ptr<const ParameterProvider> paramet
             ++job_->generation;
             job_->frames.clear();
         }
+    }
+    shared_->wake.notify_all();
+}
+
+void RigidTrack::set_actions(std::shared_ptr<const ActionProvider> actions, std::uint64_t from) {
+    {
+        const std::lock_guard lock{shared_->mutex};
+        RigidRunner::Job& job = *job_;
+        job.actions = std::move(actions);
+        // Frames from `from` on, and whatever a turn under way produces,
+        // describe the old actions. The turn after sees where to keep from.
+        std::erase_if(job.frames,
+                      [from](const std::shared_ptr<const RigidFrame>& f) { return f->tick > from || from == 0U; });
+        ++job.generation;
+        if (job.built) {
+            job.revise_from = job.revise_from ? std::min(*job.revise_from, from) : from;
+        }
+    }
+    shared_->wake.notify_all();
+}
+
+void RigidTrack::set_lead(std::uint32_t lead) {
+    {
+        const std::lock_guard lock{shared_->mutex};
+        job_->lead = lead;
     }
     shared_->wake.notify_all();
 }

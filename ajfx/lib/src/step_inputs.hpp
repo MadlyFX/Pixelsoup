@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ajfx/actions.hpp>
 #include <ajfx/effect.hpp>
 #include <ajfx/random.hpp>
 #include <ajfx/rigid_solver.hpp>
@@ -162,12 +163,20 @@ inline BodySource body_source(const RigidPhysics& physics, const EmitterState& b
 // them, newborns included. By the name of the emitter.
 using ParticleSources = std::map<std::string, const EmitterState*, std::less<>>;
 
-// Where a particle born of a contact, a moving body or a moving particle
-// starts, before its init modules: added to the position and velocity they
-// give it.
+// Where a particle born of a contact, a moving body, a moving particle or
+// an action starts, before its init modules: added to the position and
+// velocity they give it. A body born of an action (`exact`) takes the pose
+// and motion as they are instead, whatever its init modules say, at `size`
+// when that is above zero.
 struct BirthOrigin final {
     Vec3 position{};
     Vec3 velocity{};
+    bool exact{false};
+    Quat orientation{};
+    Vec3 angular_velocity{};
+    float size{0.0F};
+    // A body asleep until this tick (0 for one awake from birth).
+    std::uint64_t held_until{0U};
 };
 
 // What births need beyond the spawn stack: the step, the emitter's seed
@@ -181,6 +190,18 @@ struct BirthContext final {
     float dt{0.0F};
     const BodySources* bodies{nullptr};
     const ParticleSources* particles{nullptr};
+    // The actions the step applies (SpawnActions), the emitter's name they
+    // are kept under, and how many more of its action-born particles may be
+    // alive (max_alive less those alive now; a particle emitter, which keeps
+    // no such count, passes max_per_step). Rigid physics emitters bear their
+    // tick-0 spawns before the first step (Simulation::start), so the step
+    // from 0 skips them (`skip_spawns`).
+    const ActionProvider* actions{nullptr};
+    std::string_view emitter;
+    std::uint32_t action_room{0U};
+    bool skip_spawns{false};
+    // Whether the emitter has rigid physics: its action births are exact.
+    bool rigid{false};
 };
 
 inline Vec3 unit_or_zero(Vec3 v) {
@@ -394,6 +415,47 @@ void particle_births(const SpawnFromParticles& m, std::uint32_t source, const Bi
     }
 }
 
+// A Spawn action as a birth origin: a body takes it exactly, a particle
+// starts from it.
+inline BirthOrigin action_origin(const Action& action, std::uint64_t tick, bool rigid) {
+    BirthOrigin origin;
+    origin.position = action.position;
+    origin.velocity = action.velocity;
+    origin.exact = rigid;
+    origin.orientation = action.orientation;
+    origin.angular_velocity = action.angular_velocity;
+    origin.size = action.size;
+    origin.held_until = rigid && action.release > tick ? action.release : 0U;
+    return origin;
+}
+
+// The births a SpawnActions module makes in one step: every Spawn action
+// stamped with the step's tick, in the provider's order, each with the
+// action's serial as its count. Refused past the module's cap for the step
+// and past the room the context gives, and counted so. A serial too large
+// for a spawn index is refused too.
+template <class Birth>
+void action_births(const SpawnActions& m, std::uint32_t source, const BirthContext& context, Birth& birth) {
+    if (context.actions == nullptr || context.skip_spawns) {
+        return;
+    }
+    std::uint32_t made = 0U;
+    for (const Action& action : context.actions->actions_at(context.emitter, context.tick)) {
+        if (action.kind != ActionKind::Spawn) {
+            continue;
+        }
+        const BirthOrigin origin = action_origin(action, context.tick, context.rigid);
+        if (made >= m.max_per_step || made >= context.action_room || action.serial > spawn_count_mask) {
+            // Refused, as a birth past capacity is: the birth callback counts
+            // it without room for it.
+            birth(0.0, action.body, source, spawn_index_of(source, action.serial), &origin, true);
+            continue;
+        }
+        birth(0.0, action.body, source, spawn_index_of(source, action.serial), &origin, false);
+        ++made;
+    }
+}
+
 // Calls `birth(age, body_kind, source, spawn_index, origin)` for every
 // particle the emitter's spawn stack produces in the step [start, end), in
 // stack order, with the age each has reached by the end of the step, the
@@ -403,13 +465,19 @@ void particle_births(const SpawnFromParticles& m, std::uint32_t source, const Bi
 // a moving body or a moving particle, where it starts (null for the rest).
 // `rate_carry` holds one fractional count per SpawnRate. The particles
 // SpawnFromParticles sheds come last, in stack order among themselves: the
-// GPU sheds those in a kernel after the births it was handed.
+// GPU sheds those in a kernel after the births it was handed. Action
+// births (SpawnActions) come with `refused` set when the module or the
+// context has no room for them: they are counted, not made.
 template <class Birth>
 void for_each_birth(const Emitter& emitter, const Inputs& in, std::vector<double>& rate_carry,
                     std::vector<std::uint64_t>& counts, double start, double end, double steps_per_second,
-                    const BirthContext& context, Birth&& birth) {
+                    const BirthContext& context, Birth&& born) {
     std::size_t rate_slot = 0U;
     const BirthOrigin* const none = nullptr;
+    const auto birth = [&born](double age, std::uint32_t kind, std::uint32_t source, std::uint32_t spawn_index,
+                               const BirthOrigin* origin, bool refused = false) {
+        born(age, kind, source, spawn_index, origin, refused);
+    };
     for (std::size_t slot = 0U; slot < emitter.spawn.size(); ++slot) {
         const SpawnModule& module = emitter.spawn[slot];
         const auto source = static_cast<std::uint32_t>(slot);
@@ -464,6 +532,8 @@ void for_each_birth(const Emitter& emitter, const Inputs& in, std::vector<double
             contact_births(*contacts, source, context, counts, birth);
         } else if (const SpawnFromBodies* bodies = std::get_if<SpawnFromBodies>(&module)) {
             body_births(*bodies, source, context, counts, birth);
+        } else if (const SpawnActions* actions = std::get_if<SpawnActions>(&module)) {
+            action_births(*actions, source, context, birth);
         }
     }
     for (std::size_t slot = 0U; slot < emitter.spawn.size(); ++slot) {

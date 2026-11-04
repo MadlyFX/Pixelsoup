@@ -114,7 +114,9 @@ public:
     // Records one step; nothing runs until the device is flushed. Under
     // hosted rigid physics the step's particle emitters meet no bodies and
     // are born of no contacts or bodies: give the step the rigid frame.
-    void step(const ParameterProvider* parameters = nullptr);
+    // `actions` are the step's (SpawnActions), as Simulation::step takes
+    // them; none acts without them.
+    void step(const ParameterProvider* parameters = nullptr, const ActionProvider* actions = nullptr);
     // Hosted rigid physics: records one step whose rigid physics emitters
     // are `rigid`, the host's frame of the tick this step reaches (tick() + 1,
     // RigidTrack::frame). Its particle emitters meet those bodies
@@ -122,11 +124,12 @@ public:
     // (SpawnFromContacts, SpawnFromBodies) as the CPU reference's are, and
     // the frame's particles are written for drawing, so no write_rigid is
     // needed for that tick. Inline, the frame is ignored and this is step().
-    void step(const ParameterProvider* parameters, const RigidFrame& rigid);
-    void advance_to(std::uint64_t target, const ParameterProvider* parameters = nullptr);
-    // Back to step 0, holding only the rigid physics emitters' piles when
-    // they are inline (see Simulation::reset).
-    void reset(const ParameterProvider* parameters = nullptr);
+    void step(const ParameterProvider* parameters, const RigidFrame& rigid, const ActionProvider* actions = nullptr);
+    void advance_to(std::uint64_t target, const ParameterProvider* parameters = nullptr,
+                    const ActionProvider* actions = nullptr);
+    // Back to step 0, holding only the rigid physics emitters' piles and
+    // placed bodies when they are inline (see Simulation::reset).
+    void reset(const ParameterProvider* parameters = nullptr, const ActionProvider* actions = nullptr);
 
     // Hosted rigid physics only: records writing a rigid physics emitter's
     // particles, as the host's simulation of it has them at this tick, into

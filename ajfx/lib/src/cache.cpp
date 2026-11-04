@@ -284,6 +284,10 @@ void write_emitter(Writer& w, const EmitterState& s) {
     for (const std::uint32_t kind : s.body_kind) {
         w.u32(kind);
     }
+    w.u32(static_cast<std::uint32_t>(s.held_until.size()));
+    for (const std::uint64_t until : s.held_until) {
+        w.u64(until);
+    }
     w.u32(static_cast<std::uint32_t>(s.joins.size()));
     for (const RigidJoin& join : s.joins) {
         w.u32(join.a);
@@ -387,6 +391,14 @@ bool read_emitter(Reader& r, EmitterState& s) {
     s.body_kind.resize(kinds);
     for (std::uint32_t& kind : s.body_kind) {
         kind = r.u32();
+    }
+    const std::uint32_t holds = r.u32();
+    if ((holds != 0U && holds != n) || !r.fits(holds, 8U)) {
+        return false;
+    }
+    s.held_until.resize(holds);
+    for (std::uint64_t& until : s.held_until) {
+        until = r.u64();
     }
     const std::uint32_t joins = r.u32();
     if (joins > max_rigid_joins || !r.fits(joins, 36U)) {
@@ -1195,6 +1207,10 @@ std::optional<std::string> emitter_difference(const CacheIdentity& have, const C
         if (now->mode != baked.mode || now->digest != baked.digest) {
             return "emitter " + quoted(baked.emitter) + " has changed since the bake";
         }
+        if (now->actions != baked.actions) {
+            return "the actions on emitter " + quoted(baked.emitter) + ", or on what it depends on, have changed "
+                   "since the bake";
+        }
     }
     return std::nullopt;
 }
@@ -1388,6 +1404,75 @@ std::uint64_t emitter_digest(const Effect& effect, std::size_t index, const Mesh
     return hash;
 }
 
+std::uint64_t actions_digest(const Effect& effect, std::size_t index, const ActionProvider* provider) {
+    if (provider == nullptr || index >= effect.emitters.size()) {
+        return 0U;
+    }
+    const auto takes = [](const Emitter& emitter) {
+        return std::any_of(emitter.spawn.begin(), emitter.spawn.end(),
+                           [](const SpawnModule& m) { return std::holds_alternative<SpawnActions>(m); });
+    };
+    bool any = false;
+    std::uint64_t hash = fnv_basis;
+    const auto mix_in = [&](const Emitter& emitter) {
+        if (!takes(emitter)) {
+            return;
+        }
+        any = true;
+        hash = fnv_text(emitter.name, hash);
+        hash = fnv_u64(provider->digest(emitter.name), hash);
+    };
+    mix_in(effect.emitters[index]);
+    const auto depend_on = [&](const std::string& name) {
+        for (std::size_t other = 0U; other < effect.emitters.size(); ++other) {
+            if (other != index && effect.emitters[other].name == name) {
+                mix_in(effect.emitters[other]);
+            }
+        }
+    };
+    for (const UpdateModule& module : effect.emitters[index].update) {
+        if (const auto* meets = std::get_if<BodyCollision>(&module)) {
+            depend_on(meets->emitter);
+        } else if (const auto* stirred = std::get_if<Wake>(&module)) {
+            depend_on(stirred->emitter);
+        }
+    }
+    for (const SpawnModule& module : effect.emitters[index].spawn) {
+        if (const auto* contacts = std::get_if<SpawnFromContacts>(&module)) {
+            depend_on(contacts->emitter);
+        } else if (const auto* shed = std::get_if<SpawnFromBodies>(&module)) {
+            depend_on(shed->emitter);
+        } else if (const auto* trail = std::get_if<SpawnFromParticles>(&module)) {
+            depend_on(trail->emitter);
+        }
+    }
+    for (const UpdateModule& module : effect.emitters[index].update) {
+        const auto* follows = std::get_if<VolumeAdvect>(&module);
+        if (follows == nullptr) {
+            continue;
+        }
+        for (const Emitter& other : effect.emitters) {
+            for (const UpdateModule& feeding : other.update) {
+                const auto* feeds = std::get_if<VolumeSource>(&feeding);
+                if (feeds != nullptr && feeds->volume == follows->volume) {
+                    depend_on(other.name);
+                }
+            }
+        }
+    }
+    return any ? hash : 0U;
+}
+
+// Every emitter's actions, for the whole effect's digest: the checkpoints
+// hold live emitters too, which the actions steer.
+std::uint64_t whole_actions_digest(const Effect& effect, const ActionProvider* provider) {
+    std::uint64_t hash = fnv_basis;
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        hash = fnv_u64(actions_digest(effect, i, provider), hash);
+    }
+    return hash;
+}
+
 std::uint64_t simulation_digest(const Effect& effect, const MeshSet& meshes, const FieldSet& fields) {
     Effect declared;
     declared.name = "effect";
@@ -1464,7 +1549,8 @@ std::vector<std::size_t> parameters_read(const Effect& effect, std::size_t index
 }
 
 CacheIdentity cache_identity(const Effect& effect, std::span<const CacheMode> modes, std::uint32_t instance_seed,
-                             std::span<const ParameterValue> values, const MeshSet& meshes, const FieldSet& fields) {
+                             std::span<const ParameterValue> values, const MeshSet& meshes, const FieldSet& fields,
+                             const ActionProvider* actions) {
     const std::vector<CacheMode> defaults = modes.empty() ? default_cache_modes(effect) : std::vector<CacheMode>{};
     const std::span<const CacheMode> chosen = modes.empty() ? std::span<const CacheMode>{defaults} : modes;
     const std::vector<bool> read = cached_reads(effect, chosen);
@@ -1472,8 +1558,9 @@ CacheIdentity cache_identity(const Effect& effect, std::span<const CacheMode> mo
     CacheIdentity identity{instance_seed, effect.simulation_rate, {}, {}};
     for (std::size_t i = 0U; i < effect.emitters.size() && i < chosen.size(); ++i) {
         if (chosen[i] != CacheMode::Live) {
-            identity.emitters.push_back(
-                CachedEmitter{effect.emitters[i].name, chosen[i], emitter_digest(effect, i, meshes, fields)});
+            identity.emitters.push_back(CachedEmitter{effect.emitters[i].name, chosen[i],
+                                                      emitter_digest(effect, i, meshes, fields),
+                                                      actions_digest(effect, i, actions)});
         }
     }
     for (std::size_t i = 0U; i < effect.parameters.size(); ++i) {
@@ -1648,7 +1735,8 @@ std::optional<SimulationState> Cache::checkpoint_before(std::uint64_t tick) cons
 }
 
 Result<Cache> Cache::open(std::vector<std::uint8_t> bytes, const Effect& effect, std::uint32_t instance_seed,
-                          std::span<const ParameterValue> values, const MeshSet& meshes, const FieldSet& fields) {
+                          std::span<const ParameterValue> values, const MeshSet& meshes, const FieldSet& fields,
+                          const ActionProvider* actions) {
     if (bytes.size() < sizeof(cache_magic) + 4U + 8U ||
         !std::equal(std::begin(cache_magic), std::end(cache_magic), bytes.begin())) {
         return malformed("is not an ajfx cache");
@@ -1671,7 +1759,7 @@ Result<Cache> Cache::open(std::vector<std::uint8_t> bytes, const Effect& effect,
     identity.instance_seed = r.u32();
     identity.simulation_rate = r.u32();
     const std::uint32_t cached = r.u32();
-    if (!r.fits(cached, 13U)) {
+    if (!r.fits(cached, 21U)) {
         return malformed("the cache's identity is truncated");
     }
     for (std::uint32_t i = 0U; i < cached; ++i) {
@@ -1679,6 +1767,7 @@ Result<Cache> Cache::open(std::vector<std::uint8_t> bytes, const Effect& effect,
         emitter.emitter = r.str();
         const std::uint8_t mode = r.u8();
         emitter.digest = r.u64();
+        emitter.actions = r.u64();
         if (mode == 0U || mode > static_cast<std::uint8_t>(CacheMode::Particles)) {
             return malformed("the cache's identity is malformed");
         }
@@ -1810,7 +1899,7 @@ Result<Cache> Cache::open(std::vector<std::uint8_t> bytes, const Effect& effect,
         }
     }
     // What it was baked from and with, against what it is to be played with.
-    const CacheIdentity expected = cache_identity(effect, modes, instance_seed, values, meshes, fields);
+    const CacheIdentity expected = cache_identity(effect, modes, instance_seed, values, meshes, fields, actions);
     if (std::optional<std::string> why = emitter_difference(identity, expected)) {
         return Error{ErrorCode::StaleCache, "the cache does not belong to this effect: " + *why};
     }
@@ -1819,7 +1908,9 @@ Result<Cache> Cache::open(std::vector<std::uint8_t> bytes, const Effect& effect,
     }
     // Its checkpoints hold every emitter, so they serve only the effect
     // that was baked, live emitters and all.
-    bool same_effect = baked_whole == simulation_digest(effect, meshes, fields) && layers == effect.emitters.size();
+    bool same_effect = baked_whole == fnv_u64(whole_actions_digest(effect, actions),
+                                              simulation_digest(effect, meshes, fields)) &&
+                       layers == effect.emitters.size();
     for (std::size_t i = 0U; same_effect && i < layers; ++i) {
         same_effect = data->layers[i].name == effect.emitters[i].name;
     }
@@ -1863,9 +1954,11 @@ Result<Baked> bake(const Effect& effect, std::uint32_t instance_seed, Simulation
         return Error{ErrorCode::InvalidEffect, "a bake needs one mode per emitter"};
     }
     const std::vector<ParameterValue> baked_values = complete(effect, settings.values);
+    const ActionProvider* const actions = settings.actions.get();
     const CacheIdentity pinned =
-        cache_identity(effect, modes, instance_seed, baked_values, options.meshes, options.fields);
-    const std::uint64_t whole = simulation_digest(effect, options.meshes, options.fields);
+        cache_identity(effect, modes, instance_seed, baked_values, options.meshes, options.fields, actions);
+    const std::uint64_t whole =
+        fnv_u64(whole_actions_digest(effect, actions), simulation_digest(effect, options.meshes, options.fields));
     // Checkpoints hold the live emitters' state too, which is only the
     // cache's to give if nothing outside the identity steers them.
     bool checkpoints_hold = true;
@@ -1938,7 +2031,7 @@ Result<Baked> bake(const Effect& effect, std::uint32_t instance_seed, Simulation
     }
     Simulation simulation = std::move(created).value();
     const FixedValues values{baked_values};
-    simulation.reset(&values);
+    simulation.reset(&values, actions);
 
     const float dt = simulation.step_seconds();
     struct Layer final {
@@ -1963,7 +2056,7 @@ Result<Baked> bake(const Effect& effect, std::uint32_t instance_seed, Simulation
 
     for (std::uint64_t tick = 0U; tick < settings.frames; ++tick) {
         if (tick > 0U) {
-            simulation.step(&values);
+            simulation.step(&values, actions);
         }
         for (std::size_t i = 0U; i < count; ++i) {
             if (modes[i] == CacheMode::Live) {
@@ -2108,6 +2201,7 @@ Result<Baked> bake(const Effect& effect, std::uint32_t instance_seed, Simulation
         w.str(emitter.emitter);
         w.u8(static_cast<std::uint8_t>(emitter.mode));
         w.u64(emitter.digest);
+        w.u64(emitter.actions);
     }
     w.u32(static_cast<std::uint32_t>(pinned.bake.size()));
     for (const BakeValue& value : pinned.bake) {

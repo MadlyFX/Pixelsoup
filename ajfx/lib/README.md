@@ -92,7 +92,7 @@ the emitter, module and field at fault.
 
 | Stage | Modules |
 | --- | --- |
-| Spawn | `SpawnRate`, `SpawnBurst`, `SpawnPile` (rigid physics only), `SpawnFromContacts` and `SpawnFromBodies` (particles born of another emitter's bodies) |
+| Spawn | `SpawnRate`, `SpawnBurst`, `SpawnPile` (rigid physics only), `SpawnFromContacts` and `SpawnFromBodies` (particles born of another emitter's bodies), `SpawnActions` (born of a host's actions, see below) |
 | Init | `Lifetime` (required), `ShapeLocation` (point, sphere, box, disc), `Velocity` (cone), `InitColor`, `InitSize`, `InitRotation`, `InitSpin`, `InitTumble` |
 | Update: appearance | `ColorOverLife`, `SizeOverLife`, `Heat` (a glow that cools) |
 | Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor`, `Converge`, `Shockwave` (a blast, see below), `VolumeAdvect` (carried by a grid volume) |
@@ -318,6 +318,42 @@ smoke on after the particles that made it have died.
   particles about to be drawn. The reference GPU renderer does not apply
   them yet; a host's renderer applies them per draw.
 
+### Actions
+
+A host can act on a running effect (`include/ajfx/actions.hpp`): place a
+body before the first step, drop one mid-run, push it, steer it by hand,
+take it away, paint particles in. Actions are inputs like parameter values:
+
+- An emitter that takes them has one `SpawnActions` module, which declares
+  only the bounds (`max_per_step`, and `max_alive` for a rigid physics
+  emitter's bodies). The actions themselves come from an `ActionProvider`
+  handed to `Simulation::step`, `CheckpointRing::seek`, `RigidRunner::track`
+  and `GpuSimulation::step`, so acting never changes the effect or its
+  package. `ActionList` is a provider kept by emitter and tick.
+- Every action is stamped with a tick and applied in that tick's step: a
+  body spawned at tick t stands at t + 1, exactly where and as the action
+  says, of the body kind it names, asleep until its `release` if that is
+  later. A rigid physics emitter's tick-0 spawns stand before the first
+  step, as a pile does: that is a stage's initial state. A particle
+  emitter's spawns start where the action says, offset and thrown by the
+  init modules; the GPU runtime bears them too.
+- `Push` adds a velocity and a spin to a body; `Steer` drives a body towards
+  a pose, as a hand holding it that lets go when the steering stops; `Remove`
+  ends a body's life. All three name their body by its spawn index, so a
+  pile's bodies can be handled too. They act on bodies only.
+- Spawns take the action's own `serial` as their spawn count rather than a
+  running one, so taking an action away or moving it leaves every other
+  spawn's random draws as they were. A spawn past the bounds is refused and
+  counted (`EmitterState::refused`), never squeezed in.
+- A provider is a pure function of (emitter, tick). A host that appends
+  while a simulation runs hands over a snapshot and says which tick changed:
+  `CheckpointRing::clear_from` and `RigidTrack::set_actions` keep what stands
+  before it and work the rest out again. With `RigidTrack::set_lead(0)` a
+  playing host appends at ticks not yet stepped and nothing is thrown away.
+- A cache is keyed by the actions its emitters were baked with
+  (`BakeSettings::actions`, `CachedEmitter::actions`): another performance
+  is a stale cache.
+
 ## Caching
 
 A simulation can be worked out once and played back (`include/ajfx/cache.hpp`):
@@ -346,7 +382,8 @@ A simulation can be worked out once and played back (`include/ajfx/cache.hpp`):
 - **Identity.** A cache is keyed by what its cached emitters depend on
   (`CacheIdentity`): the instance seed, the simulation rate, each cached
   emitter's `emitter_digest` (its modules, the meshes and fields it names,
-  the bodies it collides with, the bake-time parameters it reads) and those
+  the bodies it collides with, the bake-time parameters it reads), the
+  actions it and those bodies were baked with (`actions_digest`) and those
   parameters' values. Textures, kernels, looks, draw inputs and live
   emitters are not in it, so editing them keeps a cache. `Cache::open`
   refuses one that does not belong (`StaleCache`) and says why: another
@@ -970,8 +1007,9 @@ player.
 
 A small container of named entries, sorted by name, with an FNV-1a checksum
 (layout in `include/ajfx/package.hpp`).
-- `effect.json` holds the effect (format 7: the effect's `volumes` and the
-  `volume_source` and `volume_advect` modules; 6 the renderer's `lighting`,
+- `effect.json` holds the effect (format 10: the `spawn_actions` module; 9
+  BoxCollision's turn; 8 SpawnPile's single shape; 7 the effect's `volumes`
+  and the `volume_source` and `volume_advect` modules; 6 the renderer's `lighting`,
   `lightmap`, `curvature`, `wrap`, `ambient` and `shadowed`; 5 added
   per-kind/prop `draw_tint` and
   SpawnPile initial velocity/turn; 4 added the `wake` module; 3 added the
@@ -1026,10 +1064,11 @@ checksum.
   from age.
 - A rigid solver's world is built with its statics and then its props, in
   the order the desc lists them and before any body exists. It is then
-  driven in a fixed order: removals oldest first, wakes in slot order, a
-  blast's breaks and pushes (bodies in birth order, then loose props), the
-  driven props' new poses, one step, additions in birth order into the
-  lowest free slots. Every node must build the same Jolt source with the
+  driven in a fixed order: removals oldest first (an action's removals among
+  them), wakes in slot order, the actions' pushes and steers in the
+  provider's order, a blast's breaks and pushes (bodies in birth order, then
+  loose props), the driven props' new poses, one step, additions in birth
+  order into the lowest free slots. Every node must build the same Jolt source with the
   same defines (`third_party/jolt`), and update together.
 - The contacts a step reports are put in ajfx's own order
   (`contact_before`), with each pair's sides in a fixed order of their own.
@@ -1040,7 +1079,9 @@ checksum.
 - Particles born of contacts and bodies are counted by hashes of the step
   and the contact's place or the body's spawn index, and set off by draws
   keyed by their own spawn indices; their births, starts and speeds are
-  worked out on the CPU for the GPU too.
+  worked out on the CPU for the GPU too. Particles born of actions take the
+  action's serial as their count, so an action taken away or moved leaves
+  the rest as they were.
 - What particles deposit into a grid volume is quantised and summed as
   integers, so the sum is the same whichever order the particles come in;
   the grid's step reads only the previous pass and uses only products and

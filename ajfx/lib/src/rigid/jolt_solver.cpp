@@ -587,7 +587,7 @@ public:
     // Jolt adds the velocity and wakes a sleeping body itself. It is called
     // from the one thread that steps the world, in the caller's order, so
     // which bodies wake in which order is the caller's alone.
-    void push(RigidSide side, std::uint32_t index, Vec3 change) override {
+    void push(RigidSide side, std::uint32_t index, Vec3 change, Vec3 twist) override {
         JPH::BodyID id;
         if (side == RigidSide::Body && index < desc_.capacity) {
             id = JPH::BodyID(index);
@@ -601,7 +601,11 @@ public:
         if (!bodies.IsAdded(id)) {
             return;
         }
-        bodies.AddLinearVelocity(id, vec(change));
+        if (twist == Vec3{}) {
+            bodies.AddLinearVelocity(id, vec(change));
+        } else {
+            bodies.AddLinearAndAngularVelocity(id, vec(change), vec(twist));
+        }
     }
 
     void step(Vec3 gravity) override {

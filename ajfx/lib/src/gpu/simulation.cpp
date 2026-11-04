@@ -80,6 +80,10 @@ struct EmitterGpu final {
     std::uint32_t module_floats{0U};
     std::uint32_t seed{0U};
     std::uint64_t spawned{0U};
+    // Action births the module's caps refused (SpawnActions), which never
+    // reach the kernels: counted here, beside what the kernels refuse past
+    // capacity, as the reference counts them.
+    std::uint64_t refused{0U};
     std::vector<double> rate_carry;
     // Births by source (EmitterState::spawn_counts), counted here on the
     // CPU, which hands each newborn its spawn index.
@@ -109,6 +113,7 @@ struct GpuCheckpoint::Data final {
         Buffer counters;
         Buffer args;
         std::uint64_t spawned{0U};
+        std::uint64_t refused{0U};
         std::vector<double> rate_carry;
         std::vector<std::uint64_t> spawn_counts;
         // Invalid for an emitter that sheds from no particles.
@@ -282,7 +287,7 @@ struct GpuSimulation::State final {
     // Records one step. `hosted` is the host's frame of the tick the step
     // reaches, under hosted rigid physics; inline, the CPU simulation holds
     // the rigid physics emitters.
-    void record(const ParameterProvider* parameters, const RigidFrame* hosted);
+    void record(const ParameterProvider* parameters, const RigidFrame* hosted, const ActionProvider* actions);
 
     void zero_counters(const EmitterGpu& e) const {
         const std::uint8_t zeros[args_bytes]{};
@@ -603,15 +608,16 @@ std::uint64_t GpuSimulation::tick() const noexcept {
     return state_->tick;
 }
 
-void GpuSimulation::step(const ParameterProvider* parameters) {
-    state_->record(parameters, nullptr);
+void GpuSimulation::step(const ParameterProvider* parameters, const ActionProvider* actions) {
+    state_->record(parameters, nullptr, actions);
 }
 
-void GpuSimulation::step(const ParameterProvider* parameters, const RigidFrame& rigid) {
-    state_->record(parameters, state_->rigid ? nullptr : &rigid);
+void GpuSimulation::step(const ParameterProvider* parameters, const RigidFrame& rigid, const ActionProvider* actions) {
+    state_->record(parameters, state_->rigid ? nullptr : &rigid, actions);
 }
 
-void GpuSimulation::State::record(const ParameterProvider* parameters, const RigidFrame* hosted) {
+void GpuSimulation::State::record(const ParameterProvider* parameters, const RigidFrame* hosted,
+                                  const ActionProvider* actions) {
     State& s = *this;
     detail::resolve_values(s.effect, parameters, s.tick, s.values);
     const detail::Inputs in{s.effect, s.values};
@@ -619,7 +625,7 @@ void GpuSimulation::State::record(const ParameterProvider* parameters, const Rig
     const double start = static_cast<double>(s.tick) / rate;
     const double end = static_cast<double>(s.tick + 1U) / rate;
     if (s.rigid) {
-        s.rigid->step(parameters);
+        s.rigid->step(parameters, actions);
     }
 
     // Each rigid physics emitter's particles at the end of this step, and
@@ -759,10 +765,27 @@ void GpuSimulation::State::record(const ParameterProvider* parameters, const Rig
         // Each birth is counted by its own source, as the reference counts
         // it, refused or not, and starts where a contact or a body puts it,
         // as the reference starts it.
-        const detail::BirthContext context{s.tick, e.seed, s.dt, &sources};
+        detail::BirthContext context{s.tick, e.seed, s.dt, &sources};
+        for (const SpawnModule& module : emitter.spawn) {
+            if (const auto* acting = std::get_if<SpawnActions>(&module)) {
+                // A particle emitter's room for action births is its step's
+                // cap, as the reference gives it.
+                context.actions = actions;
+                context.emitter = emitter.name;
+                context.action_room = acting->max_per_step;
+            }
+        }
         detail::for_each_birth(emitter, in, e.rate_carry, e.spawn_counts, start, end, rate, context,
                                [&](double age, std::uint32_t, std::uint32_t, std::uint32_t spawn_index,
-                                   const detail::BirthOrigin* origin) {
+                                   const detail::BirthOrigin* origin, bool refused) {
+                                   // An action birth refused by its module's
+                                   // caps is counted as the reference counts
+                                   // it, and never reaches the kernels.
+                                   if (refused) {
+                                       ++e.refused;
+                                       ++e.spawned;
+                                       return;
+                                   }
                                    // Births past capacity are refused by the
                                    // kernels; they need no age or index.
                                    if (births < emitter.capacity) {
@@ -873,21 +896,23 @@ void GpuSimulation::State::record(const ParameterProvider* parameters, const Rig
     ++s.tick;
 }
 
-void GpuSimulation::advance_to(std::uint64_t target, const ParameterProvider* parameters) {
+void GpuSimulation::advance_to(std::uint64_t target, const ParameterProvider* parameters,
+                               const ActionProvider* actions) {
     while (state_->tick < target) {
-        step(parameters);
+        step(parameters, actions);
     }
 }
 
-void GpuSimulation::reset(const ParameterProvider* parameters) {
+void GpuSimulation::reset(const ParameterProvider* parameters, const ActionProvider* actions) {
     State& s = *state_;
     s.tick = 0U;
     s.current = 0U;
     if (s.rigid) {
-        s.rigid->reset(parameters);
+        s.rigid->reset(parameters, actions);
     }
     for (EmitterGpu& e : s.emitters) {
         e.spawned = 0U;
+        e.refused = 0U;
         std::fill(e.rate_carry.begin(), e.rate_carry.end(), 0.0);
         std::fill(e.spawn_counts.begin(), e.spawn_counts.end(), 0U);
         s.zero_counters(e);
@@ -1053,7 +1078,7 @@ Result<EmitterState> GpuSimulation::read_emitter(std::size_t emitter) {
         out.spin.push_back(field(l.spin, 0.0F));
     }
     out.spawned = e.spawned;
-    out.refused = words[2];
+    out.refused = words[2] + e.refused;
     out.rate_carry = e.rate_carry;
     out.spawn_counts = e.spawn_counts;
     if (e.shed_state.valid()) {
@@ -1136,6 +1161,7 @@ void GpuSimulation::save_into(GpuCheckpoint& checkpoint) {
         const std::uint64_t record_bytes =
             static_cast<std::uint64_t>(s.effect.emitters[i].capacity) * e.layout.stride;
         saved.spawned = e.spawned;
+        saved.refused = e.refused;
         saved.rate_carry = e.rate_carry;
         saved.spawn_counts = e.spawn_counts;
         s.device->copy_buffer(saved.particles, 0U, e.particles[s.current], 0U, record_bytes);
@@ -1167,6 +1193,7 @@ void GpuSimulation::restore(const GpuCheckpoint& checkpoint) {
         const std::uint64_t record_bytes =
             static_cast<std::uint64_t>(s.effect.emitters[i].capacity) * e.layout.stride;
         e.spawned = saved.spawned;
+        e.refused = saved.refused;
         e.rate_carry = saved.rate_carry;
         e.spawn_counts = saved.spawn_counts;
         s.device->copy_buffer(e.particles[s.current], 0U, saved.particles, 0U, record_bytes);
