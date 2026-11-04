@@ -928,10 +928,14 @@ float body_reach(const RigidWorldDesc& desc, std::uint32_t kind) {
 }
 
 // Where `count` bodies spaced `d` apart stack, bottom first, relative to the
-// middle of the pile's base.
+// middle of the pile's base; a single body's middle is the point itself.
 std::vector<Vec3> pile_lattice(const SpawnPile& m, std::size_t count, float d) {
     std::vector<Vec3> points;
     if (count == 0U) {
+        return points;
+    }
+    if (m.shape == PileShape::Single) {
+        points.assign(count, Vec3{});
         return points;
     }
     if (m.shape == PileShape::Box) {

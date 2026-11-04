@@ -74,6 +74,40 @@ void new_scene_ground_catches_objects_and_can_be_removed() {
     CHECK(ready(document).requests.empty());
 }
 
+// A Dynamic object starts with its middle where the inspector and its handle
+// put it, whatever it collides as, and falls from there. It used to start
+// half a pile spacing higher (most of its own size) and drop into place.
+void a_dynamic_object_starts_where_it_is_placed() {
+    Document document = new_scene();
+    const Uid hull = add_object(document);
+    object(document, hull).position = {0.6F, 2.3F, -0.9F};
+    object(document, hull).size = 1.4F;
+    const Uid ball = add_object(document);
+    object(document, ball).position = {-1.7F, 1.1F, 0.4F};
+    object(document, ball).size = 0.6F;
+    object(document, ball).collider = ObjectCollider::Sphere;
+    const Compiled compiled = ready(document);
+    auto solver = ajfx::rigid::make_jolt_solver();
+    auto run = simulation(compiled, solver.get());
+    const ajfx::EmitterState &start = run.emitter(0);
+    CHECK(start.alive() == 2U);
+    const auto starts_at = [&start](ajfx::Vec3 at) {
+        for (std::size_t i = 0U; i < start.alive(); ++i) {
+            if (start.position[i] == at) {
+                return true;
+            }
+        }
+        return false;
+    };
+    CHECK(starts_at({0.6F, 2.3F, -0.9F}));
+    CHECK(starts_at({-1.7F, 1.1F, 0.4F}));
+    // Each comes to rest on the floor, its middle half its size up.
+    run.advance_to(240U);
+    const float a = run.emitter(0).position[0].y;
+    const float b = run.emitter(0).position[1].y;
+    CHECK(near(std::min(a, b), 0.3F, 0.03F) && near(std::max(a, b), 0.7F, 0.03F));
+}
+
 void typed_scene_roundtrip_and_strict_fields() {
     Document document = empty_scene();
     const Uid a = add_object(document, "artist/model.obj");
@@ -991,6 +1025,7 @@ void add_scene_tests(std::vector<studio_test::Case> &cases) {
     cases.push_back({"forces_are_scene_items_that_act_on_their_targets", forces_are_scene_items_that_act_on_their_targets});
     cases.push_back({"motion_stack_and_age_drivers_reach_the_runtime", motion_stack_and_age_drivers_reach_the_runtime});
     cases.push_back({"new_scene_ground_catches_objects_and_can_be_removed", new_scene_ground_catches_objects_and_can_be_removed});
+    cases.push_back({"a_dynamic_object_starts_where_it_is_placed", a_dynamic_object_starts_where_it_is_placed});
     cases.push_back({"typed_scene_roundtrip_and_strict_fields", typed_scene_roundtrip_and_strict_fields});
     cases.push_back({"independent_surfaces_share_one_colliding_world", independent_surfaces_share_one_colliding_world});
     cases.push_back(

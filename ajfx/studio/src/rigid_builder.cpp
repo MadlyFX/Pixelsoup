@@ -185,7 +185,9 @@ void RigidBuilder::object(const Block& block) {
         place_spawn(block.uid,
                     SpawnPile{.id = id(block, 1U),
                               .count = out.count,
-                              .shape = arrange == "stack" ? PileShape::Box : PileShape::Heap,
+                              .shape = arrange == "one"     ? PileShape::Single
+                                       : arrange == "stack" ? PileShape::Box
+                                                            : PileShape::Heap,
                               .center = to_vec3(get(block, "at")) * s_,
                               .slope = number_of(block, "slope"),
                               .width = number_of(block, "width") * s_,

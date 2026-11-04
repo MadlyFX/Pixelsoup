@@ -768,6 +768,41 @@ void piles_need_rigid_physics_and_room() {
         AJFX_CHECK(s.position[8] == (Vec3{-0.75F, 0.75F, -0.25F}));
         AJFX_CHECK(s.position[19] == (Vec3{0.75F, 1.25F, -0.25F}));
     }
+    {
+        // A single body's middle is the pile's point, where a heap of one
+        // stands its body half a spacing above it: a cube of size 0.8
+        // reaches 0.8 * sqrt(3), so the heap lifts it 0.8 * sqrt(3) * 1.05 / 2.
+        const Vec3 at{0.3F, 1.7F, -0.4F};
+        const auto cube = [&at](PileShape shape) {
+            EffectBuilder builder{"crate"};
+            builder.emitter("crates")
+                .capacity(4U)
+                .spawn(SpawnPile{.count = 1U, .shape = shape, .center = at, .spacing = 1.05F, .jitter = 0.0F})
+                .init(Lifetime{.min = 5.0F, .max = 5.0F})
+                .init(InitSize{.min = 0.8F, .max = 0.8F})
+                .update(RigidPhysics{.shape = RigidShape::Box});
+            return make(builder.build().value());
+        };
+        Simulation single = cube(PileShape::Single);
+        AJFX_CHECK(single.emitter(0).alive() == 1U);
+        AJFX_CHECK(single.emitter(0).position[0] == at);
+        Simulation heap = cube(PileShape::Heap);
+        const float lift = heap.emitter(0).position[0].y - at.y;
+        AJFX_CHECK(std::abs(lift - 0.8F * std::sqrt(3.0F) * 1.05F * 0.5F) < 1.0e-4F);
+    }
+    {
+        // A single shape holds one body, and says so of any other count.
+        EffectBuilder builder{"pair"};
+        builder.emitter("crates")
+            .capacity(4U)
+            .spawn(SpawnPile{.count = 2U, .shape = PileShape::Single})
+            .init(Lifetime{.min = 5.0F, .max = 5.0F})
+            .update(RigidPhysics{.shape = RigidShape::Box});
+        const Result<Effect> built = builder.build();
+        AJFX_CHECK(!built.ok());
+        AJFX_CHECK(built.error().message.find("count") != std::string::npos);
+        std::cout << "  " << built.error().message << '\n';
+    }
 }
 
 // Two emitters, the first not rigid: a track's frames keep the effect's
@@ -1201,8 +1236,8 @@ Effect two_balls_of_different_kinds(float scale) {
     EffectBuilder builder{"scaled"};
     builder.emitter("balls")
         .capacity(8U)
-        // A pile of one places its body at its own centre, so the two stand
-        // apart and fall without meeting each other.
+        // A pile of one each, two metres apart, so the two fall without
+        // meeting each other.
         .spawn(SpawnPile{.count = 1U, .center = Vec3{-1.0F, 1.0F, 0.0F}, .jitter = 0.0F, .release = 0.0F, .body = 1U})
         .spawn(SpawnPile{.count = 1U, .center = Vec3{1.0F, 1.0F, 0.0F}, .jitter = 0.0F, .release = 0.0F, .body = 2U})
         .init(Lifetime{.min = 30.0F, .max = 30.0F})

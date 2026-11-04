@@ -45,7 +45,9 @@ density, friction, restitution, initial velocity, release time and fracture.
 Static, Dynamic and Animated have their usual collision meanings. Animated
 uses the runtime's supported single move, with start, duration and target
 pose. Collider choices are explicit convex hull, sphere or box. Distribution
-creates a Single object or one Grid/Pile instance set. Repeated Static and
+creates a Single object or one Grid/Pile instance set. A Single object of
+any motion starts with its middle at its Position, where its handle is.
+Repeated Static and
 Animated objects, and fracture on either, are diagnosed as unsupported.
 
 A particle system owns its sources, launch direction and speed, gravity

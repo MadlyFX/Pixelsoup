@@ -252,6 +252,7 @@ void check_module(const Effect&, const SpawnPile& m, FieldChecker& check) {
     check.require(m.spacing >= 0.5F && m.spacing <= 4.0F, "spacing", "must be between 0.5 and 4");
     check.require(m.jitter >= 0.0F && m.jitter <= 1.0F, "jitter", "must be between 0 and 1");
     check.require(m.release >= 0.0F, "release", "must not be negative");
+    check.require(m.shape != PileShape::Single || m.count == 1U, "count", "must be 1 for a single body");
 }
 
 void check_module(const Effect& e, const SpawnRate& m, FieldChecker& check) {

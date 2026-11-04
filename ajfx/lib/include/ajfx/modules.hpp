@@ -114,6 +114,9 @@ enum class PileShape {
     // Rows filling a `width` by `depth` footprint, a layer at a time, as a
     // wall of bricks or a stack of crates.
     Box,
+    // One body whose middle is `center`, as an object placed by hand: a
+    // count of 1, with no lattice under it to lift it off the point.
+    Single,
 };
 
 // `count` bodies already there when the effect starts, stacked on `center`
@@ -127,7 +130,8 @@ enum class PileShape {
 //   bottom up. A heap's layers are staggered, each body over a gap below, and
 //   it grows as tall as `count` needs; a box is built as high as it needs.
 //   `jitter` moves each body across by up to that share of the spacing, so a
-//   heap is not a perfect stack.
+//   heap is not a perfect stack. A single body is not stacked: its middle
+//   is `center` itself.
 // - **How:** init modules set each body up as any newborn (life, colour,
 //   size, orientation), but a pile body starts still where the pile puts it:
 //   position, velocity and spin are the pile's.
@@ -1758,7 +1762,7 @@ struct EnumNames<RigidShape> {
 };
 template <>
 struct EnumNames<PileShape> {
-    static constexpr std::string_view names[] = {"heap", "box"};
+    static constexpr std::string_view names[] = {"heap", "box", "single"};
 };
 template <>
 struct EnumNames<PropMotion> {
