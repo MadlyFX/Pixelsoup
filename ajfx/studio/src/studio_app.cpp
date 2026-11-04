@@ -12,6 +12,7 @@
 #include "imgui_layer.hpp"
 #include "scene_view.hpp"
 #include "stage.hpp"
+#include "stage_gizmo.hpp"
 #include "stage_panel.hpp"
 #include "session.hpp"
 #include "stage_camera.hpp"
@@ -191,6 +192,7 @@ public:
         }
         list_.set_scale(window_.ui_scale());
         imgui_->begin_frame(input_);
+        gizmo_overlay();
         const double now = window_.time_seconds();
         take_dropped_files(now);
         const double dt = std::clamp(now - last_time_, 0.0, 0.1);
@@ -1307,6 +1309,7 @@ private:
             orbit_.pitch = std::clamp(orbit_.pitch + ctx_.pointer_dy() / 700.0F, -0.02F, 0.24F);
             want_frame_ = false;
         }
+        stage_view_ = view;
         pick_click(view, hit);
         if (hit.clicked && clicks_.double_click(1U, ctx_.time_seconds())) {
             orbit_ = frame_bounds(orbit_, frame_selection_bounds(), preview_aspect_);
@@ -1366,6 +1369,13 @@ private:
         if (tool_ == StageTool::Select) {
             if (picked && picked->on_body) {
                 scene_view_.select(picked->layer, ctx_.ctrl_held());
+                // A thing put down or dropped is picked as itself, to be
+                // moved with the gizmo or timed on the timeline.
+                if (const std::optional<BodyRef> ref =
+                        picked->spawn_index ? body_ref(package_targets_, *picked->spawn_index) : std::nullopt;
+                    ref && ref->drop != 0U) {
+                    selected_act_ = ref->drop;
+                }
             }
             return;
         }
@@ -1394,6 +1404,29 @@ private:
                   : tool_ == StageTool::Place ? "Placed: it stands there when the scene starts"
                                               : "Deleted: it goes once the scene plays on",
                   true);
+        }
+    }
+
+    // The gizmo over the thing picked on the stage: drawn before the rest, so
+    // a press on it is not also a press on the picture under it.
+    void gizmo_overlay() {
+        if (!document_.scene || selected_act_ == 0U || tool_ != StageTool::Select || stage_view_.width <= 1.0F) {
+            return;
+        }
+        const Act* act = find_act(document_.scene->performance, selected_act_);
+        if (act == nullptr || !on_stage(*act)) {
+            return;
+        }
+        const float scale = window_.ui_scale();
+        const gui::Rect pixels{stage_view_.x * scale, stage_view_.y * scale, stage_view_.width * scale,
+                               stage_view_.height * scale};
+        const StageCamera camera{camera_pose(orbit_), pixels};
+        const GizmoOutcome gizmo = draw_gizmo(camera, pixels, stage_panel_.gizmo, GizmoPose{act->position, act->turn});
+        if (gizmo.took_pointer) {
+            input_.withhold_pointer();
+        }
+        if (gizmo.moved) {
+            move_placement(document_.scene->performance, selected_act_, gizmo.moved->position, gizmo.moved->turn);
         }
     }
 
@@ -1782,6 +1815,9 @@ private:
     StagePanelState stage_panel_;
     bool settling_{false};
     std::string stage_status_;
+    // The picture as the camera sees it, in the interface's units, for the
+    // gizmo over the thing picked on the stage.
+    gui::Rect stage_view_{};
     // Models dropped on the viewport from the desktop: each is a kind placed
     // by hand, and a first copy goes on the stage where it was let go once
     // the package that has the kind is built.

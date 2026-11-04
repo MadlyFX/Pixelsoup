@@ -57,6 +57,27 @@ StageRequest draw_stage_panel(StagePanelState& state, const StagePanelIn& in, St
     ImGui::SameLine();
     tool_button(state, StageControl::Delete, "Delete", StageTool::Delete, tool, "Take away the thing you click from then on (X)");
 
+    ImGui::TextDisabled("Drag the handle over the thing picked to");
+    const auto handle_button = [&](StageControl control, const char* label, GizmoMode mine, const char* tip) {
+        const bool on = state.gizmo == mine;
+        if (on) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        }
+        if (ImGui::Button(label)) {
+            state.gizmo = mine;
+        }
+        note(state, control);
+        if (on) {
+            ImGui::PopStyleColor();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", tip);
+        }
+    };
+    handle_button(StageControl::Move, "Move", GizmoMode::Move, "Drag the arrows to move the picked thing, or the middle to move it across the view");
+    ImGui::SameLine();
+    handle_button(StageControl::Turn, "Turn", GizmoMode::Turn, "Drag the rings to turn the picked thing about its own axes");
+
     if (scene != nullptr) {
         const std::size_t placed = stage_count(scene->performance);
         const std::size_t held = dropped_count(scene->performance);

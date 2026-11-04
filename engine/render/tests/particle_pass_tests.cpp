@@ -1636,6 +1636,76 @@ void a_body_dropped_while_playing_joins_the_heap() {
     std::cout << "  held " << held << " frames playing on after the drop\n";
 }
 
+// Bodies put on the stage, as ajfx Studio's Place tool does, are drops at
+// the first step. A scene opened with them paused at its start shows them
+// standing there, though the instance began without them and was told of
+// them afterwards, as Studio does when its first package arrives.
+void bodies_placed_at_the_first_step_stand_while_paused_there() {
+    render::ParticleSettings settings;
+    settings.rigid_lead = 12U;
+    settings.acting_rigid_lead = 4U;
+    render::ParticlePass pass = make_pass(settings);
+    ajfx::EffectBuilder builder{"stage"};
+    builder.emitter("stones")
+        .capacity(32U)
+        .seed(7U)
+        .spawn(ajfx::SpawnActions{.max_per_step = 4U, .max_alive = 16U})
+        .init(ajfx::Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ajfx::InitSize{.min = 0.2F, .max = 0.3F})
+        .update(ajfx::Gravity{})
+        .update(ajfx::RigidPhysics{.shape = ajfx::RigidShape::Sphere, .friction = 0.7F})
+        .update(ajfx::PlaneCollision{.friction = 0.8F});
+    const ajfx::Effect effect = builder.build().value();
+    render::ParticleInstance instance = make_instance(pass, effect);
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+    auto none = std::make_shared<ajfx::ActionList>();
+    pass.revise(instance, none, 0U);
+
+    const auto advance = [&](core::u64 frame) {
+        auto acquired = g_device->acquire_commands();
+        PASS_CHECK(acquired);
+        rhi::CommandList commands = std::move(acquired).value();
+        const bool reached = pass.advance(commands, instance, frame, 24U, 1U);
+        auto submitted = g_device->submit(std::move(commands));
+        PASS_CHECK(submitted);
+        PASS_CHECK(std::move(submitted).value().wait());
+        PASS_CHECK(!pass.take_error());
+        return reached;
+    };
+    const auto reach = [&](core::u64 frame) {
+        int held = 0;
+        while (!advance(frame)) {
+            ++held;
+            PASS_CHECK(held < 5000);
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return held;
+    };
+    // Paused at the start with nothing placed: nothing stands.
+    static_cast<void>(reach(0U));
+    PASS_CHECK(instance.step() == 0U && instance.simulation().read_emitter(0U).value().alive() == 0U);
+
+    // Three things put down at the first step, told of afterwards.
+    auto placed = std::make_shared<ajfx::ActionList>();
+    for (std::uint32_t i = 0U; i < 3U; ++i) {
+        ajfx::Action place;
+        place.tick = 0U;
+        place.serial = i + 1U;
+        place.position = ajfx::Vec3{static_cast<float>(i) - 1.0F, 2.0F + static_cast<float>(i), 0.0F};
+        placed->add("stones", place);
+    }
+    pass.revise(instance, placed, 0U);
+    static_cast<void>(reach(0U));
+    PASS_CHECK(instance.step() == 0U);
+    ajfx::Simulation reference =
+        ajfx::Simulation::create(effect, 3U, ajfx::SimulationOptions{.rigid = solver.get()}).value();
+    reference.reset(nullptr, placed.get());
+    const ajfx::EmitterState expected = reference.emitter(0U);
+    const ajfx::EmitterState drawn = instance.simulation().read_emitter(0U).value();
+    PASS_CHECK(expected.alive() == 3U);
+    PASS_CHECK(drawn.alive() == 3U && drawn.position == expected.position && drawn.spawn_index == expected.spawn_index);
+}
+
 // A rigid physics emitter holding one cube prop that collides as `shape` and
 // moves as `motion`, with its single particle parked ten units below the
 // camera's view so only the prop's own pixels land in the frame. The prop
@@ -2241,6 +2311,7 @@ int main() {
         {"rigid_physics_holds_until_its_thread_has_the_step", rigid_physics_holds_until_its_thread_has_the_step},
         {"revised_actions_replay_from_their_tick", revised_actions_replay_from_their_tick},
         {"a_body_dropped_while_playing_joins_the_heap", a_body_dropped_while_playing_joins_the_heap},
+        {"bodies_placed_at_the_first_step_stand_while_paused_there", bodies_placed_at_the_first_step_stand_while_paused_there},
         {"body_kinds_draw_as_their_own_models", body_kinds_draw_as_their_own_models},
         {"body_kind_surface_tint_reaches_pixels", body_kind_surface_tint_reaches_pixels},
         {"a_body_kinds_scale_reaches_its_draw", a_body_kinds_scale_reaches_its_draw},

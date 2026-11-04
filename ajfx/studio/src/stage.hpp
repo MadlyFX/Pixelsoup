@@ -5,6 +5,7 @@
 #include <ajfx/math.hpp>
 #include <ajfx/rigid_solver.hpp>
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -28,6 +29,14 @@ namespace ajfx::studio {
 // The degrees (x, y, z as an Object's rotation) that prop_orientation turns
 // into `q`; the inverse, up to the several turns that make one pose.
 [[nodiscard]] Vec3 turn_of(Quat q) noexcept;
+
+// A pose as a 4x4 matrix, column-major (translation in the last column), as a
+// gizmo takes it: the rotation prop_orientation makes of `turn`, at `position`.
+using PoseMatrix = std::array<float, 16>;
+[[nodiscard]] PoseMatrix pose_matrix(Vec3 position, Vec3 turn) noexcept;
+// The position and turn (as an Object's rotation, in degrees) a rigid pose
+// matrix has. Any scale in it is taken out first.
+void pose_from_matrix(const PoseMatrix& matrix, Vec3& position, Vec3& turn) noexcept;
 
 // Makes a kind placed by hand of each model file in `files` (an OBJ, glTF or
 // GLB, whatever the case of its extension; anything else is left alone) and

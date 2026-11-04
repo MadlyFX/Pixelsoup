@@ -5,6 +5,7 @@
 
 #include <ajfx/math.hpp>
 
+#include <array>
 #include <optional>
 
 // The preview's camera as the page's toolkit sees it, and the handles dragged
@@ -32,6 +33,11 @@ public:
     // The pointer's ray into the scene.
     void ray(float x, float y, Vec3& origin, Vec3& direction) const;
     [[nodiscard]] Vec3 forward() const noexcept { return forward_; }
+    // The camera as a gizmo takes it: 4x4, column-major, right-handed, the
+    // view from world to the camera and the projection from the camera to
+    // clip space (depth -1 to 1), over the same view `project` lands in.
+    [[nodiscard]] std::array<float, 16> view_matrix() const noexcept;
+    [[nodiscard]] std::array<float, 16> projection_matrix(float near_plane, float far_plane) const noexcept;
     // Pixels per metre at `world`'s depth, for sizing by distance.
     [[nodiscard]] float pixels_per_metre(Vec3 world) const;
 

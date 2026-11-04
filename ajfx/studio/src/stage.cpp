@@ -62,6 +62,49 @@ Vec3 turn_of(Quat q) noexcept {
     return Vec3{pitch * degrees, yaw * degrees, roll * degrees};
 }
 
+PoseMatrix pose_matrix(Vec3 position, Vec3 turn) noexcept {
+    const Quat q = prop_orientation(turn);
+    const float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
+    const float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
+    const float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
+    // Row r, column c of the rotation, stored at [c * 4 + r].
+    return PoseMatrix{1.0F - 2.0F * (yy + zz), 2.0F * (xy + wz),        2.0F * (xz - wy),        0.0F,
+                      2.0F * (xy - wz),        1.0F - 2.0F * (xx + zz), 2.0F * (yz + wx),        0.0F,
+                      2.0F * (xz + wy),        2.0F * (yz - wx),        1.0F - 2.0F * (xx + yy), 0.0F,
+                      position.x,              position.y,              position.z,              1.0F};
+}
+
+void pose_from_matrix(const PoseMatrix& m, Vec3& position, Vec3& turn) noexcept {
+    position = Vec3{m[12], m[13], m[14]};
+    // The columns are the rotated axes; unit length takes any scale out.
+    const auto column = [&](std::size_t c) {
+        const Vec3 v{m[c * 4U], m[c * 4U + 1U], m[c * 4U + 2U]};
+        const float l = std::sqrt(dot(v, v));
+        return l > 1.0e-9F ? v * (1.0F / l) : v;
+    };
+    const Vec3 x = column(0U), y = column(1U), z = column(2U);
+    // Row r, column c.
+    const float r00 = x.x, r10 = x.y, r20 = x.z;
+    const float r01 = y.x, r11 = y.y, r21 = y.z;
+    const float r02 = z.x, r12 = z.y, r22 = z.z;
+    Quat q{};
+    const float trace = r00 + r11 + r22;
+    if (trace > 0.0F) {
+        const float s = std::sqrt(trace + 1.0F) * 2.0F;
+        q = Quat{(r21 - r12) / s, (r02 - r20) / s, (r10 - r01) / s, 0.25F * s};
+    } else if (r00 > r11 && r00 > r22) {
+        const float s = std::sqrt(1.0F + r00 - r11 - r22) * 2.0F;
+        q = Quat{0.25F * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s};
+    } else if (r11 > r22) {
+        const float s = std::sqrt(1.0F + r11 - r00 - r22) * 2.0F;
+        q = Quat{(r01 + r10) / s, 0.25F * s, (r12 + r21) / s, (r02 - r20) / s};
+    } else {
+        const float s = std::sqrt(1.0F + r22 - r00 - r11) * 2.0F;
+        q = Quat{(r02 + r20) / s, (r12 + r21) / s, 0.25F * s, (r10 - r01) / s};
+    }
+    turn = turn_of(q);
+}
+
 std::vector<Uid> add_dropped_models(Document& document, std::span<const std::string> files) {
     std::vector<Uid> kinds;
     if (!document.scene) {

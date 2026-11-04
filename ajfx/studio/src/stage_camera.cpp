@@ -65,6 +65,21 @@ void StageCamera::ray(float x, float y, Vec3& origin, Vec3& direction) const {
     direction = normalized(forward_ + right_ * (nx * tan_half_ * aspect_) + up_ * (ny * tan_half_), forward_);
 }
 
+std::array<float, 16> StageCamera::view_matrix() const noexcept {
+    return {right_.x, up_.x, -forward_.x, 0.0F,
+            right_.y, up_.y, -forward_.y, 0.0F,
+            right_.z, up_.z, -forward_.z, 0.0F,
+            -dot(right_, eye_), -dot(up_, eye_), dot(forward_, eye_), 1.0F};
+}
+
+std::array<float, 16> StageCamera::projection_matrix(float near_plane, float far_plane) const noexcept {
+    const float f = 1.0F / tan_half_;
+    return {f / aspect_, 0.0F, 0.0F, 0.0F,
+            0.0F, f, 0.0F, 0.0F,
+            0.0F, 0.0F, -(far_plane + near_plane) / (far_plane - near_plane), -1.0F,
+            0.0F, 0.0F, -2.0F * far_plane * near_plane / (far_plane - near_plane), 0.0F};
+}
+
 float StageCamera::pixels_per_metre(Vec3 world) const {
     const float z = std::max(dot(world - eye_, forward_), near_);
     return view_.height * 0.5F / (z * tan_half_);

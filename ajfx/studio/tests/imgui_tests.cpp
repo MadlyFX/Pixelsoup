@@ -1,6 +1,8 @@
 #include "imgui_layer.hpp"
 #include "scene.hpp"
 #include "stage.hpp"
+#include "stage_camera.hpp"
+#include "stage_gizmo.hpp"
 #include "stage_panel.hpp"
 
 #include <mediaserver/gui/input.hpp>
@@ -9,6 +11,8 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
+#include <optional>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -200,6 +204,91 @@ void a_stage_without_things_cannot_be_settled() {
           StageRequest::None);
 }
 
+// clip = projection * view * (world, 1), column-major, then into the view's
+// pixels: worked out here rather than asked of the camera.
+ajfx::Vec3 through_matrices(const StageCamera& camera, const gui::Rect& view, ajfx::Vec3 world, float& depth) {
+    const std::array<float, 16> v = camera.view_matrix();
+    const std::array<float, 16> p = camera.projection_matrix(0.05F, 1000.0F);
+    const auto multiply = [](const std::array<float, 16>& m, const float in[4], float out[4]) {
+        for (int row = 0; row < 4; ++row) {
+            out[row] = m[static_cast<std::size_t>(row)] * in[0] + m[static_cast<std::size_t>(4 + row)] * in[1] +
+                       m[static_cast<std::size_t>(8 + row)] * in[2] + m[static_cast<std::size_t>(12 + row)] * in[3];
+        }
+    };
+    const float world4[4]{world.x, world.y, world.z, 1.0F};
+    float eye[4]{};
+    float clip[4]{};
+    multiply(v, world4, eye);
+    multiply(p, eye, clip);
+    depth = clip[3];
+    return ajfx::Vec3{view.x + (clip[0] / clip[3] + 1.0F) * 0.5F * view.width,
+                      view.y + (1.0F - clip[1] / clip[3]) * 0.5F * view.height, clip[2] / clip[3]};
+}
+
+void the_cameras_matrices_land_where_it_projects() {
+    const CameraPose pose{ajfx::Vec3{2.0F, 1.5F, 5.0F}, ajfx::Vec3{0.5F, 0.8F, -0.2F}, 0.12F};
+    const gui::Rect view{100.0F, 50.0F, 800.0F, 450.0F};
+    const StageCamera camera{pose, view};
+    for (const ajfx::Vec3 world : {ajfx::Vec3{0.5F, 0.8F, -0.2F}, ajfx::Vec3{-1.0F, 0.0F, 0.0F}, ajfx::Vec3{2.0F, 3.0F, -4.0F},
+                                   ajfx::Vec3{0.0F, 1.0F, 1.0F}}) {
+        float depth = 0.0F;
+        const ajfx::Vec3 landed = through_matrices(camera, view, world, depth);
+        const std::optional<gui::UiPoint> projected = camera.project(world);
+        CHECK(projected.has_value() && depth > 0.0F);
+        CHECK(std::abs(landed.x - projected->x) < 0.05F && std::abs(landed.y - projected->y) < 0.05F);
+        // In front of the camera it is inside the clip range.
+        CHECK(landed.z > -1.0F && landed.z < 1.0F);
+    }
+    // The point the camera looks at is the middle of the view.
+    float depth = 0.0F;
+    const ajfx::Vec3 middle = through_matrices(camera, view, pose.target, depth);
+    CHECK(std::abs(middle.x - 500.0F) < 0.05F && std::abs(middle.y - 275.0F) < 0.05F);
+}
+
+// The thing at the origin of a camera looking straight at it, its gizmo
+// dragged by the middle across the view to the right.
+void dragging_the_gizmos_middle_moves_the_thing_across_the_view() {
+    Headless imgui;
+    ImGui::GetIO().DisplaySize = ImVec2{1000.0F, 700.0F};
+    const gui::Rect view{0.0F, 0.0F, 1000.0F, 700.0F};
+    const StageCamera camera{CameraPose{ajfx::Vec3{0.0F, 1.0F, 5.0F}, ajfx::Vec3{0.0F, 1.0F, 0.0F}, 0.11F}, view};
+    GizmoPose pose{ajfx::Vec3{0.0F, 1.0F, 0.0F}, ajfx::Vec3{}};
+    const std::optional<gui::UiPoint> middle = camera.project(pose.position);
+    CHECK(middle.has_value());
+    bool took = false;
+    std::size_t moves = 0U;
+    const auto frame = [&] {
+        imgui.frame([&] {
+            const GizmoOutcome outcome = draw_gizmo(camera, view, GizmoMode::Move, pose);
+            took = took || outcome.took_pointer;
+            if (outcome.moved) {
+                pose = *outcome.moved;
+                ++moves;
+            }
+        });
+    };
+    Headless::move(middle->x, middle->y);
+    frame();
+    frame();
+    Headless::button(true);
+    frame();
+    for (int step = 1; step <= 6; ++step) {
+        Headless::move(middle->x + 10.0F * static_cast<float>(step), middle->y);
+        frame();
+    }
+    Headless::button(false);
+    frame();
+    frame();
+    CHECK(took && moves > 0U);
+    // Across the view to the right is along +x for this camera, by about the
+    // 60 pixels the pointer went (a pixel is 2 * tan(fov/2) * 5 / 700 metres
+    // here) and not up or towards the camera.
+    const float metres_per_pixel = 2.0F * std::tan(0.11F * 6.28318530718F * 0.5F) * 5.0F / 700.0F;
+    CHECK(std::abs(pose.position.x - 60.0F * metres_per_pixel) < 0.05F);
+    CHECK(std::abs(pose.position.y - 1.0F) < 0.02F && std::abs(pose.position.z) < 0.02F);
+    CHECK(std::abs(pose.turn.x) < 0.01F && std::abs(pose.turn.y) < 0.01F && std::abs(pose.turn.z) < 0.01F);
+}
+
 void the_old_interface_is_told_what_imgui_took() {
     gui::InputState input;
     input.set_mouse_position(120.0F, 80.0F);
@@ -232,6 +321,8 @@ int main() {
         {"draw_data_follows_the_framebuffer_scale", draw_data_follows_the_framebuffer_scale},
         {"the_stage_panel_picks_tools_and_asks_for_setup", the_stage_panel_picks_tools_and_asks_for_setup},
         {"a_stage_without_things_cannot_be_settled", a_stage_without_things_cannot_be_settled},
+        {"the_cameras_matrices_land_where_it_projects", the_cameras_matrices_land_where_it_projects},
+        {"dragging_the_gizmos_middle_moves_the_thing_across_the_view", dragging_the_gizmos_middle_moves_the_thing_across_the_view},
         {"the_old_interface_is_told_what_imgui_took", the_old_interface_is_told_what_imgui_took},
     };
     int failures = 0;

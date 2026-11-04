@@ -248,6 +248,41 @@ void settling_leaves_later_acts_and_refuses_an_empty_stage() {
     CHECK(*find_act(scene.document.scene->performance, later) == before);
 }
 
+void a_pose_makes_a_matrix_and_comes_back() {
+    const ajfx::Vec3 turns[] = {{0.0F, 0.0F, 0.0F},     {0.0F, 90.0F, 0.0F},  {30.0F, 0.0F, 0.0F},
+                                {0.0F, -45.0F, 20.0F},  {10.0F, 70.0F, -35.0F}, {-60.0F, 120.0F, 80.0F},
+                                {0.0F, 179.0F, 0.0F}};
+    for (const ajfx::Vec3 turn : turns) {
+        const ajfx::Vec3 at{1.5F, -2.0F, 0.25F};
+        const PoseMatrix m = pose_matrix(at, turn);
+        // Translation in the last column, the rest a rotation: the axes are
+        // unit and at right angles, and a right-handed set.
+        CHECK(m[12] == 1.5F && m[13] == -2.0F && m[14] == 0.25F && m[15] == 1.0F && m[3] == 0.0F && m[7] == 0.0F);
+        const ajfx::Vec3 x{m[0], m[1], m[2]}, y{m[4], m[5], m[6]}, z{m[8], m[9], m[10]};
+        CHECK(near(ajfx::dot(x, x), 1.0F, 1.0e-5F) && near(ajfx::dot(y, y), 1.0F, 1.0e-5F));
+        CHECK(near(ajfx::dot(x, y), 0.0F, 1.0e-5F) && near(ajfx::dot(x, ajfx::cross(y, z)), 1.0F, 1.0e-5F));
+        // It turns a vector as the runtime's orientation does.
+        const ajfx::Vec3 v = ajfx::rotate(ajfx::prop_orientation(turn), {0.3F, 0.5F, -0.7F});
+        const ajfx::Vec3 w{m[0] * 0.3F + m[4] * 0.5F + m[8] * -0.7F, m[1] * 0.3F + m[5] * 0.5F + m[9] * -0.7F,
+                           m[2] * 0.3F + m[6] * 0.5F + m[10] * -0.7F};
+        CHECK(length(v - w) < 1.0e-5F);
+        // And back to the same pose, scale or not.
+        ajfx::Vec3 position{}, back{};
+        pose_from_matrix(m, position, back);
+        CHECK(length(position - at) < 1.0e-6F);
+        const ajfx::Quat a = ajfx::prop_orientation(turn);
+        const ajfx::Quat b = ajfx::prop_orientation(back);
+        CHECK(std::abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) > 0.99999F);
+        PoseMatrix scaled = m;
+        for (std::size_t i = 0U; i < 3U; ++i) {
+            scaled[i] *= 2.0F;
+        }
+        pose_from_matrix(scaled, position, back);
+        const ajfx::Quat c = ajfx::prop_orientation(back);
+        CHECK(std::abs(a.x * c.x + a.y * c.y + a.z * c.z + a.w * c.w) > 0.99999F);
+    }
+}
+
 void dropped_model_files_become_kinds_placed_by_hand() {
     Document document = new_scene();
     const std::size_t before = document.scene->items.size();
@@ -293,6 +328,7 @@ void add_stage_tests(std::vector<studio_test::Case>& cases) {
     cases.push_back({"jitter_is_bounded_exact_and_taken_back_by_reset", jitter_is_bounded_exact_and_taken_back_by_reset});
     cases.push_back({"settling_keeps_where_things_came_to_rest", settling_keeps_where_things_came_to_rest});
     cases.push_back({"settling_leaves_later_acts_and_refuses_an_empty_stage", settling_leaves_later_acts_and_refuses_an_empty_stage});
+    cases.push_back({"a_pose_makes_a_matrix_and_comes_back", a_pose_makes_a_matrix_and_comes_back});
     cases.push_back({"dropped_model_files_become_kinds_placed_by_hand", dropped_model_files_become_kinds_placed_by_hand});
     cases.push_back({"placements_are_saved_with_their_home", placements_are_saved_with_their_home});
 }

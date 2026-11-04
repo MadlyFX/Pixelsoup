@@ -61,6 +61,15 @@ that act in the viewport, **Select** (Esc), **Place** (O), **Drop** (D) and
   thing's own serial, so the same seed does the same and taking a thing away
   moves no other.
 - **Reset** puts everything Settle or Jitter moved back where it was put.
+- **Move** and **Turn** pick what the gizmo over the picked thing does (ImGuizmo):
+  with Select, a click on a placed or dropped thing picks it (its marker on the
+  timeline is picked too), and dragging the arrows or the middle moves it, or
+  the rings turn it about its own axes. What is dragged to becomes where it was
+  put, so Reset does not undo it. The gizmo has the pointer where it is, and
+  the camera and picking beneath it do not.
+- A model file (OBJ, glTF or GLB) let go on the viewport from the desktop
+  becomes a kind placed by hand, with a first copy on the stage where it was let
+  go, and the tool becomes Place so more copies are a click each.
 
 A kind placed by hand has to be Dynamic, since it is dropped; a Static or
 Animated one is diagnosed. Placements count against **Most dropped at once**

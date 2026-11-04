@@ -2,6 +2,7 @@
 
 #include "performance.hpp"
 #include "scene.hpp"
+#include "stage_gizmo.hpp"
 
 #include <imgui.h>
 
@@ -19,7 +20,7 @@ namespace ajfx::studio {
 enum class StageRequest : std::uint8_t { None, Jitter, Settle, Reset };
 
 // The panel's controls, to say where each was drawn.
-enum class StageControl : std::uint8_t { Select, Place, Drop, Delete, Settle, Jitter, Reset, Count };
+enum class StageControl : std::uint8_t { Select, Place, Drop, Delete, Move, Turn, Settle, Jitter, Reset, Count };
 
 // What the panel keeps between frames: its own settings, not the scene's.
 struct StagePanelState final {
@@ -28,6 +29,8 @@ struct StagePanelState final {
     float tilt{4.0F};
     // The jitter's seed; another one is another jitter.
     std::int32_t seed{1};
+    // What dragging the gizmo over the thing picked does.
+    GizmoMode gizmo{GizmoMode::Move};
     // Where each control was drawn last frame, in the window's pixels (left,
     // top, right, bottom): what a test aims its clicks at.
     std::array<ImVec4, static_cast<std::size_t>(StageControl::Count)> where{};
