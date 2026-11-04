@@ -399,8 +399,8 @@ Basic refuses a started effect with the reason.
   the same rigid frame as the particles, so what is on screen is one tick of
   one world. A prop's model is drawn through the mesh-particle path, scaled by
   the authored `size` and turned by the pose's own orientation, before the
-  emitters so it depth-writes like a scene model and lights like the debris
-  around it; a prop takes no particle capacity and does not change where
+  emitters so it depth-writes like a scene model and takes the scene's light
+  and shadows like the lit debris around it; a prop takes no particle capacity and does not change where
   particles sort. Its motion vector comes from the velocity its pose reports,
   as a particle's does from its own. Meshes are uploaded once per name, so
   emitters and props drawing the same model share buffers. A prop draws the

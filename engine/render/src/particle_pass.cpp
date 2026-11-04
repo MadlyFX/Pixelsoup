@@ -1082,6 +1082,12 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         prop.motion = {targets.motion_valid ? targets.motion_seconds : 0.0F,
                        targets.motion_valid ? 1.0F : 0.0F, 0.0F, 0.0F};
         prop.flags = flag_mesh;
+        // A prop stands in the scene, so the scene's light falls on it: lit
+        // through its own normals, taking the hemisphere whole and the sun's
+        // shadows. Without a scene the pass lights it from the camera.
+        prop.look = {0.0F, 0.0F, 1.0F, shadow_bias};
+        prop.lighting[2] = static_cast<core::u32>(ajfx::Lighting::Lit);
+        prop.lighting[3] = 1U;
         const std::array<rhi::SampledTexture, sprite_texture_slots> untextured = sampled_textures(nullptr, nullptr, nullptr);
         for (const ParticleInstance::State::PropGroup& group : i.props) {
             const ParticleInstance::State::MeshUpload& uploaded = i.mesh_uploads[group.upload];
