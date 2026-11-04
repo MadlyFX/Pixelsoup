@@ -385,6 +385,12 @@ Basic refuses a started effect with the reason.
 - **Published parameters** (`particle_parameter.<name>.<component>` values
   and keys under the same name) are sampled as curves at each simulation
   step. A changed value or key restarts the simulation.
+- **Draw inputs** (`SpriteRenderer::tint`, `brightness`, `opacity` and
+  `size_scale`) multiply each emitter's particles as they are drawn, never
+  as they are simulated: `ajfx::draw_adjustment` is resolved once an
+  advance, against the parameters at the step reached, and reaches the
+  sprite, ribbon and mesh draws (a body kind's own tint and scale multiply
+  on top).
 - **Rigid physics** runs off the frame path: each pass owns one
   `ajfx::RigidRunner` (`ParticleSettings::rigid_threads` threads, default 2),
   and an instance whose step the runner has not reached holds. No physics

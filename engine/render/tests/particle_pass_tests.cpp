@@ -128,7 +128,8 @@ struct Frame final {
 // Advances to `frame` of a 24 fps show (one call) and draws into fresh
 // targets cleared to transparent black and the given depth.
 [[nodiscard]] Frame render_frame(render::ParticlePass& pass, render::ParticleInstance& instance, core::u64 frame,
-                                 const scene::Mat4& placement, float depth_clear = 0.0F) {
+                                 const scene::Mat4& placement, float depth_clear = 0.0F,
+                                 const ajfx::ParameterProvider* parameters = nullptr) {
     rhi::TextureDesc color_desc{};
     color_desc.width = size;
     color_desc.height = size;
@@ -148,7 +149,7 @@ struct Frame final {
     auto acquired = g_device->acquire_commands();
     PASS_CHECK(acquired);
     rhi::CommandList commands = std::move(acquired).value();
-    PASS_CHECK(pass.advance(commands, instance, frame, 24U, 1U));
+    PASS_CHECK(pass.advance(commands, instance, frame, 24U, 1U, parameters));
     render::ParticleTargets targets{};
     targets.color = &color.value();
     targets.depth = &depth.value();
@@ -185,6 +186,56 @@ void a_particle_draws_where_the_camera_sees_it() {
     const Frame shifted = render_frame(pass, moved, 1U, translation(1.0F, 0.0F, 0.0F));
     PASS_CHECK(shifted.red(48U, 32U) >= 251U);
     PASS_CHECK(shifted.alpha(32U, 32U) == 0U);
+}
+
+// Every value a playback-time parameter is asked for: the same at any tick.
+class Constant final : public ajfx::ParameterProvider {
+public:
+    explicit Constant(std::vector<ajfx::ParameterValue> values) : values_{std::move(values)} {}
+    void values_at(std::uint64_t, std::span<ajfx::ParameterValue> values) const override {
+        std::copy(values_.begin(), values_.end(), values.begin());
+    }
+
+private:
+    std::vector<ajfx::ParameterValue> values_;
+};
+
+void a_renderers_draw_inputs_reach_pixels() {
+    // A white particle, its renderer's tint, brightness and size scale
+    // multiplying it as it is drawn: (0.2, 0.6, 1.0) at brightness 1 by
+    // default and 0.5 when the playback-time "glow" asks for it, at twice
+    // the size the simulation gave it.
+    ajfx::EffectBuilder builder{"tinted"};
+    builder.float_parameter("glow", 1.0F, 0.0F, 4.0F).playback();
+    builder.emitter("e")
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::InitColor{.a = ajfx::Color{1.0F, 1.0F, 1.0F, 1.0F}, .b = ajfx::Color{1.0F, 1.0F, 1.0F, 1.0F}})
+        .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+        .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Alpha,
+                                       .tint = ajfx::Color{0.2F, 0.6F, 1.0F, 1.0F},
+                                       .brightness = ajfx::bind("glow"),
+                                       .size_scale = 2.0F});
+    const ajfx::Effect effect = builder.build().value();
+    render::ParticlePass pass = make_pass();
+    render::ParticleInstance instance = make_instance(pass, effect);
+    const auto near = [](core::u8 value, float expected) {
+        return std::abs(static_cast<float>(value) - expected * 255.0F) <= 3.0F;
+    };
+    const Frame plain = render_frame(pass, instance, 1U, identity());
+    std::cout << "  tinted at the default glow: " << int{plain.red(32U, 32U)} << ' ' << int{plain.green(32U, 32U)}
+              << ' ' << int{plain.blue(32U, 32U)} << '\n';
+    PASS_CHECK(near(plain.red(32U, 32U), 0.2F) && near(plain.green(32U, 32U), 0.6F) &&
+               near(plain.blue(32U, 32U), 1.0F));
+    // Diameter 2 is 32 pixels: 14 pixels right is inside it, where the
+    // simulation's own size (16 pixels across) would leave it empty.
+    PASS_CHECK(plain.alpha(46U, 32U) > 0U && plain.alpha(50U, 32U) == 0U);
+
+    const Constant dim{{ajfx::to_value(0.5F)}};
+    const Frame dimmed = render_frame(pass, instance, 2U, identity(), 0.0F, &dim);
+    PASS_CHECK(near(dimmed.red(32U, 32U), 0.1F) && near(dimmed.green(32U, 32U), 0.3F) &&
+               near(dimmed.blue(32U, 32U), 0.5F));
 }
 
 void the_scene_depth_hides_particles_behind_it() {
@@ -1904,6 +1955,7 @@ int main() {
     };
     const Case cases[] = {
         {"a_particle_draws_where_the_camera_sees_it", a_particle_draws_where_the_camera_sees_it},
+        {"a_renderers_draw_inputs_reach_pixels", a_renderers_draw_inputs_reach_pixels},
         {"the_scene_depth_hides_particles_behind_it", the_scene_depth_hides_particles_behind_it},
         {"additive_particles_add_and_cover_as_they_brighten", additive_particles_add_and_cover_as_they_brighten},
         {"alpha_particles_draw_back_to_front_in_the_placed_effect",

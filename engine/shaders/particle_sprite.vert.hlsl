@@ -51,8 +51,9 @@ cbuffer ParticleView : register(b0, space1) {
     uint premultiplied;
     // x: seconds of motion a velocity-aligned quad spans. y: 1 for additive
     // light. z: the bits of a mesh particle's orientation offset (asuint),
-    // absent when it has none. w: the body kind's own size scale for this
-    // mesh draw, 1 where the size is the record's alone.
+    // absent when it has none. w: what the record's size is multiplied by as
+    // it is drawn: the renderer's size scale, times the body kind's own for
+    // a mesh draw.
     float4 sprite_extra;
     uint age_offset;
     uint lifetime_offset;
@@ -293,7 +294,7 @@ Output ribbon_vertex(float2 corner, uint instance) {
     float3 side = cross(tangent, camera_forward.xyz);
     const float span = length(side);
     side = span > 1.0e-6F ? side / span : camera_right.xyz;
-    const float size = size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F;
+    const float size = (size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F) * sprite_extra.w;
     output.position = mul(view_projection, float4(position + side * (corner.y * size * 0.5F), 1.0F));
     // Soft across, like the disc; the texture along it by life.
     output.uv = float2(0.0F, corner.y);
@@ -382,7 +383,7 @@ Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     const uint record = (flags & 8U) != 0U ? order.Load(instance * 4U) : instance;
     const uint base = record * stride;
     const float3 position = to_world_point(asfloat(particles.Load3(base + position_offset)));
-    const float size = size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F;
+    const float size = (size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F) * sprite_extra.w;
 
     float3 right = camera_right.xyz;
     float3 up = camera_up.xyz;

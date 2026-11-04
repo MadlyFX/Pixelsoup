@@ -47,7 +47,7 @@ struct ViewConstants final {
     core::u32 facing_velocity{};
     core::u32 premultiplied{};
     // x: stretch, y: 1 for additive light, z: orientation offset bits,
-    // w: the body kind's size scale for a mesh draw (1 leaves the size alone)
+    // w: the renderer's size scale, times the body kind's for a mesh draw
     std::array<float, 4U> extra{};
     core::u32 age_offset{absent};
     core::u32 lifetime_offset{absent};
@@ -176,6 +176,11 @@ struct ParticleInstance::State final {
     std::vector<std::optional<std::size_t>> emitter_lightmap;
     // Each emitter's drawing order from the last draw, for its motion.
     std::vector<ajfx::gpu::Buffer> orders;
+    // What each emitter's particles are multiplied by as they are drawn (the
+    // renderer's tint, brightness, opacity and size scale), resolved against
+    // the parameters at the step the simulation stands at. The simulation
+    // never reads them, so a cache or a checkpoint carries none of them.
+    std::vector<ajfx::DrawAdjustment> adjustments;
     // One package mesh on the GPU: its vertices interleaved as the sprite
     // stage pulls them (position, normal, uv) and its triangle list. Keyed by
     // mesh name rather than by emitter, because several emitters and props may
@@ -705,6 +710,11 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
         state->emitter_texture.push_back(texture.value());
         state->emitter_lightmap.push_back(lightmap.value());
     }
+    // The parameters' defaults until an advance brings values of its own.
+    const std::vector<ajfx::ParameterValue> defaults = ajfx::parameter_values(state->effect, nullptr, 0U);
+    for (std::size_t e = 0U; e < state->effect.emitters.size(); ++e) {
+        state->adjustments.push_back(ajfx::draw_adjustment(state->effect, e, defaults));
+    }
     return Result::success(ParticleInstance{std::move(state)});
 }
 
@@ -915,6 +925,14 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
                 }
                 i.rigid_written = i.target;
             }
+        }
+    }
+    // An effect without parameters keeps the adjustments it was created with.
+    if (!i.effect.parameters.empty()) {
+        const std::vector<ajfx::ParameterValue> values =
+            ajfx::parameter_values(i.effect, parameters, simulation.tick());
+        for (std::size_t e = 0U; e < i.adjustments.size(); ++e) {
+            i.adjustments[e] = ajfx::draw_adjustment(i.effect, e, values);
         }
     }
     s.particles->end_recording();
@@ -1187,8 +1205,10 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         constants.rotation_offset = offset_or_absent(buffers.layout.rotation);
         constants.facing_velocity = sprite.facing == ajfx::Facing::Velocity ? 1U : 0U;
         constants.premultiplied = sprite.blend == ajfx::BlendMode::Premultiplied ? 1U : 0U;
+        const ajfx::DrawAdjustment& adjustment = i.adjustments[e];
         constants.extra = {sprite.stretch, sprite.blend == ajfx::BlendMode::Additive ? 1.0F : 0.0F,
-                           std::bit_cast<float>(offset_or_absent(buffers.layout.orientation)), 1.0F};
+                           std::bit_cast<float>(offset_or_absent(buffers.layout.orientation)), adjustment.size};
+        constants.draw_tint = {adjustment.color.r, adjustment.color.g, adjustment.color.b, adjustment.color.a};
         constants.age_offset = offset_or_absent(buffers.layout.age);
         constants.lifetime_offset = offset_or_absent(buffers.layout.lifetime);
         constants.flipbook = sprite.flipbook_columns | (sprite.flipbook_rows << 16U);
@@ -1254,8 +1274,9 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
                 // The kind's own size scale is this draw's, so each group
                 // carries the emitter's constants with its own scale in them.
                 ViewConstants group_constants = constants;
-                group_constants.extra[3] = group.scale;
-                group_constants.draw_tint = {group.tint.r, group.tint.g, group.tint.b, group.tint.a};
+                group_constants.extra[3] = group.scale * adjustment.size;
+                group_constants.draw_tint = {group.tint.r * adjustment.color.r, group.tint.g * adjustment.color.g,
+                                             group.tint.b * adjustment.color.b, group.tint.a * adjustment.color.a};
                 const std::span<const core::u8> group_uniform{reinterpret_cast<const core::u8*>(&group_constants),
                                                               sizeof(group_constants)};
                 rhi::PulledDraw group_draw{};
