@@ -181,7 +181,7 @@ bool visible_property(const SceneItem &item, const SceneProperty &p) {
         if (p.section == "Fracture" && p.control.id != "fracture" && !o->fracture) {
             return false;
         }
-        if (o->distribution == Distribution::Single &&
+        if ((o->distribution == Distribution::Single || o->distribution == Distribution::Placed) &&
             (p.control.id == "count" || p.control.id == "width" || p.control.id == "depth" ||
              p.control.id == "spacing" || p.control.id == "variation")) {
             return false;
@@ -333,7 +333,7 @@ void SceneView::tree_children(gui::UiContext &ctx, Document &document, Uid paren
         }
         std::string label = item.name;
         if (const auto *o = std::get_if<Object>(&item.data); o && o->distribution != Distribution::Single) {
-            label += " (" + std::to_string(o->count) + ")";
+            label += o->distribution == Distribution::Placed ? " (kind)" : " (" + std::to_string(o->count) + ")";
         }
         ctx.label(gui::Rect{row.x + (group ? 30 : 10), row.y, row.width - 34, row.height}, label,
                   item.simulate ? theme.text : theme.text_muted);

@@ -241,6 +241,10 @@ std::string save_scene(const Document &document) {
             a.add("position", numbers({act.position.x, act.position.y, act.position.z}));
             a.add("turn", numbers({act.turn.x, act.turn.y, act.turn.z}));
             a.add("velocity", numbers({act.velocity.x, act.velocity.y, act.velocity.z}));
+            if (act.touched) {
+                a.add("home", numbers({act.home.x, act.home.y, act.home.z}));
+                a.add("home_turn", numbers({act.home_turn.x, act.home_turn.y, act.home_turn.z}));
+            }
         } else {
             a.add("kind", Json::of("delete"));
             a.add("object", numeric(act.target.object));
@@ -521,10 +525,21 @@ Loaded load_scene(const Json &root) {
                 std::array<float, 3> position{};
                 std::array<float, 3> turn{};
                 std::array<float, 3> velocity{};
-                if (!keys(a, {"serial", "tick", "kind", "object", "position", "turn", "velocity"}) ||
+                if (!keys(a, {"serial", "tick", "kind", "object", "position", "turn", "velocity", "home",
+                              "home_turn"}) ||
                     !integer(a, "object", act.object) || !numbers(a.find("position"), position) ||
                     !numbers(a.find("turn"), turn) || !numbers(a.find("velocity"), velocity)) {
                     return fail("invalid drop");
+                }
+                if (a.find("home") != nullptr || a.find("home_turn") != nullptr) {
+                    std::array<float, 3> home{};
+                    std::array<float, 3> home_turn{};
+                    if (!numbers(a.find("home"), home) || !numbers(a.find("home_turn"), home_turn)) {
+                        return fail("invalid drop");
+                    }
+                    act.touched = true;
+                    act.home = {home[0], home[1], home[2]};
+                    act.home_turn = {home_turn[0], home_turn[1], home_turn[2]};
                 }
                 act.kind = ActKind::Drop;
                 act.position = {position[0], position[1], position[2]};

@@ -16,7 +16,9 @@ namespace ajfx::studio {
 // according to tree order. Organization is deliberately not transform parenting.
 enum class ObjectMotion { Static, Dynamic, Animated };
 enum class ObjectCollider { Hull, Sphere, Box };
-enum class Distribution { Single, Grid, Pile };
+// Placed: the Object is a kind only, with no body of its own; every body of it
+// is put on the stage by hand (a Place at the start) or dropped while it plays.
+enum class Distribution { Single, Grid, Pile, Placed };
 enum class SourceMode { Initial, Continuous, Burst };
 enum class ParticleLook { Glow, Smoke, Solid };
 // Glows: the particle's colour as it is. Lit: the scene's lights and shadows
@@ -250,6 +252,12 @@ struct Act final {
     Vec3 position{};           // Drop: where, metres in the scene
     Vec3 turn{};               // Drop: degrees, as an Object's rotation
     Vec3 velocity{};           // Drop: m/s
+    // Drop at step 0 is a thing on the stage. A setup tool (Settle, Jitter)
+    // moves it from where the artist put it; `home` is where that was, so
+    // Reset can put it back. Putting it somewhere by hand makes that its home.
+    bool touched{false};
+    Vec3 home{};
+    Vec3 home_turn{};
     BodyRef target{};          // Delete: the body taken away
     friend bool operator==(const Act &, const Act &) = default;
 };

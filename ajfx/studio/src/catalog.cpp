@@ -589,7 +589,8 @@ std::string block_summary(const Block& block) {
             choice_of(block, "model") == "file" ? file_label(file_of(block, "model_file")) : choice_label(block, "model");
         const std::string arrange = choice_of(block, "arrange");
         std::string text = (model.empty() ? std::string{"No model"} : model) + ", " +
-                           (arrange == "one" ? std::string{"one"}
+                           (arrange == "one"      ? std::string{"one"}
+                            : arrange == "placed" ? std::string{"placed by hand"}
                                              : choice_label(block, "arrange") + " of " +
                                                    format_number(number_of(block, "count"), 0)) +
                            ", " + with_unit(number_of(block, "size"), 2, "m");

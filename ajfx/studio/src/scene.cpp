@@ -657,6 +657,11 @@ std::string validate_scene(const Document &document, bool for_playback) {
                 return where + "Fracture requires Dynamic motion";
             }
             if (for_playback && object->motion != ObjectMotion::Dynamic &&
+                object->distribution == Distribution::Placed) {
+                return where + "a thing placed by hand has to be Dynamic: it is dropped, and a thing that stands "
+                               "still or is moved cannot be";
+            }
+            if (for_playback && object->motion != ObjectMotion::Dynamic &&
                 object->distribution != Distribution::Single) {
                 return where + "repeated Static or Animated objects are not supported by this target";
             }
@@ -1124,6 +1129,7 @@ Document lower_scene(const Document &document, Uid live) {
                                           {"move_over", number(object->move_over)},
                                           {"arrange", choice(object->distribution == Distribution::Single ? "one"
                                                              : object->distribution == Distribution::Grid ? "stack"
+                                                             : object->distribution == Distribution::Placed ? "placed"
                                                                                                           : "heap")},
                                           {"count", number(static_cast<float>(object->count))},
                                           {"width", number(object->width)},

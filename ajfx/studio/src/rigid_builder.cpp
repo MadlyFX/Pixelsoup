@@ -122,9 +122,12 @@ void RigidBuilder::object(const Block& block) {
     const std::string collides = choice_of(block, "collides");
     const bool hollow = collides == "bucket" || collides == "crate" || collides == "tube";
     const bool own_material = toggle_of(block, "own_material");
-    out.count = arrange == "one"
-                    ? 1U
-                    : static_cast<std::uint32_t>(std::max(1L, std::lround(number_of(block, "count"))));
+    // A kind placed by hand has no body of its own: they are all put on the
+    // stage or dropped.
+    const bool placed = arrange == "placed";
+    out.count = placed             ? 0U
+                : arrange == "one" ? 1U
+                                   : static_cast<std::uint32_t>(std::max(1L, std::lround(number_of(block, "count"))));
     out.model = model_of(block, "model", "model_file", "cube");
     const std::string& model = out.model;
     const float size = std::max(number_of(block, "size") * s_, 1.0e-4F);
@@ -198,6 +201,11 @@ void RigidBuilder::object(const Block& block) {
                               .body = out.kind});
     } else {
         out.prop = true;
+        if (placed) {
+            error_ = "A thing placed by hand has to be knocked about: let " + std::string{block_title(block)} +
+                     " move, or give it a place of its own";
+            return;
+        }
         if (out.count > 1U) {
             error_ = "Only one " + std::string{block_title(block)} +
                      " can stand still, be moved or be hollow: set how many back to just one, or let it be "
