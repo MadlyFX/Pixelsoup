@@ -263,6 +263,43 @@ void native_d3d12_reports_a_lost_device() {
 #endif
 }
 
+// The committed tally follows exactly the adapter-local resources this device
+// holds: a target and a geometry buffer add at least their pixel and byte
+// sizes, an upload buffer in system memory adds nothing, and releasing them
+// returns the tally to where it was. The OS budget reads as known.
+void native_d3d12_counts_committed_video_memory() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    auto created = rhi::Device::create(config);
+    RHI_CHECK(created);
+    auto device = std::move(created).value();
+    const rhi::VideoMemory memory = device.video_memory();
+    RHI_CHECK(memory.known());
+    RHI_CHECK(memory.usage != 0U);
+    RHI_CHECK(memory.headroom() <= memory.budget);
+
+    const core::u64 baseline = device.committed_bytes();
+    {
+        auto target = device.create_texture(target_desc(1000U, 700U));
+        RHI_CHECK(target);
+        const core::u64 with_target = device.committed_bytes();
+        RHI_CHECK(with_target >= baseline + 1000ULL * 700ULL * 4ULL);
+        {
+            auto upload = device.create_storage_buffer(300'000U);
+            RHI_CHECK(upload);
+            RHI_CHECK(device.committed_bytes() == with_target);
+            auto geometry = device.create_geometry_buffer(300'000U);
+            RHI_CHECK(geometry);
+            RHI_CHECK(device.committed_bytes() >= with_target + 300'000U);
+        }
+        RHI_CHECK(device.committed_bytes() == with_target);
+    }
+    RHI_CHECK(device.committed_bytes() == baseline);
+}
+
 void native_d3d12_is_nonblocking_and_preserves_linear_float_pixels() {
     if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
         return;
@@ -1994,7 +2031,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 28U> cases{{
+constexpr std::array<Case, 29U> cases{{
     {"an explicit transition is journalled and rolls back",
      &native_d3d12_an_explicit_transition_is_journalled_and_rolls_back},
     {"a redundant transition is a no-op",
@@ -2036,6 +2073,7 @@ constexpr std::array<Case, 28U> cases{{
     {"native D3D12 is nonblocking and preserves linear float pixels",
      &native_d3d12_is_nonblocking_and_preserves_linear_float_pixels},
     {"native D3D12 reports a lost device", &native_d3d12_reports_a_lost_device},
+    {"native D3D12 counts committed video memory", &native_d3d12_counts_committed_video_memory},
     {"native D3D12 upload pages span multiple 4K plates and reuse",
      &native_d3d12_upload_pages_span_multiple_4k_plates_and_reuse},
     {"native D3D12 cancelled lists restore texture state",

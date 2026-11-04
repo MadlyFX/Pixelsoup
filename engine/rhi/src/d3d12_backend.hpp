@@ -41,6 +41,8 @@ void destroy_d3d12_device(void* state) noexcept;
 [[nodiscard]] core::RenderAdapterIdentity d3d12_adapter_identity(void* state) noexcept;
 [[nodiscard]] std::string_view d3d12_driver_name(void* state) noexcept;
 [[nodiscard]] core::u64 d3d12_dedicated_video_memory(void* state) noexcept;
+[[nodiscard]] VideoMemory d3d12_video_memory(void* state) noexcept;
+[[nodiscard]] core::u64 d3d12_committed_bytes(void* state) noexcept;
 [[nodiscard]] std::string_view d3d12_lost_reason(void* state) noexcept;
 [[nodiscard]] bool d3d12_supports_shader(ShaderFormat format) noexcept;
 [[nodiscard]] bool d3d12_supports_texture(

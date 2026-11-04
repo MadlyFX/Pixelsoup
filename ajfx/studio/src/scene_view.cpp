@@ -5,6 +5,7 @@
 #include <tinyfiledialogs.h>
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <filesystem>
 #include <type_traits>
@@ -30,6 +31,23 @@ float property_height(const ControlDef &control, float width) {
     return (width - 24.0F - 8.0F) / 3.0F >= min_axis_width ? 2.0F * row_height : 4.0F * row_height + 6.0F;
 }
 
+// The decimals a value is shown with: the control's, or as many more (up to
+// four) as it takes to show it as it is, so an ember of 0.015 m does not
+// read 0.01.
+int shown_decimals(float value, int decimals) {
+    if (decimals <= 0) {
+        return decimals;
+    }
+    int shown = decimals;
+    for (; shown < 4; ++shown) {
+        const double scaled = std::fabs(static_cast<double>(value)) * std::pow(10.0, shown);
+        if (std::fabs(scaled - std::round(scaled)) < 2.0e-3) {
+            break;
+        }
+    }
+    return shown;
+}
+
 bool field(editor::NumberField &numbers, gui::UiContext &ctx, std::uint64_t owner, const ControlDef &control,
            const gui::Rect &row, Value &v, bool mixed = false, unsigned mixed_axes = 7U,
            unsigned *edited_axes = nullptr, bool *reset_value = nullptr) {
@@ -52,7 +70,8 @@ bool field(editor::NumberField &numbers, gui::UiContext &ctx, std::uint64_t owne
         const float unit_w = control.unit.empty() ? 0.0F : ctx.font_width(control.unit) + 5.0F;
         double out = value;
         changed = numbers.draw(ctx, part_id(owner, control.id), gui::Rect{box.x, box.y, box.width - unit_w, box.height},
-                               {}, value, control.decimals == 0 ? 1.0 : 0.01, out, control.decimals, nullptr, mixed);
+                               {}, value, control.decimals == 0 ? 1.0 : 0.01, out, shown_decimals(value, control.decimals),
+                               nullptr, mixed);
         if (changed) {
             v.x = std::clamp(static_cast<float>(out), control.hard_min, control.hard_max);
         }
@@ -70,7 +89,7 @@ bool field(editor::NumberField &numbers, gui::UiContext &ctx, std::uint64_t owne
                 axis_rows ? gui::Rect{box.x, box.y + static_cast<float>(k) * (row_height + 2.0F), box.width, box.height}
                           : gui::Rect{box.x + static_cast<float>(k) * (width + 4.0F), box.y, width, box.height};
             if (numbers.draw(ctx, part_id(owner, control.id, k), axis_box,
-                             axes[k], *values[k], 0.01, out, control.decimals, nullptr,
+                             axes[k], *values[k], 0.01, out, shown_decimals(*values[k], control.decimals), nullptr,
                              mixed && (mixed_axes & (1U << k)) != 0U)) {
                 *values[k] = std::clamp(static_cast<float>(out), control.hard_min, control.hard_max);
                 if (edited_axes) { *edited_axes |= 1U << k; }
@@ -87,7 +106,8 @@ bool field(editor::NumberField &numbers, gui::UiContext &ctx, std::uint64_t owne
             double out = *values[k];
             const gui::Rect part{box.x + static_cast<float>(k) * (width + gap), box.y, width, box.height};
             if (numbers.draw(ctx, part_id(owner, control.id, k), part, {}, *values[k],
-                             control.decimals == 0 ? 1.0 : 0.01, out, control.decimals, nullptr, mixed)) {
+                             control.decimals == 0 ? 1.0 : 0.01, out, shown_decimals(*values[k], control.decimals), nullptr,
+                             mixed)) {
                 *values[k] = std::clamp(static_cast<float>(out), control.hard_min, control.hard_max);
                 changed = true;
             }
@@ -168,6 +188,11 @@ bool visible_property(const SceneItem &item, const SceneProperty &p) {
         }
     }
     if (const auto *s = std::get_if<ParticleSystem>(&item.data); s && s->persistent && p.control.id == "lifetime") {
+        return false;
+    }
+    if (const auto *s = std::get_if<ParticleSystem>(&item.data);
+        s && !s->casts_light &&
+        (p.control.id == "light_count" || p.control.id == "light_strength" || p.control.id == "light_reach")) {
         return false;
     }
     if (const auto *f = std::get_if<Force>(&item.data)) {
@@ -505,12 +530,17 @@ void SceneView::draw_relationships(gui::UiContext &ctx, Document &document, cons
         static_cast<void>(remove_relationship(document, remove));
     }
     if (shown == 0U) {
-        ctx.label(gui::Rect{x, y, width, row_height},
-                  item == nullptr ? "None. Add one from an object, a particle system or a smoke grid."
-                  : grid          ? "None yet: no particle system feeds or rides it."
-                                  : "None yet.",
-                  ctx.theme().text_muted);
-        y += 32.0F;
+        // Wrapped, not cut short: a narrow inspector still reads all of it.
+        for (const std::string &part :
+             wrap_text(ctx,
+                       item == nullptr ? "None. Add one from an object, a particle system or a smoke grid."
+                       : grid          ? "None yet: no particle system feeds or rides it."
+                                       : "None yet.",
+                       width)) {
+            ctx.label(gui::Rect{x, y, width, 22}, part, ctx.theme().text_muted);
+            y += 22.0F;
+        }
+        y += 10.0F;
     }
     if (item == nullptr || document.scene->relationships.size() >= max_relationships) {
         return;
@@ -678,15 +708,27 @@ void SceneView::draw_sources(gui::UiContext &ctx, Document &document, SceneItem 
     const bool bound = std::any_of(document.scene->relationships.begin(), document.scene->relationships.end(),
                                    [&item](const Relationship &r) { return r.system == item.uid; });
     if (system->sources.empty()) {
-        ctx.label(gui::Rect{x, y, width, row_height},
-                  bound ? "None of its own: born only of its relationships." : "None: add one, or a relationship.",
-                  bound ? ctx.theme().text_muted : ctx.theme().caution);
-        y += 32.0F;
+        for (const std::string &part :
+             wrap_text(ctx, bound ? "None of its own: born only of its relationships." : "None: add one, or a relationship.",
+                       width)) {
+            ctx.label(gui::Rect{x, y, width, 22}, part, bound ? ctx.theme().text_muted : ctx.theme().caution);
+            y += 22.0F;
+        }
+        y += 10.0F;
     }
     Uid remove{};
+    std::size_t ordinal = 0U;
     for (ParticleSource &source : system->sources) {
         {
-            ctx.label(gui::Rect{x, y, width - 30, 28}, "Source " + std::to_string(source.uid), ctx.theme().text_muted);
+            // Numbered in the list's order and said in words: what it gives
+            // and when, never its identity.
+            const std::string gives =
+                source.mode == SourceMode::Continuous ? format_number(source.rate, 2) + " a second"
+                : source.mode == SourceMode::Initial  ? std::to_string(source.count) + " at the start"
+                                                      : std::to_string(source.count) + " at " +
+                                                           format_number(source.time, 2) + " s";
+            ctx.label(gui::Rect{x, y, width - 30, 28}, "Source " + std::to_string(++ordinal) + ": " + gives,
+                      ctx.theme().text_muted);
             if (editor::icon_button(ctx, part_id(source.uid, "remove"), gui::Rect{x + width - 28, y, 28, 28},
                                     gui::Icon::Trash,
                                     system->sources.size() == 1U && !bound
@@ -802,9 +844,11 @@ void SceneView::draw_targets(gui::UiContext &ctx, Document &document, SceneItem 
         y += 32.0F;
     }
     if (force->targets.empty()) {
-        ctx.label(gui::Rect{x, y, width, row_height}, "Acts on nothing until a system is switched on.",
-                  ctx.theme().warning);
-        y += 32.0F;
+        for (const std::string &part : wrap_text(ctx, "Acts on nothing until a system is switched on.", width)) {
+            ctx.label(gui::Rect{x, y, width, 22}, part, ctx.theme().warning);
+            y += 22.0F;
+        }
+        y += 10.0F;
     }
 }
 
@@ -1128,6 +1172,12 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
     const auto &theme = ctx.theme();
     ctx.rounded(bounds, theme.panel, theme.radius_large);
     const gui::Rect view{bounds.x + 12, bounds.y + 12, bounds.width - 24, bounds.height - 24};
+    // Another selection starts at the top, at its name, rather than where
+    // the last one was scrolled to.
+    if (selection_ != inspected_) {
+        inspected_ = selection_;
+        inspector_scroll_.reset();
+    }
     const float offset = inspector_scroll_.begin(ctx, view);
     const float x = view.x;
     const float width = view.width;
@@ -1147,14 +1197,7 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
     } else {
         if (selection_.size() == 1U) {
             static_cast<void>(ctx.text_field(part_id(item->uid, "name"), gui::Rect{x, y, width - 24, 30}, item->name));
-            const auto *object = std::get_if<Object>(&item->data);
-            const auto *force = std::get_if<Force>(&item->data);
-            const std::string fallback =
-                object ? (object->mesh == "cube" ? "Object" : std::filesystem::path{object->mesh}.stem().string())
-                : force                                         ? std::string{force_name(force->kind)}
-                : std::holds_alternative<Group>(item->data)     ? "Group"
-                : std::holds_alternative<SmokeGrid>(item->data) ? "Smoke grid"
-                                                                : "Particle system";
+            const std::string fallback = default_item_name(*item);
             if (item->name != fallback &&
                 editor::reset_button(ctx, part_id(item->uid, "name.reset"), gui::Rect{x + width - 20, y + 4, 18, 22},
                                      "Reset name to " + fallback)) {
@@ -1290,7 +1333,13 @@ void SceneView::draw_inspector(gui::UiContext &ctx, const gui::Rect &bounds, Doc
                             if ((edited_axes & 2U) == 0U) { applied.y = before.y; }
                             if ((edited_axes & 4U) == 0U) { applied.z = before.z; }
                         }
+                        // A name the artist has not chosen follows what
+                        // it names: an imported model takes the file's.
+                        const std::string was = default_item_name(target);
                         other->write(target, applied);
+                        if (target.name == was) {
+                            target.name = default_item_name(target);
+                        }
                     }
                 }
             }

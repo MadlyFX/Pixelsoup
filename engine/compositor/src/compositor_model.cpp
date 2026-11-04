@@ -1708,7 +1708,7 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
                 {DiagnosticCode::PassBudgetExceeded, budget_subject, {}, 0U});
         }
         if (result.resources.offscreen_texture_bytes >
-            max_graph_offscreen_texture_bytes) {
+            graph_texture_budget_bytes(result.resources.effect_settings)) {
             result.diagnostics.push_back({DiagnosticCode::TextureBudgetExceeded,
                                           budget_subject, {}, 0U});
         }

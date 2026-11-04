@@ -1006,6 +1006,149 @@ void particles_meet_static_objects() {
     CHECK(relationship_active(*document.scene, document.scene->relationships.back()));
 }
 
+void names_follow_models_and_paths_stay_with_the_scene() {
+    Document document = new_scene();
+    const SceneItem &ground = document.scene->items.front();
+    CHECK(ground.name == "Ground" && default_item_name(ground) == "Ground");
+    const Uid crate = add_object(document);
+    const Uid log = add_object(document, "C:/props/wood/log.obj");
+    CHECK(document.scene->item(crate)->name == "Object" && document.scene->item(log)->name == "log");
+    object(document, crate).mesh = "rock";
+    CHECK(default_item_name(*document.scene->item(crate)) == "Rock");
+
+    // Saved beside the scene: relative to its folder, with forward slashes;
+    // a library shape is a name, not a file.
+    Document saving = document;
+    rebase_models(saving, "C:/props", "C:/props/scenes");
+    CHECK(object(saving, log).mesh == "../wood/log.obj");
+    CHECK(object(saving, crate).mesh == "rock");
+    // Saved somewhere else: resolved from where it was, then relative to
+    // the new folder.
+    rebase_models(saving, "C:/props/scenes", "C:/props/wood");
+    CHECK(object(saving, log).mesh == "log.obj");
+    // Nothing to resolve it against leaves a relative path alone.
+    rebase_models(saving, {}, "C:/props");
+    CHECK(object(saving, log).mesh == "log.obj");
+    // Another drive has no relative way there: the path stays whole.
+    rebase_models(saving, "C:/props/wood", "D:/elsewhere");
+    CHECK(object(saving, log).mesh == "C:/props/wood/log.obj");
+}
+
+void a_system_casts_light_in_its_own_colour() {
+    Document document = new_scene();
+    const Uid fire = add_particle_system(document);
+    {
+        const Document lowered = lower_scene(document);
+        CHECK(lowered.block(fire + 9U) == nullptr);
+    }
+    auto &flames = std::get<ParticleSystem>(document.scene->item(fire)->data);
+    flames.casts_light = true;
+    flames.light_count = 5U;
+    flames.light_strength = {2.0F, 3.0F};
+    flames.light_reach = {1.0F, 1.5F};
+    const Compiled compiled = ready(document);
+    CHECK(compiled.effect.has_value());
+    if (!compiled.effect) {
+        return;
+    }
+    const ajfx::SpriteRenderer *lit = nullptr;
+    for (const ajfx::Emitter &emitter : compiled.effect->emitters) {
+        if (emitter.renderer.light_count != 0U) { lit = &emitter.renderer; }
+    }
+    CHECK(lit != nullptr);
+    if (lit != nullptr) {
+        CHECK(lit->light_count == 5U && lit->light_intensity_min == 2.0F && lit->light_intensity_max == 3.0F);
+        CHECK(lit->light_range_min == 1.0F && lit->light_range_max == 1.5F && !lit->light_own_color);
+    }
+}
+
+void a_static_object_is_met_as_it_stands() {
+    // A cube turned 45 degrees about Z stands on an edge: particles dropped
+    // 0.4 m off its middle meet its slope and slide off, where the unturned
+    // box of its longest side would hold them on a flat top at 1.5 m.
+    Document document = new_scene();
+    const Uid diamond = add_object(document);
+    const Uid system = add_particle_system(document);
+    Object &cube = object(document, diamond);
+    cube.mesh = "cube";
+    cube.motion = ObjectMotion::Static;
+    cube.position = {0.0F, 1.0F, 0.0F};
+    cube.rotation = {0.0F, 0.0F, 45.0F};
+    cube.friction = 0.0F;
+    cube.restitution = 0.0F;
+    auto &grit = std::get<ParticleSystem>(document.scene->item(system)->data);
+    grit.sources.front().mode = SourceMode::Initial;
+    grit.sources.front().count = 40U;
+    grit.position = {0.4F, 2.5F, 0.0F};
+    grit.radius = {0.0F, 0.0F};
+    grit.speed = {0.0F, 0.0F};
+    grit.gravity = 1.0F;
+    grit.lifetime = {6.0F, 6.0F};
+    grit.size = {0.02F, 0.02F};
+
+    const Document lowered = lower_scene(document);
+    const Block *box = lowered.block(diamond + 3U);
+    CHECK(box && box->kind == "box");
+    CHECK(box && get(*box, "turn").z == 45.0F && get(*box, "center").y == 1.0F);
+
+    const Compiled compiled = ready(document);
+    auto solver = ajfx::rigid::make_jolt_solver();
+    auto run = simulation(compiled, solver.get());
+    run.advance_to(240U);
+    std::size_t grit_emitter = 0U;
+    for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
+        if (!ajfx::rigid_physics(compiled.effect->emitters[e])) { grit_emitter = e; }
+    }
+    const auto &state = run.emitter(grit_emitter);
+    CHECK(state.alive() == 40U);
+    const ajfx::Quat turn = ajfx::prop_orientation({0.0F, 0.0F, 45.0F});
+    const ajfx::Quat back{-turn.x, -turn.y, -turn.z, turn.w};
+    float highest = 0.0F;
+    for (std::size_t i = 0U; i < state.alive(); ++i) {
+        const ajfx::Vec3 local = ajfx::rotate(back, state.position[i] - ajfx::Vec3{0.0F, 1.0F, 0.0F});
+        CHECK(std::fabs(local.x) > 0.49F || std::fabs(local.y) > 0.49F || std::fabs(local.z) > 0.49F);
+        highest = std::max(highest, state.position[i].y);
+    }
+    CHECK(highest < 1.2F); // slid off the slope, not held on a flat top
+
+    // A primitive is met as its own bounds, not a cube of its longest side.
+    cube.mesh = "slab";
+    cube.rotation = {0.0F, 30.0F, 0.0F};
+    const Document slab_scene = lower_scene(document);
+    const Block *slab = slab_scene.block(diamond + 3U);
+    const auto *mesh = library_mesh("slab");
+    CHECK(slab && mesh && slab->kind == "box");
+    if (slab && mesh) {
+        float low = 1.0F;
+        float high = -1.0F;
+        for (const auto &vertex : mesh->vertices) {
+            low = std::min(low, vertex.position.y);
+            high = std::max(high, vertex.position.y);
+        }
+        CHECK(near(get(*slab, "size").y, high - low, 1.0e-5F) && get(*slab, "size").y < get(*slab, "size").x);
+        CHECK(get(*slab, "turn").y == 30.0F);
+    }
+
+    // An artist's model with a hull collider is met as its own surface:
+    // its distance field, fitted and turned as the model is drawn.
+    cube.mesh = "models/log.obj";
+    cube.collider = ObjectCollider::Hull;
+    cube.size = 1.6F;
+    cube.rotation = {0.0F, 20.0F, 80.0F};
+    const Document log_scene = lower_scene(document);
+    const Block *log = log_scene.block(diamond + 3U);
+    CHECK(log && log->kind == "mesh_collider");
+    if (log) {
+        CHECK(file_of(*log, "file") == "models/log.obj" && toggle_of(*log, "fit"));
+        CHECK(get(*log, "scale").x == 1.6F && get(*log, "turn").z == 80.0F && get(*log, "position").y == 1.0F);
+    }
+    // The same model met as a box is the box of its longest side, turned.
+    cube.collider = ObjectCollider::Box;
+    const Document box_scene = lower_scene(document);
+    const Block *block = box_scene.block(diamond + 3U);
+    CHECK(block && block->kind == "box" && get(*block, "size").x == 1.6F && get(*block, "turn").z == 80.0F);
+}
+
 // A system made from an object lives only on its rule: no source of its
 // own, so nothing plays until the object hits or moves.
 void a_bound_system_is_born_only_of_its_object() {
@@ -1255,6 +1398,9 @@ void add_scene_tests(std::vector<studio_test::Case> &cases) {
     cases.push_back({"smoke_grids_are_fed_and_ridden_by_systems", smoke_grids_are_fed_and_ridden_by_systems});
     cases.push_back({"a_bound_system_is_born_only_of_its_object", a_bound_system_is_born_only_of_its_object});
     cases.push_back({"particles_meet_static_objects", particles_meet_static_objects});
+    cases.push_back({"a_static_object_is_met_as_it_stands", a_static_object_is_met_as_it_stands});
+    cases.push_back({"names_follow_models_and_paths_stay_with_the_scene", names_follow_models_and_paths_stay_with_the_scene});
+    cases.push_back({"a_system_casts_light_in_its_own_colour", a_system_casts_light_in_its_own_colour});
     cases.push_back({"statistics_count_the_scene_and_name_limits_in_reach", statistics_count_the_scene_and_name_limits_in_reach});
     cases.push_back({"timeline_tracks_are_the_scene_moments", timeline_tracks_are_the_scene_moments});
     cases.push_back({"relationships_bind_an_object_to_a_system", relationships_bind_an_object_to_a_system});

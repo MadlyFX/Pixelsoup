@@ -409,6 +409,11 @@ inline void pack(const VolumeSource& m, const PackContext& c, Packer& p) {
 inline void pack(const BoxCollision& m, const PackContext& c, Packer& p) {
     p.v3(c.in(m.center));
     p.v3(m.half_size);
+    const Quat turn = prop_orientation(m.turn);
+    p.f(turn.x);
+    p.f(turn.y);
+    p.f(turn.z);
+    p.f(turn.w);
     p.f(c.in(m.restitution));
     p.f(1.0F - c.in(m.friction));
     p.u(m.inside ? 1U : 0U);

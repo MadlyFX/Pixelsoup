@@ -308,7 +308,8 @@ enum RuntimeRendererReadinessState:ubyte {
   BasicFallback = 2,
   MissingCapabilities = 3,
   AdvancedImplementationUnavailable = 4,
-  InvalidPolicy = 5
+  InvalidPolicy = 5,
+  VideoMemoryShort = 6
 }
 
 // Whether this process actually opened the physical outputs its bindings
@@ -440,6 +441,11 @@ table HeartbeatAck {
   // Appended: an older peer reports Unknown, which is read as "says nothing"
   // and never as evidence that the outputs opened.
   output_deployment:RuntimeOutputDeploymentState;
+  // VideoMemoryShort only: the bytes this node's missing layer renderers
+  // need and the headroom its OS budget left. Appended; an older peer
+  // reports zeroes alongside a state it never sends.
+  renderer_video_memory_needed:ulong;
+  renderer_video_memory_free:ulong;
 }
 
 // Bidirectional graceful-close notice. final_cursor is only the sender's safe

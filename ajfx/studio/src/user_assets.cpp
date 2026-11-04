@@ -295,6 +295,39 @@ bool closed_mesh(const ImportedMesh& mesh) {
     return std::all_of(uses.begin(), uses.end(), [](const auto& entry) { return entry.second == 2U; });
 }
 
+ImportedMesh placed_mesh(const ImportedMesh& mesh, bool fit, Vec3 turn) {
+    ImportedMesh out = mesh;
+    if (fit) {
+        const std::vector<std::array<std::uint32_t, 3>> triangles = triangles_of(mesh);
+        Vec3 low{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                 std::numeric_limits<float>::max()};
+        Vec3 high = low * -1.0F;
+        for (const auto& t : triangles) {
+            for (const std::uint32_t i : t) {
+                low = minimum(low, mesh.positions[i]);
+                high = maximum(high, mesh.positions[i]);
+            }
+        }
+        const float longest = std::max({high.x - low.x, high.y - low.y, high.z - low.z});
+        if (longest > 0.0F) {
+            const Vec3 centre = (low + high) * 0.5F;
+            for (Vec3& p : out.positions) {
+                p = (p - centre) * (1.0F / longest);
+            }
+        }
+    }
+    if (turn != Vec3{}) {
+        const Quat q = prop_orientation(turn);
+        for (Vec3& p : out.positions) {
+            p = rotate(q, p);
+        }
+        for (Vec3& n : out.normals) {
+            n = rotate(q, n);
+        }
+    }
+    return out;
+}
+
 std::optional<ColliderBake> bake_collider(const ImportedMesh& mesh, float scale, std::uint32_t cells,
                                           ColliderSolid solid_mode, std::string& error) {
     const std::vector<std::array<std::uint32_t, 3>> triangles = triangles_of(mesh);

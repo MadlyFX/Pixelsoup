@@ -582,6 +582,10 @@ void UiContext::label_centered(
     list_.pop_clip();
 }
 
+void UiContext::drop_tooltip() noexcept {
+    tooltip_text_.clear();
+}
+
 void UiContext::tooltip(const Rect& bounds, std::string_view text) {
     if (!pointer_blocked() && !text.empty() && bounds.contains(pointer_x(), pointer_y()) &&
         (interaction_clip_stack_.empty() || interaction_clip_stack_.back().contains(pointer_x(), pointer_y()))) {
@@ -1201,9 +1205,16 @@ void UiContext::draw_overlays(const Rect& window_bounds) {
             std::size_t count = 1U;
             while (count < remaining.size() && font_width(remaining.substr(0U, count + 1U)) < max_width) ++count;
             while (count < remaining.size() && is_continuation(remaining[count])) ++count;
+            // Break at the last space that fits, so a word is never split; a
+            // single word wider than the card is the only one cut.
+            if (count < remaining.size() && remaining[count] != ' ') {
+                const std::size_t space = remaining.substr(0U, count).rfind(' ');
+                if (space != std::string_view::npos && space > 0U) count = space;
+            }
             const auto line = remaining.substr(0U, count);
             lines.push_back(line); width = std::max(width, font_width(line));
             remaining.remove_prefix(count);
+            while (!remaining.empty() && remaining.front() == ' ') remaining.remove_prefix(1U);
         }
         const float height = static_cast<float>(lines.size()) * line_height() + 12.0F;
         const float x = std::clamp(pointer_x() + 12.0F, window_bounds.x + 4.0F,
@@ -1342,6 +1353,10 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
         case Key::Tab:
             closed_out = true;
             break;
+        case Key::SelectAll:
+            select_all_ = !value.empty();
+            caret_ = value.size();
+            break;
         case Key::Escape:
             // Cancel: put back what the field held when the edit began.
             if (value != edit_original_) {
@@ -1452,10 +1467,15 @@ bool UiContext::edit_field(UiId id, const Rect& bounds, std::string& value,
 
     bool changed = false;
     if (it.pressed) {
+        // A second press soon after the first, in the field the first one
+        // focused, selects the whole value, as a double-click does anywhere.
+        constexpr double double_click_seconds = 0.4;
+        const bool again = focus_ == id && last_field_press_ >= 0.0 && time_ - last_field_press_ < double_click_seconds;
         if (focus_ != id) {
             take_focus(id, value);
         }
-        select_all_ = false;
+        select_all_ = again && !value.empty();
+        last_field_press_ = again ? -1.0 : time_;
         if (masked) {
             // The click lands on a '*'; the caret goes before the character
             // it stands for.

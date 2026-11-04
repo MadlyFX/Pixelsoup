@@ -72,7 +72,7 @@ void floats_survive_exactly() {
 
 void hand_written_json_fills_in_defaults() {
     const Result<Effect> effect = effect_from_json(R"({
-        "format": 8,
+        "format": 9,
         "name": "hand",
         "parameters": [{"name": "tint", "type": "color", "default": [1, 0.5, 0.25, 1], "min": 0, "max": 2}],
         "emitters": [{
@@ -98,17 +98,17 @@ void hand_written_json_fills_in_defaults() {
 }
 
 void malformed_json_is_reported_with_its_path() {
-    const std::string head = R"({"format": 8, "name": "x", "emitters": [{"name": "e", )";
+    const std::string head = R"({"format": 9, "name": "x", "emitters": [{"name": "e", )";
     AJFX_CHECK(fails_with(effect_from_json(head + R"("init": [{"type": "lifetime", "id": 1, "mn": 2}]}]})"),
                           ErrorCode::MalformedPackage, "emitters[0].init[0] has unknown field 'mn'"));
     AJFX_CHECK(fails_with(effect_from_json(head + R"("init": [{"type": "gravity", "id": 1}]}]})"),
                           ErrorCode::MalformedPackage, "unknown module type 'gravity' for this stack"));
     AJFX_CHECK(fails_with(effect_from_json(head + R"("init": [{"type": "lifetime", "id": 1, "min": "2"}]}]})"),
                           ErrorCode::MalformedPackage, "emitters[0].init[0].min must be a number"));
-    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 8, "name": )"), ErrorCode::MalformedPackage, "at byte"));
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 9, "name": )"), ErrorCode::MalformedPackage, "at byte"));
     AJFX_CHECK(fails_with(effect_from_json(R"({"name": "x"})"), ErrorCode::MalformedPackage, "no format version"));
-    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 9, "name": "x"})"), ErrorCode::UnsupportedVersion,
-                          "format 9 is not supported"));
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 10, "name": "x"})"), ErrorCode::UnsupportedVersion,
+                          "format 10 is not supported"));
     // Valid syntax, but the effect itself is refused.
     AJFX_CHECK(fails_with(effect_from_json(head + R"("capacity": 5, "spawn": [{"type": "spawn_burst", "id": 1,
                           "count": 6}], "init": [{"type": "lifetime", "id": 2}]}]})"),
@@ -409,7 +409,7 @@ void body_kinds_round_trip_and_are_checked() {
                           "has a body kind shaped by mesh 'ball'"));
 
     // A misspelt field of a kind is reported with its path, as a prop's is.
-    const std::string head = R"({"format": 8, "name": "x", "emitters": [{"name": "e", "capacity": 8,
+    const std::string head = R"({"format": 9, "name": "x", "emitters": [{"name": "e", "capacity": 8,
         "init": [{"type": "lifetime", "id": 1}], "update": [{"type": "rigid_physics", "id": 2, "bodies": )";
     AJFX_CHECK(fails_with(effect_from_json(head + R"([{"shape": "box", "frictoin": 0.5}]}]}]})"),
                           ErrorCode::MalformedPackage,
@@ -460,7 +460,7 @@ void breaks_round_trip_and_are_checked() {
     AJFX_CHECK(breaking->threshold == 2.5F && breaking->scatter == 1.5F && breaking->spin == 240.0F);
 
     // A misspelt field of a piece is reported with its path, as a prop's is.
-    const std::string head = R"({"format": 8, "name": "x", "emitters": [{"name": "e", "capacity": 8,
+    const std::string head = R"({"format": 9, "name": "x", "emitters": [{"name": "e", "capacity": 8,
         "init": [{"type": "lifetime", "id": 1}], "update": [{"type": "rigid_physics", "id": 2},
         {"type": "break", "id": 3, "pieces": )";
     AJFX_CHECK(fails_with(effect_from_json(head + R"([{"size": 0.5, "ofset": [0, 1, 0]}]}]}]})"),
@@ -529,9 +529,9 @@ void blasts_round_trip_and_are_checked() {
     AJFX_CHECK(fails_with(twice.build(), ErrorCode::InvalidEffect, "blast 'b' is declared twice"));
 
     // A misspelt field of a blast is reported with its path.
-    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 8, "name": "x", "blasts": [{"name": "b", "radus": 2}]})"),
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 9, "name": "x", "blasts": [{"name": "b", "radus": 2}]})"),
                           ErrorCode::MalformedPackage, "blasts[0] has unknown field 'radus'"));
-    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 8, "name": "x", "blasts": {"name": "b"}})"),
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 9, "name": "x", "blasts": {"name": "b"}})"),
                           ErrorCode::MalformedPackage, "blasts must be an array of blasts"));
 }
 
@@ -593,7 +593,7 @@ void props_round_trip_and_are_checked() {
 
     // A misspelt field of a prop is reported with its path, as a module's is,
     // rather than being ignored.
-    const std::string head = R"({"format": 8, "name": "x", "emitters": [{"name": "e", "capacity": 8,
+    const std::string head = R"({"format": 9, "name": "x", "emitters": [{"name": "e", "capacity": 8,
         "init": [{"type": "lifetime", "id": 1}], "update": [{"type": "rigid_physics", "id": 2, "props": )";
     AJFX_CHECK(fails_with(effect_from_json(head + R"([{"shape": "sphere", "radius": 0.5, "radus": 1}]}]}]})"),
                           ErrorCode::MalformedPackage,

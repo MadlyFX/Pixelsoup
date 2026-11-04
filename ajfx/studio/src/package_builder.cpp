@@ -368,8 +368,10 @@ void PackageBuilder::resolve_assets(Compiled& compiled, const std::filesystem::p
                 if (model.error.empty() && request.kind == AssetRequest::Kind::Mesh) {
                     fresh.mesh = debris_mesh(model.mesh, fresh.error);
                 } else if (model.error.empty()) {
+                    const bool placed = request.fit || request.turn != Vec3{};
                     if (std::optional<ColliderBake> bake =
-                            bake_collider(model.mesh, request.scale, request.cells, request.solid, fresh.error)) {
+                            bake_collider(placed ? placed_mesh(model.mesh, request.fit, request.turn) : model.mesh,
+                                          request.scale, request.cells, request.solid, fresh.error)) {
                         fresh.field = std::move(bake->field);
                     }
                 }

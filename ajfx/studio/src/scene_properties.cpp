@@ -135,6 +135,10 @@ const std::vector<SceneProperty> &system_properties() {
             property("wrap", "Light wraps", "Appearance", &ParticleSystem::wrap, 0, 1),
             property("ambient", "Takes ambient", "Appearance", &ParticleSystem::ambient, 0, 16, "x"),
             property("shadowed", "Takes shadows", "Appearance", &ParticleSystem::shadowed)};
+        out.push_back(property("casts_light", "Casts light", "Casts light", &ParticleSystem::casts_light));
+        out.push_back(property("light_count", "Lights", "Casts light", &ParticleSystem::light_count, 1, 64));
+        out.push_back(property("light_strength", "Strength", "Casts light", &ParticleSystem::light_strength, 0, 20));
+        out.push_back(property("light_reach", "Reach", "Casts light", &ParticleSystem::light_reach, 0.05F, 10, "m"));
         out.push_back(property("collide", "Collide with objects", "Interactions", &ParticleSystem::collide));
         for (SceneProperty &p : out) {
             if (p.control.id == "tint" || p.control.id == "look") {

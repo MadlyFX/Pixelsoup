@@ -1485,6 +1485,16 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
         director_renderer_lockstep.local_failure;
     output_monitor.cluster.renderer_failure_node =
         director_renderer_lockstep.failing_node;
+    const bool memory_short = director_renderer_lockstep.code ==
+        server::RendererLockstepCode::VideoMemoryShort;
+    output_monitor.cluster.renderer_memory_needed =
+        memory_short ? director_renderer_lockstep.video_memory_needed : 0U;
+    output_monitor.cluster.renderer_memory_free =
+        memory_short ? director_renderer_lockstep.video_memory_free : 0U;
+    output_monitor.cluster.preview_memory_needed =
+        director_renderer_lockstep.preview_memory_needed;
+    output_monitor.cluster.preview_memory_free =
+        director_renderer_lockstep.preview_memory_free;
     output_monitor.cluster.conformance_active = renderer.backend == scene::RendererBackend::Advanced;
     output_monitor.cluster.conformance = observed_local_renderer.conformance;
     output_monitor.cluster.frame_timing = observed_local_renderer.timing;
@@ -2093,6 +2103,8 @@ PhaseExit DirectorShowLoop::apply_editor_services(
             editor_frame.temporal_restart_frame,
             core::RenderConformance{.adapter = editor_frame.render_adapter},
             editor_frame.frame_timing,
+            observed.video_memory_needed,
+            observed.video_memory_free,
         };
     }
     if (editor_frame.check_render_conformance) {

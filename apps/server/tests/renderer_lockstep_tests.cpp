@@ -319,6 +319,60 @@ void inactive_cohort_needs_no_observation() {
 } // namespace
 } // namespace mediaserver
 
+namespace mediaserver {
+namespace {
+
+// A node short of GPU memory holds Program and names itself with its figures.
+// The Director's own preview short of memory holds nothing unless the
+// Director drives a physical output, because the nodes render Program.
+void video_memory_shortage_holds_only_where_program_is_drawn() {
+    const auto settings = advanced();
+    const auto healthy =
+        observation(settings, net::RuntimeRendererBackend::Advanced);
+    auto short_of_memory = healthy;
+    short_of_memory.state = net::RuntimeRendererReadinessState::VideoMemoryShort;
+    short_of_memory.satisfied = false;
+    short_of_memory.video_memory_needed = 5'100'000'000ULL;
+    short_of_memory.video_memory_free = 2'400'000'000ULL;
+
+    auto node_short = server::begin_renderer_lockstep(settings, true);
+    server::observe_renderer_lockstep(node_short, &healthy, 0U, true);
+    server::observe_renderer_lockstep(node_short, &short_of_memory, 3U, false);
+    LOCKSTEP_CHECK(node_short.code ==
+                   server::RendererLockstepCode::VideoMemoryShort);
+    LOCKSTEP_CHECK(!node_short.satisfied());
+    LOCKSTEP_CHECK(node_short.failing_node == 3U);
+    LOCKSTEP_CHECK(!node_short.local_failure);
+    LOCKSTEP_CHECK(node_short.video_memory_needed == 5'100'000'000ULL);
+    LOCKSTEP_CHECK(node_short.video_memory_free == 2'400'000'000ULL);
+    LOCKSTEP_CHECK(node_short.preview_memory_needed == 0U);
+    LOCKSTEP_CHECK(server::renderer_lockstep_headline(node_short.code) ==
+                   "NOT ENOUGH GPU MEMORY");
+
+    auto preview_short = server::begin_renderer_lockstep(settings, true);
+    server::observe_renderer_lockstep(preview_short, &short_of_memory, 0U, true);
+    server::observe_renderer_lockstep(preview_short, &healthy, 3U, false);
+    LOCKSTEP_CHECK(preview_short.satisfied());
+    LOCKSTEP_CHECK(preview_short.code == server::RendererLockstepCode::Ready);
+    LOCKSTEP_CHECK(preview_short.selected ==
+                   net::RuntimeRendererBackend::Advanced);
+    LOCKSTEP_CHECK(preview_short.preview_memory_needed == 5'100'000'000ULL);
+    LOCKSTEP_CHECK(preview_short.preview_memory_free == 2'400'000'000ULL);
+    LOCKSTEP_CHECK(preview_short.video_memory_needed == 0U);
+
+    auto output_short = server::begin_renderer_lockstep(settings, true);
+    output_short.local_drives_output = true;
+    server::observe_renderer_lockstep(output_short, &short_of_memory, 0U, true);
+    server::observe_renderer_lockstep(output_short, &healthy, 3U, false);
+    LOCKSTEP_CHECK(output_short.code ==
+                   server::RendererLockstepCode::VideoMemoryShort);
+    LOCKSTEP_CHECK(output_short.local_failure);
+    LOCKSTEP_CHECK(output_short.preview_memory_needed == 0U);
+}
+
+} // namespace
+} // namespace mediaserver
+
 int main() {
     using namespace mediaserver;
     const std::vector<std::pair<const char*, void (*)()>> tests{
@@ -332,6 +386,7 @@ int main() {
         {"conformance evidence", &conformance_evidence_gates_program_and_names_the_first_pass},
         {"frame budget policy and recovery", &frame_budget_observations_follow_policy_and_recover},
         {"inactive cohort", &inactive_cohort_needs_no_observation},
+        {"video memory shortage", &video_memory_shortage_holds_only_where_program_is_drawn},
     };
     std::size_t failures{};
     for (const auto& [name, test] : tests) {

@@ -430,6 +430,10 @@ enum class RuntimeRendererReadinessState : core::u8 {
     MissingCapabilities = 3U,
     AdvancedImplementationUnavailable = 4U,
     InvalidPolicy = 5U,
+    // The node's GPU cannot hold the frame's layer renderers within the
+    // memory its OS currently allows. Machine-local: it says nothing about
+    // any other node or the Director.
+    VideoMemoryShort = 6U,
 };
 
 struct RuntimeRendererReadiness final {
@@ -450,6 +454,11 @@ struct RuntimeRendererReadiness final {
     core::RenderConformance conformance{};
 
     core::FrameTiming timing{};
+
+    // VideoMemoryShort only: adapter-local bytes the node still needs, and
+    // the headroom its OS budget left.
+    core::u64 video_memory_needed{};
+    core::u64 video_memory_free{};
 
     bool operator==(const RuntimeRendererReadiness&) const = default;
 };

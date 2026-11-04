@@ -549,6 +549,55 @@ void a_paste_inserts_at_the_caret() {
     UI_CHECK(ctx.caret() == 3U);
 }
 
+// Ctrl+A selects a focused field's whole value, and so does a second click
+// soon after the first; either way the next keystroke replaces it. Two clicks
+// a second apart only place the caret.
+void select_all_by_chord_or_double_click() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::UiId id = gui::ui_id("name");
+    const gui::Rect r{0.0F, 0.0F, 200.0F, 24.0F};
+
+    std::string value = "Flames";
+    focus_field(input, ctx, id, r, value);
+    begin_frame(input, ctx, 2.0F, 2.0F, false);
+    input.add_key(gui::Key::SelectAll);
+    UI_CHECK(!ctx.text_field(id, r, value));
+    begin_frame(input, ctx, 2.0F, 2.0F, false);
+    input.add_text("Embers");
+    UI_CHECK(ctx.text_field(id, r, value));
+    UI_CHECK(value == "Embers");
+
+    const auto click = [&](double at) {
+        input.new_frame();
+        input.set_mouse_position(2.0F, 2.0F);
+        input.set_mouse_button(gui::MouseButton::Left, true);
+        ctx.new_frame(at);
+        static_cast<void>(ctx.text_field(id, r, value));
+        input.new_frame();
+        input.set_mouse_button(gui::MouseButton::Left, false);
+        ctx.new_frame(at + 0.05);
+        static_cast<void>(ctx.text_field(id, r, value));
+    };
+    const auto type = [&](double at, std::string_view text) {
+        input.new_frame();
+        input.set_mouse_position(2.0F, 2.0F);
+        ctx.new_frame(at);
+        input.add_text(text);
+        static_cast<void>(ctx.text_field(id, r, value));
+    };
+    click(10.0);
+    click(10.2);
+    type(10.3, "Ash");
+    UI_CHECK(value == "Ash");
+    click(20.0);
+    click(21.0);
+    type(21.1, "x");
+    UI_CHECK(value == "xAsh");
+}
+
 void an_unfocused_field_ignores_the_keyboard() {
     gui::InputState input;
     gui::UiDrawList list;
@@ -1173,7 +1222,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 40U> cases{{
+constexpr std::array<Case, 41U> cases{{
     {"a sprite is sampled nearest in a run of its own",
      &a_sprite_is_sampled_nearest_in_a_run_of_its_own},
     {"motion after release does not change the click endpoint", &motion_after_release_does_not_change_the_click_endpoint},
@@ -1212,6 +1261,7 @@ constexpr std::array<Case, 40U> cases{{
      &hovering_sets_hot_without_capturing},
     {"a click focuses a text field and typing inserts",
      &a_click_focuses_a_text_field_and_typing_inserts},
+    {"select all by chord or double click", &select_all_by_chord_or_double_click},
     {"a password field edits the real text",
      &a_password_field_edits_the_real_text},
     {"an unfocused field ignores the keyboard",

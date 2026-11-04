@@ -100,6 +100,9 @@ namespace {
         if (code == SDLK_V) {
             return Key::Paste;
         }
+        if (code == SDLK_A) {
+            return Key::SelectAll;
+        }
         if (code == SDLK_K || code == SDLK_B) {
             return Key::Split;
         }

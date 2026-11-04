@@ -18,7 +18,12 @@ in the workspace, along with selection, group expansion, camera and transport.
 **Add** creates a complete cube object, a working particle source with motion
 and appearance, or a group. Creating a group places the current selection in
 it. **Import** accepts multiple OBJ, glTF and GLB files in one edit, retaining
-separate named objects and asset assignments. Decoding and fracture preparation
+separate named objects and asset assignments; each object is named after
+its file until renamed, and a model picked for an object still named for
+what it held before takes the new file's name. A saved scene keeps its
+models' paths relative to the scene's folder, so the folder can be moved or
+copied with them; saved to another folder, the paths are worked out again
+from there. Decoding and fracture preparation
 remain on the package worker. **Add > Floor** creates another Ground object,
 including in an existing floorless scene. Ground owns a built-in thin mesh
 and derived convex collider, with ordinary transform, surface and physics
@@ -59,13 +64,18 @@ puff), with **Rounded** (flat to a ball), **Light wraps** (light reaching
 round the dark side), **Takes ambient** and **Takes shadows**. The scene
 settings choose the preview **Backdrop**: Studio (a lit stage), Night (a dim
 moonlit rig, for glowing effects) or Void (no light at all), which is the
-quickest way to see lit and glowing systems differ. Radius,
+quickest way to see lit and glowing systems differ. **Casts light** has
+the particles give off light in their own colour, fading in and out with
+their life, onto the scene and its smoke: **Lights** is the most that carry
+one at once, and each light's **Strength** and **Reach** are ranges. A
+campfire under the Night backdrop lights its own smoke this way. Radius,
 lifetime, speed, size, brightness and spin are **ranges**: two values, and
 each particle picks its own between them once, at birth. A range whose two
 values are equal is a constant. The system's seed, and each behavior's seed,
 choose another set of picks; seeds are explicit, undoable and never change as
 a side effect of another edit. Sources have stable
-identities and are Initial, Continuous or Burst. Additional sources are
+identities and are Initial, Continuous or Burst; the inspector numbers them
+in order and says what each gives ("Source 1: 40 a second"). Additional sources are
 added inside the inspector. A bounded Initial/Burst population can be
 persistent; an unbounded Continuous source cannot. Source Initial currently
 uses the runtime's time-zero burst and becomes populated on the first step.
@@ -126,8 +136,7 @@ cache. Selecting a grid draws its box in the viewport, with a corner handle
 for its size and a centre handle for its position. A grid starts empty: a
 particle system fills it through a relationship (below). The preview draws
 the smoke with the media server's own volume pass; export writes the volume
-in the `.ajfx` package. A switched-off grid is not on the effect, so rules
-on it do nothing and say so. At most 16 grids in a scene. The HUD and
+in the `.ajfx` package. At most 16 grids in a scene. The HUD and
 Statistics count them ("Smoke: 1 grid, 12,000 cells, 2 MiB on the GPU") and
 name the limit once a grid is four fifths of the way to it. A system that
 feeds smoke is never cached (a cache keeps particles, not what they deposit):
@@ -135,10 +144,13 @@ the bake takes the rest and the HUD says how many systems feeding smoke stay
 live, rather than failing.
 
 Particles with **Collide with objects** on meet loose (Dynamic) objects
-through the shared world, and each Static object as its own shape: the
-floor as a plane at its top, a Sphere collider as a sphere, and a Box or
-Convex hull collider as the box of the object's longest side, without its
-rotation. Animated objects are not met by particles yet. Switching the
+through the shared world, and each Static object as its own shape, turned
+as it stands: the floor as a plane at its top, a Sphere collider as a
+sphere, an imported model with a Convex hull collider as its own surface
+(a distance field of the model, fitted and turned as it is drawn), a
+library shape as the box of its own bounds, and an imported model with a
+Box collider as the box of its longest side. Animated objects are not met
+by particles yet. Switching the
 collision off lets particles pass through everything.
 
 A **relationship** is one rule on the scene binding a particle system to

@@ -21,6 +21,7 @@ enum class RendererLockstepCode : core::u8 {
     ConformanceMismatch,
     FrameBudgetExceeded,
     FrameTimingPending,
+    VideoMemoryShort,
 };
 
 [[nodiscard]] std::string_view renderer_lockstep_headline(
@@ -48,6 +49,17 @@ struct RendererLockstep final {
     core::u64 conformance_request{};
     core::RenderConformance conformance{};
     core::ConformanceComparison conformance_difference{};
+    // Whether the Director's own renderer feeds a physical output. When it
+    // only previews, its GPU running short of memory holds nothing: Program
+    // is rendered by the nodes, and a laptop running the show must not stop
+    // a wall its render nodes can draw.
+    bool local_drives_output{};
+    // VideoMemoryShort: what the failing node still needs and has free.
+    core::u64 video_memory_needed{};
+    core::u64 video_memory_free{};
+    // The Director's preview reported VideoMemoryShort without holding.
+    core::u64 preview_memory_needed{};
+    core::u64 preview_memory_free{};
 
     [[nodiscard]] bool satisfied() const noexcept {
         if (!hold_over_budget && (code == RendererLockstepCode::FrameBudgetExceeded

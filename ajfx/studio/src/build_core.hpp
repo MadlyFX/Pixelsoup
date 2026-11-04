@@ -114,7 +114,8 @@ protected:
 
     // Names the package entry an artist's file goes in, and asks for it.
     std::string request(AssetRequest::Kind kind, const Block& block, const std::string& path, float scale = 1.0F,
-                        std::uint32_t cells = 0U, ColliderSolid solid = ColliderSolid::Auto);
+                        std::uint32_t cells = 0U, ColliderSolid solid = ColliderSolid::Auto, bool fit = false,
+                        Vec3 turn = {});
 
     template <class M>
     void place_init(int slot, Uid origin, M module) {

@@ -338,6 +338,37 @@ void spheres_and_boxes_hold_particles_in_or_out() {
                             std::fabs(p.z) < 3.0F - slack;
         AJFX_CHECK(!within);
     }
+    // A turned box holds its own axes, not the world's: inside a crate
+    // turned 30 degrees about Y and 40 about X, every particle is within it
+    // in the crate's frame, and some stand where the unturned crate would
+    // not reach.
+    const Vec3 turn{40.0F, 30.0F, 0.0F};
+    const Quat back = [&turn] {
+        const Quat q = prop_orientation(turn);
+        return Quat{-q.x, -q.y, -q.z, q.w};
+    }();
+    const Simulation turned = flung(BoxCollision{.half_size = Vec3{0.5F, 1.0F, 2.0F}, .turn = turn, .inside = true});
+    AJFX_CHECK(turned.emitter(0).alive() > 300U);
+    std::size_t beyond_unturned = 0U;
+    for (const Vec3& p : turned.emitter(0).position) {
+        const Vec3 local = rotate(back, p);
+        AJFX_CHECK(std::fabs(local.x) <= 0.5F + slack && std::fabs(local.y) <= 1.0F + slack &&
+                   std::fabs(local.z) <= 2.0F + slack);
+        beyond_unturned += std::fabs(p.x) > 0.5F + slack || std::fabs(p.y) > 1.0F + slack ? 1U : 0U;
+    }
+    AJFX_CHECK(beyond_unturned > 0U);
+    // Outside a slab tipped 30 degrees about Z: none within it, in its frame.
+    const Vec3 tip{0.0F, 0.0F, 30.0F};
+    const Simulation leaning =
+        flung(BoxCollision{.center = Vec3{0.0F, 2.0F, 0.0F}, .half_size = Vec3{3.0F, 0.5F, 3.0F}, .turn = tip});
+    const Quat q = prop_orientation(tip);
+    const Quat undo{-q.x, -q.y, -q.z, q.w};
+    for (const Vec3& p : leaning.emitter(0).position) {
+        const Vec3 local = rotate(undo, p - Vec3{0.0F, 2.0F, 0.0F});
+        const bool within = std::fabs(local.x) < 3.0F - slack && std::fabs(local.y) < 0.5F - slack &&
+                            std::fabs(local.z) < 3.0F - slack;
+        AJFX_CHECK(!within);
+    }
     // Killing instead: the escapees are gone, not held.
     const Simulation culled = flung(SphereCollision{.radius = 1.0F, .inside = true, .kill = true});
     AJFX_CHECK(culled.emitter(0).alive() < 60U);

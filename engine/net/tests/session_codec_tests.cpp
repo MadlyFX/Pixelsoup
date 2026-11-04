@@ -1194,6 +1194,27 @@ void runtime_renderer_readiness_round_trips_and_fails_closed() {
     SESSION_CHECK(!refused.has_value());
     SESSION_CHECK(refused.error() ==
                   net::SessionEncodeError::InvalidHeartbeatAck);
+
+    // A node short of GPU memory carries both figures across the wire, and
+    // one whose need fits its headroom contradicts itself.
+    auto memory_short = message;
+    memory_short.renderer.state =
+        net::RuntimeRendererReadinessState::VideoMemoryShort;
+    memory_short.renderer.satisfied = false;
+    memory_short.renderer.video_memory_needed = 5'100'000'017ULL;
+    memory_short.renderer.video_memory_free = 2'400'000'029ULL;
+    auto memory_bytes = net::encode_session(net::SessionMessage{memory_short});
+    SESSION_CHECK(memory_bytes.has_value());
+    auto memory_back = net::decode_session(memory_bytes.value());
+    SESSION_CHECK(memory_back.has_value());
+    SESSION_CHECK(std::get<net::HeartbeatAck>(memory_back.value()) ==
+                  memory_short);
+    auto memory_fits = memory_short;
+    memory_fits.renderer.video_memory_free = 5'100'000'017ULL;
+    refused = net::encode_session(net::SessionMessage{memory_fits});
+    SESSION_CHECK(!refused.has_value());
+    SESSION_CHECK(refused.error() ==
+                  net::SessionEncodeError::InvalidHeartbeatAck);
 }
 
 void runtime_media_status_round_trips_and_is_bounded() {

@@ -522,6 +522,7 @@ server::RendererLockstep DirectorShowLoop::evaluate_renderer_lockstep(
 
     lockstep.hold_over_budget = director_sync.policy.late_frame == sync::LateFramePolicy::HoldGroup;
     lockstep.conformance_request = conformance_request;
+    lockstep.local_drives_output = options.output;
 #if defined(MEDIASERVER_HAS_GUI)
     if (observed_local_renderer.selected == net::RuntimeRendererBackend::Advanced) {
         const auto adapter = observed_local_renderer.conformance.adapter;

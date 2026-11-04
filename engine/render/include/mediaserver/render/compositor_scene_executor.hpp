@@ -440,6 +440,12 @@ class CompositorSceneExecutor final {
     CompositorSceneStats stats_{};
     MediaCacheStats latest_media_cache_stats_{};
     RendererReadiness last_readiness_{};
+    // Adapter-local bytes the last added layer renderer took, and the padded
+    // extent it was built at. Zero until one has been built; a different
+    // extent costs a different amount, so it is measured again there.
+    core::u64 layer_renderer_bytes_{};
+    core::u32 layer_renderer_bytes_width_{};
+    core::u32 layer_renderer_bytes_height_{};
     RendererPassStatus last_passes_{};
     core::u64 last_renderer_profile_digest_{};
     doc::Version temporal_document_version_{};

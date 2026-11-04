@@ -4257,7 +4257,8 @@ void project_effect_settings_are_clamped_and_replicated() {
          real(schema::blur_sigma_ratio, 9.0),
          whole(schema::blur_passes, 99),
          text(schema::brightness_curve, schema::gain_curve),
-         real(schema::brightness_gamma, 0.0)})));
+         real(schema::brightness_gamma, 0.0),
+         real(schema::graph_texture_budget_gb, 500.0)})));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const scene::EffectSettings settings = model.effect_settings();
@@ -4266,7 +4267,21 @@ void project_effect_settings_are_clamped_and_replicated() {
     MODEL_CHECK(settings.blur_passes == scene::max_blur_passes);
     MODEL_CHECK(settings.brightness_curve == scene::BrightnessCurve::Gain);
     MODEL_CHECK(settings.brightness_gamma == scene::min_brightness_gamma);
+    MODEL_CHECK(settings.graph_texture_budget_gb ==
+                scene::max_graph_texture_budget_gb);
     MODEL_CHECK(model.effect_settings_node() == doc::NodeId{3U});
+
+    // An in-range budget is kept exactly, and one below the floor rises to it.
+    scene::SceneModel budget;
+    budget.reset(doc::Root{}.set(node(
+        4U, schema::settings_type,
+        {real(schema::graph_texture_budget_gb, 12.5)})));
+    MODEL_CHECK(budget.effect_settings().graph_texture_budget_gb == 12.5F);
+    budget.reset(doc::Root{}.set(node(
+        4U, schema::settings_type,
+        {real(schema::graph_texture_budget_gb, 0.01)})));
+    MODEL_CHECK(budget.effect_settings().graph_texture_budget_gb ==
+                scene::min_graph_texture_budget_gb);
 
     // An even tap count has no centre sample, so it is rounded up rather than
     // silently filtering off by half a pixel.
@@ -4281,6 +4296,9 @@ void project_effect_settings_are_clamped_and_replicated() {
     MODEL_CHECK(built.effect_settings == settings);
     scene::Scene other = built;
     other.effect_settings.blur_taps = 5U;
+    MODEL_CHECK(scene::digest(other) != scene::digest(built));
+    other = built;
+    other.effect_settings.graph_texture_budget_gb = 7.5F;
     MODEL_CHECK(scene::digest(other) != scene::digest(built));
 
     // A project with no settings node is the built-in default, not a refusal.

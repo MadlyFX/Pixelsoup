@@ -1486,6 +1486,21 @@ struct ExternalVideoPlanes final {
     Texture chroma;
 };
 
+// The adapter's local memory as the operating system sees this process use it.
+// `budget` is what the OS currently lets the process keep resident; past it,
+// allocations are demoted to system memory rather than refused, so a frame
+// slows down instead of failing. It moves as other processes use the GPU.
+// Zero budget means the backend cannot tell.
+struct VideoMemory final {
+    core::u64 budget{};
+    core::u64 usage{};
+
+    [[nodiscard]] bool known() const noexcept { return budget != 0U; }
+    [[nodiscard]] core::u64 headroom() const noexcept {
+        return budget > usage ? budget - usage : 0U;
+    }
+};
+
 // The GPU device. One per process; every resource above is created from it and
 // must not outlive it.
 class Device final {
@@ -1512,6 +1527,14 @@ public:
     // size a GPU-resident budget need this rather than a fixed number: a
     // laptop node and a workstation differ by an order of magnitude.
     [[nodiscard]] core::u64 dedicated_video_memory_bytes() const noexcept;
+    // The budget and current use of the adapter's local memory. A kernel
+    // query: cheap enough for a readiness decision, not for every draw.
+    [[nodiscard]] VideoMemory video_memory() const noexcept;
+    // Adapter-local bytes held by the textures and geometry buffers this
+    // device created and has not released, as the driver lays them out.
+    // Measuring it either side of a construction gives that construction's
+    // cost on this adapter. Zero on backends that do not count.
+    [[nodiscard]] core::u64 committed_bytes() const noexcept;
     // Why the GPU device stopped working - a fault, a hang, a driver reset or
     // update - or empty while it works. A lost device runs nothing recorded on
     // it again and refuses every present, so a window only keeps its last

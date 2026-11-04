@@ -890,17 +890,20 @@ void ajfx_sdf_collision(inout Particle p, uint o, uint id) {
     }
 }
 
-// [center.xyz, half_size.xyz, restitution, 1 - friction, inside, kill]
+// [center.xyz, half_size.xyz, turn.xyzw, restitution, 1 - friction, inside, kill]
+// Worked in the box's own frame, as the reference does.
 void ajfx_box_collision(inout Particle p, uint o, uint id) {
-    float3 d = p.position - ajfx_f3(o);
+    float4 turn = ajfx_f4(o + 6u);
+    float4 back = float4(-turn.x, -turn.y, -turn.z, turn.w);
+    float3 d = ajfx_turn(back, p.position - ajfx_f3(o));
     float3 h = ajfx_f3(o + 3u);
     float3 s = float3(d.x < 0.0f ? -1.0f : 1.0f, d.y < 0.0f ? -1.0f : 1.0f, d.z < 0.0f ? -1.0f : 1.0f);
     float3 q = float3(abs(d.x) - h.x, abs(d.y) - h.y, abs(d.z) - h.z);
     float3 over = float3(max(q.x, 0.0f), max(q.y, 0.0f), max(q.z, 0.0f));
     float outside = sqrt(ajfx_dot(over, over));
-    float restitution = ajfx_f(o + 6u);
-    float slide = ajfx_f(o + 7u);
-    bool kill = ajfx_u32(o + 9u) != 0u;
+    float restitution = ajfx_f(o + 10u);
+    float slide = ajfx_f(o + 11u);
+    bool kill = ajfx_u32(o + 13u) != 0u;
     float3 n;
     float dist = outside;
     if (outside > 0.0f) {
@@ -917,7 +920,8 @@ void ajfx_box_collision(inout Particle p, uint o, uint id) {
             dist = q.z;
         }
     }
-    if (ajfx_u32(o + 8u) != 0u) {
+    n = ajfx_turn(turn, n);
+    if (ajfx_u32(o + 12u) != 0u) {
         ajfx_respond(p, -dist, n * -1.0f, restitution, slide, kill);
     } else {
         ajfx_respond(p, dist, n, restitution, slide, kill);

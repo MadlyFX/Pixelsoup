@@ -570,7 +570,9 @@ host's lit scene, at most `light_count` at once.
 **Colliders.** `SphereCollision`, `BoxCollision` and `SdfCollision` keep
 particles out of a shape, or with `inside` within it. The response is the
 same as `PlaneCollision`'s: back onto the surface, with restitution,
-friction or `kill`. `SdfCollision` follows a distance field, a
+friction or `kill`. A box may be turned (`turn`, degrees about Y, then X,
+then Z, as a prop is), and a rigid physics emitter meets it turned too.
+`SdfCollision` follows a distance field, a
 `fields/<name>` package entry that `make_distance_field` bakes. The CPU
 reference and the GPU kernels sample it identically.
 

@@ -37,6 +37,12 @@ enum class RendererReadinessCode : core::u8 {
     // orthographic view is drawn only as an explicit view (the Stage's Top,
     // Front and Side) over a perspective authored camera.
     OrthographicCamera,
+    // This machine's GPU cannot hold the layer renderers the frame needs
+    // within the memory the operating system currently allows it. Past that
+    // budget the OS pages to system memory and the frame crawls, so it is
+    // refused before allocating. A machine-local answer: a bigger GPU on
+    // another node can still render the same graph.
+    VideoMemoryShort,
 };
 
 enum class RendererCapability : core::u64 {
@@ -61,6 +67,10 @@ struct RendererReadiness final {
     core::u64 missing_capabilities{};
     bool satisfied{true};
     bool fallback{};
+    // VideoMemoryShort only: adapter-local bytes the missing layer renderers
+    // need, and the headroom the OS budget left when it was refused.
+    core::u64 video_memory_needed{};
+    core::u64 video_memory_free{};
 
     bool operator==(const RendererReadiness&) const = default;
     [[nodiscard]] std::string_view headline() const noexcept;

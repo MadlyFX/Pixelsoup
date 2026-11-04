@@ -1147,6 +1147,14 @@ struct OutputMonitorState final {
     bool renderer_selected_advanced{};
     bool renderer_failure_local{};
     core::u32 renderer_failure_node{};
+    // When the failing renderer is short of GPU memory: what it still needs
+    // and what its OS budget leaves free. Zero otherwise.
+    core::u64 renderer_memory_needed{};
+    core::u64 renderer_memory_free{};
+    // The editor's own preview is short of GPU memory. It holds nothing,
+    // because the render nodes draw Program, so it is reported apart.
+    core::u64 preview_memory_needed{};
+    core::u64 preview_memory_free{};
     bool conformance_active{};
     core::RenderConformance conformance{};
     core::FrameTiming frame_timing{};

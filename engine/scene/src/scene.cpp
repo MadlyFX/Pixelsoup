@@ -1232,6 +1232,7 @@ core::u64 digest(const Scene& scene) noexcept {
                    static_cast<core::u8>(
                        scene.effect_settings.brightness_curve)));
     mix(state, scene.effect_settings.brightness_gamma);
+    mix(state, scene.effect_settings.graph_texture_budget_gb);
 
     if (scene.renderer_settings != RendererSettings{}) {
         mix(state, core::u64{0x5245'4E44'4552'7631ULL}); // "RENDERv1"
@@ -1748,6 +1749,12 @@ EffectSettings clamped(const EffectSettings& value) noexcept {
             ? std::clamp(value.brightness_gamma, min_brightness_gamma,
                          max_brightness_gamma)
             : 1.0F;
+    result.graph_texture_budget_gb =
+        std::isfinite(value.graph_texture_budget_gb)
+            ? std::clamp(value.graph_texture_budget_gb,
+                         min_graph_texture_budget_gb,
+                         max_graph_texture_budget_gb)
+            : EffectSettings{}.graph_texture_budget_gb;
     return result;
 }
 

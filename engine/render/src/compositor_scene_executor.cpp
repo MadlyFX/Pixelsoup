@@ -2287,6 +2287,33 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                         !pass.matte_branch->background.has_value();
                 }));
         while (layer_renderers_.size() < renderers_needed) {
+            // Refuse before allocating once this extent's cost is known. Past
+            // the OS budget allocations do not fail: they are paged to system
+            // memory and every frame crawls, which no node may do silently.
+            // The answer is this machine's alone; it says nothing about
+            // whether a larger GPU elsewhere can render the same graph.
+            if (layer_renderer_bytes_ != 0U &&
+                layer_renderer_bytes_width_ == padded_width() &&
+                layer_renderer_bytes_height_ == padded_height()) {
+                const core::u64 needed = layer_renderer_bytes_ *
+                    static_cast<core::u64>(
+                        renderers_needed - layer_renderers_.size());
+                const rhi::VideoMemory memory = device_->video_memory();
+                if (memory.known() && needed > memory.headroom()) {
+                    last_readiness_.code =
+                        RendererReadinessCode::VideoMemoryShort;
+                    last_readiness_.satisfied = false;
+                    last_readiness_.fallback = false;
+                    last_readiness_.video_memory_needed = needed;
+                    last_readiness_.video_memory_free = memory.headroom();
+                    return CompositorSceneResult::failure(
+                        RenderError::AllocationFailed);
+                }
+            }
+            // Measured either side of the construction. Another thread
+            // allocating on this device at the same moment inflates it, which
+            // errs towards refusing; the next construction measures again.
+            const core::u64 committed_before = device_->committed_bytes();
             // The first layer captures the complete residency scene once and
             // every following layer samples that exact capture. Constructing
             // a nested full renderer for each borrower wasted GPU memory and
@@ -2305,6 +2332,12 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             // call further down the same frame. Both land on this frame; one
             // keeps every allocation this executor makes in one place.
             layer_renderers_.back().prepare(plan.adjusted_scene);
+            const core::u64 committed_after = device_->committed_bytes();
+            if (committed_after > committed_before) {
+                layer_renderer_bytes_ = committed_after - committed_before;
+                layer_renderer_bytes_width_ = padded_width();
+                layer_renderer_bytes_height_ = padded_height();
+            }
         }
         // Isolated layer renderers are deliberately transparent, so the
         // compositor owns the visible environment behind them. Use the one

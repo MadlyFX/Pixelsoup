@@ -1302,6 +1302,8 @@ void SceneModel::put(const doc::Node& node) {
             reader.number(schema::blur_sigma_ratio, values.blur_sigma_ratio);
         values.brightness_gamma =
             reader.number(schema::brightness_gamma, values.brightness_gamma);
+        values.graph_texture_budget_gb = reader.number(
+            schema::graph_texture_budget_gb, values.graph_texture_budget_gb);
         const auto curve =
             reader.text(schema::brightness_curve, schema::exposure_curve);
         if (curve == schema::gain_curve) {

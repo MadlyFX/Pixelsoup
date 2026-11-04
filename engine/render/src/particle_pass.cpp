@@ -92,7 +92,7 @@ struct VolumeConstants final {
     std::array<float, 4U> color{};
     std::array<float, 4U> sky_ambient{};
     std::array<float, 4U> ground_exposure{};
-    std::array<core::u32, 4U> lighting{};   // lights, cascades, shadowed
+    std::array<core::u32, 4U> lighting{};   // lights, cascades, shadowed, particle lights
     std::array<std::array<float, 16U>, 4U> shadow_view_projection{};
     std::array<float, 4U> shadow_texel_depth{};
     std::array<float, 4U> shadow_bias{};
@@ -416,7 +416,7 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     auto lights = device.create_compute_pipeline(light_kernel);
     // The grid volumes' box and raymarch: the fragment stage binds the
     // sprite's seven texture slots (the scene depth and the cascades among
-    // them), then the grid's cells and the scene's lights.
+    // them), then the grid's cells, the scene's lights and the particles'.
     rhi::ShaderDesc volume_vertex{};
     volume_vertex.stage = rhi::ShaderStage::Vertex;
     volume_vertex.format = rhi::ShaderFormat::Dxil;
@@ -431,7 +431,7 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
         reinterpret_cast<const core::u8*>(mediaserver_particle_volume_frag_dxil),
         sizeof(mediaserver_particle_volume_frag_dxil)};
     volume_fragment.sampler_count = sprite_texture_slots;
-    volume_fragment.storage_buffer_count = 2U;
+    volume_fragment.storage_buffer_count = 3U;
     volume_fragment.uniform_buffer_count = 1U;
     // Depth-bound but untested: the march stops at the scene's depth itself,
     // where a test of the box's back face would hide smoke in front of a
@@ -1143,7 +1143,9 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         volume.march = {0.0F, 0.0F, volume_ray_steps, volume_light_steps};
         volume.sky_ambient = constants.sky_ambient;
         volume.ground_exposure = constants.ground_exposure;
-        volume.lighting = {constants.lighting[0], constants.lighting[1], 1U, 0U};
+        const rhi::StorageBuffer* particle_lights = lighting != nullptr ? lighting->particle_lights : nullptr;
+        volume.lighting = {constants.lighting[0], constants.lighting[1], 1U,
+                           particle_lights != nullptr ? lighting->particle_light_count : 0U};
         volume.shadow_view_projection = constants.shadow_view_projection;
         volume.shadow_texel_depth = constants.shadow_texel_depth;
         volume.shadow_bias = {shadow_bias, 0.0F, 0.0F, 0.0F};
@@ -1169,10 +1171,10 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
             box.box_size = {static_cast<float>(cells.nx) * cells.cell_size,
                             static_cast<float>(cells.ny) * cells.cell_size,
                             static_cast<float>(cells.nz) * cells.cell_size, 0.0F};
-            // The scene's lights, or the cells standing in where there are
-            // none (the count says not to read them).
-            const rhi::StorageBuffer* fragment_buffers[] = {buffer,
-                                                            scene_lights != nullptr ? scene_lights : buffer};
+            // The scene's lights and the particles', or the cells standing
+            // in where there are none (the counts say not to read them).
+            const rhi::StorageBuffer* fragment_buffers[] = {buffer, scene_lights != nullptr ? scene_lights : buffer,
+                                                            particle_lights != nullptr ? particle_lights : buffer};
             const std::array<rhi::DrawBatch, 1U> batches{rhi::DrawBatch{36U, 1U}};
             rhi::PulledDraw draw{};
             draw.pipeline = &s.volume;

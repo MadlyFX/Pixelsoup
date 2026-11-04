@@ -2016,6 +2016,20 @@ core::u64 Device::dedicated_video_memory_bytes() const noexcept {
     return detail::d3d12_dedicated_video_memory(handle_);
 }
 
+VideoMemory Device::video_memory() const noexcept {
+    if (handle_ == nullptr || capabilities_.backend != BackendKind::D3d12) {
+        return {};
+    }
+    return detail::d3d12_video_memory(handle_);
+}
+
+core::u64 Device::committed_bytes() const noexcept {
+    if (handle_ == nullptr || capabilities_.backend != BackendKind::D3d12) {
+        return 0U;
+    }
+    return detail::d3d12_committed_bytes(handle_);
+}
+
 std::string_view Device::lost_reason() const noexcept {
     if (handle_ == nullptr || capabilities_.backend != BackendKind::D3d12) {
         return {};

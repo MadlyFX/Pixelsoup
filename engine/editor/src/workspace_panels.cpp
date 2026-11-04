@@ -1498,6 +1498,15 @@ distribute_boxes(std::span<const LayoutBox> boxes, bool horizontal) {
                      static_cast<std::size_t>(std::max(length, 0))};
 }
 
+// GPU memory in decimal gigabytes with one decimal, as operators read a card.
+[[nodiscard]] std::string gpu_memory_text(core::u64 bytes) {
+  std::array<char, 32U> output{};
+  const int length = std::snprintf(output.data(), output.size(), "%.1f GB",
+                                   static_cast<double>(bytes) / 1.0e9);
+  return std::string{output.data(),
+                     static_cast<std::size_t>(std::max(length, 0))};
+}
+
 [[nodiscard]] std::string fps_text(float fps) {
   std::array<char, 16U> output{};
   const int length = std::snprintf(output.data(), output.size(), "%.0f",
@@ -8842,6 +8851,13 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
         renderer_tip +=
             core::conformance_detail(state.cluster.conformance_difference);
       }
+      if (state.cluster.renderer_memory_needed != 0U) {
+        renderer_tip += ": its GPU needs " +
+                        gpu_memory_text(state.cluster.renderer_memory_needed) +
+                        " more for this graph's layers and has " +
+                        gpu_memory_text(state.cluster.renderer_memory_free) +
+                        " free";
+      }
       std::string renderer_text;
       if (state.cluster.renderer_satisfied) {
         renderer_text = state.cluster.renderer_selected_advanced
@@ -8860,6 +8876,14 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       chip(renderer_text,
            state.cluster.renderer_satisfied ? theme.good : theme.warning,
            renderer_tip);
+    }
+    if (state.cluster.preview_memory_needed != 0U) {
+      chip("Preview short of GPU memory", theme.warning,
+           "This machine's preview needs " +
+               gpu_memory_text(state.cluster.preview_memory_needed) +
+               " more GPU memory for this graph's layers and has " +
+               gpu_memory_text(state.cluster.preview_memory_free) +
+               " free. Render nodes draw Program, so the show is not held.");
     }
     if (state.cluster.release_lag_frames != 0U ||
         state.cluster.pacer_lag_frames != 0U) {

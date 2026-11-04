@@ -249,6 +249,7 @@ enum class PresenterRendererReadinessState : core::u8 {
     MissingCapabilities,
     AdvancedImplementationUnavailable,
     InvalidPolicy,
+    VideoMemoryShort,
 };
 
 struct PresenterRendererReadiness final {
@@ -268,6 +269,11 @@ struct PresenterRendererReadiness final {
 
     core::RenderAdapterIdentity adapter{};
     core::FrameTiming timing{};
+
+    // VideoMemoryShort only: adapter-local bytes still needed, and the
+    // headroom the OS budget left.
+    core::u64 video_memory_needed{};
+    core::u64 video_memory_free{};
 
     bool operator==(const PresenterRendererReadiness&) const = default;
 };

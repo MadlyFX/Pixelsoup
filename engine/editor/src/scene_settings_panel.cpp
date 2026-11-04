@@ -141,6 +141,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       return out;
     };
     if (auto found = look(renderer, fresh.renderer)) return found;
+    if (auto found = look(values.settings, fresh.settings)) return found;
     return look(environment, fresh.environment);
   };
   // The reset arrow at the end of a label while its value is not the
@@ -382,6 +383,9 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       choice("Brightness curve", values.settings.brightness_curve,
              {"Exposure", "Gain"});
       number("Brightness gamma", values.settings.brightness_gamma, 0.1, 4);
+      number("Graph texture budget", values.settings.graph_texture_budget_gb,
+             scene::min_graph_texture_budget_gb,
+             scene::max_graph_texture_budget_gb, 0.1, "GB", 1);
     }
   } else {
     if (section(6, "SKY & LIGHTING")) {

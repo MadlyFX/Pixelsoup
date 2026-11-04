@@ -158,6 +158,11 @@ struct AssetRequest final {
     float scale{1.0F};
     std::uint32_t cells{0U};
     ColliderSolid solid{ColliderSolid::Auto};
+    // A field's model centred on its bounds with its longest side 1 before
+    // `scale`, as an object's model is drawn, and turned by `turn` (degrees,
+    // prop_orientation): the field stands where the object does.
+    bool fit{false};
+    Vec3 turn{};
 
     friend bool operator==(const AssetRequest&, const AssetRequest&) = default;
 };

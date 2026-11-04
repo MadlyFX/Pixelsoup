@@ -410,8 +410,15 @@ private:
             const Vec3 centre = to_vec3(get(block, "center")) * s_;
             const Value size = get(block, "size");
             const Vec3 half = Vec3{std::fabs(size.x), std::fabs(size.y), std::fabs(size.z)} * (0.5F * s_);
-            box(guide, centre, half);
-            handle(block, "size", HandleMotion::Corner, centre + half, centre, "Size");
+            const Vec3 turn = to_vec3(get(block, "turn"));
+            if (turn == Vec3{}) {
+                box(guide, centre, half);
+                handle(block, "size", HandleMotion::Corner, centre + half, centre, "Size");
+            } else {
+                // A corner handle drags along the world's axes, so a turned
+                // box is sized by typing.
+                turned_box(guide, centre, half, prop_orientation(turn));
+            }
             handle(block, "center", HandleMotion::Floor, centre, centre, "Center");
         } else if (kind == BlockKind::SmokeGrid) {
             // The box of air, drawn as a field: a corner sizes it and its
@@ -424,6 +431,9 @@ private:
             drop(guide, centre);
             handle(block, "size", HandleMotion::Corner, centre + half, centre, "Size");
             handle(block, "center", HandleMotion::Floor, centre, centre, "Position");
+        } else if (kind == BlockKind::MeshCollider && toggle_of(block, "fit")) {
+            // Fitted to an object's model, which the object's own guide
+            // already draws where it stands: nothing to add, nothing to drag.
         } else if (kind == BlockKind::MeshCollider) {
             guide.kind = GuideKind::Collider;
             const Vec3 at = to_vec3(get(block, "position")) * s_;

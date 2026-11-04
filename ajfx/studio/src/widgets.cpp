@@ -259,6 +259,9 @@ std::optional<std::size_t> PopoverList::draw(gui::UiContext& ctx, const gui::Rec
     if (!open_) {
         return std::nullopt;
     }
+    // Open, the card is what the pointer is about: the button that opened it
+    // must not explain itself over it. Its own rows may still.
+    ctx.drop_tooltip();
     const gui::Theme& theme = ctx.theme();
     const gui::UiId search_id = gui::ui_id("studio.popover.search");
 

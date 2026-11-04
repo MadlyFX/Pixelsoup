@@ -211,6 +211,25 @@ that same capture without constructing extra reflection renderers. This reduces
 the cold allocation cost of graphs with many plates, including LED Car Process,
 while preserving layer order, source resolution, blends and reflection content.
 
+**Each machine checks that its own GPU can hold the layers.** The graph's
+budgets are sanity limits that every machine evaluates identically; they say
+nothing about any one card. The offscreen texture budget is a project setting
+(Project Settings > Effect defaults > Graph texture budget, 4 GB by default,
+0.5 to 64 GB). It caps the graph's own estimate of its full-canvas render
+targets, so a facility can size it to its render nodes. The real fit is checked where the layers are built. The executor
+measures what one layer renderer takes on this adapter, from the device's
+committed-bytes tally either side of its construction, and before building
+more it compares the missing renderers' cost with the headroom in the OS video
+memory budget. Past that budget Windows pages to system memory instead of
+failing, so the frame would crawl. The executor refuses first, with
+`RendererReadinessCode::VideoMemoryShort` carrying both figures. A render node
+reports this to the Director, which holds Program and names the node and the
+figures on the Output Monitor's renderer chip. The Director's own preview
+running short holds nothing unless the Director itself drives an output,
+because the nodes draw Program. A laptop running the show must not stop a wall
+its render nodes can draw, so the Output Monitor shows a separate "Preview
+short of GPU memory" chip instead.
+
 **Isolated layers keep the frame's depth.** Isolating a layer costs it the
 shared depth buffer, and a flat premultiplied composite has no way to put that
 back: adding a brightness or blur node to an object used to lift that object in
@@ -358,7 +377,10 @@ Basic refuses a started effect with the reason.
   absorbing by density times `extinction` and scattering `albedo` of it in
   `color`, lit by the scene's first directional light through 8 fixed steps
   back out of the box and that light's shadow cascades (four-tap compare,
-  the sprites' bias), plus the hemisphere, under the scene's exposure. The
+  the sprites' bias), plus the hemisphere, plus every local light (the
+  scene's point and spot lights and the frame's particle lights, by the lit
+  pass's windowed inverse-square falloff and unshadowed by the smoke, so a
+  fire lights its smoke from within), under the scene's exposure. The
   reference renderer's absorption and single scattering exactly, so a uniform
   slab draws the same cover and colour on both. Rays come from the camera's
   eye and forward axis and the box, never from the slice's projection, so

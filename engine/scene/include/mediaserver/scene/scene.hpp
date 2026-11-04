@@ -1027,6 +1027,12 @@ struct EffectSettings final {
     // applied. One is the literal multiplier; below one softens the control's
     // response and above one sharpens it.
     float brightness_gamma{1.0F};
+    // The most offscreen render-target memory a compositor graph may estimate
+    // for itself, in decimal gigabytes at the full authored canvas. An
+    // authored sanity limit every machine evaluates identically, not a
+    // reading of any GPU: each node separately refuses a frame its own card
+    // cannot hold.
+    float graph_texture_budget_gb{4.0F};
 
     bool operator==(const EffectSettings&) const = default;
 };
@@ -1703,6 +1709,8 @@ inline constexpr float min_blur_sigma_ratio = 0.05F;
 inline constexpr float max_blur_sigma_ratio = 2.0F;
 inline constexpr float min_brightness_gamma = 0.1F;
 inline constexpr float max_brightness_gamma = 4.0F;
+inline constexpr float min_graph_texture_budget_gb = 0.5F;
+inline constexpr float max_graph_texture_budget_gb = 64.0F;
 inline constexpr float max_saturation = 4.0F;
 
 // Saturation is authored in [0, 4]. A non-finite or out-of-contract value is

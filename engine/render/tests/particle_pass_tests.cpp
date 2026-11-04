@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -617,6 +618,29 @@ void soft_particles_fade_as_they_near_the_scene() {
     return std::move(buffer).value();
 }
 
+// One point light record at (x, y, z), white at `intensity`, reaching `range`.
+[[nodiscard]] rhi::StorageBuffer point_buffer(float x, float y, float z, float intensity, float range) {
+    std::array<float, 32U> record{};
+    record[0] = x;
+    record[1] = y;
+    record[2] = z;
+    record[3] = std::bit_cast<float>(1U); // kind: point
+    record[4] = record[5] = record[6] = 1.0F;
+    record[7] = intensity;
+    record[8] = range;
+    auto buffer = g_device->create_storage_buffer(128U);
+    PASS_CHECK(buffer);
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(commands.upload(buffer.value(), std::span<const core::u8>{reinterpret_cast<const core::u8*>(record.data()),
+                                                                          record.size() * sizeof(float)}));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    return std::move(buffer).value();
+}
+
 void lit_particles_take_the_scenes_light_and_its_shadow() {
     render::ParticlePass pass = make_pass();
     // No scene: lit from the camera, as bright at the centre as unlit.
@@ -775,6 +799,63 @@ struct SlabScene final {
     Frame out{std::vector<core::u8>(mapped.begin(), mapped.begin() + size * size * 4U)};
     readback.value().unmap();
     return out;
+}
+
+void a_fire_lights_its_smoke() {
+    render::ParticlePass pass = make_pass();
+    // The slab of volumes_raymarch_a_slab_of_smoke under a black sky with no
+    // sun, and a point light of intensity 15 reaching 10 units three units
+    // above its middle (world (0, 3, -3)). Each of the march's 64 samples
+    // along the centre pixel's ray (x 1/32, y -1/32, z from -2 to -4) takes
+    // the windowed inverse-square falloff the lit pass gives particle
+    // lights, unshadowed by the smoke between it and the light.
+    const float density = 0.6F;
+    const float extinction = 1.5F;
+    const float albedo = 0.8F;
+    const double sigma = static_cast<double>(density) * extinction;
+    const double ds = 2.0 / 64.0;
+    const double through = std::exp(-sigma * ds);
+    double transmittance = 1.0;
+    double scattered = 0.0;
+    for (int k = 0; k < 64; ++k) {
+        const double t = (k + 0.5) * ds;
+        const double dx = 1.0 / 32.0;
+        const double dy = 3.0 + 1.0 / 32.0;
+        const double dz = 1.0 - t;
+        const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const double falloff = 1.0 - d / 10.0;
+        scattered += transmittance * (1.0 - through) * albedo * 15.0 * falloff * falloff / (d * d);
+        transmittance *= through;
+    }
+    const auto expect = [](core::u8 value, double wanted, int slack) {
+        const int rounded = static_cast<int>(std::floor(wanted * 255.0 + 0.5));
+        return value >= rounded - slack && value <= rounded + slack;
+    };
+    render::ParticleLighting night{};
+    night.sky_ambient = {0.0F, 0.0F, 0.0F, 1.0F};
+    night.ground_exposure = {0.0F, 0.0F, 0.0F, 1.0F};
+    const Frame unlit = render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&night});
+    PASS_CHECK(unlit.red(32U, 32U) == 0U && expect(unlit.alpha(32U, 32U), 1.0 - std::exp(-1.8), 2));
+    // The particles' light, as a fire's.
+    rhi::StorageBuffer flame = point_buffer(0.0F, 3.0F, -3.0F, 15.0F, 10.0F);
+    render::ParticleLighting fire = night;
+    fire.particle_lights = &flame;
+    fire.particle_light_count = 1U;
+    const Frame lit = render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&fire});
+    std::cout << "  smoke under a particle light: " << int{lit.red(32U, 32U)} << " of " << scattered * 255.0 << '\n';
+    PASS_CHECK(expect(lit.red(32U, 32U), scattered, 4));
+    PASS_CHECK(expect(lit.green(32U, 32U), scattered * 0.5, 4));
+    PASS_CHECK(lit.alpha(32U, 32U) == unlit.alpha(32U, 32U));
+    // The scene's own point light there lights it the same.
+    render::ParticleLighting lamp = night;
+    lamp.lights = &flame;
+    lamp.light_count = 1U;
+    PASS_CHECK(render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&lamp}).red(32U, 32U) ==
+               lit.red(32U, 32U));
+    // Out of its reach, nothing.
+    rhi::StorageBuffer short_flame = point_buffer(0.0F, 3.0F, -3.0F, 15.0F, 2.5F);
+    fire.particle_lights = &short_flame;
+    PASS_CHECK(render_slab(pass, slab(extinction, albedo, false), density, SlabScene{&fire}).red(32U, 32U) == 0U);
 }
 
 void volumes_raymarch_a_slab_of_smoke() {
@@ -1965,6 +2046,7 @@ int main() {
         {"soft_particles_fade_as_they_near_the_scene", soft_particles_fade_as_they_near_the_scene},
         {"lit_particles_take_the_scenes_light_and_its_shadow", lit_particles_take_the_scenes_light_and_its_shadow},
         {"volumes_raymarch_a_slab_of_smoke", volumes_raymarch_a_slab_of_smoke},
+        {"a_fire_lights_its_smoke", a_fire_lights_its_smoke},
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"distance_fields_reach_the_simulation", distance_fields_reach_the_simulation},
         {"mesh_particles_draw_solid_meshes", mesh_particles_draw_solid_meshes},

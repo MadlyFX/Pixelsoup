@@ -102,16 +102,21 @@ ModuleId BuildCore::wake_id() {
 
 // Names the package entry an artist's file goes in, and asks for it.
 std::string BuildCore::request(AssetRequest::Kind kind, const Block& block, const std::string& path, float scale,
-                               std::uint32_t cells, ColliderSolid solid) {
+                               std::uint32_t cells, ColliderSolid solid, bool fit, Vec3 turn) {
     std::string options;
     if (kind == AssetRequest::Kind::Field) {
         options = format_number(scale, 6) + "/" + std::to_string(cells) + "/" +
                   std::to_string(static_cast<int>(solid));
+        if (fit || turn != Vec3{}) {
+            options += "/" + std::string{fit ? "fit" : "as-is"} + "/" + format_number(turn.x, 4) + "," +
+                       format_number(turn.y, 4) + "," + format_number(turn.z, 4);
+        }
     }
     const std::string_view what = kind == AssetRequest::Kind::Texture ? "texture"
                                   : kind == AssetRequest::Kind::Mesh  ? "mesh"
                                                                       : "field";
-    AssetRequest wanted{kind, user_asset_name(what, path, options), path, layer_.uid, block.uid, scale, cells, solid};
+    AssetRequest wanted{kind,  user_asset_name(what, path, options), path, layer_.uid, block.uid, scale, cells, solid,
+                        fit,   turn};
     const std::string entry = wanted.entry;
     if (std::none_of(requests_.begin(), requests_.end(), [&](const AssetRequest& r) { return r.entry == entry; })) {
         requests_.push_back(std::move(wanted));
@@ -822,6 +827,7 @@ private:
                                  .center = to_vec3(get(block, "center")) * s,
                                  .half_size = Vec3{std::fabs(extent.x), std::fabs(extent.y), std::fabs(extent.z)} *
                                               (0.5F * s),
+                                 .turn = to_vec3(get(block, "turn")),
                                  .inside = toggle_of(block, "inside"),
                                  .restitution = input(block, "bounce", number_of(block, "bounce"), 1.0F),
                                  .friction = input(block, "friction", number_of(block, "friction"), 1.0F),
@@ -1072,7 +1078,8 @@ private:
                                     : mode == "surface" ? ColliderSolid::Surface
                                                         : ColliderSolid::Auto;
         const float scale = std::max(number_of(block, "scale"), 0.001F) * s_;
-        const std::string field = request(AssetRequest::Kind::Field, block, path, scale, cells, solid);
+        const std::string field = request(AssetRequest::Kind::Field, block, path, scale, cells, solid,
+                                          toggle_of(block, "fit"), to_vec3(get(block, "turn")));
         place_after(SlotCollision, block.uid,
                     SdfCollision{.id = id(block, 1U),
                                  .field = field,

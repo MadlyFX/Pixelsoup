@@ -41,6 +41,7 @@ std::string_view renderer_lockstep_headline(
     case RendererLockstepCode::ConformanceMismatch: return "RENDER CONFORMANCE MISMATCH";
     case RendererLockstepCode::FrameBudgetExceeded: return "FRAME BUDGET EXCEEDED";
     case RendererLockstepCode::FrameTimingPending: return "FRAME TIMING PENDING";
+    case RendererLockstepCode::VideoMemoryShort: return "NOT ENOUGH GPU MEMORY";
     case RendererLockstepCode::SelectionMismatch:
         return "RENDERER BACKEND MISMATCH";
     }
@@ -99,6 +100,18 @@ void observe_renderer_lockstep(
         observation->requested != state.requested) {
         fail(state, RendererLockstepCode::ProfileMismatch,
              node_index, local);
+        return;
+    }
+    if (observation->state ==
+        net::RuntimeRendererReadinessState::VideoMemoryShort) {
+        if (local && !state.local_drives_output) {
+            state.preview_memory_needed = observation->video_memory_needed;
+            state.preview_memory_free = observation->video_memory_free;
+            return;
+        }
+        state.video_memory_needed = observation->video_memory_needed;
+        state.video_memory_free = observation->video_memory_free;
+        fail(state, RendererLockstepCode::VideoMemoryShort, node_index, local);
         return;
     }
     if (!observation->satisfied ||

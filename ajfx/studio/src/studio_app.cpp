@@ -205,6 +205,7 @@ public:
         scene_view_.draw_tree(ctx_, left.first, document_);
         scene_view_.draw_inspector(ctx_, right.second, document_, compiled_.error.empty() ? std::string_view{build_error_} : std::string_view{compiled_.error});
         draw_preview(right.first, now);
+        stage_area_ = right.first;
         shield.release();
         scene_view_.draw_overlays(ctx_, window, document_);
         draw_toast(window, now);
@@ -466,7 +467,15 @@ private:
                 path += document_extension;
             }
         }
-        const std::string text = save_document(document_);
+        // Models are saved relative to the scene's folder, so the folder can
+        // move or be copied and still find them. Saved somewhere new, what
+        // the scene holds is first resolved from where it was.
+        if (!path_.empty() && path.parent_path() != path_.parent_path()) {
+            rebase_models(document_, path_.parent_path(), {});
+        }
+        Document saving = document_;
+        rebase_models(saving, path.parent_path(), path.parent_path());
+        const std::string text = save_document(saving);
         std::string error;
         if (!write_file(path, std::span{reinterpret_cast<const std::uint8_t*>(text.data()), text.size()}, error)) {
             toast(error, false);
@@ -709,7 +718,12 @@ private:
         } else if (ctx_.key_pressed(gui::Key::Redo)) {
             redo();
         }
-        const std::string_view typed = ctx_.shortcut_text();
+        // Letters and the space bar act only with the pointer over the
+        // viewport and timeline. Typed over the tree or the inspector they
+        // were meant for a field, and a click that missed it must not turn
+        // a name into a reframed camera and looping playback.
+        const bool over_stage = stage_area_.contains(ctx_.pointer_x(), ctx_.pointer_y());
+        const std::string_view typed = over_stage ? ctx_.shortcut_text() : std::string_view{};
         if (typed.find(' ') != std::string_view::npos) {
             toggle_playing();
         }
@@ -1051,7 +1065,9 @@ private:
         }
         const float note_w = std::min(ctx_.font_width(note) + 24.0F, view.width - 100.0F);
         const gui::Rect note_rect{view.x + 10.0F, view.y + 10.0F, note_w, 24.0F};
-        ctx_.rounded(note_rect, gui::fade(theme.background, 0.7F), note_rect.height * 0.5F);
+        // Nearly opaque: the guides drawn before it must not show through
+        // its words.
+        ctx_.rounded(note_rect, gui::fade(theme.background, 0.94F), note_rect.height * 0.5F);
         ctx_.label(gui::Rect{note_rect.x + 12.0F, note_rect.y, note_rect.width - 16.0F, note_rect.height}, note, note_tone);
         ctx_.tooltip(note_rect, "Motion edits simulate again from the initial setup up to the playhead. Color edits preserve motion caches. Preview is simulating; cache playback is not connected yet.");
 
@@ -1120,7 +1136,7 @@ private:
         const float line_h = 20.0F;
         const gui::Rect hud_rect{view.x + 10.0F, view.bottom() - 10.0F - line_h * static_cast<float>(hud.size()) - 8.0F, hud_w,
                                  line_h * static_cast<float>(hud.size()) + 8.0F};
-        ctx_.rounded(hud_rect, gui::fade(theme.background, 0.7F), 10.0F);
+        ctx_.rounded(hud_rect, gui::fade(theme.background, 0.94F), 10.0F);
         for (std::size_t k = 0U; k < hud.size(); ++k) {
             const bool warning = hud[k].rfind("Near a limit.", 0U) == 0U;
             ctx_.label(gui::Rect{hud_rect.x + 12.0F, hud_rect.y + 4.0F + line_h * static_cast<float>(k), hud_rect.width - 16.0F, line_h},
@@ -1420,6 +1436,8 @@ private:
     Document scene_guides_;
     std::uint64_t scene_guides_for_{};
     StageOverlay overlay_;
+    // The viewport and timeline, as last drawn: where letter shortcuts act.
+    gui::Rect stage_area_{};
     SessionState session_;
     bool show_guides_{true};
     bool show_handles_{true};

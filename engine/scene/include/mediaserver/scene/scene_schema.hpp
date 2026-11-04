@@ -624,6 +624,8 @@ inline constexpr std::string_view brightness_curve = "brightness_curve";
 inline constexpr std::string_view exposure_curve = "exposure";
 inline constexpr std::string_view gain_curve = "gain";
 inline constexpr std::string_view brightness_gamma = "brightness_gamma";
+inline constexpr std::string_view graph_texture_budget_gb =
+    "graph_texture_budget_gb";
 
 // Renderer selection and advanced quality are show state. A node that cannot
 // satisfy a required backend reports unready; it never rewrites these values or

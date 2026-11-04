@@ -7,6 +7,7 @@
 #include "scene_properties.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -167,13 +168,64 @@ Document new_scene() {
     return document;
 }
 
+void rebase_models(Document &document, const std::filesystem::path &from, const std::filesystem::path &to) {
+    if (!document.scene) {
+        return;
+    }
+    for (SceneItem &item : document.scene->items) {
+        auto *object = std::get_if<Object>(&item.data);
+        if (object == nullptr || object->mesh.empty() || library_mesh(object->mesh) != nullptr) {
+            continue;
+        }
+        std::filesystem::path model{object->mesh};
+        if (model.is_relative()) {
+            if (from.empty()) {
+                continue; // nothing to resolve it against
+            }
+            model = from / model;
+        }
+        model = model.lexically_normal();
+        if (!to.empty()) {
+            // Another drive has no way there: the path stays whole.
+            model = model.lexically_proximate(to.lexically_normal());
+        }
+        object->mesh = model.generic_string();
+    }
+}
+
+std::string default_item_name(const SceneItem &item) {
+    if (const auto *object = std::get_if<Object>(&item.data)) {
+        if (object->mesh == "cube") {
+            return "Object";
+        }
+        if (object->mesh == "floor") {
+            return "Ground";
+        }
+        if (library_mesh(object->mesh) != nullptr) {
+            std::string name = object->mesh;
+            name.front() = static_cast<char>(std::toupper(static_cast<unsigned char>(name.front())));
+            return name;
+        }
+        return std::filesystem::path{object->mesh}.stem().string();
+    }
+    if (const auto *force = std::get_if<Force>(&item.data)) {
+        return std::string{force_name(force->kind)};
+    }
+    if (std::holds_alternative<Group>(item.data)) {
+        return "Group";
+    }
+    if (std::holds_alternative<SmokeGrid>(item.data)) {
+        return "Smoke grid";
+    }
+    return "Particle system";
+}
+
 Uid add_floor(Document &document) {
     const Uid uid = add_object(document, "floor");
     if (uid == 0U) {
         return 0U;
     }
     SceneItem &item = *document.scene->item(uid);
-    item.name = "Ground";
     Object &floor = std::get<Object>(item.data);
     // The built-in floor is 1 x 0.01 x 1. At 20 m its top is exactly Y=0.
     floor.size = 20.0F;
@@ -194,9 +246,9 @@ Uid add_object(Document &document, std::string mesh) {
     }
     SceneItem item;
     item.uid = uid;
-    item.name = mesh == "cube" ? "Object" : std::filesystem::path{mesh}.stem().string();
     item.seed = uid;
     item.data = Object{.mesh = std::move(mesh)};
+    item.name = default_item_name(item);
     document.scene->items.push_back(std::move(item));
     return uid;
 }
@@ -1025,6 +1077,16 @@ Document lower_scene(const Document &document) {
             layer.blocks.push_back(block(item->uid + 3U, "color",
                                          {{"color", color(1.0F, 1.0F, 1.0F)}, {"brightness", value(system->brightness)}}));
             layer.blocks.push_back(block(item->uid + 5U, "size", {{"size", value(system->size)}}));
+            if (system->casts_light) {
+                // In the particle's own colour, fading in and out with its
+                // life, so a flame's light goes as the flame does.
+                layer.blocks.push_back(block(item->uid + 9U, "light",
+                                             {{"count", number(static_cast<float>(system->light_count))},
+                                              {"intensity", value(system->light_strength)},
+                                              {"reach", value(system->light_reach)},
+                                              {"over_life", choice("fade")},
+                                              {"color_mode", choice("particle")}}));
+            }
             if (system->spin.max > 0.0F || system->spin.min > 0.0F) {
                 layer.blocks.push_back(block(item->uid + 15U, "spin", {{"speed", value(system->spin)}}));
             }
@@ -1040,11 +1102,14 @@ Document lower_scene(const Document &document) {
                 layer.blocks.push_back(block(item->uid + 12U, "passes_through"));
             } else {
                 // Particles meet loose bodies through the world, but a Static
-                // object stands outside it, so each is met as its own shape:
-                // the floor as a plane at its top, a sphere as a sphere, and
-                // a box or hull as the box of its longest side (rotation is
-                // not taken into account). The block keeps the object's
-                // identity, so every system meets the same thing.
+                // object stands outside it, so each is met as its own shape,
+                // turned as it stands: the floor as a plane at its top, a
+                // sphere as a sphere, an artist's model with a hull collider
+                // as its own surface (a distance field fitted and turned as
+                // the model is drawn), and anything else as a box: a
+                // primitive's own bounds, or a model's longest side. The
+                // block keeps the object's identity, so every system meets
+                // the same thing.
                 for (const SceneItem *other : ordered) {
                     const auto *still = std::get_if<Object>(&other->data);
                     if (still == nullptr || !other->simulate || still->motion != ObjectMotion::Static) {
@@ -1069,10 +1134,33 @@ Document lower_scene(const Document &document) {
                                                       {"radius", number(still->size * 0.5F)},
                                                       {"bounce", number(still->restitution)},
                                                       {"friction", number(still->friction)}}));
+                    } else if (const MeshData *primitive = library_mesh(still->mesh);
+                               primitive == nullptr && still->collider == ObjectCollider::Hull) {
+                        layer.blocks.push_back(block(uid, "mesh_collider",
+                                                     {{"file", choice(still->mesh)},
+                                                      {"position", value(still->position)},
+                                                      {"scale", number(still->size)},
+                                                      {"fit", toggle(true)},
+                                                      {"turn", value(still->rotation)},
+                                                      {"bounce", number(still->restitution)},
+                                                      {"friction", number(still->friction)}}));
                     } else {
+                        Vec3 low{-0.5F, -0.5F, -0.5F};
+                        Vec3 high{0.5F, 0.5F, 0.5F};
+                        if (primitive != nullptr && !primitive->vertices.empty()) {
+                            low = high = primitive->vertices.front().position;
+                            for (const auto &vertex : primitive->vertices) {
+                                const Vec3 v = vertex.position;
+                                low = Vec3{std::min(low.x, v.x), std::min(low.y, v.y), std::min(low.z, v.z)};
+                                high = Vec3{std::max(high.x, v.x), std::max(high.y, v.y), std::max(high.z, v.z)};
+                            }
+                        }
+                        const Vec3 middle = rotate(prop_orientation(still->rotation), (low + high) * (0.5F * still->size));
+                        const Vec3 extent = (high - low) * still->size;
                         layer.blocks.push_back(block(uid, "box",
-                                                     {{"center", value(still->position)},
-                                                      {"size", vec3(still->size, still->size, still->size)},
+                                                     {{"center", value(still->position + middle)},
+                                                      {"size", value(extent)},
+                                                      {"turn", value(still->rotation)},
                                                       {"bounce", number(still->restitution)},
                                                       {"friction", number(still->friction)}}));
                     }

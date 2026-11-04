@@ -345,6 +345,12 @@ template <typename Acknowledgement>
                value.requested != RuntimeRendererBackend::Unknown &&
                value.selected != RuntimeRendererBackend::Unknown &&
                !value.satisfied && !value.fallback;
+    case RuntimeRendererReadinessState::VideoMemoryShort:
+        return value.profile_digest != 0U &&
+               value.requested != RuntimeRendererBackend::Unknown &&
+               value.selected != RuntimeRendererBackend::Unknown &&
+               !value.satisfied && !value.fallback &&
+               value.video_memory_needed > value.video_memory_free;
     }
     return false;
 }
@@ -956,7 +962,9 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    heartbeat_ack->renderer.temporal_restarts,
                    heartbeat_ack->renderer.temporal_restart_frame, encoded_proof, encoded_timing,
                    static_cast<fb::RuntimeOutputDeploymentState>(
-                       heartbeat_ack->output_deployment))
+                       heartbeat_ack->output_deployment),
+                   heartbeat_ack->renderer.video_memory_needed,
+                   heartbeat_ack->renderer.video_memory_free)
                    .Union();
     } else if (const auto* goodbye = std::get_if<Goodbye>(&message)) {
         const auto session = encode_id(goodbye->session_id);
@@ -1481,6 +1489,9 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
             source->renderer_temporal_restarts(),
             source->renderer_temporal_restart_frame(),
         };
+        value.renderer.video_memory_needed =
+            source->renderer_video_memory_needed();
+        value.renderer.video_memory_free = source->renderer_video_memory_free();
         value.output_deployment = static_cast<RuntimeOutputDeploymentState>(
             source->output_deployment());
         if (const auto* timing = source->renderer_timing()) {

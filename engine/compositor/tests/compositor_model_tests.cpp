@@ -2073,6 +2073,41 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
     COMPOSITOR_CHECK(compositor::digest(streamed_graph) ==
                      compositor::digest(graph));
 
+    // Six 8192x8192 targets, about 1.6 GB, fit; six 16384x16384 do not.
+    std::vector<doc::Node> texture_large = ordinary;
+    texture_large[0U] = stage(1000U, 8'192U, 8'192U);
+    model.reset(root_of(texture_large));
+    const compositor::CompositorGraph large_graph =
+        model.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+    COMPOSITOR_CHECK(large_graph.valid());
+    COMPOSITOR_CHECK(large_graph.resources.offscreen_texture_bytes ==
+                     8192ULL * 8192ULL * 4ULL * 6ULL);
+    COMPOSITOR_CHECK(!has_diagnostic(
+        large_graph, compositor::DiagnosticCode::TextureBudgetExceeded,
+        doc::NodeId{3U}));
+
+    // The budget is the project's own: a 1 GB setting refuses the graph the
+    // 4 GB default accepted, and the graph digest moves with the setting.
+    std::vector<doc::Node> texture_tight = texture_large;
+    texture_tight[1U] = node(1001U, scene::schema::settings_type,
+                             {whole(scene::schema::blur_taps, 33U),
+                              whole(scene::schema::blur_passes, 4U),
+                              real(scene::schema::graph_texture_budget_gb, 1.0)});
+    model.reset(root_of(texture_tight));
+    const compositor::CompositorGraph tight_graph =
+        model.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+    COMPOSITOR_CHECK(!tight_graph.valid());
+    COMPOSITOR_CHECK(tight_graph.resources.effect_settings
+                         .graph_texture_budget_gb == 1.0F);
+    COMPOSITOR_CHECK(has_diagnostic(
+        tight_graph, compositor::DiagnosticCode::TextureBudgetExceeded,
+        doc::NodeId{3U}));
+    COMPOSITOR_CHECK(compositor::graph_texture_budget_bytes(
+                         tight_graph.resources.effect_settings) ==
+                     1'000'000'000ULL);
+    COMPOSITOR_CHECK(compositor::digest(tight_graph) !=
+                     compositor::digest(large_graph));
+
     std::vector<doc::Node> texture_over = ordinary;
     texture_over[0U] = stage(1000U, 16'384U, 16'384U);
     model.reset(root_of(texture_over));

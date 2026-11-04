@@ -357,6 +357,7 @@ public:
             const RigidStatic& s = desc_.statics[k];
             JPH::RefConst<JPH::Shape> shape;
             JPH::RVec3 at = JPH::RVec3::sZero();
+            JPH::Quat turn = JPH::Quat::sIdentity();
             switch (s.kind) {
             case RigidStatic::Kind::Plane:
                 shape = new JPH::PlaneShape(JPH::Plane::sFromPointAndNormal(vec(s.center), vec(s.normal)), nullptr,
@@ -369,9 +370,10 @@ public:
             case RigidStatic::Kind::Box:
                 shape = new JPH::BoxShape(vec(s.half_size));
                 at = JPH::RVec3(s.center.x, s.center.y, s.center.z);
+                turn = JPH::Quat(s.turn.x, s.turn.y, s.turn.z, s.turn.w);
                 break;
             }
-            JPH::BodyCreationSettings settings(shape, at, JPH::Quat::sIdentity(), JPH::EMotionType::Static,
+            JPH::BodyCreationSettings settings(shape, at, turn, JPH::EMotionType::Static,
                                                layers::still);
             settings.mFriction = s.friction;
             settings.mRestitution = s.restitution;

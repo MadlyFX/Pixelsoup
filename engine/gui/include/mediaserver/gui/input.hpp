@@ -117,6 +117,9 @@ enum class Key : core::u8 {
     // Ctrl+Enter: Take - Preview to the wall. Its own key, so nothing that
     // answers a plain Enter (a field, the Cue Stack's GO) fires with it.
     Take,
+    // Ctrl+A: select a focused field's whole value, so the next keystroke
+    // replaces it.
+    SelectAll,
 };
 
 // Physical keys read as held state rather than as presses: a 3D viewport flies

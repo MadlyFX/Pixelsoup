@@ -971,8 +971,10 @@ struct SphereCollision final {
     friend bool operator==(const SphereCollision&, const SphereCollision&) = default;
 };
 
-// Particles kept outside an axis-aligned box (in the effect's own space), or
-// with `inside` within it; `half_size` is half its extent on each axis. A
+// Particles kept outside a box (in the effect's own space), or with `inside`
+// within it; `half_size` is half its extent on each of its own axes, and
+// `turn` stands it as a prop is turned (degrees about Y, then X, then Z,
+// prop_orientation), so a log lying across a fire is met lying there. A
 // particle that gets inside leaves through the nearest face (x before y
 // before z on a tie); one that gets out returns to the nearest point on the
 // box. Responds as SphereCollision.
@@ -981,6 +983,7 @@ struct BoxCollision final {
     ModuleId id{};
     Vec3Input center{};
     Vec3 half_size{0.5F, 0.5F, 0.5F};
+    Vec3 turn{}; // degrees, as RigidProp's
     bool inside{false};
     FloatInput restitution{0.5F};
     FloatInput friction{0.0F};
@@ -990,6 +993,7 @@ struct BoxCollision final {
     static void fields(Self& self, Visitor&& visit) {
         visit("center", self.center);
         visit("half_size", self.half_size);
+        visit("turn", self.turn);
         visit("inside", self.inside);
         visit("restitution", self.restitution);
         visit("friction", self.friction);

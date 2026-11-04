@@ -680,6 +680,7 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
     hash_byte(hash, static_cast<core::u8>(
                         graph.resources.effect_settings.brightness_curve));
     hash_float(hash, graph.resources.effect_settings.brightness_gamma);
+    hash_float(hash, graph.resources.effect_settings.graph_texture_budget_gb);
     hash_u32(hash, graph.resources.active_scene_layers);
     hash_u32(hash, graph.resources.blurred_scene_layers);
     hash_u32(hash, graph.resources.box_blurred_scene_layers);

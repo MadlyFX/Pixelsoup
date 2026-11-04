@@ -72,6 +72,12 @@ struct ColliderBake final {
 // coincide count as one corner).
 [[nodiscard]] bool closed_mesh(const ImportedMesh& mesh);
 
+// The model as an object stands it: with `fit`, centred on its bounding box
+// with its longest side 1 (as debris_mesh draws it); then turned by `turn`
+// (degrees, prop_orientation). Corners, normals and triangles otherwise as
+// they were.
+[[nodiscard]] ImportedMesh placed_mesh(const ImportedMesh& mesh, bool fit, Vec3 turn);
+
 // Bakes the model, times `scale`, into a signed distance field about `cells`
 // samples along its longest side, with a margin round it so particles meet
 // the surface inside the grid. Exact distances near the surface, carried

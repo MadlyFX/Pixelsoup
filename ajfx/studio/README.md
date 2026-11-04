@@ -70,12 +70,13 @@ scene for scale.
 | P | Particle paths on or off |
 | Drag a timeline marker | Move a release, burst, blast or animated move in time; drag a move's end for its duration |
 | Click a timeline name | Select that item |
-| Space | Play or pause |
+| Space | Play or pause (letter and Space shortcuts act with the pointer over the viewport or timeline) |
 | L | Loop over the capture range, or play on past it |
 | Home | Back to the start |
 | Left, Right | Step a frame |
 | / | Open Add |
 | Ctrl+Z, Ctrl+Y | Undo, redo |
+| Ctrl+A, double-click a field | Select the field's whole text |
 | Ctrl+S | Save |
 | Ctrl+=, Ctrl+-, Ctrl+0 | Interface zoom |
 

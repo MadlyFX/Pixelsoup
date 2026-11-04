@@ -5,7 +5,9 @@
 // scatters its albedo of what it absorbed towards the camera, in the
 // volume's colour, lit by the scene's first directional light through a
 // fixed number of steps of its own back out of the box, through that light's
-// shadow cascades, plus the hemisphere, all under the scene's exposure.
+// shadow cascades, plus the hemisphere, plus every local light (the scene's
+// points and spots, and the particles' own lights, so a fire lights its
+// smoke) by its falloff, all under the scene's exposure.
 //
 // Determinism: the step counts are fixed, nothing is jittered, and the ray
 // comes from the world-space box the vertex stage built and the camera's
@@ -31,6 +33,8 @@ SamplerState scene_motion_sampler : register(s1, space2);
 ByteAddressBuffer volume_cells : register(t7, space2);
 // The scene's lights, lighting.x of them.
 StructuredBuffer<Light> scene_lights : register(t8, space2);
+// The particles' lights this frame, lighting.w of them.
+StructuredBuffer<Light> particle_light_records : register(t9, space2);
 
 cbuffer ParticleVolume : register(b0, space3) {
     // Effect to world, four columns, and world to effect, four columns.
@@ -62,6 +66,7 @@ cbuffer ParticleVolume : register(b0, space3) {
     float4 sky_ambient;     // rgb sky, a: ambient strength
     float4 ground_exposure; // rgb ground, a: exposure
     // x: lights in scene_lights. y: shadow cascades. z: 1 to take shadows.
+    // w: lights in particle_light_records.
     uint4 lighting;
     column_major float4x4 shadow_view_projection[4];
     float4 shadow_texel_depth;
@@ -152,6 +157,41 @@ bool box_span(float3 o, float3 d, out float enter, out float leave) {
         leave = min(leave, max(t0, t1));
     }
     return leave > enter;
+}
+
+// What one local light gives world point `p`: the windowed inverse-square
+// falloff the lit pass and lit sprites use, and a spot's cone. The smoke
+// between the light and the point does not dim it: a light inside the
+// smoke, as a fire is, lights it from within.
+float3 local_light(Light record, float3 p) {
+    const float3 offset = record.vector - p;
+    const float distance = length(offset);
+    const float range = max(record.params.x, 1e-3f);
+    if (record.color_intensity.a <= 0.0f || distance >= range) {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    const float falloff = saturate(1.0f - distance / range);
+    float3 light = record.color_intensity.rgb * record.color_intensity.a
+        * (falloff * falloff / max(distance * distance, 1e-4f));
+    if (record.kind == LIGHT_SPOT) {
+        light *= light_cone_weight(record, dot(-offset / max(distance, 1e-5f), record.spot.xyz));
+    }
+    return light;
+}
+
+// Every local light at world point `p`, before the exposure.
+float3 local_lights_at(float3 p) {
+    float3 total = float3(0.0f, 0.0f, 0.0f);
+    for (uint l = 0u; l < lighting.x; ++l) {
+        const Light record = scene_lights[l];
+        if (record.kind == LIGHT_POINT || record.kind == LIGHT_SPOT) {
+            total += local_light(record, p);
+        }
+    }
+    for (uint q = 0u; q < lighting.w; ++q) {
+        total += local_light(particle_light_records[q], p);
+    }
+    return total;
 }
 
 // Whether the directional light reaches world point `p`: the nearest
@@ -265,6 +305,10 @@ float4 main(Input input) : SV_Target {
     const float light_scale = length(to_light_scaled);
     const float3 to_light = light_scale > 0.0f ? to_light_scaled / light_scale : float3(0.0f, 1.0f, 0.0f);
     const bool shadowed = lit && !no_scene && lighting.z != 0u && lighting.y != 0u;
+    bool local = lighting.w != 0u;
+    for (uint l = 0u; !local && l < lighting.x; ++l) {
+        local = scene_lights[l].kind == LIGHT_POINT || scene_lights[l].kind == LIGHT_SPOT;
+    }
 
     const float extinction = march.x;
     const float albedo = march.y;
@@ -300,7 +344,10 @@ float4 main(Input input) : SV_Target {
                 reaching *= shadow_at(to_world_point(p));
             }
         }
-        const float3 light = light_color * reaching + ambient;
+        float3 light = light_color * reaching + ambient;
+        if (local) {
+            light += local_lights_at(to_world_point(p)) * exposure;
+        }
         scattered += transmittance * (1.0f - through) * albedo * color.rgb * light;
         transmittance *= through;
     }

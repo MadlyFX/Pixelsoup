@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <variant>
 #include <vector>
@@ -115,6 +116,13 @@ struct ParticleSystem final {
     float wrap{0.25F};     // light reaching round the dark side
     float ambient{1.0F};   // its share of the sky and ground light
     bool shadowed{true};
+    // Light the particles give off, in their own colour, onto the scene and
+    // its smoke (SpriteRenderer's particle lights): at most `light_count`
+    // carry one at once, each its strength and reach between the two.
+    bool casts_light{false};
+    std::uint32_t light_count{6U};
+    Range light_strength{1.5F, 2.5F};
+    Range light_reach{1.2F, 2.0F};
     // Size and colour over age multiply the base size and the colour. Keys
     // are sorted by age; values hold beyond the ends.
     Driver size_driver{Driver::Constant};
@@ -267,6 +275,14 @@ bool remove_relationship(Document &document, std::uint32_t uid);
 [[nodiscard]] std::string_view relation_name(RelationKind kind);
 inline constexpr std::size_t max_relationships = 256U;
 [[nodiscard]] std::string_view force_name(ForceKind kind);
+// What an item is called until the artist names it: "Object" for a cube,
+// "Ground" for the floor, the file's name for a model, the kind otherwise.
+[[nodiscard]] std::string default_item_name(const SceneItem &item);
+// Resolves each object's model file against the folder `from` (where a
+// relative one was relative to) and writes it relative to the folder `to`,
+// with forward slashes; `to` empty leaves it whole. Library shapes are
+// names, not files, and stay as they are.
+void rebase_models(Document &document, const std::filesystem::path &from, const std::filesystem::path &to);
 // Whether a force acts on a particle system: every one, or one it names.
 [[nodiscard]] bool force_targets(const Force &force, std::uint32_t system);
 // A blast throws everything; the others each lower into the systems they

@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -272,6 +273,9 @@ struct D3d12Texture final {
     core::u32 dsv{invalid_descriptor};
     core::u32 srv{invalid_descriptor};
     core::u32 uav{invalid_descriptor};
+    // This texture's share of D3d12Device::committed_bytes. Zero when it is
+    // an imported decoder plane, which the decoder's device owns.
+    core::u64 committed{};
 };
 
 struct D3d12Buffer final {
@@ -299,6 +303,9 @@ struct D3d12Buffer final {
         D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     };
     bool device_local{};
+    // This buffer's share of D3d12Device::committed_bytes; upload-heap
+    // buffers live in system memory and count nothing.
+    core::u64 committed{};
     // Created with UAV access: a dispatch may bind it read-write.
     bool writable{};
     std::array<RecordingState, max_command_contexts> recording_states{};
@@ -459,6 +466,9 @@ struct D3d12Device final {
     // the measure the selection above uses to find the real GPU.
     core::u64 dedicated_video_memory{};
     core::RenderAdapterIdentity identity{};
+    // Default-heap textures and geometry buffers still held. Worker threads
+    // create and release resources too, so this is an atomic tally.
+    std::atomic<core::u64> committed_bytes{};
 };
 
 struct D3d12Swapchain final {
@@ -1466,6 +1476,25 @@ core::u64 d3d12_dedicated_video_memory(void* value) noexcept {
     return state == nullptr ? 0U : state->dedicated_video_memory;
 }
 
+VideoMemory d3d12_video_memory(void* value) noexcept {
+    const auto* state = as_device(value);
+    DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+    if (state == nullptr || !state->adapter ||
+        FAILED(state->adapter->QueryVideoMemoryInfo(
+            0U, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+        return {};
+    }
+    return VideoMemory{static_cast<core::u64>(info.Budget),
+                       static_cast<core::u64>(info.CurrentUsage)};
+}
+
+core::u64 d3d12_committed_bytes(void* value) noexcept {
+    const auto* state = as_device(value);
+    return state == nullptr
+        ? 0U
+        : state->committed_bytes.load(std::memory_order_relaxed);
+}
+
 std::string_view d3d12_lost_reason(void* value) noexcept {
     const auto* state = as_device(value);
     if (state == nullptr || !state->device) {
@@ -1849,6 +1878,11 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_create_texture(
             texture->resource.Get(), nullptr, &view,
             state->views.cpu(texture->uav));
     }
+    texture->committed = static_cast<core::u64>(
+        state->device->GetResourceAllocationInfo(0U, 1U, &resource)
+            .SizeInBytes);
+    state->committed_bytes.fetch_add(texture->committed,
+                                     std::memory_order_relaxed);
     return Result::success(D3d12CreatedResource{
         texture, texture->resource.Get()});
 }
@@ -1936,6 +1970,8 @@ void d3d12_release_texture(void* device_value, void* value) noexcept {
         state->dsvs.release(texture->dsv);
         state->views.release(texture->srv);
         state->views.release(texture->uav);
+        state->committed_bytes.fetch_sub(texture->committed,
+                                         std::memory_order_relaxed);
     }
     delete texture;
 }
@@ -1993,6 +2029,10 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_create_geometry_buffer(
         delete buffer;
         return Result::failure(RhiError::AllocationFailed);
     }
+    buffer->committed = static_cast<core::u64>(
+        state->device->GetResourceAllocationInfo(0U, 1U, &desc).SizeInBytes);
+    state->committed_bytes.fetch_add(buffer->committed,
+                                     std::memory_order_relaxed);
     return Result::success(D3d12CreatedResource{
         buffer, buffer->resource.Get()});
 }
@@ -2005,10 +2045,15 @@ bool d3d12_buffer_safe_to_release(void* device_value, void* value) noexcept {
             || (state->fence && state->fence->GetCompletedValue() >= buffer->last_submission));
 }
 
-void d3d12_release_storage_buffer(void*, void* value) noexcept {
+void d3d12_release_storage_buffer(void* device_value, void* value) noexcept {
+    auto* state = as_device(device_value);
     auto* buffer = as_buffer(value);
     if (buffer != nullptr && buffer->resource && buffer->mapped != nullptr) {
         buffer->resource->Unmap(0U, nullptr);
+    }
+    if (state != nullptr && buffer != nullptr) {
+        state->committed_bytes.fetch_sub(buffer->committed,
+                                         std::memory_order_relaxed);
     }
     delete buffer;
 }
@@ -3935,6 +3980,8 @@ void destroy_d3d12_device(void*) noexcept {}
 core::RenderAdapterIdentity d3d12_adapter_identity(void*) noexcept { return {}; }
 std::string_view d3d12_driver_name(void*) noexcept { return {}; }
 core::u64 d3d12_dedicated_video_memory(void*) noexcept { return 0U; }
+VideoMemory d3d12_video_memory(void*) noexcept { return {}; }
+core::u64 d3d12_committed_bytes(void*) noexcept { return 0U; }
 std::string_view d3d12_lost_reason(void*) noexcept { return {}; }
 bool d3d12_supports_shader(ShaderFormat) noexcept { return false; }
 bool d3d12_supports_texture(void*, TextureFormat) noexcept { return false; }

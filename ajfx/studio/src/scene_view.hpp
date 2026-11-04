@@ -49,6 +49,8 @@ class SceneView final {
     std::set<Uid> folded_;
     gui::ScrollRegion tree_scroll_;
     gui::ScrollRegion inspector_scroll_;
+    // The selection the inspector last showed, so another one scrolls to the top.
+    std::vector<Uid> inspected_;
     PopoverList add_;
     PopoverList behavior_add_;
     Uid behavior_target_{};

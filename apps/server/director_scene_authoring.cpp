@@ -906,6 +906,10 @@ schedule_project_settings(cmd::DirectorScheduler &scheduler,
     node.properties.emplace(
         std::string{scene::schema::brightness_gamma},
         doc::PropertyValue{static_cast<double>(settings.brightness_gamma)});
+    node.properties.emplace(
+        std::string{scene::schema::graph_texture_budget_gb},
+        doc::PropertyValue{
+            static_cast<double>(settings.graph_texture_budget_gb)});
 
     // The lighting environment lives on the stage node rather than on the
     // settings node this function builds, so it is written as its own update.

@@ -145,6 +145,8 @@ std::string_view RendererReadiness::headline() const noexcept {
         return "RENDERER POLICY INVALID";
     case RendererReadinessCode::OrthographicCamera:
         return "ORTHOGRAPHIC CAMERA NEEDS A STAGE VIEW";
+    case RendererReadinessCode::VideoMemoryShort:
+        return "NOT ENOUGH GPU MEMORY";
     }
     return "RENDERER UNAVAILABLE";
 }

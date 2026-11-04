@@ -1255,6 +1255,11 @@ SdlPresenter::renderer_readiness() const noexcept {
     case render::RendererReadinessCode::OrthographicCamera:
         result.state = show::PresenterRendererReadinessState::InvalidPolicy;
         break;
+    case render::RendererReadinessCode::VideoMemoryShort:
+        result.state = show::PresenterRendererReadinessState::VideoMemoryShort;
+        result.video_memory_needed = observed.video_memory_needed;
+        result.video_memory_free = observed.video_memory_free;
+        break;
     }
     result.requested = observed.requested;
     result.selected = observed.selected;

@@ -619,9 +619,15 @@ inline constexpr core::u32 max_merge_nesting = 4U;
 // Facility-independent graph budgets. They intentionally describe authored
 // work rather than querying one adapter's VRAM or driver limits.
 inline constexpr core::u32 max_graph_render_passes = 128U;
-inline constexpr core::u64 max_graph_offscreen_texture_bytes =
-    1'000'000'000ULL;
 inline constexpr core::u64 max_graph_blur_taps_per_pixel = 2'048ULL;
+// The offscreen texture budget is authored with the project's effect settings
+// rather than fixed here, so a facility sizes it to its own render nodes.
+// Decimal gigabytes, converted in double so every machine gets the same bytes.
+[[nodiscard]] inline core::u64 graph_texture_budget_bytes(
+    const scene::EffectSettings& settings) noexcept {
+    return static_cast<core::u64>(
+        static_cast<double>(settings.graph_texture_budget_gb) * 1.0e9);
+}
 
 struct CompositorGraph final {
     // Authored values are sorted by their document ids. An invalid graph is

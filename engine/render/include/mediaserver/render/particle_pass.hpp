@@ -146,6 +146,11 @@ struct ParticleLighting final {
     // reads them.
     const rhi::StorageBuffer* lights{};
     core::u32 light_count{};
+    // The particles' own lights this frame (light.hlsli records, written by
+    // write_lights), `particle_light_count` of them: grid volumes take them
+    // with the scene's local lights, so a fire lights its smoke.
+    const rhi::StorageBuffer* particle_lights{};
+    core::u32 particle_light_count{};
     // rgb: the sky half of the ambient hemisphere; a: overall ambient strength.
     std::array<float, 4U> sky_ambient{};
     // rgb: the ground half; a: the exposure the scene applies to what it

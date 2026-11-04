@@ -31,13 +31,14 @@ struct RigidStatic final {
         Plane,
         // A ball of `radius` at `center`.
         Sphere,
-        // An axis-aligned box of `half_size` at `center`.
+        // A box of `half_size` at `center`, turned by `turn`.
         Box,
     };
     Kind kind{Kind::Plane};
     Vec3 center{};
     Vec3 normal{0.0F, 1.0F, 0.0F};
     Vec3 half_size{};
+    Quat turn{};
     float radius{0.0F};
     float friction{0.0F};
     float restitution{0.0F};

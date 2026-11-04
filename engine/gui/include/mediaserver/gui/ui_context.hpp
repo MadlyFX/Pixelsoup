@@ -467,6 +467,10 @@ public:
     void label_centered(const Rect& bounds, std::string_view text, UiColor color);
     // Hover details retain long paths and diagnostics without occupying rows.
     void tooltip(const Rect& bounds, std::string_view text);
+    // Forgets the tooltip asked for so far this frame: what a menu or card
+    // drawn over the interface calls, so the button that opened it does not
+    // explain itself on top of it. Tooltips asked for afterwards still show.
+    void drop_tooltip() noexcept;
 
     // An engine texture drawn into `bounds` - a rendered viewport composited
     // into the widget tree with no copy, which is the whole reason the UI
@@ -802,8 +806,11 @@ private:
     UiId focus_{};
     std::size_t caret_{};
     // The focused field's whole value is selected (see
-    // focus_text_field_selected).
+    // focus_text_field_selected, Ctrl+A and a double-click).
     bool select_all_{};
+    // When a press last landed in the focused field, so a second one soon
+    // after selects its whole value; below zero once spent.
+    double last_field_press_{-1.0};
     bool navigating_{};
     // What the focused field held when the edit began, for Escape.
     std::string edit_original_;

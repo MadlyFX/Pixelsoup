@@ -167,6 +167,8 @@ boundary_wake_text(const show::BoundaryLateness::Window &window) {
             AdvancedImplementationUnavailable;
     case show::PresenterRendererReadinessState::InvalidPolicy:
         return net::RuntimeRendererReadinessState::InvalidPolicy;
+    case show::PresenterRendererReadinessState::VideoMemoryShort:
+        return net::RuntimeRendererReadinessState::VideoMemoryShort;
     case show::PresenterRendererReadinessState::Unknown:
         return net::RuntimeRendererReadinessState::Unknown;
     }
@@ -191,6 +193,8 @@ boundary_wake_text(const show::BoundaryLateness::Window &window) {
     case render::RendererReadinessCode::InvalidPolicy:
     case render::RendererReadinessCode::OrthographicCamera:
         return net::RuntimeRendererReadinessState::InvalidPolicy;
+    case render::RendererReadinessCode::VideoMemoryShort:
+        return net::RuntimeRendererReadinessState::VideoMemoryShort;
     }
     return net::RuntimeRendererReadinessState::Unknown;
 }
@@ -214,6 +218,8 @@ boundary_wake_text(const show::BoundaryLateness::Window &window) {
         observed.temporal_restart_frame,
         core::RenderConformance{.adapter = observed.adapter},
         observed.timing,
+        observed.video_memory_needed,
+        observed.video_memory_free,
     };
 }
 

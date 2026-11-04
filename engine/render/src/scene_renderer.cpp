@@ -5596,6 +5596,10 @@ bool SceneRenderer::render(
     ParticleLighting particle_lighting{};
     particle_lighting.lights = &light_buffer_;
     particle_lighting.light_count = scene_constants.counts[0U];
+    if (particle_light_buffer_ && particle_lights_used_ != 0U) {
+        particle_lighting.particle_lights = &particle_light_buffer_;
+        particle_lighting.particle_light_count = particle_lights_used_;
+    }
     std::copy_n(scene_constants.sky_ambient, 4U, particle_lighting.sky_ambient.begin());
     std::copy_n(scene_constants.ground_exposure, 4U, particle_lighting.ground_exposure.begin());
     particle_lighting.cascade_count = cascade_count;

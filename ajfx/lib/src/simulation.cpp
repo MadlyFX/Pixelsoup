@@ -679,8 +679,12 @@ void apply(const BoxCollision& m, Step& step) {
     const Vec3 h = m.half_size;
     const float restitution = step.in(m.restitution);
     const float slide = 1.0F - step.in(m.friction);
+    // Worked in the box's own frame: into it by the inverse turn, the way
+    // out back by the turn (an unturned box turns nothing, to the bit).
+    const Quat turn = prop_orientation(m.turn);
+    const Quat back{-turn.x, -turn.y, -turn.z, turn.w};
     for (std::size_t i = step.first; i < step.last; ++i) {
-        const Vec3 d = step.s.position[i] - center;
+        const Vec3 d = rotate(back, step.s.position[i] - center);
         const Vec3 sign{d.x < 0.0F ? -1.0F : 1.0F, d.y < 0.0F ? -1.0F : 1.0F, d.z < 0.0F ? -1.0F : 1.0F};
         // How far past each face pair: positive outside it.
         const Vec3 q{std::fabs(d.x) - h.x, std::fabs(d.y) - h.y, std::fabs(d.z) - h.z};
@@ -705,6 +709,7 @@ void apply(const BoxCollision& m, Step& step) {
                 distance = q.z;
             }
         }
+        n = rotate(turn, n);
         if (m.inside) {
             respond(step, i, -distance, n * -1.0F, restitution, slide, m.kill);
         } else {
@@ -1384,22 +1389,26 @@ Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysi
         } else if (const auto* box = std::get_if<BoxCollision>(&module)) {
             const Vec3 c = box->center.value;
             const Vec3 h = box->half_size;
-            const auto add = [&](Vec3 center, Vec3 half) {
+            const Quat turn = prop_orientation(box->turn);
+            // `offset` is in the box's own frame, so the walls of a turned
+            // box turn with it.
+            const auto add = [&](Vec3 offset, Vec3 half) {
                 desc.statics.push_back(RigidStatic{.kind = RigidStatic::Kind::Box,
-                                                   .center = center,
+                                                   .center = c + rotate(turn, offset),
                                                    .half_size = half,
+                                                   .turn = turn,
                                                    .friction = box->friction.value,
                                                    .restitution = box->restitution.value});
             };
             if (!box->inside) {
-                add(c, h);
+                add(Vec3{}, h);
             } else {
                 // Six walls around the inside, as thick as the box is large.
                 const float t = std::max({h.x, h.y, h.z});
                 for (const float side : {-1.0F, 1.0F}) {
-                    add(c + Vec3{side * (h.x + t), 0.0F, 0.0F}, Vec3{t, h.y + 2.0F * t, h.z + 2.0F * t});
-                    add(c + Vec3{0.0F, side * (h.y + t), 0.0F}, Vec3{h.x + 2.0F * t, t, h.z + 2.0F * t});
-                    add(c + Vec3{0.0F, 0.0F, side * (h.z + t)}, Vec3{h.x + 2.0F * t, h.y + 2.0F * t, t});
+                    add(Vec3{side * (h.x + t), 0.0F, 0.0F}, Vec3{t, h.y + 2.0F * t, h.z + 2.0F * t});
+                    add(Vec3{0.0F, side * (h.y + t), 0.0F}, Vec3{h.x + 2.0F * t, t, h.z + 2.0F * t});
+                    add(Vec3{0.0F, 0.0F, side * (h.z + t)}, Vec3{h.x + 2.0F * t, h.y + 2.0F * t, t});
                 }
             }
         }
