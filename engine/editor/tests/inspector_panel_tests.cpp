@@ -1591,6 +1591,17 @@ void a_bound_feed_is_configured_where_it_is_chosen() {
     UI_CHECK(swapped.named_edits.front().property
              == scene::schema::tracking_protocol);
     UI_CHECK(near(swapped.named_edits.front().value, 1.0));
+    // The third choice is NatNet; the Director spells the index into the
+    // document, so the value is the choice and not a toggle.
+    Harness natnet;
+    natnet.element = make_camera(feed);
+    natnet.sources = two_feeds();
+    const editor::InspectorFrame third =
+        natnet.choose(tracker_protocol_y, 0, 2);
+    UI_CHECK(third.named_edits.size() == 1U);
+    UI_CHECK(third.named_edits.front().property
+             == scene::schema::tracking_protocol);
+    UI_CHECK(near(third.named_edits.front().value, 2.0));
 
     // An unbound camera offers no feed settings at all, so the rows below the
     // list are the camera's own: nothing here can edit a feed that is not

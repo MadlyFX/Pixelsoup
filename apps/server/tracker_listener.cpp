@@ -1,6 +1,7 @@
 #include "tracker_listener.hpp"
 
 #include <mediaserver/track/freed.hpp>
+#include <mediaserver/track/natnet.hpp>
 #include <mediaserver/track/opentrackio.hpp>
 
 #include <algorithm>
@@ -10,10 +11,14 @@
 #include <exception>
 #include <mutex>
 #include <optional>
+#include <string>
+#include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <asio/io_context.hpp>
+#include <asio/ip/multicast.hpp>
 #include <asio/ip/udp.hpp>
 #include <asio/socket_base.hpp>
 
@@ -21,10 +26,29 @@ namespace mediaserver::server {
 namespace {
 
 // A FreeD D1 message is 29 bytes and an OpenTrackIO sample is a couple of
-// kilobytes. This is the largest datagram the socket will read; anything
-// longer is truncated by the receive and then refused by the parser, which is
-// the correct outcome for a sender this is not talking to.
-constexpr std::size_t max_datagram_bytes = track::max_opentrackio_sample_bytes;
+// kilobytes. This is the largest datagram the socket will read for those two;
+// anything longer is truncated by the receive and then refused by the parser,
+// which is the correct outcome for a sender this is not talking to. A NatNet
+// frame carries every marker in the volume and needs the full UDP payload.
+[[nodiscard]] std::size_t max_datagram_bytes(
+    scene::TrackerProtocolKind protocol) noexcept {
+    return protocol == scene::TrackerProtocolKind::NatNet
+        ? track::max_natnet_datagram_bytes
+        : track::max_opentrackio_sample_bytes;
+}
+
+// While a NatNet server has not answered, one connect request goes out for
+// this many frames received. Motive streams at the camera rate, so this is a
+// retry every second or so against a command port that is blocked or busy,
+// rather than one per frame.
+constexpr core::u64 handshake_retry_frames = 60U;
+
+[[nodiscard]] track::NatNetUpAxis natnet_up_axis(
+    const scene::TrackerCalibration& calibration) noexcept {
+    return calibration.axes == scene::TrackerAxes::ZUpRightHanded
+        ? track::NatNetUpAxis::Z
+        : track::NatNetUpAxis::Y;
+}
 
 } // namespace
 
@@ -60,6 +84,10 @@ struct TrackerListener::State final {
     // The receiver's own datagram ordinal. FreeD carries no sequence number,
     // and a consumer still has to tell a repeated pose from a stalled sender.
     core::u64 received_ordinal{};
+    // NatNet: the version the server answered with, and how many frames have
+    // arrived since the last connect request went out. Both under `mutex`.
+    std::optional<track::NatNetVersion> natnet_version;
+    core::u64 frames_since_handshake_request{};
 
     void record(const track::TrackedPose& pose,
                 scene::Turns field_of_view) {
@@ -110,6 +138,9 @@ bool TrackerListener::deliver(
     // Whether the datagram said which camera it is for. FreeD always does;
     // OpenTrackIO's `sourceNumber` is optional.
     bool identifies_camera = true;
+    // Whether the parser already picked the authored camera out of the
+    // datagram, so the check below has nothing left to compare.
+    bool camera_selected = false;
     if (source.protocol == scene::TrackerProtocolKind::FreeD) {
         const auto parsed = track::parse_freed_d1(datagram, ordinal);
         if (!parsed) {
@@ -117,6 +148,84 @@ bool TrackerListener::deliver(
             return false;
         }
         pose = parsed.value().pose;
+    } else if (source.protocol == scene::TrackerProtocolKind::NatNet) {
+        // One socket carries both the server's reply to the connect request
+        // and its frames of data; the message id says which this is.
+        const auto message = track::natnet_message_id(datagram);
+        if (!message) {
+            state_->refuse(track::TrackerParseError::Truncated);
+            return false;
+        }
+        if (*message == track::natnet_server_info_message) {
+            const auto info = track::parse_natnet_server_info(datagram);
+            if (!info) {
+                state_->refuse(info.error());
+                return false;
+            }
+            const track::NatNetServerInfo& server = info.value();
+            std::string description{server.application_name.data()};
+            if (description.empty()) {
+                description = "NatNet server";
+            }
+            description += ' ';
+            description += std::to_string(server.application_version.major);
+            description += '.';
+            description += std::to_string(server.application_version.minor);
+            description += '.';
+            description += std::to_string(server.application_version.build);
+            description += ", NatNet ";
+            description += std::to_string(server.natnet_version.major);
+            description += '.';
+            description += std::to_string(server.natnet_version.minor);
+            const std::lock_guard lock{state_->mutex};
+            state_->natnet_version = server.natnet_version;
+            state_->status.server_description = std::move(description);
+            // A reply is not a pose, but it is the moment the link is known
+            // to be two-way, which Waiting does not say.
+            if (state_->status.state == TrackerListenerState::Waiting) {
+                state_->status.state = TrackerListenerState::Receiving;
+            }
+            return false;
+        }
+        if (*message != track::natnet_frame_message) {
+            // Model definitions, keep-alives, string messages: the server's
+            // business with other clients, not a frame.
+            state_->refuse(track::TrackerParseError::UnrecognizedMessage);
+            return false;
+        }
+        std::optional<track::NatNetVersion> version;
+        {
+            const std::lock_guard lock{state_->mutex};
+            version = state_->natnet_version;
+            if (!version) {
+                ++state_->status.awaiting_handshake;
+                ++state_->frames_since_handshake_request;
+                return false;
+            }
+        }
+        const auto parsed = track::parse_natnet_frame(
+            datagram, *version, source.camera_id,
+            natnet_up_axis(source.calibration));
+        if (!parsed) {
+            state_->refuse(parsed.error());
+            return false;
+        }
+        const track::NatNetFrame& frame = parsed.value();
+        if (!frame.found) {
+            // Counted as another camera's, which it is: the volume is
+            // streaming rigid bodies, and none of them is the one authored.
+            const std::lock_guard lock{state_->mutex};
+            ++state_->status.foreign_camera;
+            return false;
+        }
+        if (!frame.tracked) {
+            // Listed but not solved. The last good pose stays in the slot.
+            const std::lock_guard lock{state_->mutex};
+            ++state_->status.untracked;
+            return false;
+        }
+        pose = frame.pose;
+        camera_selected = true;
     } else {
         const auto parsed = track::parse_opentrackio(datagram, ordinal);
         if (!parsed) {
@@ -138,8 +247,9 @@ bool TrackerListener::deliver(
     // it must not be confused with a sample that said "camera 0", which is
     // what happened while the OpenTrackIO parser never set the id at all and
     // every non-zero feed refused everything it received.
-    if (!identifies_camera ? source.camera_id != 0U
-                           : pose.camera_id != source.camera_id) {
+    if (!camera_selected
+        && (!identifies_camera ? source.camera_id != 0U
+                               : pose.camera_id != source.camera_id)) {
         const std::lock_guard lock{state_->mutex};
         ++state_->status.foreign_camera;
         return false;
@@ -181,6 +291,10 @@ bool TrackerListener::configure(
         state_->status = TrackerListenerStatus{};
         state_->status.source = bounded;
         state_->received_ordinal = 0U;
+        // A new source may be a different server; its version is learned
+        // again rather than assumed from the last one.
+        state_->natnet_version.reset();
+        state_->frames_since_handshake_request = 0U;
     }
     if (!bounded.enabled) {
         return true;
@@ -198,6 +312,21 @@ bool TrackerListener::configure(
         }
         if (!error) {
             socket.bind(endpoint, error);
+        }
+        if (!error && bounded.protocol == scene::TrackerProtocolKind::NatNet) {
+            // Motive streams to a multicast group rather than to this host,
+            // so the socket has to ask for the group's traffic. Joining on
+            // every interface is what the SDK's own client does.
+            const asio::ip::address_v4 group{
+                asio::ip::address_v4::bytes_type{
+                    bounded.multicast_group[0], bounded.multicast_group[1],
+                    bounded.multicast_group[2], bounded.multicast_group[3]}};
+            if (!group.is_multicast()) {
+                error = std::make_error_code(std::errc::invalid_argument);
+            } else {
+                socket.set_option(asio::ip::multicast::join_group(group),
+                                  error);
+            }
         }
         if (error) {
             const std::lock_guard lock{state_->mutex};
@@ -219,7 +348,7 @@ bool TrackerListener::configure(
         state_->status.state = TrackerListenerState::Waiting;
     }
     state_->stop_requested.store(false, std::memory_order_release);
-    state_->buffer.assign(max_datagram_bytes, std::byte{});
+    state_->buffer.assign(max_datagram_bytes(bounded.protocol), std::byte{});
     // Armed before the thread starts, so the context has work the moment it
     // runs and `run()` cannot return immediately on an idle tracker.
     arm_receive();
@@ -261,6 +390,12 @@ void TrackerListener::arm_receive() noexcept {
             if (!error) {
                 static_cast<void>(deliver(std::span<const std::byte>{
                     state_->buffer.data(), received}));
+                if (awaiting_handshake()) {
+                    // The frame could not be decoded without the server's
+                    // version. It came from the server, so its address is
+                    // where the connect request goes.
+                    request_handshake();
+                }
             } else if (error == asio::error::message_size) {
                 // A datagram longer than the buffer. Windows reports this and
                 // hands back the truncated bytes while Linux truncates
@@ -274,6 +409,42 @@ void TrackerListener::arm_receive() noexcept {
             }
             arm_receive();
         });
+}
+
+bool TrackerListener::awaiting_handshake() const noexcept {
+    const std::lock_guard lock{state_->mutex};
+    return state_->status.source.protocol == scene::TrackerProtocolKind::NatNet
+        && state_->status.source.enabled && !state_->natnet_version;
+}
+
+void TrackerListener::request_handshake() noexcept {
+    if (!state_->socket) {
+        return;
+    }
+    core::u16 command_port = 0U;
+    {
+        const std::lock_guard lock{state_->mutex};
+        // The first frame that needed a version asks at once; after that,
+        // one request per run of frames.
+        if (state_->frames_since_handshake_request != 1U
+            && state_->frames_since_handshake_request % handshake_retry_frames
+                != 1U) {
+            return;
+        }
+        command_port =
+            static_cast<core::u16>(state_->status.source.command_port);
+    }
+    const asio::ip::udp::endpoint server{state_->from.address(), command_port};
+    const auto request = track::natnet_connect_request();
+    std::error_code error;
+    // The socket is non-blocking and a four-byte datagram either goes or
+    // does not; the reply, if any, arrives through the ordinary receive.
+    static_cast<void>(state_->socket->send_to(
+        asio::buffer(request.data(), request.size()), server, 0, error));
+    if (error) {
+        const std::lock_guard lock{state_->mutex};
+        state_->status.last_error = error.message();
+    }
 }
 
 void TrackerListener::stop() noexcept {

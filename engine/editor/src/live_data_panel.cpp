@@ -121,6 +121,8 @@ std::size_t nonzero_refusals(
       {"Checksum", tracking.checksum_failures},
       {"Out of range", tracking.invalid_values},
       {"Other camera", tracking.foreign_camera},
+      {"No handshake", tracking.awaiting_handshake},
+      {"Not tracked", tracking.untracked},
   }};
   std::size_t used = 0U;
   for (const RefusalRow &candidate : candidates) {
@@ -261,14 +263,33 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       row("Error", tracking.last_error, ctx.theme().warning);
     }
 
+    const bool natnet =
+        tracking.source.protocol == scene::TrackerProtocolKind::NatNet;
     plain_row("Protocol",
               tracking.source.protocol == scene::TrackerProtocolKind::FreeD
                   ? "FreeD"
-                  : "OpenTrackIO");
+                  : natnet ? "NatNet" : "OpenTrackIO");
     plain_row("Port", tracking.source.port == 0U
                           ? std::string{"not set"}
                           : format_unsigned("UDP %llu", tracking.source.port));
-    plain_row("Camera id", format_unsigned("%llu", tracking.source.camera_id));
+    if (natnet) {
+      plain_row("Multicast",
+                scene::multicast_group_text(tracking.source.multicast_group));
+      plain_row("Command port",
+                format_unsigned("UDP %llu", tracking.source.command_port));
+      plain_row("Rigid body",
+                tracking.source.camera_id == 0U
+                    ? std::string{"first in frame"}
+                    : format_unsigned("%llu", tracking.source.camera_id));
+      // The server names itself once it has answered; until then the
+      // "No handshake" count below says what is missing.
+      if (!tracking.server_description.empty()) {
+        plain_row("Server", tracking.server_description);
+      }
+    } else {
+      plain_row("Camera id",
+                format_unsigned("%llu", tracking.source.camera_id));
+    }
 
     // State the presence of a thing, never the absence of one: when nothing
     // has arrived there is simply no pose block, and the counters say why.

@@ -786,8 +786,15 @@ inline constexpr std::string_view tracking_enabled = "tracking_enabled";
 inline constexpr std::string_view tracking_protocol = "tracking_protocol";
 inline constexpr std::string_view freed_protocol = "freed";
 inline constexpr std::string_view opentrackio_protocol = "opentrackio";
+inline constexpr std::string_view natnet_protocol = "natnet";
 inline constexpr std::string_view tracking_port = "tracking_port";
 inline constexpr std::string_view tracking_camera_id = "tracking_camera_id";
+// NatNet only: the multicast group as dotted decimal, and the server's
+// command port. Absent means Motive's defaults.
+inline constexpr std::string_view tracking_multicast_group =
+    "tracking_multicast_group";
+inline constexpr std::string_view tracking_command_port =
+    "tracking_command_port";
 inline constexpr std::string_view tracking_sensor_height_mm =
     "tracking_sensor_height_mm";
 inline constexpr std::string_view tracking_sensor_aspect =

@@ -1404,10 +1404,18 @@ TrackerCalibration clamped(const TrackerCalibration& value) noexcept {
 
 TrackingSourceSettings clamped(const TrackingSourceSettings& value) noexcept {
     TrackingSourceSettings result = value;
-    result.protocol = value.protocol == TrackerProtocolKind::OpenTrackIO
-        ? TrackerProtocolKind::OpenTrackIO
-        : TrackerProtocolKind::FreeD;
+    switch (value.protocol) {
+    case TrackerProtocolKind::OpenTrackIO:
+    case TrackerProtocolKind::NatNet:
+        result.protocol = value.protocol;
+        break;
+    case TrackerProtocolKind::FreeD:
+    default:
+        result.protocol = TrackerProtocolKind::FreeD;
+        break;
+    }
     result.port = std::min(value.port, max_tracking_port);
+    result.command_port = std::min(value.command_port, max_tracking_port);
     const auto bounded = [](float candidate, float low, float high,
                             float fallback) noexcept {
         return std::isfinite(candidate) ? std::clamp(candidate, low, high)
@@ -1428,6 +1436,52 @@ TrackingSourceSettings clamped(const TrackingSourceSettings& value) noexcept {
     // Saying so here means no downstream reader has to guard the same thing.
     result.enabled = value.enabled && result.port != 0U;
     return result;
+}
+
+bool parse_multicast_group(
+    std::string_view text, std::array<core::u8, 4U>& into) noexcept {
+    std::array<core::u8, 4U> parsed{};
+    std::size_t octet = 0U;
+    std::size_t digits = 0U;
+    core::u32 value = 0U;
+    for (const char c : text) {
+        if (c >= '0' && c <= '9') {
+            if (++digits > 3U) {
+                return false;
+            }
+            value = value * 10U + static_cast<core::u32>(c - '0');
+            if (value > 255U) {
+                return false;
+            }
+        } else if (c == '.') {
+            if (digits == 0U || octet == 3U) {
+                return false;
+            }
+            parsed[octet] = static_cast<core::u8>(value);
+            ++octet;
+            digits = 0U;
+            value = 0U;
+        } else {
+            return false;
+        }
+    }
+    if (octet != 3U || digits == 0U) {
+        return false;
+    }
+    parsed[3] = static_cast<core::u8>(value);
+    into = parsed;
+    return true;
+}
+
+std::string multicast_group_text(const std::array<core::u8, 4U>& group) {
+    std::string text;
+    for (std::size_t index = 0U; index < group.size(); ++index) {
+        if (index != 0U) {
+            text.push_back('.');
+        }
+        text += std::to_string(static_cast<unsigned>(group[index]));
+    }
+    return text;
 }
 
 Turns tracked_field_of_view(

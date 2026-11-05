@@ -1,5 +1,6 @@
 add_library(mediaserver_track STATIC
     src/freed.cpp
+    src/natnet.cpp
     src/opentrackio.cpp
     src/pose_channel.cpp
     src/pose_slot.cpp
@@ -28,7 +29,7 @@ mediaserver_set_deterministic_float_options(mediaserver_track)
 set_target_properties(mediaserver_track PROPERTIES FOLDER "engine")
 
 if(BUILD_TESTING)
-    foreach(_track_suite IN ITEMS freed opentrackio pose_slot pose_channel)
+    foreach(_track_suite IN ITEMS freed natnet opentrackio pose_slot pose_channel)
         add_executable(mediaserver_track_${_track_suite}_tests
             tests/${_track_suite}_tests.cpp
         )

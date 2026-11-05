@@ -859,6 +859,49 @@ to drag. Every authored media item is an explicit placement with a positive
 duration; an invalid placement is reported rather than reinterpreted as an
 always-on layer.
 
+### Camera tracking feeds
+
+A tracked camera takes its pose from a **feed**: a tracker protocol the
+Director listens to on a UDP port. Feeds are project state. Select a camera,
+press **+ New feed** in its TRACKING section, pick the feed from the **Feed**
+list, and its settings appear below: **State** (Listening or not), **Protocol**,
+**Port**, the camera or rigid-body id, the sensor and fallback lens the plate is
+sized from, and the **Up axis**, **Heading**, **Origin** and **Scale** that place
+the tracker's numbers on the stage. Only the Director opens the socket; every
+render node receives the pose the Director sampled, stamped for an exact
+control frame, so two nodes never disagree about where the camera is.
+
+Three protocols are supported:
+
+- **FreeD** - the 29-byte D1 datagram most lens and crane encoders send. The
+  **Camera ID** matches the id byte in every datagram, so two cameras can share
+  a port.
+- **OpenTrackIO** - the JSON sample from the SMPTE RIS. The camera id matches
+  the sample's `sourceNumber`; a feed authored for camera 0 takes samples that
+  name no camera.
+- **NatNet** - OptiTrack Motive's streaming protocol. The camera is a rigid
+  body in the volume. **Rigid body** is its streaming id from Motive's Assets
+  pane, or 0 for the first body in every frame. **Port** is Motive's data
+  port (1511), **Multicast** is the group Motive streams to (239.255.42.99),
+  and **Command port** (1510) is where the Director asks Motive which NatNet
+  version it speaks. Motive's streaming pane must be set to **Multicast**;
+  unicast is not supported. Frames that arrive before Motive has answered are
+  counted under **No handshake** in Live Data and nothing is tracked until it
+  does, because the frame layout depends on the version and a guessed one
+  tracks the wrong bytes. A body Motive lists but cannot solve this frame is
+  counted under **Not tracked** and the last good pose holds. Motive tracks the
+  body, not the lens, so the plate is sized from the feed's fallback focal
+  length or the camera's lens profile. Set **Up axis** to **Z up** if Motive is
+  configured for Z-up; the rigid body's orientation is remapped along with its
+  position. Orient the rigid body in Motive so that at zero rotation the
+  camera looks along stage forward; a residual heading offset is corrected
+  with **Heading** like any other tracker.
+
+**Window > Live Data** shows each feed's link state, counters and the pose the
+wall is drawing. Without a tracker, `scripts/send-freed-tracking.ps1` and
+`scripts/send-natnet-tracking.ps1` stand in for a FreeD encoder and for
+Motive; each script's help describes the feed settings it expects.
+
 ## Project settings
 
 **File > Project Settings** holds the numbers that decide *how* an effect is

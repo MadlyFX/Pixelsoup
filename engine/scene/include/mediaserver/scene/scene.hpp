@@ -1133,6 +1133,11 @@ struct TrackedCamera final {
 enum class TrackerProtocolKind : core::u8 {
     FreeD,
     OpenTrackIO,
+    // OptiTrack Motive's streaming protocol. The camera is a rigid body in
+    // the volume; frames arrive on a multicast group and the Director asks
+    // the server's command port which NatNet version it speaks before it
+    // decodes any of them.
+    NatNet,
 };
 
 // The authored camera-tracking source.
@@ -1200,8 +1205,15 @@ struct TrackingSourceSettings final {
     core::u32 port{};
     // Which physical camera on the stage this source carries. FreeD puts a
     // camera id in every datagram; a mismatch is counted and dropped rather
-    // than tracked, so two cameras can share a port.
+    // than tracked, so two cameras can share a port. For NatNet this is the
+    // rigid body's streaming id in Motive, and zero takes the first rigid
+    // body in every frame.
     core::u32 camera_id{};
+    // NatNet only. The multicast group Motive streams frames to, and the
+    // command port the Director sends its connect request to so the server
+    // reports its NatNet version. Both default to Motive's own defaults.
+    std::array<core::u8, 4U> multicast_group{239U, 255U, 42U, 99U};
+    core::u32 command_port{1'510U};
     // Active sensor height in millimetres. With the tracker's focal length
     // this resolves a vertical field of view on the Director, which every node
     // then receives already decided.
@@ -1367,6 +1379,14 @@ inline constexpr float max_focal_length_mm = 2'000.0F;
 
 [[nodiscard]] TrackingSourceSettings clamped(
     const TrackingSourceSettings& value) noexcept;
+
+// A multicast group as the document spells it, "239.255.42.99", and back.
+// Parsing refuses anything but four decimal octets, so a mistyped group is
+// reported rather than listened on.
+[[nodiscard]] bool parse_multicast_group(
+    std::string_view text, std::array<core::u8, 4U>& into) noexcept;
+[[nodiscard]] std::string multicast_group_text(
+    const std::array<core::u8, 4U>& group);
 
 // The vertical field of view, in turns, that a focal length produces on this
 // sensor. This is the Director's lens resolution, kept beside the settings it

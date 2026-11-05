@@ -195,6 +195,11 @@ class InspectorPanel final {
     void draw_linked(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
     doc::NodeId ies_node_{};
     std::string ies_authored_, ies_draft_;
+    // The NatNet multicast group field, drafted the same way: the text the
+    // operator is typing, and the authored value it was opened from so a
+    // change from elsewhere replaces an untouched draft.
+    doc::NodeId multicast_node_{};
+    std::string multicast_authored_, multicast_draft_;
 
     enum class FieldDomain : core::u8 {
         Animation,

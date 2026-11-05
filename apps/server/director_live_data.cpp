@@ -165,6 +165,9 @@ void inject_tracked_poses(scene::Scene &scene,
         observed.tracking.checksum_failures = status.checksum_failures;
         observed.tracking.invalid_values = status.invalid_values;
         observed.tracking.foreign_camera = status.foreign_camera;
+        observed.tracking.awaiting_handshake = status.awaiting_handshake;
+        observed.tracking.untracked = status.untracked;
+        observed.tracking.server_description = status.server_description;
         observed.tracking.last_error = status.last_error;
         if (const auto* predictor = predictors.find(view.camera)) {
             auto prediction = predictor->telemetry();

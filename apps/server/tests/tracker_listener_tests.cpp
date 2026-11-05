@@ -1,8 +1,10 @@
 #include "tracker_listener.hpp"
 
 #include <mediaserver/track/freed.hpp>
+#include <mediaserver/track/natnet.hpp>
 
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -233,6 +235,251 @@ void an_opentrackio_feed_matches_on_the_samples_source_number() {
     LISTENER_CHECK(open.status().accepted == 1U);
 }
 
+// A NatNet 4.1 server reply and a minimal frame of data: one rigid body and
+// nothing else in the volume. Little endian throughout.
+[[nodiscard]] std::vector<std::byte> natnet_server_info() {
+    std::vector<std::byte> bytes;
+    const auto u8 = [&bytes](core::u8 value) {
+        bytes.push_back(static_cast<std::byte>(value));
+    };
+    const auto u16 = [&u8](core::u16 value) {
+        u8(static_cast<core::u8>(value & 0xFFU));
+        u8(static_cast<core::u8>(value >> 8U));
+    };
+    u16(track::natnet_server_info_message);
+    u16(264U);
+    const std::string_view name{"Motive"};
+    for (std::size_t index = 0U; index < 256U; ++index) {
+        u8(index < name.size() ? static_cast<core::u8>(name[index]) : 0U);
+    }
+    constexpr std::array<core::u8, 4U> application_version{3U, 1U, 0U, 0U};
+    constexpr std::array<core::u8, 4U> natnet_version{4U, 1U, 0U, 0U};
+    for (const core::u8 value : application_version) {
+        u8(value);
+    }
+    for (const core::u8 value : natnet_version) {
+        u8(value);
+    }
+    return bytes;
+}
+
+[[nodiscard]] std::vector<std::byte> natnet_frame(
+    core::u32 frame_number, core::i32 body_id, float x, bool tracked) {
+    std::vector<std::byte> payload;
+    const auto u32 = [&payload](core::u32 value) {
+        for (unsigned shift = 0U; shift < 32U; shift += 8U) {
+            payload.push_back(
+                static_cast<std::byte>((value >> shift) & 0xFFU));
+        }
+    };
+    const auto f32 = [&u32](float value) {
+        u32(std::bit_cast<core::u32>(value));
+    };
+    u32(frame_number);
+    u32(0U); u32(0U); // marker sets: none, zero bytes
+    u32(0U); u32(0U); // unlabeled markers
+    u32(1U);          // one rigid body
+    u32(4U + 7U * 4U + 4U + 2U);
+    u32(static_cast<core::u32>(body_id));
+    f32(x); f32(1.5F); f32(-2.0F);
+    f32(0.0F); f32(0.0F); f32(0.0F); f32(1.0F);
+    f32(0.0001F); // mean error
+    payload.push_back(static_cast<std::byte>(tracked ? 1U : 0U));
+    payload.push_back(std::byte{0});
+    u32(0U); u32(0U); // skeletons
+    u32(0U); u32(0U); // assets
+    u32(0U); u32(0U); // labeled markers
+    u32(0U); u32(0U); // force plates
+    u32(0U); u32(0U); // devices
+    u32(0U); u32(0U); // timecode
+    u32(0U); u32(0U); // timestamp (double)
+    for (int stamp = 0; stamp < 6; ++stamp) {
+        u32(0U);      // three 64-bit timestamps
+    }
+    u32(0U); u32(0U); // precision timestamp
+    payload.push_back(std::byte{0});
+    payload.push_back(std::byte{0}); // frame params
+    u32(0U);          // end of data
+
+    std::vector<std::byte> datagram;
+    datagram.push_back(static_cast<std::byte>(track::natnet_frame_message));
+    datagram.push_back(std::byte{0});
+    datagram.push_back(static_cast<std::byte>(payload.size() & 0xFFU));
+    datagram.push_back(static_cast<std::byte>(payload.size() >> 8U));
+    datagram.insert(datagram.end(), payload.begin(), payload.end());
+    return datagram;
+}
+
+// A NatNet feed cannot decode a frame until the server has said which version
+// it speaks, holds rather than guesses until then, and afterwards tracks the
+// authored rigid body and only that one.
+void a_natnet_feed_holds_until_the_server_answers_then_tracks_its_body() {
+    scene::TrackingSourceSettings source{};
+    source.enabled = false;
+    source.protocol = scene::TrackerProtocolKind::NatNet;
+    source.camera_id = 5U;
+    server::TrackerListener listener;
+    LISTENER_CHECK(listener.configure(source));
+    LISTENER_CHECK(!listener.awaiting_handshake()); // not enabled: no socket
+
+    // Frames before the reply are counted and held, never published.
+    LISTENER_CHECK(!listener.deliver(natnet_frame(1U, 5, 1.0F, true)));
+    LISTENER_CHECK(!listener.deliver(natnet_frame(2U, 5, 1.0F, true)));
+    LISTENER_CHECK(listener.status().awaiting_handshake == 2U);
+    LISTENER_CHECK(listener.status().accepted == 0U);
+    LISTENER_CHECK(!listener.sample().has_value());
+    LISTENER_CHECK(listener.status().server_description.empty());
+
+    // The reply is not a pose, but it names the server and unlocks decoding.
+    LISTENER_CHECK(!listener.deliver(natnet_server_info()));
+    LISTENER_CHECK(listener.status().server_description
+                   == "Motive 3.1.0, NatNet 4.1");
+    LISTENER_CHECK(listener.status().unrecognized == 0U);
+
+    LISTENER_CHECK(listener.deliver(natnet_frame(3U, 5, 1.25F, true)));
+    const auto status = listener.status();
+    LISTENER_CHECK(status.accepted == 1U);
+    LISTENER_CHECK(status.last_pose.has_value());
+    LISTENER_CHECK(status.last_pose->protocol == track::TrackerProtocol::NatNet);
+    LISTENER_CHECK(status.last_pose->x == 1.25F);
+    LISTENER_CHECK(status.last_pose->y == 1.5F);
+    LISTENER_CHECK(status.last_pose->sequence == 3U);
+    LISTENER_CHECK(status.last_pose->camera_id == 5U);
+    // No lens on a rigid body: the authored fallback focal length applies.
+    LISTENER_CHECK(status.field_of_view
+                   == scene::tracked_field_of_view(status.source, 0.0F));
+    LISTENER_CHECK(listener.sample() && listener.sample()->publications == 1U);
+
+    // Another body in the volume is somebody else's camera.
+    LISTENER_CHECK(!listener.deliver(natnet_frame(4U, 9, 7.0F, true)));
+    LISTENER_CHECK(listener.status().foreign_camera == 1U);
+    // An occluded body holds the last good pose.
+    LISTENER_CHECK(!listener.deliver(natnet_frame(5U, 5, 7.0F, false)));
+    LISTENER_CHECK(listener.status().untracked == 1U);
+    LISTENER_CHECK(listener.sample()->pose.x == 1.25F);
+    LISTENER_CHECK(listener.sample()->publications == 1U);
+
+    // A feed for no particular body takes the first one in every frame.
+    scene::TrackingSourceSettings any_body = source;
+    any_body.camera_id = 0U;
+    server::TrackerListener open;
+    LISTENER_CHECK(open.configure(any_body));
+    LISTENER_CHECK(!open.deliver(natnet_server_info()));
+    LISTENER_CHECK(open.deliver(natnet_frame(1U, 9, 7.0F, true)));
+    LISTENER_CHECK(open.status().accepted == 1U);
+    LISTENER_CHECK(open.sample()->pose.camera_id == 9U);
+
+    // Reconfiguring to another source forgets the version: it may be a
+    // different server.
+    any_body.camera_id = 2U;
+    LISTENER_CHECK(open.configure(any_body));
+    LISTENER_CHECK(!open.deliver(natnet_frame(1U, 2, 7.0F, true)));
+    LISTENER_CHECK(open.status().awaiting_handshake == 1U);
+}
+
+// The real NatNet socket: joins the multicast group, asks the sender's command
+// port for its version when a frame arrives it cannot decode, and tracks once
+// the reply has come back. This is the one path `deliver` cannot cover - the
+// join, the connect request's destination, and the reply arriving on the same
+// socket that receives frames.
+void a_natnet_socket_joins_the_group_and_completes_the_handshake() {
+    const auto free_port = []() {
+        asio::io_context probe_context;
+        asio::ip::udp::socket probe{probe_context};
+        std::error_code error;
+        probe.open(asio::ip::udp::v4(), error);
+        LISTENER_CHECK(!error);
+        probe.bind(asio::ip::udp::endpoint{asio::ip::udp::v4(), 0U}, error);
+        LISTENER_CHECK(!error);
+        const unsigned short port = probe.local_endpoint().port();
+        probe.close(error);
+        return port;
+    };
+    const unsigned short data_port = free_port();
+
+    // The stand-in server: a socket on an ephemeral command port, which is
+    // also where its frames are sent from, so the listener's connect request
+    // comes back to it.
+    asio::io_context context;
+    asio::ip::udp::socket server{context};
+    std::error_code error;
+    server.open(asio::ip::udp::v4(), error);
+    LISTENER_CHECK(!error);
+    server.bind(asio::ip::udp::endpoint{asio::ip::udp::v4(), 0U}, error);
+    LISTENER_CHECK(!error);
+    server.non_blocking(true, error);
+    LISTENER_CHECK(!error);
+    const unsigned short command_port = server.local_endpoint().port();
+
+    scene::TrackingSourceSettings source{};
+    source.enabled = true;
+    source.protocol = scene::TrackerProtocolKind::NatNet;
+    source.port = data_port;
+    source.command_port = command_port;
+    source.camera_id = 5U;
+    server::TrackerListener listener;
+    LISTENER_CHECK(listener.configure(source));
+    LISTENER_CHECK(listener.status().state
+                   == server::TrackerListenerState::Waiting);
+    LISTENER_CHECK(listener.awaiting_handshake());
+
+    const asio::ip::udp::endpoint group{
+        asio::ip::make_address_v4("239.255.42.99"), data_port};
+    const auto deadline_from_now = []() {
+        return std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    };
+
+    // Frames until a connect request arrives at the command port.
+    std::array<std::byte, 16U> request{};
+    bool asked = false;
+    core::u32 frame_number = 1U;
+    for (auto deadline = deadline_from_now();
+         !asked && std::chrono::steady_clock::now() < deadline;) {
+        const auto frame = natnet_frame(frame_number++, 5, 1.0F, true);
+        server.send_to(asio::buffer(frame.data(), frame.size()), group, 0,
+                       error);
+        LISTENER_CHECK(!error);
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        asio::ip::udp::endpoint from;
+        const std::size_t received = server.receive_from(
+            asio::buffer(request.data(), request.size()), from, 0, error);
+        if (!error && received == 4U) {
+            asked = true;
+            LISTENER_CHECK(from.port() == data_port);
+            LISTENER_CHECK(track::natnet_message_id(
+                               std::span<const std::byte>{request.data(), 4U})
+                           == track::natnet_connect_message);
+            // The reply goes back to where the request came from.
+            const auto info = natnet_server_info();
+            server.send_to(asio::buffer(info.data(), info.size()), from, 0,
+                           error);
+            LISTENER_CHECK(!error);
+        }
+    }
+    LISTENER_CHECK(asked);
+    LISTENER_CHECK(listener.status().awaiting_handshake >= 1U);
+
+    // Frames after the reply are decoded and published.
+    bool tracked = false;
+    for (auto deadline = deadline_from_now();
+         !tracked && std::chrono::steady_clock::now() < deadline;) {
+        const auto frame = natnet_frame(frame_number++, 5, 2.5F, true);
+        server.send_to(asio::buffer(frame.data(), frame.size()), group, 0,
+                       error);
+        LISTENER_CHECK(!error);
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        tracked = listener.sample().has_value();
+    }
+    LISTENER_CHECK(tracked);
+    const auto status = listener.status();
+    LISTENER_CHECK(!listener.awaiting_handshake());
+    LISTENER_CHECK(status.server_description == "Motive 3.1.0, NatNet 4.1");
+    LISTENER_CHECK(status.state == server::TrackerListenerState::Receiving);
+    LISTENER_CHECK(status.last_pose && status.last_pose->x == 2.5F);
+    LISTENER_CHECK(status.last_pose->protocol == track::TrackerProtocol::NatNet);
+    listener.stop();
+}
+
 // The real socket. Binding an ephemeral port and sending a datagram to it is
 // the one thing a parser test cannot cover, and it is where a wrong address
 // family or a missing bind would hide.
@@ -403,7 +650,11 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 8U> cases{{
+constexpr std::array<Case, 10U> cases{{
+    {"a natnet feed holds until the server answers, then tracks its body",
+     &a_natnet_feed_holds_until_the_server_answers_then_tracks_its_body},
+    {"a natnet socket joins the group and completes the handshake",
+     &a_natnet_socket_joins_the_group_and_completes_the_handshake},
     {"an unconfigured listener is idle and publishes nothing",
      &an_unconfigured_listener_is_idle_and_publishes_nothing},
     {"a datagram is parsed, counted, and published",

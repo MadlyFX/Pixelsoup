@@ -202,10 +202,20 @@ constexpr std::array<std::string_view, 3U> rgb{{"R", "G", "B"}};
 // vendors spell it.
 [[nodiscard]] std::string_view tracker_protocol_name(
     scene::TrackerProtocolKind protocol) noexcept {
-    return protocol == scene::TrackerProtocolKind::OpenTrackIO
-        ? std::string_view{"OpenTrackIO"}
-        : std::string_view{"FreeD"};
+    switch (protocol) {
+    case scene::TrackerProtocolKind::OpenTrackIO:
+        return "OpenTrackIO";
+    case scene::TrackerProtocolKind::NatNet:
+        return "NatNet";
+    case scene::TrackerProtocolKind::FreeD:
+    default:
+        return "FreeD";
+    }
 }
+
+// The protocol choices in the order the Director's authoring numbers them.
+constexpr std::array<std::string_view, 3U> tracker_protocol_choices{
+    {"FreeD", "OpenTrackIO", "NatNet"}};
 
 // The element as a new one of its kind starts: what it is - its identity,
 // its kind, its place in the show and its links - kept, and every value an
@@ -1020,12 +1030,15 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
         return value;
       case FieldDomain::Tracking:
         // A port and a camera id are whole numbers, and the ranges are the
-        // protocol's own: a UDP port, and a FreeD camera byte.
-        if (binding.property == scene::schema::tracking_port) {
+        // protocol's own: a UDP port, and a FreeD camera byte or a NatNet
+        // rigid body id. The Director narrows the id to a byte for a FreeD
+        // feed, which is the one place that knows the feed's protocol.
+        if (binding.property == scene::schema::tracking_port
+            || binding.property == scene::schema::tracking_command_port) {
           return std::clamp(std::round(value), 0.0, 65535.0);
         }
         if (binding.property == scene::schema::tracking_camera_id) {
-          return std::clamp(std::round(value), 0.0, 255.0);
+          return std::clamp(std::round(value), 0.0, 2147483647.0);
         }
         return std::max(value, 0.0);
       case FieldDomain::Particles:
@@ -2964,6 +2977,9 @@ void InspectorPanel::draw_camera_tracking(
     // looking when they want them, so this is where they are.
     if (bound != nullptr) {
         const scene::TrackingSourceSettings& settings = bound->settings;
+        // The option a dropdown landed on, written by `feed_toggle` when it
+        // returns true for a dropdown row.
+        std::size_t chosen = 0U;
         const auto feed_toggle = [&](std::string_view label, std::string_view text,
                                      std::string_view property, bool lit, core::u64 salt) {
             const gui::Rect row = take_row(cursor, row_height);
@@ -2974,12 +2990,23 @@ void InspectorPanel::draw_camera_tracking(
             const auto id = mix(id_, property, bound->node.value() + salt);
             if (property == scene::schema::tracking_enabled)
                 return ctx.checkbox(id, well, lit, "Listening") && !element.locked;
-            const bool protocol = property == scene::schema::tracking_protocol;
-            const std::array<std::string_view, 2> choices = protocol
-                ? std::array<std::string_view, 2>{"FreeD", "OpenTrackIO"}
-                : std::array<std::string_view, 2>{"Stage (Y up)", "Z up"};
-            std::size_t selected = text == choices[1] ? 1U : 0U;
-            return ctx.dropdown(id, well, choices, selected) && !element.locked;
+            constexpr std::array<std::string_view, 2> axes_choices{
+                "Stage (Y up)", "Z up"};
+            const std::span<const std::string_view> choices =
+                property == scene::schema::tracking_protocol
+                ? std::span<const std::string_view>{tracker_protocol_choices}
+                : std::span<const std::string_view>{axes_choices};
+            std::size_t selected = 0U;
+            for (std::size_t index = 0U; index < choices.size(); ++index) {
+                if (choices[index] == text) {
+                    selected = index;
+                }
+            }
+            if (!ctx.dropdown(id, well, choices, selected) || element.locked) {
+                return false;
+            }
+            chosen = selected;
+            return true;
         };
         // Two words, both true: a listening feed is bound to its socket, an
         // authored one is only described. Nothing here half-opens a port.
@@ -2994,13 +3021,15 @@ void InspectorPanel::draw_camera_tracking(
         }
         if (feed_toggle("Protocol", tracker_protocol_name(settings.protocol),
                         scene::schema::tracking_protocol, true, 1U)) {
-            const bool freed =
-                settings.protocol == scene::TrackerProtocolKind::FreeD;
+            // The index into `tracker_protocol_choices`; the Director spells
+            // it into the document.
             frame.named_edits.push_back(
                 NamedEdit{bound->node,
                           std::string{scene::schema::tracking_protocol},
-                          freed ? 1.0 : 0.0});
+                          static_cast<double>(chosen)});
         }
+        const bool natnet =
+            settings.protocol == scene::TrackerProtocolKind::NatNet;
         feed_ = bound->node;
         constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
         const auto feed_row = [&](std::string_view label,
@@ -3014,8 +3043,53 @@ void InspectorPanel::draw_camera_tracking(
         };
         feed_row("Port", scene::schema::tracking_port,
                  static_cast<float>(settings.port), 1.0F);
-        feed_row("Camera ID", scene::schema::tracking_camera_id,
+        // For Motive the camera is a rigid body, named by the streaming id
+        // its Assets pane shows; zero takes the first body in every frame.
+        feed_row(natnet ? "Rigid body" : "Camera ID",
+                 scene::schema::tracking_camera_id,
                  static_cast<float>(settings.camera_id), 1.0F);
+        if (natnet) {
+            // Motive streams frames to a multicast group and answers the
+            // Director's version query on a command port. Both default to
+            // Motive's own defaults, and change only when its streaming pane
+            // has been changed to match.
+            feed_row("Command port", scene::schema::tracking_command_port,
+                     static_cast<float>(settings.command_port), 1.0F);
+            const gui::Rect row = take_row(cursor, row_height);
+            cursor.space(row_gap);
+            const float lw = std::clamp(row.width * label_fraction,
+                                        label_min, label_max);
+            ctx.label({row.x, row.y, lw, row.height}, "Multicast",
+                      ctx.theme().text_muted);
+            const gui::Rect well{row.x + lw, row.y, row.width - lw,
+                                 row.height};
+            const std::string authored_group =
+                scene::multicast_group_text(settings.multicast_group);
+            if (multicast_node_ != bound->node
+                || multicast_authored_ != authored_group) {
+                multicast_node_ = bound->node;
+                multicast_authored_ = authored_group;
+                multicast_draft_ = authored_group;
+            }
+            if (ctx.text_field(mix(id_, "tracking.multicast",
+                                   bound->node.value()),
+                               well, multicast_draft_)
+                && !element.locked) {
+                std::array<core::u8, 4U> parsed{};
+                if (scene::parse_multicast_group(multicast_draft_, parsed)) {
+                    frame.text_edits.push_back(
+                        {bound->node,
+                         std::string{scene::schema::tracking_multicast_group},
+                         multicast_draft_});
+                }
+            }
+            std::array<core::u8, 4U> parsed{};
+            ctx.tooltip(well,
+                        scene::parse_multicast_group(multicast_draft_, parsed)
+                            ? "The group Motive streams to, from its "
+                              "Streaming pane. 239.255.42.99 is its default."
+                            : "Four numbers 0-255 separated by dots");
+        }
         // The lens the feed reports through. A FreeD packet carries a zoom
         // encoder, not a field of view; these are what turn one into the
         // other, so they describe the equipment and live with the feed.

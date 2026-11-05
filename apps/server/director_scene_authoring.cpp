@@ -570,12 +570,27 @@ map_transport(editor::TransportRequest request) noexcept {
             !std::isfinite(edit.value)) {
             return true;
         }
-        const std::string_view protocol = edit.value >= 0.5
-            ? scene::schema::opentrackio_protocol
-            : scene::schema::freed_protocol;
+        // The Inspector's choice index: FreeD, OpenTrackIO, NatNet.
+        const std::string_view protocol = edit.value >= 1.5
+            ? scene::schema::natnet_protocol
+            : edit.value >= 0.5 ? scene::schema::opentrackio_protocol
+                                : scene::schema::freed_protocol;
         updated.properties.insert_or_assign(
             edit.property, doc::PropertyValue{std::string{protocol}});
+    } else if (edit.property == scene::schema::tracking_multicast_group &&
+               edit.text.has_value()) {
+        // Spelled as the operator typed it, once it parses as a group: the
+        // model refuses a malformed one on load, so none may be written.
+        std::array<core::u8, 4U> group{};
+        if (existing->type != scene::schema::tracking_source_type ||
+            !scene::parse_multicast_group(*edit.text, group)) {
+            return true;
+        }
+        updated.properties.insert_or_assign(
+            edit.property,
+            doc::PropertyValue{scene::multicast_group_text(group)});
     } else if (edit.property == scene::schema::tracking_port ||
+               edit.property == scene::schema::tracking_command_port ||
                edit.property == scene::schema::tracking_camera_id) {
         // A port and a camera id are whole numbers the model reads as
         // integers; writing 6301.0 as a double would make the feed
@@ -584,8 +599,20 @@ map_transport(editor::TransportRequest request) noexcept {
             !std::isfinite(edit.value)) {
             return true;
         }
+        // A FreeD camera id is one byte; a NatNet rigid body id is Motive's
+        // streaming id, any positive 32-bit number.
+        const auto protocol_property =
+            existing->properties.find(std::string{scene::schema::tracking_protocol});
+        const auto* const protocol_text =
+            protocol_property == existing->properties.end()
+                ? nullptr
+                : std::get_if<std::string>(&protocol_property->second);
+        const bool freed = protocol_text == nullptr ||
+                           *protocol_text == scene::schema::freed_protocol;
         const double limit =
-            edit.property == scene::schema::tracking_port ? 65535.0 : 255.0;
+            edit.property == scene::schema::tracking_camera_id
+                ? (freed ? 255.0 : 2147483647.0)
+                : 65535.0;
         const auto whole = static_cast<std::int64_t>(
             std::llround(std::clamp(edit.value, 0.0, limit)));
         updated.properties.insert_or_assign(edit.property,

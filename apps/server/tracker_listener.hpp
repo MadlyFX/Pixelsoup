@@ -58,8 +58,20 @@ struct TrackerListenerStatus final {
     core::u64 unrecognized{};
     core::u64 checksum_failures{};
     core::u64 invalid_values{};
-    // Parsed correctly but addressed to a different camera on the stage.
+    // Parsed correctly but addressed to a different camera on the stage. For
+    // NatNet, a frame in which the authored rigid body was not present.
     core::u64 foreign_camera{};
+    // NatNet frames that arrived before the server had answered the connect
+    // request that tells the Director which version to decode them with.
+    // Nothing is published from them; the counter is what tells an operator
+    // the command port, not the data port, is what is blocked.
+    core::u64 awaiting_handshake{};
+    // NatNet frames in which the rigid body was listed but not solved -
+    // occluded, or out of the volume. The last good pose is held.
+    core::u64 untracked{};
+    // What the server said it was, once it has answered, e.g.
+    // "Motive 3.1.0, NatNet 4.1". Empty for every other protocol.
+    std::string server_description;
     // The last pose that reached the slot, if any.
     std::optional<track::TrackedPose> last_pose;
     // Vertical field of view resolved from the authored sensor and the pose's
@@ -102,9 +114,23 @@ public:
     // Parses, counts, and publishes one datagram. The receive loop calls this
     // for every packet it reads, and a test calls it directly to exercise the
     // same path without binding a port.
+    //
+    // For a NatNet source the same socket carries the server's reply to the
+    // connect request as well as frames of data, and this routes between them
+    // by message id: a reply records the server's version, a frame is decoded
+    // against it, and a frame arriving before any reply is counted and held.
     bool deliver(std::span<const std::byte> datagram) noexcept;
 
+    // Whether a NatNet source still needs the server to answer its connect
+    // request. Always false for the other protocols, which need no handshake.
+    [[nodiscard]] bool awaiting_handshake() const noexcept;
+
 private:
+    // Sends a connect request to the command port of the host the last frame
+    // arrived from. Called from the receive thread after a frame that could
+    // not be decoded for want of a version; bounded to one request per run of
+    // frames, so a server that never answers is not flooded.
+    void request_handshake() noexcept;
     // Issues one asynchronous receive and re-issues from its own completion,
     // so the socket is always armed and a datagram wakes the thread the moment
     // it lands rather than at the next tick of a poll.

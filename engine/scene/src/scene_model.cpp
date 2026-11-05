@@ -1529,6 +1529,8 @@ void SceneModel::put(const doc::Node& node) {
             source.settings.protocol = TrackerProtocolKind::FreeD;
         } else if (protocol == schema::opentrackio_protocol) {
             source.settings.protocol = TrackerProtocolKind::OpenTrackIO;
+        } else if (protocol == schema::natnet_protocol) {
+            source.settings.protocol = TrackerProtocolKind::NatNet;
         } else {
             // Tracking with a parser the project was not authored against is
             // worse than not tracking, so this is refused rather than guessed.
@@ -1543,6 +1545,25 @@ void SceneModel::put(const doc::Node& node) {
         }
         source.settings.port = source_port;
         source.settings.camera_id = source_camera;
+        core::u32 command_port{};
+        if (!as_u32(reader.integer(
+                        schema::tracking_command_port,
+                        static_cast<std::int64_t>(
+                            source.settings.command_port)),
+                    command_port)) {
+            reader.fail();
+        }
+        source.settings.command_port = command_port;
+        // A group that does not parse is refused rather than defaulted: a
+        // feed listening on the wrong group is silent in exactly the way a
+        // missing setting is, and the operator would hunt the cable.
+        const std::string default_group =
+            multicast_group_text(source.settings.multicast_group);
+        const auto group =
+            reader.text(schema::tracking_multicast_group, default_group);
+        if (!parse_multicast_group(group, source.settings.multicast_group)) {
+            reader.fail();
+        }
         source.settings.sensor_height_mm = reader.number(
             schema::tracking_sensor_height_mm,
             source.settings.sensor_height_mm);

@@ -133,6 +133,19 @@ void the_panel_draws_in_every_state_it_can_be_in() {
 
   LIVE_CHECK(harness.draw(receiving_state()) > 0U);
 
+  // A NatNet feed shows its group, command port and rigid body, and the
+  // server's name once it has answered - and draws before it has.
+  editor::LiveDataState natnet = receiving_state();
+  natnet.cameras.front().tracking.source.protocol =
+      scene::TrackerProtocolKind::NatNet;
+  natnet.cameras.front().tracking.source.port = 1'511U;
+  natnet.cameras.front().tracking.awaiting_handshake = 12U;
+  LIVE_CHECK(harness.draw(natnet) > 0U);
+  natnet.cameras.front().tracking.server_description =
+      "Motive 3.1.0, NatNet 4.1";
+  natnet.cameras.front().tracking.source.camera_id = 5U;
+  LIVE_CHECK(harness.draw(natnet) > 0U);
+
   // A stage with several cameras draws all of them, which is the case a panel
   // built around one would silently drop.
   editor::LiveDataState several = receiving_state();
@@ -202,12 +215,24 @@ void only_nonzero_refusals_are_listed() {
   LIVE_CHECK(rows[0] == editor::RefusalRow{"Checksum", 4U});
   LIVE_CHECK(rows[1] == editor::RefusalRow{"Other camera", 11U});
 
+  // The NatNet counters have rows of their own: a frame held for want of
+  // the server's version and a body Motive listed but could not solve are
+  // fixed at the server, not at the cable.
+  editor::TrackingRuntimeObservation natnet{};
+  natnet.awaiting_handshake = 3U;
+  natnet.untracked = 9U;
+  LIVE_CHECK(editor::nonzero_refusals(natnet, view) == 2U);
+  LIVE_CHECK(rows[0] == editor::RefusalRow{"No handshake", 3U});
+  LIVE_CHECK(rows[1] == editor::RefusalRow{"Not tracked", 9U});
+
   editor::TrackingRuntimeObservation all{};
   all.truncated = 1U;
   all.unrecognized = 2U;
   all.checksum_failures = 3U;
   all.invalid_values = 4U;
   all.foreign_camera = 5U;
+  all.awaiting_handshake = 6U;
+  all.untracked = 7U;
   LIVE_CHECK(editor::nonzero_refusals(all, view) ==
              editor::max_refusal_rows);
   for (std::size_t index = 0U; index < editor::max_refusal_rows; ++index) {

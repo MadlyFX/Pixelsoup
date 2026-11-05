@@ -4385,6 +4385,56 @@ void tracking_sources_round_trip_and_are_clamped() {
                     .settings.fallback_focal_length_mm ==
                 scene::min_focal_length_mm);
 
+    // A NatNet feed carries the multicast group and command port Motive is
+    // configured with, and takes Motive's defaults when the document is
+    // silent about them.
+    scene::SceneModel natnet;
+    natnet.reset(doc::Root{}
+                     .set(node(1U, schema::tracking_source_type,
+                               {text(schema::tracking_protocol,
+                                     schema::natnet_protocol),
+                                whole(schema::tracking_port, 1511),
+                                whole(schema::tracking_camera_id, 7),
+                                whole(schema::tracking_command_port, 1600),
+                                text(schema::tracking_multicast_group,
+                                     "239.255.42.100")}))
+                     .set(node(2U, schema::tracking_source_type,
+                               {text(schema::tracking_protocol,
+                                     schema::natnet_protocol)})));
+    MODEL_CHECK(natnet.counters().rejected == 0U);
+    const std::vector<scene::TrackingSource> motive_sources =
+        natnet.tracking_sources();
+    MODEL_CHECK(motive_sources.size() == 2U);
+    const scene::TrackingSourceSettings& motive =
+        motive_sources.front().settings;
+    MODEL_CHECK(motive.protocol == scene::TrackerProtocolKind::NatNet);
+    MODEL_CHECK(motive.camera_id == 7U);
+    MODEL_CHECK(motive.command_port == 1'600U);
+    MODEL_CHECK(motive.multicast_group
+                == (std::array<core::u8, 4U>{239U, 255U, 42U, 100U}));
+    MODEL_CHECK(scene::multicast_group_text(motive.multicast_group)
+                == "239.255.42.100");
+    const scene::TrackingSourceSettings& defaults =
+        motive_sources.back().settings;
+    MODEL_CHECK(defaults.command_port == 1'510U);
+    MODEL_CHECK(defaults.multicast_group
+                == (std::array<core::u8, 4U>{239U, 255U, 42U, 99U}));
+    // A group that is not four octets is refused, not listened on.
+    for (const std::string_view bad :
+         {"239.255.42", "239.255.42.256", "239.255.42.99.1", "group", ""}) {
+        scene::SceneModel malformed;
+        malformed.reset(doc::Root{}.set(node(
+            1U, schema::tracking_source_type,
+            {text(schema::tracking_protocol, schema::natnet_protocol),
+             text(schema::tracking_multicast_group, bad)})));
+        MODEL_CHECK(malformed.counters().rejected == 1U);
+    }
+    std::array<core::u8, 4U> parsed{};
+    MODEL_CHECK(scene::parse_multicast_group("224.0.0.1", parsed)
+                && parsed == (std::array<core::u8, 4U>{224U, 0U, 0U, 1U}));
+    MODEL_CHECK(!scene::parse_multicast_group("224.0.0.1 ", parsed));
+    MODEL_CHECK(!scene::parse_multicast_group("224..0.1", parsed));
+
     // A protocol this build cannot honour is refused rather than guessed at:
     // tracking with the wrong parser is worse than not tracking.
     scene::SceneModel unknown;

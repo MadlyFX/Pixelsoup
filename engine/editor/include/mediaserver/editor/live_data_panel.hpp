@@ -68,6 +68,12 @@ struct TrackingRuntimeObservation final {
   // because it is the one refusal an operator fixes by changing a setting
   // rather than a cable.
   core::u64 foreign_camera{};
+  // NatNet: frames that arrived before the server had answered the version
+  // query, and frames in which the rigid body was listed but not solved.
+  core::u64 awaiting_handshake{};
+  core::u64 untracked{};
+  // What a NatNet server said it was, once it answered. Empty otherwise.
+  std::string server_description;
 
   // The last pose that reached the Director, if any.
   bool has_pose{};
@@ -270,7 +276,7 @@ struct RefusalRow final {
   bool operator==(const RefusalRow &) const = default;
 };
 
-inline constexpr std::size_t max_refusal_rows = 5U;
+inline constexpr std::size_t max_refusal_rows = 7U;
 
 // Fills `into` with the nonzero refusal counters and returns how many were
 // written, never more than `max_refusal_rows`.

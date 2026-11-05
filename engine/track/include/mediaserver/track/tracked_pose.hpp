@@ -39,6 +39,7 @@ enum class TrackerProtocol : core::u8 {
     None = 0U,
     FreeD = 1U,
     OpenTrackIO = 2U,
+    NatNet = 3U,
 };
 
 // One tracker sample.
