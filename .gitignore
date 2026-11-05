@@ -17,6 +17,8 @@ compile_commands.json
 # Local operator state and design references are not project source.
 /media-server.wal
 /media-server.wal.release
+/media-server.wal.nodes-*.bin
+/media-server.wal.nodes-*.bin.lock
 /example UI images/
 # Artists' ajfx Studio pages are their own work, not project source.
 /ajfx/pages/

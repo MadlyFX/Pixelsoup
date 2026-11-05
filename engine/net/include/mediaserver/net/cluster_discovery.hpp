@@ -1,6 +1,8 @@
 #pragma once
 
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/net/session_protocol.hpp>
+#include <mediaserver/net/node_index_assignments.hpp>
 
 #include <array>
 #include <chrono>
@@ -17,28 +19,40 @@
 #include <asio/ip/tcp.hpp>
 #include <asio/ip/udp.hpp>
 
-// Finding render machines on the local network.
+// Finding render machines and Directors on the local IPv4 network.
 //
 // A render machine's lifecycle agent answers a small UDP query on a
 // well-known port with where its control listener is, which node it
 // supervises, and whether it was given a password. The editor asks every
 // couple of seconds - by broadcast on each IPv4 interface, and on loopback -
 // and offers the machines that answered in the Hardware Map.
+// Directors answer queries of their own kind with the show listener and show
+// identity. Render machines use those answers to resolve an automatic address
+// on process startup. Discovery carries public endpoint information only;
+// normal show-session identity and readiness checks still apply.
 //
 // The exchange is information only. It carries no password or key and
 // authorizes nothing: a machine found this way is still controlled over the
-// authenticated lifecycle channel, so a forged answer can at worst offer a
-// wrong card. A query is padded to the size of the largest answer, so an agent
+// authenticated lifecycle channel, and nodes validate the show session before
+// rendering. A query is padded to the size of the largest answer, so an agent
 // cannot be used to amplify traffic toward a third party.
 namespace mediaserver::net {
 
 // Just below the default lifecycle control range (47840 + node index).
 inline constexpr std::uint16_t cluster_discovery_port = 47'839U;
-inline constexpr std::size_t cluster_discovery_datagram_bytes = 128U;
+inline constexpr std::size_t cluster_discovery_datagram_bytes = 160U;
 inline constexpr std::size_t cluster_discovery_max_hostname_bytes = 63U;
+
+enum class ClusterDiscoveryKind : std::uint8_t { RenderMachine, Director };
 
 struct ClusterDiscoveryQuery final {
     std::uint64_t nonce{};
+    ClusterDiscoveryKind kind{ClusterDiscoveryKind::RenderMachine};
+    // Zero browses only. Enrollment targets a previously selected Director
+    // instance, so browsing several editors never consumes node slots.
+    Id128 node_id{};
+    core::u64 director_instance{};
+    core::u32 requested_node_index{automatic_node_index};
 
     bool operator==(const ClusterDiscoveryQuery&) const = default;
 };
@@ -58,6 +72,10 @@ struct ClusterDiscoveryAnswer final {
     bool password_set{};
     // Printable ASCII, at most cluster_discovery_max_hostname_bytes.
     std::string hostname;
+    ClusterDiscoveryKind kind{ClusterDiscoveryKind::RenderMachine};
+    Id128 show_id{};
+    Id128 enrolled_node_id{};
+    NodeAssignmentStatus assignment{NodeAssignmentStatus::None};
 
     bool operator==(const ClusterDiscoveryAnswer&) const = default;
 };
@@ -106,6 +124,9 @@ struct ClusterDiscoveryResponderConfig final {
     std::string hostname;
     // Queries beyond this are ignored, so a flood costs this machine little.
     core::u32 max_answers_per_second{64U};
+    ClusterDiscoveryKind kind{ClusterDiscoveryKind::RenderMachine};
+    Id128 show_id{};
+    std::shared_ptr<NodeIndexAssignments> node_assignments;
 };
 
 namespace detail {
@@ -144,6 +165,10 @@ struct ClusterDiscoveryBrowserConfig final {
     // Where queries go. Empty means loopback, the limited broadcast address,
     // and each interface's directed broadcast.
     std::vector<asio::ip::address_v4> targets;
+    ClusterDiscoveryKind kind{ClusterDiscoveryKind::RenderMachine};
+    Id128 node_id{};
+    core::u64 director_instance{};
+    core::u32 requested_node_index{automatic_node_index};
 };
 
 struct ClusterDiscoveredMachine final {
@@ -160,6 +185,10 @@ struct ClusterDiscoveredMachine final {
     bool password_set{};
     // It answered on loopback or from one of this machine's own addresses.
     bool this_machine{};
+    Id128 show_id{};
+    ClusterDiscoveryKind kind{ClusterDiscoveryKind::RenderMachine};
+    Id128 enrolled_node_id{};
+    NodeAssignmentStatus assignment{NodeAssignmentStatus::None};
 
     bool operator==(const ClusterDiscoveredMachine&) const = default;
 };
@@ -173,6 +202,18 @@ struct ClusterDiscoverySnapshot final {
 
     bool operator==(const ClusterDiscoverySnapshot&) const = default;
 };
+
+// Automatic connection requires exactly one live Director for this show.
+// Several interfaces of that Director are already deduplicated by the browser.
+[[nodiscard]] std::optional<asio::ip::tcp::endpoint>
+discovered_director(const ClusterDiscoverySnapshot& snapshot, Id128 show_id);
+
+// An empty show selects a single editor and adopts its advertised show ID.
+// An optional endpoint restricts discovery for a manual address override.
+[[nodiscard]] std::optional<ClusterDiscoveredMachine>
+discovered_director_identity(const ClusterDiscoverySnapshot& snapshot,
+                             Id128 show_id = {},
+                             std::optional<asio::ip::tcp::endpoint> endpoint = {});
 
 class ClusterDiscoveryBrowser final {
 public:

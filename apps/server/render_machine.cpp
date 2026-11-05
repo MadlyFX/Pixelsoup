@@ -201,35 +201,47 @@ render_machine_config(const persist::Preferences& stored) {
                 "This machine is not set up as a render machine yet."});
     }
     RenderMachineConfig config{};
-    const auto director = parse_endpoint(stored.render_machine_director);
-    if (!director || director->port() == 0U ||
-        !connectable(director->address())) {
+    config.discover_director = stored.render_machine_director == "auto";
+    const auto director = config.discover_director
+        ? std::optional<asio::ip::tcp::endpoint>{asio::ip::tcp::endpoint{}}
+        : parse_endpoint(stored.render_machine_director);
+    if (!config.discover_director && (!director || director->port() == 0U ||
+        !connectable(director->address()))) {
         return invalid("The saved control machine address (" +
                        stored.render_machine_director +
                        ") cannot be used. Enter it again.");
     }
     config.director = *director;
-    if (stored.render_machine_node_index >
+    config.automatic_index = stored.render_machine_node_index == net::automatic_node_index;
+    if (!config.automatic_index && stored.render_machine_node_index >
         persist::maximum_render_machine_node_index) {
         return invalid("The saved node index is out of range. Enter it again.");
     }
     config.node_index = stored.render_machine_node_index;
+    if (!stored.render_machine_node_id.empty()) {
+        const auto id = parse_id128(stored.render_machine_node_id);
+        if (!id) return invalid("The saved machine identity is invalid. Restore this machine's settings.");
+        config.node_id = *id;
+    } else if (config.automatic_index) {
+        return invalid("Save settings to generate this render machine's identity.");
+    } else {
+        config.node_id = render_machine_node_id(config.node_index);
+    }
     if (stored.render_machine_control_port > 65'535U) {
         return invalid(
             "The saved control port is out of range. Enter it again.");
     }
+    config.automatic_control_port = stored.render_machine_control_port == 0U;
     config.control_port =
         stored.render_machine_control_port == 0U
             ? render_machine_default_control_port(config.node_index)
             : static_cast<std::uint16_t>(stored.render_machine_control_port);
-    const auto show = parse_id128(stored.render_machine_show_id.empty()
-                                      ? render_machine_default_show_id
-                                      : stored.render_machine_show_id);
-    if (!show) {
+    const auto show = parse_id128(stored.render_machine_show_id);
+    if (!stored.render_machine_show_id.empty() && !show) {
         return invalid("The saved show ID (" + stored.render_machine_show_id +
                        ") is not 32 hexadecimal digits. Enter it again.");
     }
-    config.show_id = *show;
+    config.show_id = show.value_or(net::Id128{});
     // A damaged key is refused rather than read as "no password": a machine
     // its operator secured must not quietly come up open to the network.
     if (stored.lifecycle_password_key.empty()) {
@@ -252,9 +264,11 @@ render_machine_child_arguments(const RenderMachineConfig& config) {
     // the Feed Map and present the plain camera view.
     return {
         "--role=render,output",
-        "--director-connect=" + endpoint_text(config.director),
-        "--show-id=" + format_id128(config.show_id),
-        "--node-id=" + format_id128(render_machine_node_id(config.node_index)),
+        "--director-connect=" + (config.discover_director
+                                     ? std::string{"auto"}
+                                     : endpoint_text(config.director)),
+        "--show-id=" + (config.show_id ? format_id128(config.show_id) : std::string{"auto"}),
+        "--node-id=" + format_id128(config.node_id ? config.node_id : render_machine_node_id(config.node_index)),
         "--node-incarnation=" + std::string{render_node_incarnation},
         "--playback",
         "--output",
@@ -308,9 +322,14 @@ RenderMachineForm render_machine_form(const persist::Preferences& stored) {
         form.director_port = std::to_string(director->port());
     } else {
         // Shown as stored, so the operator sees what needs correcting.
-        form.director_address = stored.render_machine_director;
+        if (stored.render_machine_director != "auto") {
+            form.director_address = stored.render_machine_director;
+        }
     }
-    form.node_index = std::to_string(stored.render_machine_node_index);
+    if (!stored.render_machine_director.empty() &&
+        stored.render_machine_node_index != net::automatic_node_index) {
+        form.node_index = std::to_string(stored.render_machine_node_index);
+    }
     if (stored.render_machine_control_port != 0U) {
         form.control_port = std::to_string(stored.render_machine_control_port);
     }
@@ -325,14 +344,10 @@ core::Result<persist::Preferences, RenderMachineFormError>
 apply_render_machine_form(const RenderMachineForm& form,
                           persist::Preferences stored) {
     const std::string_view typed_address = trim(form.director_address);
-    if (typed_address.empty()) {
-        return form_error(RenderMachineField::DirectorAddress,
-                          "Enter the control machine's address, such as "
-                          "192.168.1.20.");
-    }
+    const bool automatic = typed_address.empty();
     std::optional<asio::ip::tcp::endpoint> director =
         parse_endpoint(typed_address);
-    if (!director) {
+    if (!automatic && !director) {
         const auto address = parse_address(typed_address);
         if (!address) {
             return form_error(
@@ -357,20 +372,21 @@ apply_render_machine_form(const RenderMachineForm& form,
         director = asio::ip::tcp::endpoint{*address,
                                            static_cast<std::uint16_t>(*port)};
     }
-    if (director->port() == 0U) {
+    if (!automatic && director->port() == 0U) {
         return form_error(RenderMachineField::DirectorPort,
                           "The Director port is a number from 1 to 65535 - "
                           "normally 45060.");
     }
-    if (!connectable(director->address())) {
+    if (!automatic && !connectable(director->address())) {
         return form_error(RenderMachineField::DirectorAddress,
                           "That address cannot be connected to. Enter the "
                           "control machine's own address, such as "
                           "192.168.1.20.");
     }
 
-    const auto node_index = parse_decimal(
-        trim(form.node_index), persist::maximum_render_machine_node_index);
+    const auto node_index = trim(form.node_index).empty()
+        ? std::optional<std::uint32_t>{net::automatic_node_index}
+        : parse_decimal(trim(form.node_index), persist::maximum_render_machine_node_index);
     if (!node_index) {
         return form_error(RenderMachineField::NodeIndex,
                           "The node index is a whole number from 0 to 4095: "
@@ -412,7 +428,17 @@ apply_render_machine_form(const RenderMachineForm& form,
                 ? std::string{}
                 : net::lifecycle_key_from_password(form.password);
     }
-    stored.render_machine_director = endpoint_text(*director);
+    if (stored.render_machine_node_id.empty()) {
+        // A configured machine already has an index-derived session identity.
+        // Keep that identity when clearing overrides so its editor assignment
+        // and existing output binding survive the change to automatic setup.
+        const auto id = !stored.render_machine_director.empty() &&
+                        stored.render_machine_node_index <= persist::maximum_render_machine_node_index
+            ? render_machine_node_id(stored.render_machine_node_index)
+            : net::new_render_machine_id();
+        stored.render_machine_node_id = format_id128(id);
+    }
+    stored.render_machine_director = automatic ? "auto" : endpoint_text(*director);
     stored.render_machine_node_index = *node_index;
     stored.render_machine_control_port = control_port;
     stored.render_machine_show_id = std::move(show_id);

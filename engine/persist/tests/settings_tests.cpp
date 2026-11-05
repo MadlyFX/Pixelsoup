@@ -284,6 +284,7 @@ void startup_returns_only_a_fully_valid_existing_project() {
         persist::ProxyTranscodePriority::Balanced;
     preferences.render_machine_director = "10.20.0.10:45060";
     preferences.render_machine_node_index = 3U;
+    preferences.render_machine_node_id = "112233445566778899AABBCCDDEEFF00";
     preferences.render_machine_control_port = 47'900U;
     preferences.render_machine_show_id = "0000000000000001000000000000000B";
     return preferences;

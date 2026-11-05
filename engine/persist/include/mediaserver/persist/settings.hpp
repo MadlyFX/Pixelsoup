@@ -185,21 +185,22 @@ struct Preferences final {
     // lifecycle_password_key above - the render node password is one setting
     // whichever end of the connection this machine is.
     //
-    // "ADDRESS:PORT" of the Director the render process connects to.
+    // "auto" discovers the Director for this show on each process start;
+    // otherwise "ADDRESS:PORT" is an explicit manual override.
     std::string render_machine_director;
-    // Which slice of the wall this machine drives; also its identity in the
-    // Hardware Map.
+    // Output identity in the Hardware Map. UINT32_MAX asks the editor to assign it.
     std::uint32_t render_machine_node_index{};
+    // Generated once on setup. Independent of the editor-assigned output index.
+    std::string render_machine_node_id;
     // TCP port Output Monitor controls the agent on. Zero is the default,
     // 47840 plus the node index, which is where the editor looks first.
     std::uint32_t render_machine_control_port{};
-    // 32 hexadecimal characters; empty is the show identity the bundled
-    // scripts and the editor demo use.
+    // 32 hexadecimal characters; empty adopts the selected editor's show.
     std::string render_machine_show_id;
 
     [[nodiscard]] bool valid_render_machine() const noexcept {
-        return render_machine_node_index <=
-                   maximum_render_machine_node_index &&
+        return (render_machine_node_index <= maximum_render_machine_node_index ||
+                render_machine_node_index == 0xffffffffU) &&
                render_machine_control_port <= 65'535U;
     }
 
@@ -228,6 +229,7 @@ struct Preferences final {
                proxy_transcode_priority == default_proxy_transcode_priority &&
                render_machine_director.empty() &&
                render_machine_node_index == 0U &&
+               render_machine_node_id.empty() &&
                render_machine_control_port == 0U &&
                render_machine_show_id.empty();
     }
@@ -283,6 +285,16 @@ load_workspace_layout(const std::filesystem::path &layout_file);
 [[nodiscard]] WorkspaceLayoutSaveResult
 save_workspace_layout(const std::filesystem::path &layout_file,
                       std::span<const std::byte> layout);
+
+// A separate checksummed, atomic record for the Director's stable node-index
+// assignments. Network startup workers own its bounded inner schema.
+using NodeAssignmentsLoadResult = core::Result<std::vector<std::byte>, SettingsError>;
+using NodeAssignmentsSaveResult = core::Result<std::filesystem::path, SettingsError>;
+[[nodiscard]] NodeAssignmentsLoadResult
+load_node_assignments(const std::filesystem::path& file);
+[[nodiscard]] NodeAssignmentsSaveResult
+save_node_assignments(const std::filesystem::path& file,
+                      std::span<const std::byte> bytes);
 
 // Startup probe: missing settings yield no candidate; corrupt/unreadable
 // settings or projects return a diagnostic while leaving all live state

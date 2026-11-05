@@ -410,6 +410,21 @@ endif()
 
 # The unqualified launch cadence and range are the new-project defaults.
 execute_process(
+    COMMAND "${SERVER_EXE}" --validate-startup --role=output
+        --director-connect=auto --show-id=auto --node-index=auto
+        "--node-id=${node_id}" "--node-incarnation=${node_incarnation}"
+        --playback
+    WORKING_DIRECTORY "${TEST_ROOT}"
+    RESULT_VARIABLE auto_discovery_result
+    OUTPUT_VARIABLE auto_discovery_output
+    ERROR_VARIABLE auto_discovery_error
+    TIMEOUT 10
+)
+if(NOT auto_discovery_result EQUAL 0)
+    message(FATAL_ERROR "automatic editor discovery startup validation failed: ${auto_discovery_error}")
+endif()
+
+execute_process(
     COMMAND
         "${SERVER_EXE}"
         --validate-startup

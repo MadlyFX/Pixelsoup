@@ -33,6 +33,7 @@ add_library(mediaserver_net STATIC
     src/frame_commit_sink.cpp
     src/heartbeat_schedule.cpp
     src/node_session_service.cpp
+    src/node_index_assignments.cpp
     src/resume_session.cpp
     src/session_codec.cpp
     src/socket_readiness.cpp

@@ -45,6 +45,9 @@ constexpr std::array<std::byte, 8U> kPreferencesMagic{
 constexpr std::array<std::byte, 8U> kWorkspaceLayoutMagic{
     std::byte{'M'}, std::byte{'S'}, std::byte{'W'}, std::byte{'O'},
     std::byte{'R'}, std::byte{'K'}, std::byte{'0'}, std::byte{'1'}};
+constexpr std::array<std::byte, 8U> kNodeAssignmentsMagic{
+    std::byte{'M'}, std::byte{'S'}, std::byte{'N'}, std::byte{'O'},
+    std::byte{'D'}, std::byte{'E'}, std::byte{'0'}, std::byte{'1'}};
 
 // One preference value on disk: a one-byte key, a two-byte length, then UTF-8
 // bytes. An unknown key is skipped rather than rejected, so a settings file
@@ -68,13 +71,14 @@ enum class PreferenceKey : std::uint8_t {
     RenderMachineNodeIndex = 16U,
     RenderMachineControlPort = 17U,
     RenderMachineShowId = 18U,
+    RenderMachineNodeId = 19U,
 };
 
 // Every key at its largest. Older builds bounded the file by five values,
 // which a record this build writes could exceed only with values far beyond
 // anything an operator types.
 constexpr std::uint64_t kMaximumPreferencesPayload =
-    18ULL * (3ULL + max_preference_value_bytes);
+    19ULL * (3ULL + max_preference_value_bytes);
 
 constexpr std::array<std::uint32_t, 256U> make_crc32c_table() noexcept {
     std::array<std::uint32_t, 256U> table{};
@@ -756,6 +760,7 @@ void put_preference(std::vector<std::byte> &payload, PreferenceKey key,
     bool seen_render_node_index = false;
     bool seen_render_control_port = false;
     bool seen_render_show_id = false;
+    bool seen_render_node_id = false;
     std::size_t cursor = 0U;
     while (cursor < payload.size()) {
         if (payload.size() - cursor < 3U) {
@@ -885,6 +890,11 @@ void put_preference(std::vector<std::byte> &payload, PreferenceKey key,
             seen_render_director = true;
             decoded.render_machine_director = utf8_from_bytes(value);
             break;
+        case PreferenceKey::RenderMachineNodeId:
+            if (seen_render_node_id) return false;
+            seen_render_node_id = true;
+            decoded.render_machine_node_id = utf8_from_bytes(value);
+            break;
         case PreferenceKey::RenderMachineNodeIndex:
             if (seen_render_node_index ||
                 !decode_u32(value, decoded.render_machine_node_index)) {
@@ -937,7 +947,8 @@ save_preferences_impl(const std::filesystem::path &preferences_file,
           std::string_view{preferences.wal_path},
           std::string_view{preferences.proxy_cache_directory},
           std::string_view{preferences.render_machine_director},
-          std::string_view{preferences.render_machine_show_id}}) {
+          std::string_view{preferences.render_machine_show_id},
+          std::string_view{preferences.render_machine_node_id}}) {
         if (value.size() > max_preference_value_bytes) {
             return preferences_save_failure(
                 make_error(SettingsErrorCode::SizeLimitExceeded));
@@ -954,7 +965,8 @@ save_preferences_impl(const std::filesystem::path &preferences_file,
           std::string_view{preferences.wal_path},
           std::string_view{preferences.proxy_cache_directory},
           std::string_view{preferences.render_machine_director},
-          std::string_view{preferences.render_machine_show_id}}) {
+          std::string_view{preferences.render_machine_show_id},
+          std::string_view{preferences.render_machine_node_id}}) {
         if (value.empty()) {
             continue;
         }
@@ -1010,6 +1022,8 @@ save_preferences_impl(const std::filesystem::path &preferences_file,
     }
     put_preference(payload, PreferenceKey::RenderMachineDirector,
                    preferences.render_machine_director);
+    put_preference(payload, PreferenceKey::RenderMachineNodeId,
+                   preferences.render_machine_node_id);
     if (preferences.render_machine_node_index != 0U) {
         put_preference(payload, PreferenceKey::RenderMachineNodeIndex,
                        preferences.render_machine_node_index);
@@ -1147,7 +1161,9 @@ load_preferences_impl(const std::filesystem::path &preferences_file) {
 
 [[nodiscard]] WorkspaceLayoutSaveResult
 save_workspace_layout_impl(const std::filesystem::path &layout_file,
-                           std::span<const std::byte> layout) {
+                           std::span<const std::byte> layout,
+                           const std::array<std::byte, 8U>& magic = kWorkspaceLayoutMagic,
+                           std::uint16_t version = current_workspace_layout_format_version) {
     if (!valid_target_path(layout_file)) {
         return WorkspaceLayoutSaveResult::failure(
             make_error(SettingsErrorCode::InvalidSettingsPath));
@@ -1157,8 +1173,8 @@ save_workspace_layout_impl(const std::filesystem::path &layout_file,
             make_error(SettingsErrorCode::SizeLimitExceeded));
     }
     auto bytes = make_setting_bytes(
-        std::span<const std::byte, 8U>{kWorkspaceLayoutMagic},
-        current_workspace_layout_format_version, layout);
+        std::span<const std::byte, 8U>{magic},
+        version, layout);
 
     auto parent = layout_file.parent_path();
     if (parent.empty()) {
@@ -1198,7 +1214,9 @@ save_workspace_layout_impl(const std::filesystem::path &layout_file,
 }
 
 [[nodiscard]] WorkspaceLayoutLoadResult
-load_workspace_layout_impl(const std::filesystem::path &layout_file) {
+load_workspace_layout_impl(const std::filesystem::path &layout_file,
+                           const std::array<std::byte, 8U>& magic = kWorkspaceLayoutMagic,
+                           std::uint16_t version = current_workspace_layout_format_version) {
     if (!valid_target_path(layout_file)) {
         return WorkspaceLayoutLoadResult::failure(
             make_error(SettingsErrorCode::InvalidSettingsPath));
@@ -1244,12 +1262,12 @@ load_workspace_layout_impl(const std::filesystem::path &layout_file) {
     }
 
     const auto view = std::span<const std::byte>{bytes};
-    if (!std::equal(kWorkspaceLayoutMagic.begin(), kWorkspaceLayoutMagic.end(),
+    if (!std::equal(magic.begin(), magic.end(),
                     view.begin())) {
         return WorkspaceLayoutLoadResult::failure(
             make_error(SettingsErrorCode::InvalidFormat));
     }
-    if (get_u16(view, 8U) != current_workspace_layout_format_version) {
+    if (get_u16(view, 8U) != version) {
         return WorkspaceLayoutLoadResult::failure(
             make_error(SettingsErrorCode::UnsupportedVersion));
     }
@@ -1421,6 +1439,23 @@ save_workspace_layout(const std::filesystem::path &layout_file,
     } catch (const std::filesystem::filesystem_error &error) {
         return WorkspaceLayoutSaveResult::failure(
             make_error(SettingsErrorCode::WriteFailed, error.code()));
+    }
+}
+
+NodeAssignmentsLoadResult load_node_assignments(const std::filesystem::path& file) {
+    try {
+        return load_workspace_layout_impl(file, kNodeAssignmentsMagic, 1U);
+    } catch (const std::exception&) {
+        return WorkspaceLayoutLoadResult::failure(make_error(SettingsErrorCode::ReadFailed));
+    }
+}
+
+NodeAssignmentsSaveResult save_node_assignments(
+    const std::filesystem::path& file, std::span<const std::byte> bytes) {
+    try {
+        return save_workspace_layout_impl(file, bytes, kNodeAssignmentsMagic, 1U);
+    } catch (const std::exception&) {
+        return WorkspaceLayoutSaveResult::failure(make_error(SettingsErrorCode::WriteFailed));
     }
 }
 

@@ -16,6 +16,7 @@
 #include <mediaserver/cmd/node_command_bus.hpp>
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/net/session_protocol.hpp>
+#include <mediaserver/net/node_index_assignments.hpp>
 #include <mediaserver/net/tcp_framed_stream.hpp>
 #include <mediaserver/persist/command_log.hpp>
 #include <mediaserver/persist/durable_director.hpp>
@@ -141,6 +142,7 @@ struct DirectorSessionConfig final {
     SessionDecodeLimits codec_limits{};
     wire::DecodeLimits wire_limits{};
     SessionIoPolicy io{};
+    std::shared_ptr<NodeIndexAssignments> node_assignments;
 };
 
 struct NodeSessionConfig final {

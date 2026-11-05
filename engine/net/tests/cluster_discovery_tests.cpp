@@ -1,4 +1,5 @@
 #include <mediaserver/net/cluster_discovery.hpp>
+#include <mediaserver/persist/settings.hpp>
 
 #include <asio/io_context.hpp>
 #include <asio/ip/udp.hpp>
@@ -8,6 +9,8 @@
 #include <chrono>
 #include <exception>
 #include <functional>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -81,8 +84,25 @@ void queries_are_padded_and_strict() {
     wrong_magic[3] = 'A';
     DISCOVERY_CHECK(!net::decode_cluster_discovery_query(wrong_magic));
     auto wrong_version = bytes;
-    wrong_version[4] = 2U;
+    wrong_version[4] = 4U;
     DISCOVERY_CHECK(!net::decode_cluster_discovery_query(wrong_version));
+    const auto editor_query = net::encode_cluster_discovery_query(
+        {0xFEDCBA9876543210ULL, net::ClusterDiscoveryKind::Director});
+    DISCOVERY_CHECK(editor_query[5] == 1U);
+    DISCOVERY_CHECK(editor_query[8] == 0xFEU && editor_query[15] == 0x10U);
+    const auto editor_decoded = net::decode_cluster_discovery_query(editor_query);
+    DISCOVERY_CHECK(editor_decoded->kind == net::ClusterDiscoveryKind::Director);
+    DISCOVERY_CHECK(editor_decoded->nonce == 0xFEDCBA9876543210ULL);
+    auto unknown_kind = bytes;
+    unknown_kind[5] = 2U;
+    DISCOVERY_CHECK(!net::decode_cluster_discovery_query(unknown_kind));
+    const net::ClusterDiscoveryQuery enrollment{0x1020304050607080ULL,
+        net::ClusterDiscoveryKind::Director, {0x1122334455667788ULL, 0x99AABBCCDDEEFF00ULL},
+        0xFEDCBA9876543210ULL, 37U};
+    const auto identity_query = net::encode_cluster_discovery_query(enrollment);
+    DISCOVERY_CHECK(net::decode_cluster_discovery_query(identity_query) == enrollment);
+    DISCOVERY_CHECK(identity_query[16] == 0x11U && identity_query[24] == 0x99U);
+    DISCOVERY_CHECK(identity_query[32] == 0xFEU && identity_query[43] == 37U);
 }
 
 void answers_round_trip_and_fail_closed() {
@@ -94,9 +114,16 @@ void answers_round_trip_and_fail_closed() {
     answer.control_address = asio::ip::make_address_v4("192.0.2.17");
     answer.password_set = true;
     answer.hostname = "RENDER-07";
+    answer.kind = net::ClusterDiscoveryKind::Director;
+    answer.show_id = {0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL};
+    answer.enrolled_node_id = {0x1122334455667788ULL, 0x99AABBCCDDEEFF00ULL};
+    answer.assignment = net::NodeAssignmentStatus::Assigned;
     const auto bytes = net::encode_cluster_discovery_answer(answer);
     DISCOVERY_CHECK(bytes.size() <= net::cluster_discovery_datagram_bytes);
     const auto decoded = net::decode_cluster_discovery_answer(bytes);
+    DISCOVERY_CHECK(bytes[7] == 1U);
+    DISCOVERY_CHECK(bytes[36] == 0x01U && bytes[43] == 0xEFU);
+    DISCOVERY_CHECK(bytes[44] == 0xFEU && bytes[51] == 0x10U);
     DISCOVERY_CHECK(decoded.has_value());
     DISCOVERY_CHECK(*decoded == answer);
 
@@ -126,6 +153,9 @@ void answers_round_trip_and_fail_closed() {
     auto control_character = bytes;
     control_character.back() = 0x07U;
     DISCOVERY_CHECK(!net::decode_cluster_discovery_answer(control_character));
+    auto unknown_kind = bytes;
+    unknown_kind[7] = 2U;
+    DISCOVERY_CHECK(!net::decode_cluster_discovery_answer(unknown_kind));
     DISCOVERY_CHECK(!net::cluster_discovery_hostname().empty());
 }
 
@@ -263,6 +293,13 @@ void every_agent_sharing_the_port_on_this_machine_is_found() {
     net::ClusterDiscoveryBrowserConfig config{};
     config.port = shared_port;
     config.query_interval = 100ms;
+    auto editor_config = responder_config(
+        {asio::ip::address_v4::loopback(), 45'321U});
+    editor_config.bind_endpoint.port(shared_port);
+    editor_config.kind = net::ClusterDiscoveryKind::Director;
+    editor_config.show_id = {17U, 23U};
+    net::ClusterDiscoveryResponder editor{editor_config};
+    DISCOVERY_CHECK(!editor.start());
     net::ClusterDiscoveryBrowser browser{config};
     DISCOVERY_CHECK(!browser.start());
     DISCOVERY_CHECK(eventually([&] { return browser.snapshot().machines.size() == 2U; }));
@@ -270,7 +307,56 @@ void every_agent_sharing_the_port_on_this_machine_is_found() {
         DISCOVERY_CHECK(machine.address == asio::ip::address_v4::loopback());
         DISCOVERY_CHECK(machine.control_port == 47'990U + machine.node_index);
     }
+    config.kind = net::ClusterDiscoveryKind::Director;
+    net::ClusterDiscoveryBrowser editors{config};
+    DISCOVERY_CHECK(!editors.start());
+    DISCOVERY_CHECK(eventually([&] {
+        return net::discovered_director(editors.snapshot(), {17U, 23U}) ==
+            std::optional<asio::ip::tcp::endpoint>{{asio::ip::address_v4::loopback(), 45'321U}};
+    }));
+    DISCOVERY_CHECK(editors.snapshot().machines.size() == 1U);
     browser.stop();
+}
+
+void directors_are_discovered_separately_and_selected_by_show() {
+    const net::Id128 show{0x1122334455667788ULL, 0x99AABBCCDDEEFF01ULL};
+    auto config = responder_config({asio::ip::address_v4::loopback(), 45'123U});
+    config.kind = net::ClusterDiscoveryKind::Director;
+    config.show_id = show;
+    net::ClusterDiscoveryResponder responder{config};
+    DISCOVERY_CHECK(!responder.start());
+    auto search = browser_config(responder.local_endpoint()->port(),
+                                  {asio::ip::address_v4::loopback()});
+    net::ClusterDiscoveryBrowser nodes{search};
+    DISCOVERY_CHECK(!nodes.start());
+    // Queries for render machines must never get an editor answer.
+    std::this_thread::sleep_for(200ms);
+    DISCOVERY_CHECK(nodes.snapshot().machines.empty());
+    DISCOVERY_CHECK(responder.answers() == 0U);
+    search.kind = net::ClusterDiscoveryKind::Director;
+    net::ClusterDiscoveryBrowser editors{search};
+    DISCOVERY_CHECK(!editors.start());
+    DISCOVERY_CHECK(eventually([&] {
+        return net::discovered_director(editors.snapshot(), show).has_value();
+    }));
+    auto found = editors.snapshot();
+    const auto endpoint = net::discovered_director(found, show);
+    DISCOVERY_CHECK(endpoint->address() == asio::ip::address_v4::loopback());
+    DISCOVERY_CHECK(endpoint->port() == 45'123U);
+    DISCOVERY_CHECK(!net::discovered_director(found, {7U, 9U}));
+    // Different instances with the same show are ambiguous, even at one IP.
+    found.machines.push_back(found.machines.front());
+    found.machines.back().instance += 1U;
+    found.machines.back().control_port = 45'124U;
+    DISCOVERY_CHECK(!net::discovered_director(found, show));
+    found.machines.back().show_id = {11U, 13U};
+    DISCOVERY_CHECK(net::discovered_director(found, show) == endpoint);
+    found.running = false;
+    DISCOVERY_CHECK(!net::discovered_director(found, show));
+    responder.stop();
+    DISCOVERY_CHECK(eventually([&] {
+        return !net::discovered_director(editors.snapshot(), show);
+    }));
 }
 
 void answers_are_rate_limited() {
@@ -294,6 +380,124 @@ void answers_are_rate_limited() {
     responder.stop();
 }
 
+struct IdentityDirectory {
+    std::filesystem::path root = std::filesystem::current_path() / "out" /
+        ("node-identity-" + std::to_string(net::new_render_machine_id().low));
+    IdentityDirectory() { std::filesystem::create_directories(root); }
+    ~IdentityDirectory() { std::error_code ignored; std::filesystem::remove_all(root, ignored); }
+};
+
+void node_indices_are_unique_durable_and_fail_closed() {
+    const IdentityDirectory temporary;
+    const auto file = temporary.root / "assignments.bin";
+    const net::Id128 first{0x1234U, 0x5678U}, second{0xABCDU, 0xEF12U};
+    mediaserver::core::u32 first_index{}, second_index{};
+    {
+        net::NodeIndexAssignments registry{file};
+        DISCOVERY_CHECK(registry.ready());
+        net::NodeIndexAssignments other_editor{file};
+        DISCOVERY_CHECK(!other_editor.ready());
+        DISCOVERY_CHECK(registry.assign({99U, 101U}, 0U).status == net::NodeAssignmentStatus::Assigned);
+        net::NodeIndexAssignment a, b;
+        std::thread one{[&] { a = registry.assign(first); }};
+        std::thread two{[&] { b = registry.assign(second); }};
+        one.join(); two.join();
+        DISCOVERY_CHECK(a.status == net::NodeAssignmentStatus::Assigned);
+        DISCOVERY_CHECK(b.status == net::NodeAssignmentStatus::Assigned);
+        DISCOVERY_CHECK(a.index != b.index);
+        DISCOVERY_CHECK(a.index + b.index == 3U);
+        first_index = a.index; second_index = b.index;
+        DISCOVERY_CHECK(registry.assign({13U, 17U}, first_index).status == net::NodeAssignmentStatus::Conflict);
+        DISCOVERY_CHECK(registry.assign(first).index == first_index);
+    }
+    {
+        net::NodeIndexAssignments restarted{file};
+        DISCOVERY_CHECK(restarted.ready());
+        DISCOVERY_CHECK(restarted.assign(second).index == second_index);
+        DISCOVERY_CHECK(restarted.assign(first).index == first_index);
+        DISCOVERY_CHECK(restarted.assign({19U, 23U}).index == 3U);
+    }
+    // A damaged saved table must never become an empty table and reassign outputs.
+    {
+        std::fstream bytes{file, std::ios::binary | std::ios::in | std::ios::out};
+        bytes.seekp(-1, std::ios::end);
+        bytes.put('\x7f');
+    }
+    net::NodeIndexAssignments damaged{file};
+    DISCOVERY_CHECK(!damaged.ready());
+    DISCOVERY_CHECK(damaged.assign({29U, 31U}).status == net::NodeAssignmentStatus::Unavailable);
+}
+
+void discovery_adopts_show_and_assigns_stable_node_indices() {
+    const IdentityDirectory temporary;
+    auto registry = std::make_shared<net::NodeIndexAssignments>(temporary.root / "enrollment.bin");
+    auto config = responder_config({asio::ip::address_v4::loopback(), 45'789U});
+    config.kind = net::ClusterDiscoveryKind::Director;
+    config.show_id = {0xAB123U, 0xCD456U};
+    config.node_assignments = registry;
+    net::ClusterDiscoveryResponder responder{config};
+    DISCOVERY_CHECK(!responder.start());
+    auto search = browser_config(responder.local_endpoint()->port(), {asio::ip::address_v4::loopback()});
+    search.kind = net::ClusterDiscoveryKind::Director;
+    net::ClusterDiscoveryBrowser browse{search};
+    DISCOVERY_CHECK(!browse.start());
+    DISCOVERY_CHECK(eventually([&] { return net::discovered_director_identity(browse.snapshot()).has_value(); }));
+    const auto editor = *net::discovered_director_identity(browse.snapshot());
+    DISCOVERY_CHECK(editor.show_id == config.show_id);
+    search.director_instance = editor.instance;
+    search.node_id = {0x1111U, 0x2222U};
+    net::ClusterDiscoveryBrowser first{search};
+    DISCOVERY_CHECK(!first.start());
+    search.node_id = {0x3333U, 0x4444U};
+    net::ClusterDiscoveryBrowser second{search};
+    DISCOVERY_CHECK(!second.start());
+    DISCOVERY_CHECK(eventually([&] {
+        return !first.snapshot().machines.empty() && !second.snapshot().machines.empty();
+    }));
+    const auto a = *net::discovered_director_identity(first.snapshot());
+    const auto b = *net::discovered_director_identity(second.snapshot());
+    DISCOVERY_CHECK(a.assignment == net::NodeAssignmentStatus::Assigned);
+    DISCOVERY_CHECK(b.assignment == net::NodeAssignmentStatus::Assigned);
+    DISCOVERY_CHECK(a.enrolled_node_id == (net::Id128{0x1111U, 0x2222U}));
+    DISCOVERY_CHECK(b.enrolled_node_id == search.node_id);
+    DISCOVERY_CHECK(a.node_index != b.node_index);
+    DISCOVERY_CHECK(a.node_index + b.node_index == 1U);
+    // A new browser/process for the same saved ID receives the original index.
+    net::ClusterDiscoveryBrowser again{search};
+    DISCOVERY_CHECK(!again.start());
+    DISCOVERY_CHECK(eventually([&] { return !again.snapshot().machines.empty(); }));
+    DISCOVERY_CHECK(again.snapshot().machines.front().node_index == b.node_index);
+}
+
+void assignment_capacity_and_failed_saves_are_explicit() {
+    const IdentityDirectory temporary;
+    const auto full_file = temporary.root / "full.bin";
+    std::vector<std::byte> payload;
+    // A pre-existing table fills all 4096 valid indices. IDs are distinct and
+    // deliberately unrelated to their index-derived legacy identities.
+    for (std::uint64_t index = 0; index < 4096U; ++index) {
+        for (const auto value : {std::uint64_t{0xDEADBEEF}, index + 101U}) {
+            for (unsigned byte = 0; byte < 8U; ++byte)
+                payload.push_back(static_cast<std::byte>(value >> (8U * byte)));
+        }
+        for (unsigned byte = 0; byte < 4U; ++byte)
+            payload.push_back(static_cast<std::byte>(index >> (8U * byte)));
+    }
+    DISCOVERY_CHECK(mediaserver::persist::save_node_assignments(full_file, payload));
+    DISCOVERY_CHECK(!mediaserver::persist::load_workspace_layout(full_file));
+    net::NodeIndexAssignments full{full_file};
+    DISCOVERY_CHECK(full.ready());
+    DISCOVERY_CHECK(full.assign({0xDEADBEEFU, 4196U}).index == 4095U);
+    DISCOVERY_CHECK(full.assign({55U, 77U}).status == net::NodeAssignmentStatus::Full);
+    const auto blocked_file = temporary.root / "blocked.bin";
+    net::NodeIndexAssignments blocked{blocked_file};
+    DISCOVERY_CHECK(blocked.ready());
+    std::filesystem::create_directory(blocked_file);
+    DISCOVERY_CHECK(blocked.assign({11U, 33U}).status == net::NodeAssignmentStatus::Unavailable);
+    std::filesystem::remove(blocked_file);
+    DISCOVERY_CHECK(blocked.assign({55U, 77U}).index == 0U);
+}
+
 } // namespace
 
 int main() {
@@ -310,6 +514,11 @@ int main() {
         {"every agent sharing the port on this machine is found",
          &every_agent_sharing_the_port_on_this_machine_is_found},
         {"answers are rate limited", &answers_are_rate_limited},
+        {"node indices are unique, durable and fail closed", &node_indices_are_unique_durable_and_fail_closed},
+        {"discovery adopts show and assigns stable indices", &discovery_adopts_show_and_assigns_stable_node_indices},
+        {"assignment capacity and failed saves are explicit", &assignment_capacity_and_failed_saves_are_explicit},
+        {"directors are discovered separately and selected by show",
+         &directors_are_discovered_separately_and_selected_by_show},
     };
     std::size_t failures{};
     for (const auto& [name, test] : tests) {

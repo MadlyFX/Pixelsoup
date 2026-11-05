@@ -75,7 +75,9 @@ struct PlaybackOptions final {
     // Server knows. Process configuration, never project data.
     std::string lifecycle_secret;
     // The UDP port render machines answer discovery on, which the Hardware
-    // Map asks; 0 turns discovery off. Matches net::cluster_discovery_port.
+    // Map asks. Directors advertise their show listener here too, and nodes
+    // using automatic connection query it. 0 disables Director/agent discovery.
+    // Matches net::cluster_discovery_port.
     std::uint16_t lifecycle_discovery_port{47'839U};
     // The application's default WAL may use an identical recent project as a
     // saved baseline after recovery. Explicit/custom WALs remain untitled.

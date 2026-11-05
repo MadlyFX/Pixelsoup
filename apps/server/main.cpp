@@ -44,6 +44,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <stdexcept>
@@ -506,6 +507,10 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                       << config.error().message << '\n';
             return 2;
         }
+        if (config.value().automatic_index || !config.value().show_id) {
+            std::cout << "media-server render machine validated; editor assigns node index and show identity at launch\n";
+            return 0;
+        }
         auto agent_config = mediaserver::app::render_machine_agent_config(
             config.value(), options.executable);
         if (!mediaserver::app::LifecycleAgent::valid_configuration(
@@ -518,7 +523,8 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                 std::move(agent_config)};
             std::cout << "media-server render machine validated; node-index="
                       << config.value().node_index
-                      << "; director=" << endpoint_text(config.value().director)
+                      << "; director=" << (config.value().discover_director
+                          ? std::string{"auto"} : endpoint_text(config.value().director))
                       << "; control-port=" << config.value().control_port
                       << "; password="
                       << (config.value().password_set ? "set" : "none")
@@ -572,6 +578,9 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     bool validate_startup = false;
     std::optional<asio::ip::tcp::endpoint> director_listen;
     std::optional<asio::ip::tcp::endpoint> director_connect;
+    bool discover_director = false;
+    bool discover_show = false;
+    bool automatic_node_index = false;
     std::optional<mediaserver::net::Id128> show_id;
     std::optional<mediaserver::net::Id128> director_epoch;
     std::optional<mediaserver::net::Id128> node_id;
@@ -623,7 +632,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                    "[--wal=PATH] [--durable-frames] [--validate-startup] "
                    "[--director-listen=ADDRESS:PORT "
                    "--show-id=32_HEX --director-epoch=32_HEX] "
-                   "[--director-connect=ADDRESS:PORT --show-id=32_HEX "
+                   "[--director-connect=ADDRESS:PORT|auto --show-id=32_HEX "
                    "--node-id=32_HEX --node-incarnation=32_HEX] "
                    "[--lifecycle-listen=ADDRESS:PORT "
                    "--lifecycle-node-index=N "
@@ -641,14 +650,15 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                    "[--fullscreen] [--borderless]] [--edit]]\n"
                 << "       --render-machine, or no arguments at all, runs this "
                    "machine as a render machine from its stored settings: a "
-                   "window opens, asks for the control machine's address, "
+                   "window opens, discovers the control machine, asks for the "
                    "node index and render node password the first time, and "
                    "from then on starts the lifecycle agent and its render "
                    "process at once. With --validate-startup it reports what "
                    "would start and opens nothing\n"
                 << "       --wal and --director-listen are owned only by the "
                    "Director role; --director-connect is node-only and "
-                   "requires a numeric unicast address and nonzero port\n"
+                   "accepts a numeric unicast address and nonzero port, or "
+                   "auto to discover the editor for this show\n"
                 << "       --playback drives the show clock: on the Director "
                    "it seals one control frame per show frame, and on a node "
                    "it paces its own frame boundary and presents only "
@@ -701,7 +711,8 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                 << "       --lifecycle-discovery-port is the UDP port an "
                    "agent answers discovery on, so the editor's Hardware Map "
                    "can list it under DETECTED ON NETWORK, and the port the "
-                   "editor asks on. Default 47839; 0 turns discovery off. "
+                   "editor asks and answers on. Automatic nodes ask on this "
+                   "port too. Default 47839; 0 turns Director/agent discovery off. "
                    "The answer carries the agent's name, node index, control "
                    "port, and whether it has a password - never the password "
                    "itself\n"
@@ -939,6 +950,8 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         }
         constexpr std::string_view node_index_prefix = "--node-index=";
         if (argument.starts_with(node_index_prefix)) {
+            automatic_node_index = argument.substr(node_index_prefix.size()) == "auto";
+            if (automatic_node_index) continue;
             mediaserver::core::u64 parsed{};
             if (!parse_u64_argument(argument.substr(node_index_prefix.size()),
                                     parsed) ||
@@ -995,6 +1008,15 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         }
         constexpr std::string_view connect_prefix = "--director-connect=";
         if (argument.starts_with(connect_prefix)) {
+            discover_director = argument.substr(connect_prefix.size()) == "auto";
+            if (discover_director) {
+                // A valid placeholder for startup validation; resolved before
+                // constructing the actual node session.
+                director_connect = asio::ip::tcp::endpoint{
+                    asio::ip::address_v4::loopback(),
+                    mediaserver::app::render_machine_default_director_port};
+                continue;
+            }
             director_connect =
                 parse_endpoint(argument.substr(connect_prefix.size()));
             if (!director_connect ||
@@ -1008,6 +1030,11 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         }
         constexpr std::string_view show_prefix = "--show-id=";
         if (argument.starts_with(show_prefix)) {
+            discover_show = argument.substr(show_prefix.size()) == "auto";
+            if (discover_show) {
+                show_id = mediaserver::net::Id128{1U, 11U};
+                continue;
+            }
             mediaserver::net::Id128 parsed{};
             if (!parse_id128(argument.substr(show_prefix.size()), parsed)) {
                 std::cerr << "show ID must be a nonzero 32-digit hexadecimal "
@@ -1304,6 +1331,11 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     const auto complete_node_session_options =
         static_cast<bool>(director_connect) && static_cast<bool>(show_id) &&
         static_cast<bool>(node_id) && static_cast<bool>(node_incarnation);
+    if ((discover_show || automatic_node_index) &&
+        (is_director || !complete_node_session_options)) {
+        std::cerr << "automatic show/node identity requires a complete node session configuration\n";
+        return 2;
+    }
     if (!is_director && any_node_session_option &&
         !complete_node_session_options) {
         std::cerr << "node session configuration requires all of "
@@ -1347,10 +1379,12 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     }
 
     if (lifecycle_discovery_port.has_value()) {
-        if (!is_director || !playback.edit) {
+        if ((!is_director && !discover_director && !discover_show && !automatic_node_index) ||
+            (!is_director && *lifecycle_discovery_port == 0U)) {
             std::cerr << "outside lifecycle agent mode, "
                          "--lifecycle-discovery-port is used only by a "
-                         "Director operator editor\n";
+                         "Director or an automatically connecting node "
+                         "(which requires a nonzero discovery port)\n";
             return 2;
         }
         playback.lifecycle_discovery_port = *lifecycle_discovery_port;
@@ -1453,6 +1487,72 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     }
 
     if (!is_director) {
+        if (!validate_startup && !install_service_stop_handlers()) {
+            return 1;
+        }
+        if ((discover_director || discover_show || automatic_node_index) && !validate_startup) {
+            mediaserver::net::ClusterDiscoveryBrowserConfig search;
+            search.kind = mediaserver::net::ClusterDiscoveryKind::Director;
+            search.port = playback.lifecycle_discovery_port;
+            mediaserver::net::ClusterDiscoveryBrowser browser{search};
+            if (const auto error = browser.start()) {
+                std::cerr << "could not discover editor: " << error.message() << '\n';
+                return 1;
+            }
+            std::cout << "Waiting for one editor for this show on the local network. "
+                         "If several editors are running, set a manual address.\n"
+                      << std::flush;
+            // Let a complete query round collect other editors before choosing.
+            const auto choose_after = std::chrono::steady_clock::now() + search.query_interval;
+            std::unique_ptr<mediaserver::net::ClusterDiscoveryBrowser> enrollment;
+            mediaserver::core::u64 enrolled_instance{};
+            while (stop_requested == 0) {
+                const auto found = browser.snapshot();
+                if (found.error) {
+                    std::cerr << "editor discovery failed: " << found.error.message() << '\n';
+                    return 1;
+                }
+                if (std::chrono::steady_clock::now() >= choose_after) {
+                    if (const auto editor = mediaserver::net::discovered_director_identity(
+                            found, discover_show ? mediaserver::net::Id128{} : *show_id,
+                            discover_director ? std::nullopt : director_connect)) {
+                        if (!automatic_node_index) {
+                            director_connect = asio::ip::tcp::endpoint{editor->address, editor->control_port};
+                            show_id = editor->show_id;
+                            break;
+                        }
+                        if (!enrollment || enrolled_instance != editor->instance) {
+                            auto request = search;
+                            request.node_id = *node_id;
+                            request.director_instance = editor->instance;
+                            enrollment = std::make_unique<mediaserver::net::ClusterDiscoveryBrowser>(request);
+                            if (const auto error = enrollment->start()) {
+                                std::cerr << "could not request node index: " << error.message() << '\n';
+                                return 1;
+                            }
+                            enrolled_instance = editor->instance;
+                        }
+                        const auto assigned = mediaserver::net::discovered_director_identity(
+                            enrollment->snapshot(), editor->show_id);
+                        if (assigned) {
+                            if (assigned->assignment != mediaserver::net::NodeAssignmentStatus::Assigned) {
+                                std::cerr << "editor could not assign a node index (status "
+                                          << static_cast<unsigned>(assigned->assignment) << ")\n";
+                                return 1;
+                            }
+                            director_connect = asio::ip::tcp::endpoint{assigned->address, assigned->control_port};
+                            show_id = assigned->show_id;
+                            playback.node_index = assigned->node_index;
+                            break;
+                        }
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            }
+            if (stop_requested != 0) {
+                return 0;
+            }
+        }
         mediaserver::cmd::NodeCommandBus command_bus;
         std::optional<mediaserver::net::NodeSessionService> node_session;
         if (complete_node_session_options) {
@@ -1478,9 +1578,6 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                 return 1;
             }
         }
-        if (!validate_startup && !install_service_stop_handlers()) {
-            return 1;
-        }
         if (node_session && !validate_startup) {
             auto started = node_session->start();
             if (!started) {
@@ -1503,7 +1600,8 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                           : (validate_startup ? "configured" : "supervising"));
         if (node_session) {
             std::cout << "; director-connect="
-                      << endpoint_text(*director_connect)
+                      << (discover_director && validate_startup
+                              ? std::string{"auto"} : endpoint_text(*director_connect))
                       << "; boundary-driver="
                       << (playback.enabled ? "show-clock" : "unwired");
         }
@@ -1652,6 +1750,8 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     std::optional<mediaserver::net::DirectorFrameBarrier> frame_barrier;
     std::optional<mediaserver::net::DirectorSessionService> session_service;
     std::optional<asio::ip::tcp::endpoint> bound_listener;
+    std::optional<mediaserver::net::ClusterDiscoveryResponder> director_discovery;
+    std::shared_ptr<mediaserver::net::NodeIndexAssignments> node_assignments;
     if (!validate_startup && !install_service_stop_handlers()) {
         return 1;
     }
@@ -1671,6 +1771,13 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             mediaserver::net::DirectorSessionConfig session_defaults;
             session_defaults.show_id = *show_id;
             session_defaults.director_epoch = *director_epoch;
+            if (!validate_startup) {
+                auto assignments_file = wal_path;
+                assignments_file += ".nodes-" + format_id128(*show_id) + ".bin";
+                node_assignments = std::make_shared<mediaserver::net::NodeIndexAssignments>(assignments_file);
+                session_defaults.node_assignments = node_assignments;
+                if (!node_assignments->ready()) std::cerr << node_assignments->error() << '\n';
+            }
             session_service.emplace(
                 mediaserver::net::DirectorSessionServiceConfig{
                     *director_listen,
@@ -1704,6 +1811,21 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             return 1;
         }
         bound_listener = started.value();
+        if (!validate_startup && playback.lifecycle_discovery_port != 0U) {
+            mediaserver::net::ClusterDiscoveryResponderConfig advertise;
+            advertise.bind_endpoint = {asio::ip::address_v4::any(),
+                                       playback.lifecycle_discovery_port};
+            advertise.control_endpoint = *bound_listener;
+            advertise.kind = mediaserver::net::ClusterDiscoveryKind::Director;
+            advertise.show_id = *show_id;
+            advertise.node_assignments = node_assignments;
+            director_discovery.emplace(std::move(advertise));
+            if (const auto error = director_discovery->start()) {
+                std::cerr << "editor discovery is unavailable: " << error.message()
+                          << "; nodes can still use a manual address\n";
+                director_discovery.reset();
+            }
+        }
     }
 
     std::cout << "media-server 0.1.0 "
@@ -1743,6 +1865,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                   *frame_barrier, session_service ? &*session_service : nullptr,
                   playback, stop_requested)
             : run_service_loop();
+    director_discovery.reset();
     if (session_service) {
         session_service->stop();
     }

@@ -21,6 +21,12 @@
     netsh advfirewall firewall add rule name="Media Server Director" `
       dir=in action=allow protocol=TCP localport=45060
 
+  Render machines can discover this editor automatically on the local IPv4
+  network. Allow its discovery port as well:
+
+    netsh advfirewall firewall add rule name="Media Server Discovery" `
+      dir=in action=allow protocol=UDP localport=47839
+
   Close the editor window to stop, or press Ctrl+C in this console.
 
 .PARAMETER Build

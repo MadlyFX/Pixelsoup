@@ -248,12 +248,23 @@ cannot tell them apart.
 Launch `media-server.exe` with no arguments (a double-click, a shortcut, or
 `media-server.exe --render-machine`):
 
-1. The first launch opens **SET UP THIS RENDER MACHINE**. Enter the control
-   machine's numeric address (and Director port, normally 45060), this
-   machine's node index, and the render node password from the editor's
+1. The first launch opens **SET UP THIS RENDER MACHINE**. The control machine
+   is discovered automatically. Leave the address, Node index and Show ID
+   overrides empty, and enter the render node password from the editor's
    **File > Preferences** - or nothing if none is set there. Advanced: a
-   control port other than 47840 + node index, and a show ID other than the
-   standard one, both only when the control machine uses its own.
+   control port other than 47840 + assigned node index, and an explicit show
+   ID to filter several editors. The discovered editor supplies the show ID
+   and saves a unique node index for this machine's saved identity. Simultaneous
+   enrollments are serialized; conflicting manual indices are refused.
+   The table is stored beside the Director WAL as `<wal>.nodes-<show-id>.bin`.
+   Preserve it and the node's Preferences to retain assignments across restarts.
+   The render process discovers the editor's current address and port on each
+   start or restart and waits when none is found. Several editors for the same
+   show require closing the extra editors or setting a manual address and port.
+   A manual address also supports networks where discovery cannot reach the
+   editor. Clear previously saved address, index and show overrides to enable
+   their automatic values. A missing or unavailable editor leaves the window
+   waiting without starting a render process with placeholder identity.
    **OPEN EDITOR**, on the form and in the status view, starts the operator
    editor on this machine as its Director instead (port 45060 on every
    interface, the standard show, unless Preferences stores a Director
@@ -261,7 +272,7 @@ Launch `media-server.exe` with no arguments (a double-click, a shortcut, or
    render machine keeps running beside the editor.
 2. **SAVE AND START** stores the settings in this machine's per-user
    Preferences (never a project, never sent anywhere), starts the agent on
-   every interface, and starts the render process at once.
+   every interface after identity assignment, and starts the render process.
 3. Later launches go straight to the status view with those settings. A
    stored value that can no longer be used - a damaged settings file, an
    address that does not parse - reopens the form saying which.
@@ -320,13 +331,16 @@ a service's configuration is exactly its command line.
 - Allow inbound Director-session TCP only from configured render-node
   addresses. Allow each lifecycle control port only from the Director/operator
   address. Block lateral and Internet ingress by default.
-- Discovery (UDP 47839 inbound on render machines) is what lists them under
+- Discovery (UDP 47839 inbound on render machines and Directors) lists nodes under
   DETECTED ON NETWORK in Hardware Map. It discloses each machine's host name,
   node index, control port, and whether a password is set - nothing that
   grants control - and its queries are padded so an agent cannot amplify
   traffic. On a network where even that is too much, start agents with
   `--lifecycle-discovery-port=0` (`-DiscoveryPort 0`) or leave the port closed
-  and enter machines by hand.
+  and enter machines by hand. Directors also advertise their show identity and
+  TCP listener so automatically configured nodes can find them on the local
+  IPv4 network. Nodes still validate the show session before rendering. When
+  discovery is disabled, configure the Director address explicitly on nodes.
 - Run each lifecycle listener as a machine service with automatic restart and
   a dedicated, non-administrator service identity. Grant that identity only
   read/execute access to the application, read access to its secret, read

@@ -684,7 +684,9 @@ DirectorResumeSession::resume_impl(
         hello->node_id,
         hello->incarnation,
     };
-    if (!lease_authority_->claim(identity, config_.session_id)) {
+    if ((config_.node_assignments && config_.node_assignments->assign(
+             hello->node_id, hello->node_index).status != NodeAssignmentStatus::Assigned) ||
+        !lease_authority_->claim(identity, config_.session_id)) {
         return reject(
             RejectCode::NodeLeaseRejected,
             SessionProtocolErrorCode::NodeLeaseRejected);

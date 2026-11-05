@@ -74,6 +74,7 @@ private:
         app::render_machine_form(persist::Preferences{});
     form.director_address = "192.168.1.20";
     form.node_index = "3";
+    form.show_id = std::string{app::render_machine_default_show_id};
     return form;
 }
 
@@ -87,7 +88,7 @@ void a_first_launch_has_nothing_stored_and_opens_the_form() {
     const auto form = app::render_machine_form(persist::Preferences{});
     RM_CHECK(form.director_address.empty());
     RM_CHECK(form.director_port == "45060");
-    RM_CHECK(form.node_index == "0");
+    RM_CHECK(form.node_index.empty());
     RM_CHECK(form.control_port.empty());
     RM_CHECK(form.show_id.empty());
     RM_CHECK(!form.password_set);
@@ -139,7 +140,9 @@ void the_form_is_saved_once_and_later_launches_start_from_it() {
     RM_CHECK(contains(arguments, "--director-connect=192.168.1.20:45060"));
     RM_CHECK(contains(arguments,
                       "--show-id=0000000000000001000000000000000B"));
-    RM_CHECK(contains(arguments, "--node-id=0000000000000000000000000000002D"));
+    RM_CHECK(any_starts_with(arguments, "--node-id="));
+    RM_CHECK(config.value().node_id);
+    RM_CHECK(stored.value().render_machine_node_id.size() == 32U);
     RM_CHECK(contains(arguments,
                       "--node-incarnation=00000000000000000000000000000001"));
     RM_CHECK(contains(arguments, "--playback"));
@@ -296,7 +299,7 @@ void addresses_are_numeric_and_may_carry_their_port() {
                       "--director-connect=[fd00::6]:45060"));
 
     for (const std::string_view refused :
-         {"", "   ", "control-room", "render01.local", "0.0.0.0", "::",
+         {"control-room", "render01.local", "0.0.0.0", "::",
           "224.0.0.1", "255.255.255.255", "10.0.0", "10.0.0.5:99999"}) {
         const auto result = director_of(std::string{refused}, "45060");
         RM_CHECK(!result);
@@ -323,7 +326,7 @@ void out_of_range_numbers_and_identities_are_named_in_the_form() {
         edit(form);
         return app::apply_render_machine_form(form, persist::Preferences{});
     };
-    for (const std::string_view index : {"", "4096", "-1", "two", "1.5"}) {
+    for (const std::string_view index : {"4096", "-1", "two", "1.5"}) {
         const auto result = refused([index](app::RenderMachineForm& form) {
             form.node_index = std::string{index};
         });
@@ -436,7 +439,63 @@ void the_editor_opens_as_a_director_on_stored_or_default_identity() {
     }
 }
 
-constexpr std::array<Case, 11U> cases{{
+void automatic_discovery_is_saved_without_a_stale_address() {
+    const TempDirectory temporary;
+    auto form = app::render_machine_form(persist::Preferences{});
+    form.node_index = "7";
+    form.show_id = "00000000000000110000000000000023";
+    const auto applied = app::apply_render_machine_form(form, persist::Preferences{});
+    RM_CHECK(applied);
+    RM_CHECK(applied.value().render_machine_director == "auto");
+    RM_CHECK(persist::save_preferences(temporary.file("auto.bin"), applied.value()));
+    const auto loaded = persist::load_preferences(temporary.file("auto.bin"));
+    RM_CHECK(loaded);
+    const auto config = app::render_machine_config(loaded.value());
+    RM_CHECK(config);
+    RM_CHECK(config.value().discover_director);
+    RM_CHECK(config.value().node_index == 7U);
+    RM_CHECK(config.value().show_id.high == 0x11U);
+    RM_CHECK(config.value().show_id.low == 0x23U);
+    RM_CHECK(contains(app::render_machine_child_arguments(config.value()),
+                      "--director-connect=auto"));
+    RM_CHECK(app::render_machine_form(loaded.value()).director_address.empty());
+    // Clearing an old manual override enables discovery without storing the
+    // currently discovered IP, so a later DHCP change is resolved on restart.
+    auto manual = typed_form();
+    const auto old = app::apply_render_machine_form(manual, loaded.value());
+    RM_CHECK(old);
+    manual = app::render_machine_form(old.value());
+    manual.director_address = "   ";
+    const auto cleared = app::apply_render_machine_form(manual, old.value());
+    RM_CHECK(cleared);
+    RM_CHECK(cleared.value().render_machine_director == "auto");
+    const auto fresh = app::apply_render_machine_form(
+        app::render_machine_form(persist::Preferences{}), persist::Preferences{});
+    RM_CHECK(fresh);
+    RM_CHECK(fresh.value().render_machine_node_index == net::automatic_node_index);
+    RM_CHECK(fresh.value().render_machine_show_id.empty());
+    RM_CHECK(fresh.value().render_machine_node_id.size() == 32U);
+    RM_CHECK(persist::save_preferences(temporary.file("full-auto.bin"), fresh.value()));
+    const auto reloaded = persist::load_preferences(temporary.file("full-auto.bin"));
+    RM_CHECK(reloaded);
+    const auto identity = app::render_machine_config(reloaded.value());
+    RM_CHECK(identity && identity.value().automatic_index && !identity.value().show_id);
+    const auto resaved = app::apply_render_machine_form(
+        app::render_machine_form(reloaded.value()), reloaded.value());
+    RM_CHECK(resaved);
+    RM_CHECK(resaved.value().render_machine_node_id == fresh.value().render_machine_node_id);
+    persist::Preferences existing_machine;
+    existing_machine.render_machine_director = "192.0.2.5:45123";
+    existing_machine.render_machine_node_index = 3U;
+    const auto switched = app::apply_render_machine_form(
+        app::render_machine_form(persist::Preferences{}), existing_machine);
+    RM_CHECK(switched);
+    RM_CHECK(switched.value().render_machine_node_id == "0000000000000000000000000000002D");
+}
+
+constexpr std::array<Case, 12U> cases{{
+    {"automatic discovery is saved without a stale address",
+     &automatic_discovery_is_saved_without_a_stale_address},
     {"a first launch has nothing stored and opens the form",
      &a_first_launch_has_nothing_stored_and_opens_the_form},
     {"the form is saved once and later launches start from it",

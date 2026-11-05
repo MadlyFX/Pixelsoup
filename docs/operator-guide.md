@@ -123,17 +123,45 @@ on a render machine it stays, so one computer can be both.
 
 **A render machine needs no command line.** Put `media-server.exe` on it, with
 the files beside it (the release package, or a GUI build directory), and
-double-click it. The first time, a small window asks for three things:
+double-click it. The first time, a small window discovers the editor on the
+local network and asks for this machine's settings:
 
-- the control machine's numeric address, and the Director port (normally
-  45060);
-- this machine's node index - 0 for the first render machine, 1 for the next;
+- leave the control machine address empty for automatic discovery; its
+  current address and port appear in the window when found;
+- leave Node index and the advanced Show ID empty too: the editor assigns a
+  free node index and supplies its show ID;
 - the render node password from **File > Preferences** on the control machine,
   or nothing if none is set there.
 
+Setup generates and saves a unique machine ID once. The editor saves its
+assignment of that ID to an output node index before starting the node. Several
+new nodes can enroll together without choosing the same index, and the same
+machine keeps its index after node or editor restarts. These records live
+beside the editor's WAL as `<wal>.nodes-<show-id>.bin`; retain them along with
+the render machine's Preferences when preserving a setup. A missing table
+starts a new assignment history; an unreadable table refuses enrollment.
+
+The node discovers the editor again on every render-process start, including
+Start and Restart from Output Monitor. It waits if no matching editor is running.
+If several editors are visible, close the extra editors or select one with a
+manual address and port or a Show ID filter. A manual node index requests that
+specific index; an index already reserved for another identity is refused.
+Discovery uses UDP 47839 on the editor and render machines; the show connection
+also needs the editor's TCP port, normally 45060. Discovery is limited to the
+local IPv4 network. Use a manual address across routed networks or when UDP
+broadcast is blocked. To replace a previously saved address with discovery,
+clear it under **Change settings** and save. Clear Node index and Show ID as
+well to enable their automatic values. A discovered address is displayed
+without being stored as a fixed IP. Fully manual address, show and index
+settings remain available for networks where discovery is disabled.
+
+The render-process status describes the supervised process. An editor appearing
+in discovery confirms that it advertised its listener; Output Monitor's session
+and readiness state confirms whether the node has joined and can render.
+
 **SAVE AND START** stores them in this machine's per-user Preferences - never
-in a project - and starts the lifecycle agent, which starts the render process
-straight away. From then on, double-clicking `media-server.exe` (or a shortcut
+in a project - and waits for an editor to assign identity, then starts the
+lifecycle agent and render process. From then on, double-clicking `media-server.exe` (or a shortcut
 to it, or `media-server.exe --render-machine`) skips the form and runs with
 those settings; **CHANGE SETTINGS** edits them. The window shows the render
 process with local START, STOP and RESTART, the control port Output Monitor

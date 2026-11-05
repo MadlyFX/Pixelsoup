@@ -286,14 +286,14 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
     {
         constexpr float port_label = 38.0F;
         constexpr float port_width = 72.0F;
-        ctx.label(gui::Rect{x, y, label_width, row_height}, "Address",
+        ctx.label(gui::Rect{x, y, label_width, row_height}, "Override",
                   theme.text);
         layout_.address = gui::Rect{
             field_x, y,
             std::max(field_width - port_label - port_width - 10.0F, 0.0F),
             row_height};
         edited |= field(ctx, field_address, layout_.address,
-                        form_.director_address, "192.168.1.20");
+                        form_.director_address, "Automatic");
         ctx.label(gui::Rect{layout_.address.x + layout_.address.width + 10.0F,
                             y, port_label, row_height},
                   "Port", theme.text);
@@ -303,10 +303,14 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
                         "45060");
         y += row_height + 6.0F;
         y = paragraph(ctx, field_x, y, field_width,
-                      "The control machine's numeric address - ipconfig on "
-                      "that machine shows it. The port is the Director's, "
-                      "normally 45060.",
+                      "Found automatically for this show. Leave the address "
+                      "empty to discover it on every start, or enter a manual "
+                      "address and port. Clear a saved address to use discovery.",
                       theme.text_muted);
+        if (form_.director_address.empty() && !status.editor_search.empty()) {
+            y = paragraph(ctx, field_x, y, field_width, status.editor_search,
+                          theme.text_muted);
+        }
     }
     y += 14.0F;
 
@@ -317,11 +321,11 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
         constexpr float index_width = 72.0F;
         layout_.node_index = gui::Rect{field_x, y, index_width, row_height};
         edited |= field(ctx, field_node, layout_.node_index, form_.node_index,
-                        "0");
+                        "Auto");
         ctx.label(gui::Rect{field_x + index_width + 12.0F, y,
                             std::max(field_width - index_width - 12.0F, 0.0F),
                             row_height},
-                  "0 for the first render machine, 1 for the next",
+                  "Assigned by the editor; leave blank for automatic",
                   theme.text_muted);
         y += row_height + 10.0F;
 
@@ -375,12 +379,12 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
                   theme.text);
         layout_.show_id = gui::Rect{field_x, y, field_width, row_height};
         edited |= field(ctx, field_show, layout_.show_id, form_.show_id,
-                        "standard show");
+                        "Automatic - use the discovered editor's show");
         y += row_height + 6.0F;
         y = paragraph(ctx, field_x, y, field_width,
-                      "Change these only when the control machine uses its "
-                      "own: the Render Server card's control port, or a show "
-                      "ID set in its Preferences.",
+                      "Blank values use the assigned node's control port "
+                      "and the discovered editor's show. A show ID filters "
+                      "which editor this machine joins.",
                       theme.text_muted);
     }
     if (edited) {
@@ -462,10 +466,12 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
         y += 10.0F;
     }
     if (!status.agent_running) {
-        ctx.label(gui::Rect{x, y, width, row_height}, "NOT RUNNING",
-                  theme.warning);
+        ctx.label(gui::Rect{x, y, width, row_height},
+                  status.waiting_for_identity ? "Waiting for editor" : "Not running",
+                  status.waiting_for_identity ? theme.caution : theme.warning);
         y += row_height + 4.0F;
-        y = paragraph(ctx, x, y, width, status.agent_error, theme.text);
+        y = paragraph(ctx, x, y, width,
+                      status.waiting_for_identity ? status.editor_search : status.agent_error, theme.text);
         y += 12.0F;
         layout_.retry = gui::Rect{x, y, 120.0F, button_height};
         if (ctx.button(gui::ui_id("render-machine.retry"), layout_.retry,
@@ -518,6 +524,10 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
 
         y = fact(ctx, x, y, width, "Control machine", status.director,
                  theme.text);
+        y = fact(ctx, x, y, width, "Show", status.show_id, theme.text);
+        if (status.director == "Automatic discovery") {
+            y = paragraph(ctx, x, y, width, status.editor_search, theme.text_muted);
+        }
         std::string control = "TCP " + std::to_string(status.control_port);
         control += status.discovery.starts_with("udp/")
                        ? ", found by editors on UDP " +

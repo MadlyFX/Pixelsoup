@@ -32,10 +32,15 @@ struct RenderMachineStatus final {
     std::vector<std::string> addresses;
 
     bool agent_running{};
+    bool waiting_for_identity{};
+    std::string show_id;
     // Why the agent is not running, once it has failed to start.
     std::string agent_error;
     core::u32 node_index{};
     std::string director;
+    // Discovery describes available editors, not whether a show session joined.
+    std::string editor_search;
+    std::string discovered_editor;
     std::uint16_t control_port{};
     std::string discovery;
     bool password_set{};

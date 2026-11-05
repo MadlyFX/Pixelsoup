@@ -39,9 +39,9 @@ namespace {
 
 constexpr std::array<std::uint8_t, 4U> query_magic{'M', 'S', 'D', 'Q'};
 constexpr std::array<std::uint8_t, 4U> answer_magic{'M', 'S', 'D', 'A'};
-constexpr std::uint8_t protocol_version = 1U;
-constexpr std::size_t query_header_bytes = 16U;
-constexpr std::size_t answer_header_bytes = 36U;
+constexpr std::uint8_t protocol_version = 3U;
+constexpr std::size_t query_header_bytes = 44U;
+constexpr std::size_t answer_header_bytes = 68U;
 constexpr std::uint8_t password_flag = 0x01U;
 // Bounds how long stop() waits for a loop to notice.
 constexpr auto wait_slice = std::chrono::milliseconds{50};
@@ -166,7 +166,12 @@ encode_cluster_discovery_query(const ClusterDiscoveryQuery& query) noexcept {
     std::array<std::uint8_t, cluster_discovery_datagram_bytes> bytes{};
     std::copy(query_magic.begin(), query_magic.end(), bytes.begin());
     bytes[4] = protocol_version;
+    bytes[5] = static_cast<std::uint8_t>(query.kind);
     put_u64(bytes.data() + 8U, query.nonce);
+    put_u64(bytes.data() + 16U, query.node_id.high);
+    put_u64(bytes.data() + 24U, query.node_id.low);
+    put_u64(bytes.data() + 32U, query.director_instance);
+    put_u32(bytes.data() + 40U, query.requested_node_index);
     return bytes;
 }
 
@@ -176,11 +181,14 @@ decode_cluster_discovery_query(std::span<const std::uint8_t> bytes) noexcept {
     // more than it was sent.
     if (bytes.size() != cluster_discovery_datagram_bytes ||
         !std::equal(query_magic.begin(), query_magic.end(), bytes.begin()) ||
-        bytes[4] != protocol_version) {
+        bytes[4] != protocol_version || bytes[5] > 1U) {
         return std::nullopt;
     }
     static_assert(query_header_bytes <= cluster_discovery_datagram_bytes);
-    return ClusterDiscoveryQuery{get_u64(bytes.data() + 8U)};
+    return ClusterDiscoveryQuery{get_u64(bytes.data() + 8U),
+                                 static_cast<ClusterDiscoveryKind>(bytes[5]),
+                                 {get_u64(bytes.data() + 16U), get_u64(bytes.data() + 24U)},
+                                 get_u64(bytes.data() + 32U), get_u32(bytes.data() + 40U)};
 }
 
 std::vector<std::uint8_t>
@@ -191,12 +199,18 @@ encode_cluster_discovery_answer(const ClusterDiscoveryAnswer& answer) {
     bytes[4] = protocol_version;
     bytes[5] = answer.password_set ? password_flag : std::uint8_t{0U};
     bytes[6] = static_cast<std::uint8_t>(hostname.size());
+    bytes[7] = static_cast<std::uint8_t>(answer.kind);
     put_u64(bytes.data() + 8U, answer.nonce);
     put_u64(bytes.data() + 16U, answer.instance);
     put_u32(bytes.data() + 24U, answer.node_index);
     put_u16(bytes.data() + 28U, answer.control_port);
+    bytes[30] = static_cast<std::uint8_t>(answer.assignment);
     const auto address = answer.control_address.to_bytes();
     std::copy(address.begin(), address.end(), bytes.begin() + 32);
+    put_u64(bytes.data() + 36U, answer.show_id.high);
+    put_u64(bytes.data() + 44U, answer.show_id.low);
+    put_u64(bytes.data() + 52U, answer.enrolled_node_id.high);
+    put_u64(bytes.data() + 60U, answer.enrolled_node_id.low);
     std::memcpy(bytes.data() + answer_header_bytes, hostname.data(),
                 hostname.size());
     return bytes;
@@ -207,7 +221,8 @@ decode_cluster_discovery_answer(std::span<const std::uint8_t> bytes) {
     if (bytes.size() < answer_header_bytes ||
         bytes.size() > cluster_discovery_datagram_bytes ||
         !std::equal(answer_magic.begin(), answer_magic.end(), bytes.begin()) ||
-        bytes[4] != protocol_version) {
+        bytes[4] != protocol_version || bytes[7] > 1U ||
+        bytes[30] > static_cast<core::u8>(NodeAssignmentStatus::Unavailable)) {
         return std::nullopt;
     }
     const std::size_t hostname_bytes = bytes[6];
@@ -216,11 +231,20 @@ decode_cluster_discovery_answer(std::span<const std::uint8_t> bytes) {
         return std::nullopt;
     }
     ClusterDiscoveryAnswer answer{};
+    answer.kind = static_cast<ClusterDiscoveryKind>(bytes[7]);
+    answer.show_id = {get_u64(bytes.data() + 36U), get_u64(bytes.data() + 44U)};
+    answer.enrolled_node_id = {get_u64(bytes.data() + 52U), get_u64(bytes.data() + 60U)};
+    answer.assignment = static_cast<NodeAssignmentStatus>(bytes[30]);
     answer.password_set = (bytes[5] & password_flag) != 0U;
     answer.nonce = get_u64(bytes.data() + 8U);
     answer.instance = get_u64(bytes.data() + 16U);
     answer.node_index = get_u32(bytes.data() + 24U);
     answer.control_port = get_u16(bytes.data() + 28U);
+    if ((answer.assignment == NodeAssignmentStatus::Assigned &&
+         (!answer.enrolled_node_id || answer.node_index > max_session_node_index)) ||
+        (answer.assignment != NodeAssignmentStatus::None && answer.kind != ClusterDiscoveryKind::Director)) {
+        return std::nullopt;
+    }
     asio::ip::address_v4::bytes_type address{};
     std::copy_n(bytes.begin() + 32, address.size(), address.begin());
     answer.control_address = asio::ip::address_v4{address};
@@ -360,7 +384,8 @@ public:
                 }
                 const auto query = decode_cluster_discovery_query(
                     std::span<const std::uint8_t>{buffer.data(), received});
-                if (!query || !sender.address().is_v4()) {
+                if (!query || query->kind != config.kind ||
+                    !sender.address().is_v4()) {
                     continue;
                 }
                 if (loopback_only &&
@@ -378,6 +403,16 @@ public:
                 ++answered_in_window;
                 ClusterDiscoveryAnswer reply = answer;
                 reply.nonce = query->nonce;
+                if (query->node_id) {
+                    if (config.kind != ClusterDiscoveryKind::Director ||
+                        query->director_instance != answer.instance) continue;
+                    const auto assigned = config.node_assignments
+                        ? config.node_assignments->assign(query->node_id, query->requested_node_index)
+                        : NodeIndexAssignment{};
+                    reply.enrolled_node_id = query->node_id;
+                    reply.assignment = assigned.status;
+                    reply.node_index = assigned.index;
+                }
                 try {
                     const std::vector<std::uint8_t> bytes =
                         encode_cluster_discovery_answer(reply);
@@ -475,6 +510,8 @@ bool ClusterDiscoveryResponder::valid_configuration(
     const ClusterDiscoveryResponderConfig& config) noexcept {
     // Port 0 binds an ephemeral port, which only tests want.
     return config.bind_endpoint.address().is_v4() &&
+           (config.kind == ClusterDiscoveryKind::RenderMachine ||
+            (config.kind == ClusterDiscoveryKind::Director && config.show_id)) &&
            config.control_endpoint.port() != 0U &&
            config.max_answers_per_second != 0U &&
            describe_control(config.control_endpoint).has_value();
@@ -499,7 +536,9 @@ std::error_code ClusterDiscoveryResponder::start() {
         state_->config.password_set,
         state_->config.hostname.empty()
             ? cluster_discovery_hostname()
-            : clean_hostname(state_->config.hostname)};
+            : clean_hostname(state_->config.hostname),
+        state_->config.kind,
+        state_->config.show_id};
     state_->stop_requested.store(false, std::memory_order_release);
     std::error_code error;
     const auto fail = [&](std::error_code reason) {
@@ -605,7 +644,8 @@ public:
                 }
             }
         }
-        const auto bytes = encode_cluster_discovery_query({nonce});
+        const auto bytes = encode_cluster_discovery_query({nonce, config.kind,
+            config.node_id, config.director_instance, config.requested_node_index});
         for (const asio::ip::address_v4& target : targets) {
             std::error_code ignored;
             // A target with no route (no network yet) just finds nothing.
@@ -635,16 +675,19 @@ public:
             }
             auto answer = decode_cluster_discovery_answer(
                 std::span<const std::uint8_t>{buffer.data(), received});
-            if (!answer || answer->nonce == 0U ||
+            if (!answer || answer->kind != config.kind || answer->nonce == 0U ||
                 std::find(nonces.begin(), nonces.end(), answer->nonce) ==
                     nonces.end()) {
                 continue;
             }
+            if (answer->enrolled_node_id != config.node_id ||
+                (config.node_id && answer->instance != config.director_instance)) continue;
             const asio::ip::address_v4 from = sender.address().to_v4();
             auto entry = std::find_if(
                 entries.begin(), entries.end(), [&](const Entry& candidate) {
                     return candidate.answer.instance == answer->instance &&
-                           candidate.answer.node_index == answer->node_index;
+                           (config.kind == ClusterDiscoveryKind::Director ||
+                            candidate.answer.node_index == answer->node_index);
                 });
             if (entry == entries.end()) {
                 if (entries.size() >= 1'024U) {
@@ -687,6 +730,10 @@ public:
             machine.node_index = entry.answer.node_index;
             machine.control_port = entry.answer.control_port;
             machine.password_set = entry.answer.password_set;
+            machine.show_id = entry.answer.show_id;
+            machine.kind = entry.answer.kind;
+            machine.enrolled_node_id = entry.answer.enrolled_node_id;
+            machine.assignment = entry.answer.assignment;
             std::optional<asio::ip::address_v4> lan;
             for (const Heard& heard : entry.heard) {
                 machine.addresses.push_back(heard.address);
@@ -791,6 +838,8 @@ ClusterDiscoveryBrowser::~ClusterDiscoveryBrowser() { stop(); }
 
 std::error_code ClusterDiscoveryBrowser::start() {
     if (state_->config.port == 0U ||
+        (state_->config.kind != ClusterDiscoveryKind::RenderMachine &&
+         state_->config.kind != ClusterDiscoveryKind::Director) ||
         state_->config.query_interval <= std::chrono::milliseconds::zero() ||
         state_->config.expiry <= std::chrono::milliseconds::zero()) {
         return std::make_error_code(std::errc::invalid_argument);
@@ -865,6 +914,39 @@ ClusterDiscoverySnapshot ClusterDiscoveryBrowser::snapshot() const {
 
 void ClusterDiscoveryBrowser::query_now() noexcept {
     state_->query_requested.store(true, std::memory_order_release);
+}
+
+std::optional<asio::ip::tcp::endpoint>
+discovered_director(const ClusterDiscoverySnapshot& snapshot, Id128 show_id) {
+    const auto found = discovered_director_identity(snapshot, show_id);
+    return found ? std::optional<asio::ip::tcp::endpoint>{{found->address, found->control_port}}
+                 : std::nullopt;
+}
+
+std::optional<ClusterDiscoveredMachine> discovered_director_identity(
+    const ClusterDiscoverySnapshot& snapshot, Id128 show_id,
+    std::optional<asio::ip::tcp::endpoint> endpoint) {
+    if (!snapshot.running || snapshot.error) {
+        return std::nullopt;
+    }
+    std::optional<ClusterDiscoveredMachine> result;
+    for (const auto& machine : snapshot.machines) {
+        if (machine.kind != ClusterDiscoveryKind::Director ||
+            !machine.show_id || (show_id && machine.show_id != show_id) ||
+            (endpoint && (endpoint->port() != machine.control_port ||
+                (endpoint->address() != machine.address &&
+                 std::none_of(machine.addresses.begin(), machine.addresses.end(),
+                     [&](const auto& address) { return endpoint->address() == address; }))))) {
+            continue;
+        }
+        if (result || machine.control_port == 0U ||
+            machine.address.is_unspecified() || machine.address.is_multicast() ||
+            machine.address == asio::ip::address_v4::broadcast()) {
+            return std::nullopt;
+        }
+        result = machine;
+    }
+    return result;
 }
 
 } // namespace mediaserver::net

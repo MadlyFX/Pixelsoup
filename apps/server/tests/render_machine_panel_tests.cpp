@@ -155,7 +155,20 @@ void the_save_button_saves_and_a_refusal_keeps_the_form_open() {
     static_cast<void>(harness.frame());
     PANEL_CHECK(harness.click(harness.panel.layout().save) ==
                 app::RenderMachineAction::SaveAndStart);
-    // The address is empty, so the settings refuse it and the form stays.
+    // An empty address is automatic discovery, including when the preview
+    // displays an editor's current address; saving must never pin that IP.
+    harness.status.discovered_editor = "192.0.2.31:45217";
+    harness.status.editor_search = "Editor found: 192.0.2.31:45217";
+    static_cast<void>(harness.frame());
+    const auto automatic = app::apply_render_machine_form(
+        harness.panel.form(), persist::Preferences{});
+    PANEL_CHECK(automatic);
+    PANEL_CHECK(automatic.value().render_machine_director == "auto");
+    PANEL_CHECK(automatic.value().render_machine_node_index == net::automatic_node_index);
+    PANEL_CHECK(automatic.value().render_machine_show_id.empty());
+    PANEL_CHECK(automatic.value().render_machine_node_id.size() == 32U);
+    static_cast<void>(harness.click(harness.panel.layout().address));
+    static_cast<void>(harness.type("bad address"));
     const auto refused = app::apply_render_machine_form(
         harness.panel.form(), persist::Preferences{});
     PANEL_CHECK(!refused);

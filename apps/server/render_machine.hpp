@@ -40,8 +40,12 @@ inline constexpr std::size_t render_machine_max_password_bytes = 256U;
 
 struct RenderMachineConfig final {
     asio::ip::tcp::endpoint director;
+    bool discover_director{};
+    bool automatic_index{};
+    net::Id128 node_id{};
     core::u32 node_index{};
     std::uint16_t control_port{};
+    bool automatic_control_port{};
     net::Id128 show_id{};
     // The key the agent requires: the one the stored render node password
     // derives, or the unsecured key when none is stored.
@@ -120,14 +124,15 @@ struct RenderMachineWindowOptions final {
 // The setup form as typed. Text throughout, so a half-typed value is kept
 // while the operator corrects another one.
 struct RenderMachineForm final {
-    // The control machine's numeric address. "ADDRESS:PORT" is accepted too,
+    // Empty discovers the editor for this show. Otherwise a numeric address.
+    // "ADDRESS:PORT" is accepted too,
     // and then wins over director_port.
     std::string director_address;
     std::string director_port;
     std::string node_index;
     // Empty is the default for the node index.
     std::string control_port;
-    // Empty is the standard show.
+    // Empty adopts the discovered editor's show.
     std::string show_id;
     // A password is stored and this form has not cleared it.
     bool password_set{};

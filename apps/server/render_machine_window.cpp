@@ -8,6 +8,7 @@
 #include <mediaserver/net/cluster_lifecycle.hpp>
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -126,13 +127,21 @@ int run_render_machine_window(RenderMachineWindowOptions options) {
     status.starts_at_sign_in = starts_at_sign_in(options.executable);
 
     std::unique_ptr<LifecycleAgent> agent;
+    net::ClusterDiscoveryBrowserConfig editor_search_config;
+    editor_search_config.kind = net::ClusterDiscoveryKind::Director;
+    net::ClusterDiscoveryBrowser editor_browser{editor_search_config};
+    const auto editor_search_error = editor_browser.start();
     std::optional<RenderMachineConfig> config;
+    std::optional<RenderMachineConfig> pending_identity;
+    std::unique_ptr<net::ClusterDiscoveryBrowser> enrollment_browser;
+    core::u64 enrolled_instance{};
     std::vector<FirewallRule> rules;
     std::unique_ptr<ElevatedCommand> firewall_change;
 
     using clock = std::chrono::steady_clock;
     clock::time_point next_status{};
     clock::time_point next_slow{};
+    clock::time_point choose_identity_after{};
 
     const auto refresh_slow = [&] {
         status.addresses.clear();
@@ -155,9 +164,26 @@ int run_render_machine_window(RenderMachineWindowOptions options) {
         agent.reset();
         config = wanted;
         status.agent_error.clear();
+        if (wanted.automatic_index || !wanted.show_id) {
+            pending_identity = wanted;
+            enrollment_browser.reset();
+            status.waiting_for_identity = true;
+            status.agent_running = false;
+            status.director = "Automatic discovery";
+            rules.clear();
+            next_status = {};
+            choose_identity_after = clock::now() + editor_search_config.query_interval;
+            return;
+        }
+        pending_identity.reset();
+        enrollment_browser.reset();
+        status.waiting_for_identity = false;
         status.process_message.clear();
         status.node_index = wanted.node_index;
-        status.director = endpoint_text(wanted.director);
+        status.show_id = options.stored.render_machine_show_id.empty()
+            ? "From discovered editor" : options.stored.render_machine_show_id;
+        status.director = wanted.discover_director ? "Automatic discovery"
+                                                   : endpoint_text(wanted.director);
         status.control_port = wanted.control_port;
         status.password_set = wanted.password_set;
         LifecycleAgentConfig agent_config =
@@ -232,6 +258,69 @@ int run_render_machine_window(RenderMachineWindowOptions options) {
 
         const auto now = clock::now();
         if (now >= next_status) {
+            // Interface enumeration and network I/O stay on the browser worker.
+            persist::Preferences search_preferences;
+            search_preferences.render_machine_director = "auto";
+            search_preferences.render_machine_show_id = panel.setup_open()
+                ? panel.form().show_id : options.stored.render_machine_show_id;
+            const auto search_identity = render_machine_config(search_preferences);
+            const auto found = editor_browser.snapshot();
+            status.discovered_editor.clear();
+            if (const auto error = editor_search_error ? editor_search_error : found.error) {
+                status.editor_search = "Editor discovery unavailable: " + error.message() +
+                                       ". Enter a manual address.";
+            } else if (!search_identity) {
+                status.editor_search = "Enter a valid show ID to discover its editor.";
+            } else if (const auto editor = net::discovered_director_identity(
+                           found, search_identity.value().show_id,
+                           pending_identity && !pending_identity->discover_director
+                               ? std::optional<asio::ip::tcp::endpoint>{pending_identity->director}
+                               : std::nullopt)) {
+                status.discovered_editor = endpoint_text({editor->address, editor->control_port});
+                status.editor_search = "Editor found: " + status.discovered_editor +
+                                       ". Discovery is used on each process start.";
+                if (pending_identity && now >= choose_identity_after) {
+                    if (!enrollment_browser || enrolled_instance != editor->instance) {
+                        auto request = editor_search_config;
+                        request.node_id = pending_identity->node_id;
+                        request.director_instance = editor->instance;
+                        request.requested_node_index = pending_identity->automatic_index
+                            ? net::automatic_node_index : pending_identity->node_index;
+                        enrollment_browser = std::make_unique<net::ClusterDiscoveryBrowser>(request);
+                        if (const auto enrollment_error = enrollment_browser->start()) {
+                            status.agent_error = "Could not request a node index: " + enrollment_error.message();
+                            status.waiting_for_identity = false;
+                        }
+                        enrolled_instance = editor->instance;
+                    }
+                    const auto assigned = net::discovered_director_identity(
+                        enrollment_browser->snapshot(), editor->show_id);
+                    if (assigned && assigned->assignment == net::NodeAssignmentStatus::Assigned) {
+                        auto resolved = *pending_identity;
+                        resolved.show_id = assigned->show_id;
+                        resolved.node_index = assigned->node_index;
+                        resolved.automatic_index = false;
+                        if (resolved.automatic_control_port) {
+                            resolved.control_port = render_machine_default_control_port(resolved.node_index);
+                        }
+                        start_agent(resolved);
+                    } else if (assigned) {
+                        status.waiting_for_identity = false;
+                        status.agent_error = assigned->assignment == net::NodeAssignmentStatus::Conflict
+                            ? "That node index belongs to another machine. Clear the index override to assign one automatically."
+                            : "The editor could not save a node index. Check its node-assignment record and available slots.";
+                    }
+                }
+            } else {
+                const auto matches = std::count_if(found.machines.begin(), found.machines.end(),
+                    [&](const net::ClusterDiscoveredMachine& machine) {
+                        return !search_identity.value().show_id ||
+                               machine.show_id == search_identity.value().show_id;
+                    });
+                status.editor_search = matches > 1
+                    ? "Several editors found for this show. Close the extra editors or enter a manual address."
+                    : "Waiting for an editor for this show. Open the editor and allow UDP 47839 and its show TCP port through its firewall.";
+            }
             if (agent) {
                 const auto reply =
                     agent->apply(net::ClusterLifecycleCommand::Status);
