@@ -722,8 +722,15 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}"
                 ${STB_INCLUDE_DIRS}
         )
+        target_include_directories(mediaserver_thumbnail_service_tests
+            SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS}
+        )
+        target_link_directories(mediaserver_thumbnail_service_tests
+            PRIVATE ${FFMPEG_LIBRARY_DIRS}
+        )
         target_link_libraries(mediaserver_thumbnail_service_tests
             PRIVATE MediaServer::Assets MediaServer::Render Threads::Threads
+                    ${FFMPEG_LIBRARIES}
         )
         mediaserver_set_project_options(mediaserver_thumbnail_service_tests)
         add_test(

@@ -86,7 +86,10 @@ namespace {
 
 class RendererThumbnailDecoder final : public ThumbnailDecoder {
 public:
-    RendererThumbnailDecoder() : source_(render::make_media_source()) {}
+    // An HD or UHD plate reaches the renderer as video planes or a decoder
+    // surface, neither of which a thumbnail can read; this source always
+    // answers with RGBA.
+    RendererThumbnailDecoder() : source_(render::make_rgba_media_source()) {}
 
     core::u32 frame_count(const std::string& source) override {
         return render::probe_frame_count(source);
@@ -100,7 +103,8 @@ public:
         }
         render::DecodedFrame decoded = source_->decode(source, source_ordinal);
         if (stop.stop_requested() || !decoded.valid() ||
-            decoded.format != rhi::TextureFormat::Rgba8Unorm) {
+            decoded.format != rhi::TextureFormat::Rgba8Unorm ||
+            decoded.layout != render::DecodedPixelLayout::Rgba8) {
             return {};
         }
         return ThumbnailRgbaFrame{
@@ -778,7 +782,9 @@ struct ThumbnailService::Impl final {
         std::vector<core::u64> selected_ordinals;
         if (is_thumbnail) {
             bool found = false;
-            for (core::u64 attempt = 0U; attempt < frame_count; ++attempt) {
+            const core::u64 attempts = std::min<core::u64>(
+                frame_count, maximum_thumbnail_probe_frames);
+            for (core::u64 attempt = 0U; attempt < attempts; ++attempt) {
                 if (stop.stop_requested()) {
                     finish(job, assets::DerivativeState::Cancelled);
                     return;

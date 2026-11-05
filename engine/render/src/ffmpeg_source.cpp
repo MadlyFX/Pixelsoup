@@ -146,6 +146,9 @@ struct Decoder final {
     // Every frame is held at half size: halved on the device before the
     // decoder's surface is released, or in system memory before upload.
     bool half_resolution{};
+    // Every frame is interleaved RGBA in system memory, for a reader on the
+    // CPU rather than the media shader: no renderer surface, no video planes.
+    bool rgba_only{};
     int stream{-1};
     double fps{25.0};
     core::i64 start_pts{};
@@ -575,10 +578,12 @@ stream_frame_rate(const AVStream *stream) noexcept {
                             : 25.0;
 }
 
-[[nodiscard]] std::unique_ptr<Decoder> open_decoder(const std::string &source) {
+[[nodiscard]] std::unique_ptr<Decoder> open_decoder(const std::string &source,
+                                                    bool rgba_only = false) {
     auto decoder = std::make_unique<Decoder>();
     const MediaSourceVariant variant = media_source_variant(source);
     decoder->half_resolution = variant.half_resolution;
+    decoder->rgba_only = rgba_only;
     const std::string path{variant.path};
     if (avformat_open_input(&decoder->format, path.c_str(), nullptr,
                             nullptr) != 0) {
@@ -610,7 +615,7 @@ stream_frame_rate(const AVStream *stream) noexcept {
     // limits unknown/software streams to two concurrent jobs while allowing
     // confirmed hardware streams to use its additional bounded lanes.
     const bool hardware_configured =
-        configure_hardware_decoder(*decoder, *codec, true);
+        configure_hardware_decoder(*decoder, *codec, !rgba_only);
     const auto configure_software_threads = [&]() {
         const unsigned hardware_threads =
             std::max(1U, std::thread::hardware_concurrency());
@@ -892,7 +897,7 @@ stream_frame_rate(const AVStream *stream) noexcept {
             const bool rec709 = colour.rec709;
             const bool limited = colour.limited;
             const bool full = colour.full;
-            if (decoder.hardware_active &&
+            if (!decoder.rgba_only && decoder.hardware_active &&
                 source_frame->format == AV_PIX_FMT_NV12 && rec709 &&
                 (limited || full) &&
                 width % 2 == 0 && height % 2 == 0 &&
@@ -919,7 +924,7 @@ stream_frame_rate(const AVStream *stream) noexcept {
                     return out;
                 }
             }
-            if (decoder.hardware_active &&
+            if (!decoder.rgba_only && decoder.hardware_active &&
                 source_frame->format == AV_PIX_FMT_P010LE && rec709 &&
                 (limited || full) && width % 2 == 0 && height % 2 == 0 &&
                 source_frame->linesize[0] >= width * 2 &&
@@ -965,7 +970,9 @@ stream_frame_rate(const AVStream *stream) noexcept {
             const AVPixelFormat source_format =
                 static_cast<AVPixelFormat>(source_frame->format);
             if (!decoder.target_chosen) {
-                decoder.target = choose_scaler_target(source_format, colour);
+                decoder.target = decoder.rgba_only
+                    ? ScalerTarget{}
+                    : choose_scaler_target(source_format, colour);
                 decoder.target_chosen = true;
             }
             if (decoder.target.direct) {
@@ -1199,6 +1206,9 @@ stream_frame_rate(const AVStream *stream) noexcept {
 // and walks frames, seeking only when the request is not the next frame.
 class FfmpegSource final : public MediaSource {
   public:
+    FfmpegSource() = default;
+    explicit FfmpegSource(bool rgba_only) noexcept : rgba_only_(rgba_only) {}
+
     [[nodiscard]] bool hardware_configured() const noexcept {
         return std::any_of(
             decoders_.begin(), decoders_.end(), [](const auto &entry) {
@@ -1236,7 +1246,7 @@ class FfmpegSource final : public MediaSource {
                                       core::u32 frame_index) override {
         auto found = decoders_.find(source);
         if (found == decoders_.end()) {
-            auto decoder = open_decoder(source);
+            auto decoder = open_decoder(source, rgba_only_);
             if (decoder == nullptr) {
                 return DecodedFrame{};
             }
@@ -1281,6 +1291,7 @@ class FfmpegSource final : public MediaSource {
 
   private:
     std::map<std::string, std::unique_ptr<Decoder>> decoders_;
+    bool rgba_only_{};
 };
 
 // Normalize once when a renderer first sees a source. This deliberately avoids
@@ -2199,6 +2210,40 @@ void hold_video_registry_lock_for_test(
 
 std::unique_ptr<MediaSource> make_media_source() {
     return std::make_unique<DispatchMediaSource>();
+}
+
+namespace {
+
+// Synchronous and private to its owner: it shares neither the process-wide
+// video scheduler nor the renderer's decode device, so a reader on the CPU
+// never holds a surface or a read-ahead budget the show is using.
+class RgbaMediaSource final : public MediaSource {
+  public:
+    [[nodiscard]] std::string key(const std::string &source,
+                                  core::u32 frame_index) const override {
+        return is_video_path(source)
+            ? video_.key(source, frame_index)
+            : images_.key(std::string{media_source_variant(source).path},
+                          frame_index);
+    }
+
+    [[nodiscard]] DecodedFrame decode(const std::string &source,
+                                      core::u32 frame_index) override {
+        return is_video_path(source)
+            ? video_.decode(source, frame_index)
+            : images_.decode(std::string{media_source_variant(source).path},
+                             frame_index);
+    }
+
+  private:
+    ImageSequenceSource images_;
+    FfmpegSource video_{true};
+};
+
+} // namespace
+
+std::unique_ptr<MediaSource> make_rgba_media_source() {
+    return std::make_unique<RgbaMediaSource>();
 }
 
 MediaDecodeStats media_decode_stats() { return video_registry().stats(); }
