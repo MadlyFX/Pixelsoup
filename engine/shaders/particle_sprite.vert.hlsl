@@ -14,7 +14,8 @@
 
 ByteAddressBuffer particles : register(t0, space0);
 // Drawing order from the depth sort: instance i draws record order[i] when
-// the sorted flag is set (otherwise the records are bound here too).
+// the sorted flag is set (otherwise the records are bound here too), or
+// order[first + i] for a depth slice that starts at `first`.
 ByteAddressBuffer order : register(t1, space0);
 // The emitter's counters, the live count first, for ribbons.
 ByteAddressBuffer counters : register(t2, space0);
@@ -87,6 +88,9 @@ cbuffer ParticleView : register(b0, space1) {
     uint4 lighting;
     column_major float4x4 shadow_view_projection[4];
     float4 shadow_texel_depth;
+    // x: for one depth slice of an interleaved emitter, the word of `order`
+    // that holds where the slice starts in it; absent otherwise.
+    uint4 order_slice;
 };
 
 static const uint absent = 0xffffffffU;
@@ -373,6 +377,15 @@ Output mesh_vertex(uint vertex, uint instance) {
     return output;
 }
 
+// The record a sprite instance draws.
+uint sorted_record(uint instance) {
+    if ((flags & 8U) == 0U) {
+        return instance;
+    }
+    const uint first = order_slice.x != absent ? order.Load(order_slice.x * 4U) : 0U;
+    return order.Load((first + instance) * 4U);
+}
+
 Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     if ((flags & 32U) != 0U) {
         return ribbon_vertex(corners[vertex], instance);
@@ -380,7 +393,7 @@ Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     if ((flags & 64U) != 0U) {
         return mesh_vertex(vertex, instance);
     }
-    const uint record = (flags & 8U) != 0U ? order.Load(instance * 4U) : instance;
+    const uint record = sorted_record(instance);
     const uint base = record * stride;
     const float3 position = to_world_point(asfloat(particles.Load3(base + position_offset)));
     const float size = (size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F) * sprite_extra.w;

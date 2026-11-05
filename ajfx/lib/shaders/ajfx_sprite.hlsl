@@ -24,7 +24,8 @@ cbuffer AjfxSprite : register(b0, space1) {
     uint sprite_facing;        // 0 camera, 1 velocity
     uint sprite_premultiplied; // the particle colour is already premultiplied
     float sprite_stretch;      // seconds of motion a velocity-aligned sprite spans
-    uint sprite_sorted;        // 1: instance i draws the record sprite_order[i]
+    uint sprite_sorted;        // 0: instance i draws record i; 1: the record sprite_order[i];
+                               // 2 + w: a depth slice, the record sprite_order[sprite_order[w] + i]
     uint sprite_age;
     uint sprite_lifetime;
     uint sprite_flipbook;      // columns in the low 16 bits, rows in the high
@@ -40,7 +41,8 @@ RWByteAddressBuffer sprite_particles : register(u0);
 // light: the direction it travels, its colour, the sky colour and the
 // ground colour, each padded to four floats.
 RWByteAddressBuffer sprite_camera : register(u1);
-// Drawing order from the depth sort, when sprite_sorted is set.
+// Drawing order from the depth sort, when sprite_sorted is set; then where
+// each depth slice starts in it (ParticleSorter::depth_slice).
 RWByteAddressBuffer sprite_order : register(u2);
 // The live count first, for ribbons.
 RWByteAddressBuffer sprite_counters : register(u3);
@@ -175,6 +177,15 @@ SpriteVertex sprite_ribbon_vertex(uint vertex, uint instance) {
     return output;
 }
 
+// The record a sprite instance draws.
+uint sprite_record(uint instance) {
+    if (sprite_sorted == 0u) {
+        return instance;
+    }
+    uint first = sprite_sorted >= 2u ? sprite_order.Load((sprite_sorted - 2u) * 4u) : 0u;
+    return sprite_order.Load((first + instance) * 4u);
+}
+
 // Vertex `vertex` of the mesh drawn for particle `instance`: turned by the
 // particle's orientation, or else so its +Z runs along its velocity
 // (velocity facing) or spun about Y by its rotation; scaled by its size, and
@@ -274,7 +285,7 @@ SpriteVertex sprite_vertex(uint vertex : SV_VertexID, uint instance : SV_Instanc
     if (sprite_geometry == 2u) {
         return sprite_mesh_vertex(vertex, instance);
     }
-    uint record = sprite_sorted != 0u ? sprite_order.Load(instance * 4u) : instance;
+    uint record = sprite_record(instance);
     uint base = record * sprite_stride;
     float3 position = asfloat(sprite_particles.Load3(base + sprite_position));
     float4 color = sprite_color != sprite_absent ? asfloat(sprite_particles.Load4(base + sprite_color))

@@ -67,8 +67,8 @@ struct EmitterKernelSource final {
 [[nodiscard]] std::string runtime_kernel_source();
 // HLSL for the sprite renderer: entry points "sprite_vertex" and "sprite_pixel".
 [[nodiscard]] std::string sprite_shader_source();
-// HLSL for the depth sort: entry points "sort_keys", "sort_count", "sort_scan"
-// and "sort_scatter".
+// HLSL for the depth sort: entry points "sort_keys", "sort_count", "sort_scan",
+// "sort_scatter", "sort_range" and "sort_slices".
 [[nodiscard]] std::string sort_kernel_source();
 // HLSL for the grid volumes' step: the entry points volume_kernel_names
 // lists, in that order.
@@ -104,6 +104,8 @@ struct KernelSet final {
     std::vector<std::uint8_t> sort_count;
     std::vector<std::uint8_t> sort_scan;
     std::vector<std::uint8_t> sort_scatter;
+    std::vector<std::uint8_t> sort_range;
+    std::vector<std::uint8_t> sort_slices;
     std::vector<std::uint8_t> sprite_vertex;
     std::vector<std::uint8_t> sprite_pixel;
     std::vector<EmitterKernels> emitters;

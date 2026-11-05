@@ -196,6 +196,53 @@ void alpha_particles_draw_back_to_front() {
     AJFX_CHECK(unsorted.r >= 200 && unsorted.b <= 40);
 }
 
+void emitters_interleave_by_depth() {
+    // A grey smoke disc four units across at z = 0 fills the view, drawn
+    // between two additive red sparks: one in front of it at x = -0.5
+    // (pixel 24), emitted first, and one behind it at x = 0.5 (pixel 40),
+    // emitted last. Emitter order would hide the near spark and show the far
+    // one; by depth the near one shows and the far one is hidden.
+    EffectBuilder builder{"interleaved"};
+    const auto spark = [&](const char* name, Vec3 at) {
+        const Color red{1.0F, 0.0F, 0.0F, 1.0F};
+        builder.emitter(name)
+            .spawn(SpawnBurst{.count = 1U})
+            .init(Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(ShapeLocation{.shape = Shape::Point, .center = at})
+            .init(InitColor{.a = red, .b = red})
+            .init(InitSize{.min = 0.5F, .max = 0.5F})
+            .renderer(SpriteRenderer{.blend = BlendMode::Additive, .sort = false});
+    };
+    spark("near", Vec3{-0.5F, 0.0F, 0.5F});
+    const Color grey{0.25F, 0.25F, 0.25F, 1.0F};
+    builder.emitter("smoke")
+        .spawn(SpawnBurst{.count = 1U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(InitColor{.a = grey, .b = grey})
+        .init(InitSize{.min = 4.0F, .max = 4.0F})
+        .renderer(SpriteRenderer{.blend = BlendMode::Alpha});
+    spark("far", Vec3{0.5F, 0.0F, -0.5F});
+    const Effect effect = builder.build().value();
+    for (std::size_t e = 0U; e < 3U; ++e) {
+        AJFX_CHECK(gpu::interleaved(effect, e));
+    }
+    const Frame frame = render(effect, 1U, ortho);
+    // The smoke at x = 0.5 unit is a quarter of the way out: coverage
+    // 1 - 1/16, so a premultiplied 0.234 grey. In front of it the spark adds
+    // its full red; behind it the spark shows through the last 1/16 only.
+    const Pixel near = frame.at(24U, 32U);
+    AJFX_CHECK(near.r >= 250 && near.g >= 57 && near.g <= 62);
+    const Pixel far = frame.at(40U, 32U);
+    AJFX_CHECK(far.r >= 70 && far.r <= 80 && far.g >= 57 && far.g <= 62);
+    // An effect with one such emitter, or with only additive ones, draws
+    // as it always has.
+    Effect sparks = effect;
+    sparks.emitters.erase(sparks.emitters.begin() + 1);
+    AJFX_CHECK(!gpu::interleaved(sparks, 0U) && !gpu::interleaved(sparks, 1U));
+    AJFX_CHECK(!gpu::interleaved(still(1U, Vec3{}, 1.0F, grey, BlendMode::Alpha), 0U));
+}
+
 // Four solid 8x8 cells in a 16x16 texture: red, green, blue, white.
 TextureSet cells() {
     const std::uint8_t colours[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
@@ -672,6 +719,7 @@ int main() {
         {"perspective_puts_particles_where_the_projection_says", perspective_puts_particles_where_the_projection_says},
         {"velocity_aligned_sprites_stretch_along_their_motion", velocity_aligned_sprites_stretch_along_their_motion},
         {"alpha_particles_draw_back_to_front", alpha_particles_draw_back_to_front},
+        {"emitters_interleave_by_depth", emitters_interleave_by_depth},
         {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"mesh_particles_draw_their_mesh", mesh_particles_draw_their_mesh},

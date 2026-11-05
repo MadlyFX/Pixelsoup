@@ -517,7 +517,8 @@ ajfx Studio, the authoring application, is beside the library in
 sorts them with a `gpu::ParticleSorter` before drawing.
 - **Which emitters sort:** sprites and meshes with `SpriteRenderer::sort`
   set (the default) and a blend that depends on order. Additive emitters
-  and ribbons keep birth order and cost nothing.
+  and ribbons keep birth order and cost nothing, except an additive sprite
+  emitter drawn among sorted ones (below).
 - **How it works:** a stable GPU radix sort of the view depth. It uses
   integer scans, with atomics only for counting. It sorts the top 24 bits of
   the depth (one part in 32,768 of the distance) in six passes, and sizes
@@ -531,6 +532,16 @@ sorts them with a `gpu::ParticleSorter` before drawing.
 - **Cost on an RTX 3090:** about 0.2 ms up to 65,000 particles (mostly the
   fixed cost of its 19 dispatches), 0.5 ms for a million and 1.9 ms for four
   million.
+- **Between emitters:** each emitter sorts on its own, so drawn one after
+  another the last would cover the others wherever they overlap (smoke
+  hiding the sparks in front of it). Instead the sprite emitters that share
+  depth with a sorted one (`gpu::interleaved`: sorted sprites, and additive
+  sprites, which sort for this alone) draw interleaved. `slice` cuts their
+  common depth range into 32 even slices, and the renderer draws the slices
+  farthest first, each emitter's part of a slice in emitter order, at the
+  place in emitter order of the first of them. Meshes, ribbons and unsorted
+  emitters keep their own place. Within one slice, emitters still draw in
+  emitter order.
 
 **Textures.** A sprite with a `texture` samples it instead of drawing a soft
 disc.
