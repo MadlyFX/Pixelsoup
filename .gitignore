@@ -23,6 +23,7 @@ compile_commands.json
 
 # Blender writes the previous save beside a .blend; Git already keeps history.
 *.blend1
+*.blend
 
 # Derived import/lighting packages are recreated from their source assets.
 .mslink-cache-v1/
