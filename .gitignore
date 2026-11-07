@@ -35,4 +35,4 @@ compile_commands.json
 __pycache__/
 *.py[cod]
 # Local driving footage: too large for Git without LFS.
-/Models
+Models/
