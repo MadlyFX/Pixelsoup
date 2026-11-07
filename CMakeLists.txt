@@ -94,18 +94,27 @@ add_subdirectory(engine/assets)
 # deterministic radial transforms) without depending on the GPU renderer.
 add_subdirectory(engine/compositor)
 
-# ajfx, the particles and volumes project beside the media server in this
-# repository (see ajfx/README.md). Its runtime comes first because the
-# renderer plays its effects; ajfx Studio, its editor, previews through that
-# renderer, so it is built when the GUI is.
-set(AJFX_WARNINGS_AS_ERRORS ${MEDIASERVER_WARNINGS_AS_ERRORS})
-set(AJFX_BUILD_STUDIO_APP ${MEDIASERVER_ENABLE_GUI})
-add_subdirectory(ajfx)
-
 # SDL3 carries both the window shell and the first RHI backend, so the option
 # now means "this build has SDL3" rather than "this build opens windows": a
 # headless node can drive a GPU output target without ever creating one.
 if(MEDIASERVER_ENABLE_GUI)
+    # A standalone MediaServer build supplies ajfx for particle playback.
+    # Studio's build has already added the runtime before it adds MediaServer.
+    if(NOT TARGET ajfx::ajfx)
+        set(MEDIASERVER_AJFX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../ajfx"
+            CACHE PATH "Path to the ajfx source checkout")
+        if(NOT EXISTS "${MEDIASERVER_AJFX_SOURCE_DIR}/lib/include/ajfx/effect.hpp")
+            message(FATAL_ERROR "MediaServer GUI needs an ajfx checkout. "
+                "Place it beside MediaServer or set MEDIASERVER_AJFX_SOURCE_DIR.")
+        endif()
+        block(SCOPE_FOR VARIABLES)
+            set(BUILD_TESTING OFF)
+            set(AJFX_BUILD_STUDIO_APP OFF)
+            set(AJFX_WARNINGS_AS_ERRORS ${MEDIASERVER_WARNINGS_AS_ERRORS})
+            add_subdirectory("${MEDIASERVER_AJFX_SOURCE_DIR}" _deps/ajfx EXCLUDE_FROM_ALL)
+        endblock()
+    endif()
+
     add_subdirectory(engine/shaders)
     add_subdirectory(engine/rhi)
     # The renderer that draws a scene::Scene onto a GPU target. It sits above
@@ -137,7 +146,6 @@ if(BUILD_TESTING)
     mediaserver_test_area(persist engine/persist)
     mediaserver_test_area(scene engine/scene engine/track engine/assets)
     mediaserver_test_area(compositor engine/compositor)
-    mediaserver_test_area(particles ajfx)
     mediaserver_test_area(output engine/output engine/topology engine/sync
         engine/devices)
     mediaserver_test_area(render engine/shaders engine/rhi engine/render)

@@ -72,8 +72,7 @@ function(mediaserver_test_area area)
             continue()
         endif()
 
-        # A test's properties are set through the directory that registered
-        # it, which may be below the area's own (ajfx/lib, ajfx/studio).
+        # A test's properties are set through the directory that registered it.
         _mediaserver_directory_tree(tree "${dir}")
         foreach(test_dir IN LISTS tree)
             get_property(tests DIRECTORY "${test_dir}" PROPERTY TESTS)

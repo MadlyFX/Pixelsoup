@@ -340,8 +340,10 @@ so two nodes round the pixel they share identically. Basic input remains a
 straight sample. Applied last, after warp and after the switcher's dissolve;
 per-panel calibration stays on the LED processor.
 
-**Particle effects.** A `scene.particle_effect` places an `.ajfx` package
-(see [ajfx](../ajfx/README.md)). `render::ParticlePackageCache` reads and
+## Particle effects
+
+A `scene.particle_effect` places an `.ajfx` package exported by ajfx Studio.
+`render::ParticlePackageCache` reads and
 checks packages on a worker, and the scene renderer creates at most one new
 instance a frame. `render::ParticlePass` steps each instance to its show
 frame's simulation step within a per-frame step budget
@@ -378,8 +380,7 @@ particle issue; removing the cache plays the effect live.
 - **Soft particles** read scene depth from the velocity product's z, so all
   effects' colour draws before any effect's motion. Perspective and
   orthographic views both work.
-- **Grid volumes** (`Effect::volumes`, see
-  [Grid volumes](../ajfx/lib/README.md#grid-volumes)) simulate on the RHI
+- **Grid volumes** (`Effect::volumes`) simulate on the RHI
   through the same particle device, grid for grid what ajfx's own device
   leaves. Each is drawn after the props and before the sprites, so particles
   draw over the smoke as in the reference renderer: the grid's box is
@@ -400,8 +401,7 @@ particle issue; removing the cache plays the effect live.
   behind a wall and surrounds a camera inside its box; props and other
   effects' particles are not in that depth. Volumes write no motion and
   cast no shadow on the particles, nor the particles on them.
-- **Lit particles** (`SpriteRenderer::lighting`, see
-  [Lighting](../ajfx/lib/README.md#drawing)) take the scene's light: the
+- **Lit particles** (`SpriteRenderer::lighting`) take the scene's light: the
   vertex stage sums every scene light (suns, points, spots with their cones;
   no shadows, profiles or area shapes) into six directions of the sprite's
   frame, with the hemisphere ambient and the scene's exposure, and the pixel

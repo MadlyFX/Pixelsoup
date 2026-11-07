@@ -21,6 +21,18 @@
         "tinyobjloader",
         "tinyfiledialogs",
         {
+          "name": "ffmpeg",
+          "features": [
+            "nvcodec"
+          ]
+        },
+        "freetype"
+      ]
+    },
+    "studio": {
+      "description": "Additional GUI dependencies for the ajfx Studio application.",
+      "dependencies": [
+        {
           "name": "imgui",
           "features": [
             "docking-experimental",
@@ -28,14 +40,7 @@
             "freetype"
           ]
         },
-        "imguizmo",
-        {
-          "name": "ffmpeg",
-          "features": [
-            "nvcodec"
-          ]
-        },
-        "freetype"
+        "imguizmo"
       ]
     }
   },

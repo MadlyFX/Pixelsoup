@@ -911,7 +911,7 @@ void volumes_raymarch_a_slab_of_smoke() {
     // scattering towards the camera is the march's own sum, in 64 steps
     // along the ray, each lit through 8 steps of its own back to the face:
     // the reference renderer's test (volumes_raymarch_a_slab_of_smoke in
-    // ajfx/lib/tests/render_tests.cpp), so the two agree.
+    // lib/tests/render_tests.cpp in the ajfx checkout), so the two agree.
     const float density = 0.6F;
     const float extinction = 1.5F;
     const float albedo = 0.8F;

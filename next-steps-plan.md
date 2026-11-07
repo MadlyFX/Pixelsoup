@@ -849,7 +849,7 @@ the ARP table (NovaStar OUI `54:b5:6c`) as well as by subnet search.
 
 Playing `.ajfx` packages is described in the [renderer guide](docs/renderer.md)
 and [operator guide](docs/operator-guide.md). The ajfx runtime and Studio have
-their own [roadmap](ajfx/docs/roadmap.md). What remains on the media server
+their own roadmap in the ajfx checkout. What remains on the media server
 side:
 
 - Two-node agreement on the cluster, for sprites, meshes and lights.

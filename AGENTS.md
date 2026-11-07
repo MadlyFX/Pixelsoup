@@ -22,7 +22,7 @@ document or scanning binary model assets to understand a small change.
 | Director frame-loop phases and editor command authoring | `apps/server/director_show_loop.hpp`, `apps/server/director_*.cpp` |
 | Offline lighting bake | `apps/bake` |
 | Particle effects in the scene renderer (ajfx host side) | `engine/render/particle_*`, `engine/scene` (`scene.particle_effect`) |
-| ajfx: particles runtime and ajfx Studio, a separate project with its own guide | `ajfx/` (see `ajfx/AGENTS.md`) |
+| ajfx runtime and Studio | Separate ajfx checkout (default `../ajfx`) |
 | Blender publisher | `integrations/blender`, `tests/blender`, `scripts/test-blender-livelink.py` |
 
 Modules have colocated `tests/`; the headless spine also uses `tests/unit/`.
@@ -63,7 +63,8 @@ build inputs and notices and must not be treated as disposable cache.
 
 ## Build and validation
 
-Build from an MSVC developer shell with `VCPKG_ROOT` set.
+Build from an MSVC developer shell with `VCPKG_ROOT` set. GUI builds use
+the sibling ajfx checkout or the path set by `MEDIASERVER_AJFX_SOURCE_DIR`.
 `scripts/run-editor-demo.ps1` launches the current editor workflow; `-Exe`
 selects a particular build.
 
@@ -71,7 +72,7 @@ Testing is tiered so a change builds and runs only what it affects:
 
 - **Area**: each code-map area has a build preset and a test preset of the
   same name: `area-spine`, `area-session`, `area-persist`, `area-scene`,
-  `area-compositor`, `area-particles`, `area-output`, `area-render`,
+  `area-compositor`, `area-output`, `area-render`,
   `area-editor`, `area-server` and `area-blender`. `cmake --build --preset area-render`
   links only that area's tests (on Debug GUI); `ctest --preset area-render`
   runs them. Run every area the change touches. `-R <pattern>` narrows further.
