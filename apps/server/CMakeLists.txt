@@ -111,8 +111,6 @@ target_link_libraries(mediaserver_server
         Threads::Threads
         ${FFMPEG_LIBRARIES}
 )
-# The server is only built with the GUI stack (see the root CMakeLists.txt).
-target_compile_definitions(mediaserver_server PUBLIC MEDIASERVER_HAS_GUI=1)
 
 if(WIN32)
     # ole32/oleaut32 read the Windows Firewall rules, shell32 asks for the
