@@ -9,10 +9,14 @@ project(
 
 include(CTest)
 
-option(MEDIASERVER_BUILD_SERVER "Build the media-server executable" ON)
 # Off by default so a headless build needs no video stack. Enabling it also
 # requires the vcpkg manifest feature: VCPKG_MANIFEST_FEATURES=gui.
 option(MEDIASERVER_ENABLE_GUI "Build the SDL3 window output shell" OFF)
+# The Director's editor and every node's renderer need the GUI stack, so a
+# headless build covers the engine modules only.
+include(CMakeDependentOption)
+cmake_dependent_option(MEDIASERVER_BUILD_SERVER
+    "Build the media-server executable" ON "MEDIASERVER_ENABLE_GUI" OFF)
 option(MEDIASERVER_WARNINGS_AS_ERRORS "Treat project warnings as errors" ON)
 # The sustained-rate gate runs for ten minutes, so it is registered with CTest
 # only on request. Its binary is built either way and takes --seconds.

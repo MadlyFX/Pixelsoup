@@ -101,7 +101,6 @@ namespace mediaserver::app {
 // node-creation commands in one transaction, so it replicates, journals, and
 // undoes through the same paths. Explicit output demos keep their two slices;
 // a fresh editor gets one full-canvas node-0 slice for its supervised output.
-#if defined(MEDIASERVER_HAS_GUI)
 // File > New Project: an untitled startup without the demo content. One empty
 // scene at the editor's default canvas, with the camera and compositor output
 // a created scene gets, and the node-0 feed map an untitled editor seeds so a
@@ -145,7 +144,6 @@ namespace mediaserver::app {
     }
     return root;
 }
-#endif
 
 [[nodiscard]] bool author_feed_map_document(cmd::DirectorScheduler &scheduler,
                                             cmd::FrameNumber apply_at,
@@ -176,8 +174,6 @@ namespace mediaserver::app {
     }
     return true;
 }
-
-#if defined(MEDIASERVER_HAS_GUI)
 
 // Writes the demo clip as a short image sequence of TGAs to a temp directory
 // and returns a '#'-run template the renderer resolves per frame. A stand-in
@@ -259,6 +255,5 @@ namespace mediaserver::app {
     }
     return true;
 }
-#endif
 
 } // namespace mediaserver::app

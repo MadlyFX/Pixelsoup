@@ -48,7 +48,6 @@
 #include <mediaserver/topology/hardware_map_model.hpp>
 #include <mediaserver/topology/hardware_runtime.hpp>
 
-#if defined(MEDIASERVER_HAS_GUI)
 #include "blender_links.hpp"
 #include "cluster_lifecycle_controller.hpp"
 #include "director_live_data.hpp"
@@ -57,15 +56,12 @@
 #include "thumbnail_service.hpp"
 #include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/net/cluster_discovery.hpp>
-#if defined(MEDIASERVER_HAS_GUI)
 #include <mediaserver/devices/processor_monitor.hpp>
-#endif
 #include <mediaserver/render/blender_discovery.hpp>
 #include <mediaserver/render/linked_publication.hpp>
 #include <mediaserver/render/linked_scene_ingest.hpp>
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/render/render_conformance.hpp>
-#endif
 
 #include <chrono>
 #include <csignal>
@@ -83,7 +79,6 @@
 
 namespace mediaserver::app {
 
-#if defined(MEDIASERVER_HAS_GUI)
 // How often the editor is redrawn when the show itself does not ask sooner.
 constexpr auto editor_refresh_interval = std::chrono::nanoseconds{16'666'667};
 
@@ -96,7 +91,6 @@ struct PendingKeyPaste final {
     editor::KeyClipboardRequest request;
     KeyClipboard snapshot;
 };
-#endif
 
 // The latest evaluated physical-timing picture. It is refreshed once per
 // Director tick and read by both the operator surface and the diagnostic
@@ -165,7 +159,6 @@ struct OperatorFrame final {
     bool scene_edits_locked = false;
 };
 
-#if defined(MEDIASERVER_HAS_GUI)
 // Everything one editor refresh hands to EditorShell::frame. The shell
 // borrows these (and views into them) for the duration of the call, so they
 // live together until it returns.
@@ -192,7 +185,6 @@ struct EditorViewInputs final {
     std::vector<editor::TimelineFilmstripObservation> filmstrip_observations;
     editor::AssetViewerInput asset_viewer{};
 };
-#endif
 
 enum class PaceOutcome : core::u8 {
     Ready,
@@ -222,7 +214,6 @@ struct DirectorShowLoop final {
     server::DirectorPosePredictors &director_pose_predictors;
     core::u64 &director_poses_sent;
     core::u64 &last_replicated_pose_frame;
-#if defined(MEDIASERVER_HAS_GUI)
     std::unique_ptr<editor::EditorShell> &editor;
     std::unique_ptr<ClusterLifecycleController> &lifecycle_controller;
     std::unique_ptr<net::ClusterDiscoveryBrowser> &discovery_browser;
@@ -239,7 +230,6 @@ struct DirectorShowLoop final {
     std::optional<cmd::FrameNumber> &last_editor_control_frame;
     core::u64 &editor_frame_calls;
     std::optional<std::filesystem::path> &workspace_layout_file;
-#endif
     show::ShowClock &pacer;
     sync::DirectorClockStatus &director_clock;
     bool &director_reference_seen;
@@ -247,7 +237,6 @@ struct DirectorShowLoop final {
     show::TransportAuthority &transport;
     std::deque<net::DirectorFrameBarrierId> &tracked;
     std::vector<show::PresenterCommand> &operator_commands;
-#if defined(MEDIASERVER_HAS_GUI)
     std::vector<editor::EditIntent> &pending_edits;
     std::vector<editor::WorldEdit> &pending_world_edits;
     std::optional<editor::HistoryRequest> &pending_history;
@@ -397,7 +386,6 @@ struct DirectorShowLoop final {
     core::u64 &linked_ingest_project;
     core::u64 &linked_ingest_gesture;
     core::u64 &next_new_node;
-#endif
     bool &rehearsal_mode;
     std::optional<show::TransportAuthority> &preview_transport;
     std::optional<show::TransportAnchor> &authored;
@@ -417,9 +405,7 @@ struct DirectorShowLoop final {
     net::RuntimeRendererReadiness &observed_local_renderer;
     server::RendererLockstep &director_renderer_lockstep;
     core::u64 &conformance_request;
-#if defined(MEDIASERVER_HAS_GUI)
     render::RenderConformanceService &director_conformance;
-#endif
     std::optional<std::pair<doc::NodeId, core::u64>> &pending_asset_commit;
     core::u64 &last_asset_commit_frame;
     core::u64 &last_asset_commit_digest;
@@ -453,10 +439,8 @@ struct DirectorShowLoop final {
     // the document still records at their old revision.
     std::vector<ChangedLibrarySource> &changed_library_sources;
     std::vector<doc::NodeId> &changed_library_assets;
-#if defined(MEDIASERVER_HAS_GUI)
     editor::EditorPreferencesState &preferences_view;
     std::string &stored_password_key;
-#endif
     compositor::CompositorModel &compositor_model;
     core::u64 &compositor_version;
     bool &compositor_loaded;
@@ -474,7 +458,6 @@ struct DirectorShowLoop final {
     // What those views drew on the last evaluated frame.
     ViewProxySummary program_view_proxies{};
     ViewProxySummary stage_view_proxies{};
-#if defined(MEDIASERVER_HAS_GUI)
     // The Timeline's cache bar. A placement off air has no evaluated media
     // to say which file it decodes, so the last one seen on air is kept.
     struct TimelineDecodeSource final {
@@ -496,7 +479,6 @@ struct DirectorShowLoop final {
     editor::AssetViewerRendition asset_viewer_rendition{
         editor::AssetViewerRendition::None};
     std::vector<editor::SourceRangeEditIntent> pending_source_edits{};
-#endif
 
     // Runs until stopped, closed or out of run frames; returns the exit code.
     [[nodiscard]] int run();
@@ -530,7 +512,6 @@ struct DirectorShowLoop final {
     void report_lockstep_demotions();
     void report_stopping();
 
-#if defined(MEDIASERVER_HAS_GUI)
     // director_operator_input.cpp: project, transport and switcher requests.
     [[nodiscard]] EditCoalescingPlan *coalescing_for(core::u64 gesture);
     void remember_recent_project(std::string_view path);
@@ -599,7 +580,6 @@ struct DirectorShowLoop final {
     [[nodiscard]] PhaseExit
     queue_editor_requests(DirectorTick &tick,
                           editor::EditorFrame &editor_frame);
-#endif
 };
 
 } // namespace mediaserver::app

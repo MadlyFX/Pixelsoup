@@ -125,9 +125,7 @@ void DirectorShowLoop::report_backlog(ControlBacklogEvent event) {
     if (event == ControlBacklogEvent::Recovered) {
         std::cerr << "Director resumed sealing control frames; operator "
                      "edits apply again\n";
-#if defined(MEDIASERVER_HAS_GUI)
         project_message = "EDITS RESUMED";
-#endif
         return;
     }
     std::cerr << "Director stalled: " << tracked.size()
@@ -149,14 +147,12 @@ void DirectorShowLoop::report_backlog(ControlBacklogEvent event) {
         }
     }
     std::cerr << '\n' << std::flush;
-#if defined(MEDIASERVER_HAS_GUI)
     project_message =
         waiting_on_nodes
             ? "EDITS PAUSED - a render node stopped acknowledging frames; "
               "see Output Monitor"
             : "EDITS PAUSED - the Director could not finish a frame; see "
               "its console";
-#endif
 }
 
 // Every output waits for the slowest node, up to the barrier's lag limit.
@@ -176,11 +172,9 @@ void DirectorShowLoop::report_lockstep_demotions() {
               << " frames behind. The other outputs continue; it rejoins "
                  "once it catches up. lockstep-demotions="
               << diagnostics.lockstep_demotions << '\n';
-#if defined(MEDIASERVER_HAS_GUI)
     project_message = "NODE " + std::to_string(diagnostics.last_demoted_node) +
                       " FELL BEHIND - outputs no longer wait for it until it "
                       "catches up";
-#endif
 }
 
 void DirectorShowLoop::report_stopping() {
@@ -203,11 +197,9 @@ void DirectorShowLoop::report_stopping() {
                                                             : "headless"))
               << " released-through="
               << barrier.released_through().through_frame.value();
-#if defined(MEDIASERVER_HAS_GUI)
     if (options.edit) {
         std::cout << " editor-frame-calls=" << editor_frame_calls;
     }
-#endif
     std::cout << '\n' << std::flush;
 }
 

@@ -540,34 +540,32 @@ endforeach()
 # Hardware Mapping uses signed desktop coordinates because displays can sit to
 # the left of or above the primary monitor. The CLI fallback must accept the
 # same representation. Validation does not open the requested window.
-if(HAS_GUI)
-    execute_process(
-        COMMAND
-            "${SERVER_EXE}"
-            --validate-startup
-            --role=output
-            "--director-connect=${node_endpoint}"
-            "--show-id=${show_id}"
-            "--node-id=${node_id}"
-            "--node-incarnation=${node_incarnation}"
-            --playback
-            --window
-            --window-at=-1920,-120
-        WORKING_DIRECTORY "${TEST_ROOT}"
-        RESULT_VARIABLE signed_window_result
-        OUTPUT_VARIABLE signed_window_output
-        ERROR_VARIABLE signed_window_error
-    )
-    if(NOT signed_window_result EQUAL 0)
-        message(FATAL_ERROR
-            "signed window position was rejected: "
-            "${signed_window_result}: ${signed_window_error}")
-    endif()
-    if(NOT signed_window_output MATCHES "window-at=-1920,-120")
-        message(FATAL_ERROR
-            "signed window position did not round-trip through validation: "
-            "${signed_window_output}")
-    endif()
+execute_process(
+    COMMAND
+        "${SERVER_EXE}"
+        --validate-startup
+        --role=output
+        "--director-connect=${node_endpoint}"
+        "--show-id=${show_id}"
+        "--node-id=${node_id}"
+        "--node-incarnation=${node_incarnation}"
+        --playback
+        --window
+        --window-at=-1920,-120
+    WORKING_DIRECTORY "${TEST_ROOT}"
+    RESULT_VARIABLE signed_window_result
+    OUTPUT_VARIABLE signed_window_output
+    ERROR_VARIABLE signed_window_error
+)
+if(NOT signed_window_result EQUAL 0)
+    message(FATAL_ERROR
+        "signed window position was rejected: "
+        "${signed_window_result}: ${signed_window_error}")
+endif()
+if(NOT signed_window_output MATCHES "window-at=-1920,-120")
+    message(FATAL_ERROR
+        "signed window position did not round-trip through validation: "
+        "${signed_window_output}")
 endif()
 
 execute_process(

@@ -4,7 +4,8 @@ A C++20 virtual-production media server with a native layer/timeline editor,
 media playback, a Blender scene link, and synchronized render/output nodes.
 The Director commits document edits and show frames; nodes render the same
 authored state locally. Windows offers an Advanced D3D12 renderer and an SDL
-GPU Basic fallback. Core document and cluster modules also build headless.
+GPU Basic fallback. The engine modules also build headless; the media-server
+application needs a GUI build.
 
 MediaServer plays the `.ajfx` particle packages exported by ajfx Studio.
 The ajfx runtime and Studio live in the separate ajfx repository.
@@ -42,7 +43,8 @@ run `ctest --preset quick` to skip the slow tests. The full Debug and Release
 suites run before packaging. [AGENTS.md](AGENTS.md#build-and-validation)
 lists the areas.
 
-Other presets: `windows-msvc-debug` and `linux-clang-debug` are headless;
+Other presets: `windows-msvc-debug` and `linux-clang-debug` are headless
+(engine modules and their tests, no media-server);
 `macos-clang-debug-gui` builds the SDL shell. GUI builds enable the `gui`
 vcpkg feature for SDL3, FFmpeg, model/image import, OpenEXR, OCIO and FreeType.
 Long soak tests require `MEDIASERVER_ENABLE_SOAK_TESTS=ON`.

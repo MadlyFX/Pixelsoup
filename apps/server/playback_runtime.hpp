@@ -20,9 +20,7 @@
 #include <mediaserver/sync/sync_policy.hpp>
 #include <mediaserver/sync/sync_status.hpp>
 
-#if defined(MEDIASERVER_HAS_GUI)
 #include <mediaserver/render/hybrid_scene_renderer.hpp>
-#endif
 
 #include <algorithm>
 #include <chrono>
