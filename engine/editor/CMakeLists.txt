@@ -2,6 +2,21 @@ find_package(tinyfiledialogs CONFIG REQUIRED)
 
 add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
+    src/shell/shell_support.cpp
+    src/shell/shell_chrome.cpp
+    src/shell/shell_frame_start.cpp
+    src/shell/shell_frame_render.cpp
+    src/shell/shell_frame_header.cpp
+    src/shell/shell_frame_authoring.cpp
+    src/shell/shell_frame_panels.cpp
+    src/shell/shell_panels_viewports.cpp
+    src/shell/shell_panels_scene.cpp
+    src/shell/shell_panels_library.cpp
+    src/shell/shell_panels_outputs.cpp
+    src/shell/shell_panels_timeline.cpp
+    src/shell/shell_panels_inspector.cpp
+    src/shell/shell_frame_drops.cpp
+    src/shell/shell_frame_finish.cpp
     src/asset_viewer.cpp
     src/asset_viewer_panel.cpp
     src/plateset_editor.cpp
@@ -42,7 +57,11 @@ add_library(mediaserver_editor STATIC
     src/cues_panel.cpp
     src/history_panel.cpp
     src/operator_widgets.cpp
-    src/workspace_panels.cpp
+    src/scene_panel.cpp
+    src/compositor_panel.cpp
+    src/output_monitor_panel.cpp
+    src/preferences_panel.cpp
+    src/project_settings_panel.cpp
     src/scene_settings_panel.cpp
     src/mapping_panels.cpp
     src/hardware_sprites.cpp
@@ -65,11 +84,6 @@ add_custom_command(
         "${PROJECT_SOURCE_DIR}/cmake/EmbedFile.cmake"
     VERBATIM
 )
-# The shell is one very large translation unit; Debug builds pass the
-# default COFF section limit.
-if(MSVC)
-    set_source_files_properties(src/editor_shell.cpp PROPERTIES COMPILE_OPTIONS /bigobj)
-endif()
 
 target_include_directories(mediaserver_editor
     PUBLIC

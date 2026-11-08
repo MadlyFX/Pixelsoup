@@ -123,8 +123,8 @@ namespace topology = mediaserver::topology;
 }
 
 [[nodiscard]] gui::Theme editor_like_theme() {
-  // Mirrors editor_shell.cpp's editor_theme(); kept here so the tool needs
-  // nothing from the shell.
+  // Mirrors the shell's editor_theme() (src/shell/shell_support.hpp); kept
+  // here so the tool needs nothing from the shell.
   gui::Theme theme{};
   theme.padding = 5.0F;
   return theme;
