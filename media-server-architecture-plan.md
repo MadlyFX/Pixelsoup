@@ -75,7 +75,8 @@ pipelines, not evidence that an ST 2110 or NDI receiver exists today.
 `MEDIASERVER_ENABLE_GUI=OFF` leaves the project, command, persistence, show,
 network, scene, output, topology, assets, and compositor model layers
 available for headless testing. Enabling GUI adds SDL3, the renderer, native UI,
-editor, and GUI-only dependencies including FFmpeg and import libraries.
+editor, the media-server application, and GUI-only dependencies including
+FFmpeg and import libraries.
 
 ## Control, replication, and frame boundaries
 
