@@ -22,7 +22,16 @@ add_library(mediaserver_editor STATIC
     src/plateset_editor.cpp
     src/model_facts_worker.cpp
     src/workspace_layout.cpp
-    src/viewport_panel.cpp
+    src/viewport/viewport_overlays.cpp
+    src/viewport/viewport_queries.cpp
+    src/viewport/viewport_mask_geometry.cpp
+    src/viewport/viewport_transform.cpp
+    src/viewport/viewport_toolbar.cpp
+    src/viewport/viewport_panel.cpp
+    src/viewport/viewport_keyboard.cpp
+    src/viewport/viewport_pointer.cpp
+    src/viewport/viewport_chrome.cpp
+    src/viewport/viewport_masks.cpp
     src/gizmo.cpp
     src/model_surface_cache.cpp
     src/stage_placement.cpp

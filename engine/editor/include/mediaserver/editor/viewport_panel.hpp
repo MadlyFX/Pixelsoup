@@ -761,6 +761,35 @@ class ViewportPanel final {
     std::size_t mask_insert_index_{};
     scene::MaskPointGeometry mask_insert_geometry_{};
 
+    // draw() as phases over one Frame, run in this order (see
+    // src/viewport/viewport_frame.hpp).
+    struct Frame;
+    [[nodiscard]] bool begin_frame(Frame& f);
+    void prepare_surfaces(Frame& f);
+    void prepare_gizmos(Frame& f);
+    void update_pivot_drag(Frame& f);
+    void pick_hovered_surface(Frame& f);
+    void resolve_deep_select_menu(Frame& f);
+    void handle_stage_shortcuts(Frame& f);
+    void run_keyboard_transform(Frame& f);
+    void begin_interaction(Frame& f);
+    void handle_press(Frame& f);
+    void drag_surface(Frame& f);
+    void hold_deep_select(Frame& f);
+    void drag_element(Frame& f);
+    void finish_gesture(Frame& f);
+    void draw_overlays(Frame& f);
+    void draw_gizmos(Frame& f);
+
+    // draw_masks() likewise.
+    struct MaskFrame;
+    [[nodiscard]] bool begin_mask_frame(MaskFrame& f);
+    void pick_mask(MaskFrame& f);
+    void press_mask(MaskFrame& f);
+    void drag_mask(MaskFrame& f);
+    void release_mask(MaskFrame& f);
+    void draw_mask_overlay(MaskFrame& f);
+
     friend bool detail::wait_for_viewport_projection_surface_for_test(
         ViewportPanel& panel, doc::NodeId surface) noexcept;
     friend bool detail::wait_for_viewport_surface_hierarchies_for_test(
