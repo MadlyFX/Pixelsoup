@@ -19,10 +19,8 @@
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/topology/hardware_map.hpp>
 
-#if defined(MEDIASERVER_HAS_GUI)
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/render/media_source.hpp>
-#endif
 
 #include <algorithm>
 #include <array>
@@ -97,7 +95,6 @@ resolve_scene_proxies(ProxyPlaybackService &playback, scene::Scene &frame,
                       const ProjectAssetAvailability &availability,
                       std::vector<ProxyPlacementObservation> &observations);
 
-#if defined(MEDIASERVER_HAS_GUI)
 class MediaDecodeSupportWorker final {
   public:
     struct Snapshot final {
@@ -260,6 +257,5 @@ void project_output_node_media_runtime(
     const topology::HardwareMap &hardware,
     const net::DirectorFrameBarrier &barrier,
     std::vector<editor::LibraryProxyRuntimeObservation> &destination);
-#endif
 
 } // namespace mediaserver::app

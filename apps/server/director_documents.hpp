@@ -22,22 +22,17 @@ namespace mediaserver::app {
 
 [[nodiscard]] doc::Node editor_canvas_feed_map_node(core::u32 width,
                                                     core::u32 height);
-#if defined(MEDIASERVER_HAS_GUI)
 
 [[nodiscard]] doc::Root new_project_document();
-#endif
 
 [[nodiscard]] bool author_feed_map_document(cmd::DirectorScheduler &scheduler,
                                             cmd::FrameNumber apply_at,
                                             InitialFeedMapPlan plan);
-
-#if defined(MEDIASERVER_HAS_GUI)
 
 [[nodiscard]] std::string write_demo_clip();
 
 [[nodiscard]] bool author_edit_document(cmd::DirectorScheduler &scheduler,
                                         cmd::FrameNumber apply_at,
                                         const std::string &clip_source);
-#endif
 
 } // namespace mediaserver::app

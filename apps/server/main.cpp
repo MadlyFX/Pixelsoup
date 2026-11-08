@@ -12,9 +12,7 @@
 #include "playback.hpp"
 #include "render_machine.hpp"
 #include "render_machine_system.hpp"
-#if defined(MEDIASERVER_HAS_GUI)
 #include "render_machine_window.hpp"
-#endif
 #include "sync_device_probe.hpp"
 #if defined(MEDIASERVER_HAS_NVAPI_PRESENT_BARRIER)
 #include "nvapi_present_barrier.hpp"
@@ -538,7 +536,6 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         return 0;
     }
 
-#if defined(MEDIASERVER_HAS_GUI)
     // Started from Explorer or a shortcut, the console window is noise and
     // closing it would stop the machine; from a terminal it is kept, and the
     // render process shares it as it does under the scripts.
@@ -555,12 +552,6 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             "media-server --help).");
     }
     return result;
-#else
-    std::cerr << "this build has no render machine window; run the lifecycle "
-                 "agent with --lifecycle-listen (see --help) or "
-                 "scripts/run-output-node.ps1\n";
-    return 2;
-#endif
 }
 
 [[nodiscard]] int run_utf8_main(int argc, char **argv) {

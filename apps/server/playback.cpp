@@ -33,7 +33,6 @@
 #include <mediaserver/topology/hardware_map.hpp>
 #include <mediaserver/track/pose_channel.hpp>
 
-#if defined(MEDIASERVER_HAS_GUI)
 #include "director_project_load.hpp"
 #include <mediaserver/editor/live_data_panel.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
@@ -42,7 +41,6 @@
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/persist/settings.hpp>
 #include <mediaserver/ui/sdl_presenter.hpp>
-#endif
 
 #include <algorithm>
 #include <array>
@@ -56,43 +54,23 @@
 namespace mediaserver::app {
 
 bool window_output_available() noexcept {
-#if defined(MEDIASERVER_HAS_GUI)
     return true;
-#else
-    return false;
-#endif
 }
 
 bool gpu_output_available() noexcept {
-#if defined(MEDIASERVER_HAS_GUI)
     return ui::gpu_output_available();
-#else
-    return false;
-#endif
 }
 
 bool scene_output_available() noexcept {
-#if defined(MEDIASERVER_HAS_GUI)
     return ui::scene_output_available();
-#else
-    return false;
-#endif
 }
 
 bool output_output_available() noexcept {
-#if defined(MEDIASERVER_HAS_GUI)
     return ui::output_output_available();
-#else
-    return false;
-#endif
 }
 
 bool editor_available() noexcept {
-#if defined(MEDIASERVER_HAS_GUI)
     return editor::editor_available();
-#else
-    return false;
-#endif
 }
 
 bool parse_frame_rate(std::string_view value, show::FrameRate &rate) noexcept {
@@ -316,10 +294,8 @@ int run_node_playback(net::NodeSessionService &service,
     net::RuntimeTracking node_tracking{};
     net::RuntimeTracking published_tracking{};
     net::RuntimePlayhead published_playhead{};
-#if defined(MEDIASERVER_HAS_GUI)
     render::RenderConformanceService node_conformance;
     render::PublicationVerification node_publication_verification;
-#endif
     net::RuntimeRendererReadiness node_renderer_readiness{};
     core::AssetCommit node_asset_commit{};
     net::RuntimeRendererReadiness published_renderer_readiness{};
@@ -647,12 +623,10 @@ int run_node_playback(net::NodeSessionService &service,
                     ? aggregate.assets.visible_commit : 0;
             }
         }
-#if defined(MEDIASERVER_HAS_GUI)
         if (aggregate.selected == net::RuntimeRendererBackend::Advanced) {
             const auto adapter = aggregate.conformance.adapter;
             node_conformance.poll(adapter, service.conformance_request(), aggregate.conformance);
         }
-#endif
         node_renderer_readiness = aggregate;
         if (!force && node_renderer_readiness ==
                           published_renderer_readiness) {
@@ -1259,9 +1233,7 @@ int run_node_playback(net::NodeSessionService &service,
                     active_deployment.render_server != doc::NodeId{};
             }
             node_asset_commit = scene_frame.asset_commit;
-#if defined(MEDIASERVER_HAS_GUI)
             scene_frame.publication_verified=node_publication_verification.observe(presented.root,scene_frame.id);
-#endif
 
             // The pose this node was given for the frame it is drawing.
             //
@@ -1627,11 +1599,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // it is not a GUI-only project-loading concern.
     const bool recovered_session =
         command_log.recovery_report().entry_count != 0U;
-#if !defined(MEDIASERVER_HAS_GUI)
-    // Project loading is a GUI-only authoring path, but keeping these seams in
-    // the common entry point lets both builds use the same durable coordinator.
-    static_cast<void>(frame_durability);
-#endif
     // The editor replaces the preview presenter when asked for: it is the
     // operator's surface, not an output window. Everything else - the seal
     // loop, the transport, replication - is identical either way.
@@ -1674,7 +1641,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // monotonic across a compensation change. See where it is used.
     core::u64 last_replicated_pose_frame{};
 
-#if defined(MEDIASERVER_HAS_GUI)
     std::unique_ptr<editor::EditorShell> editor;
     std::unique_ptr<ClusterLifecycleController> lifecycle_controller;
     // Finds render machines for the Hardware Map's DETECTED ON NETWORK strip.
@@ -1828,7 +1794,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         }
         clip_source = write_demo_clip();
     }
-#endif
     if (!options.edit) {
         presenter = make_presenter(options, "media-server director", true);
         if (presenter == nullptr) {
@@ -1879,7 +1844,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         std::cerr << "could not start the Director frame pacer\n";
         return 1;
     }
-#if defined(MEDIASERVER_HAS_GUI)
     if (options.edit && recovered_session) {
         const doc::Node *const raw_transport =
             scheduler.projected_document().get(show::transport_node_id);
@@ -1904,7 +1868,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             restored_recovered_transport = true;
         }
     }
-#endif
 
     // The built-in scene and feed map are authored once, as ordinary
     // node-creation commands on the first frame this Director will seal. From
@@ -1925,18 +1888,15 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             std::cerr << "could not author the built-in feed map document\n";
             return 1;
         }
-#if defined(MEDIASERVER_HAS_GUI)
         if (options.edit && !recovered_session &&
             !author_edit_document(scheduler, first, clip_source)) {
             std::cerr << "could not author the edit scene document\n";
             return 1;
         }
-#endif
     }
 
     std::deque<net::DirectorFrameBarrierId> tracked;
     std::vector<show::PresenterCommand> operator_commands;
-#if defined(MEDIASERVER_HAS_GUI)
     // Operator moves from the editor, coalesced to the latest per node,
     // authored at the next frame boundary like the transport commands.
     std::vector<editor::EditIntent> pending_edits;
@@ -2237,7 +2197,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // so an add never collides with an existing node (content, channel, or
     // demo).
     core::u64 next_new_node{100'000U};
-#endif
     bool rehearsal_mode{};
     // Preview's playhead. Program's transport is replicated document state
     // every render node derives its frame from; Preview's is Director-local
@@ -2271,9 +2230,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     net::RuntimeRendererReadiness observed_local_renderer{};
     server::RendererLockstep director_renderer_lockstep{};
     core::u64 conformance_request{};
-#if defined(MEDIASERVER_HAS_GUI)
     render::RenderConformanceService director_conformance;
-#endif
     std::optional<std::pair<doc::NodeId, core::u64>> pending_asset_commit;
     core::u64 last_asset_commit_frame{};
     core::u64 last_asset_commit_digest{};
@@ -2315,7 +2272,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     ProjectAssetAvailability director_asset_availability;
     std::vector<ChangedLibrarySource> changed_library_sources;
     std::vector<doc::NodeId> changed_library_assets;
-#if defined(MEDIASERVER_HAS_GUI)
     editor::EditorPreferencesState preferences_view{};
     // The stored render node password, as its derived key. Saved from the
     // Preferences panel and applied to the controller without a restart.
@@ -2385,7 +2341,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             displaced(options.wal_path_from_command_line, stored.wal_path,
                       active.wal_path);
     }
-#endif
 
     compositor::CompositorModel compositor_model;
     core::u64 compositor_version = 0U;
@@ -2409,7 +2364,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .director_pose_predictors = director_pose_predictors,
         .director_poses_sent = director_poses_sent,
         .last_replicated_pose_frame = last_replicated_pose_frame,
-#if defined(MEDIASERVER_HAS_GUI)
         .editor = editor,
         .lifecycle_controller = lifecycle_controller,
         .discovery_browser = discovery_browser,
@@ -2425,7 +2379,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .last_editor_control_frame = last_editor_control_frame,
         .editor_frame_calls = editor_frame_calls,
         .workspace_layout_file = workspace_layout_file,
-#endif
         .pacer = pacer,
         .director_clock = director_clock,
         .director_reference_seen = director_reference_seen,
@@ -2433,7 +2386,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .transport = transport,
         .tracked = tracked,
         .operator_commands = operator_commands,
-#if defined(MEDIASERVER_HAS_GUI)
         .pending_edits = pending_edits,
         .pending_world_edits = pending_world_edits,
         .pending_history = pending_history,
@@ -2579,7 +2531,6 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .linked_ingest_project = linked_ingest_project,
         .linked_ingest_gesture = linked_ingest_gesture,
         .next_new_node = next_new_node,
-#endif
         .rehearsal_mode = rehearsal_mode,
         .preview_transport = preview_transport,
         .authored = authored,
@@ -2599,9 +2550,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .observed_local_renderer = observed_local_renderer,
         .director_renderer_lockstep = director_renderer_lockstep,
         .conformance_request = conformance_request,
-#if defined(MEDIASERVER_HAS_GUI)
         .director_conformance = director_conformance,
-#endif
         .pending_asset_commit = pending_asset_commit,
         .last_asset_commit_frame = last_asset_commit_frame,
         .last_asset_commit_digest = last_asset_commit_digest,
@@ -2633,10 +2582,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .director_asset_availability = director_asset_availability,
         .changed_library_sources = changed_library_sources,
         .changed_library_assets = changed_library_assets,
-#if defined(MEDIASERVER_HAS_GUI)
         .preferences_view = preferences_view,
         .stored_password_key = stored_password_key,
-#endif
         .compositor_model = compositor_model,
         .compositor_version = compositor_version,
         .compositor_loaded = compositor_loaded,

@@ -69,11 +69,9 @@ int DirectorShowLoop::run() {
         }
         evaluate_feed_and_sync(tick);
         observe_asset_cohort(tick);
-#if defined(MEDIASERVER_HAS_GUI)
         if (const PhaseExit exit = refresh_editor(tick)) {
             return *exit;
         }
-#endif
         if (const PhaseExit exit = present_output(tick)) {
             return *exit;
         }
@@ -84,11 +82,9 @@ int DirectorShowLoop::run() {
         }
         auto next_wake = pacer.next_boundary_at();
         boundary_lateness.arm(next_wake);
-#if defined(MEDIASERVER_HAS_GUI)
         if (editor) {
             next_wake = std::min(next_wake, next_editor_refresh);
         }
-#endif
         sleep_until_boundary(frame_waiter, next_wake);
     }
     report_stopping();
@@ -100,12 +96,10 @@ PaceOutcome DirectorShowLoop::pace(DirectorTick &tick) {
     auto &due = tick.due;
     now = Clock::now();
     boundary_lateness.observe(now);
-#if defined(MEDIASERVER_HAS_GUI)
     if (editor_coalescing_policy.expire(now)) {
         scheduler.end_coalescing();
         pending_editor_coalescing_close = true;
     }
-#endif
 
     // The pacing source, derived from the same replicated policy a node
     // uses to pick its own. It lags a policy change by one iteration,
@@ -324,10 +318,8 @@ PhaseExit DirectorShowLoop::seal_due_frames(DirectorTick &tick) {
                 if (switcher && scene::publication::render_scene(scheduler.projected_document(),switcher->program_scene) == stage_id
                     && stage_id != switcher->program_scene) {
                     const auto* active=scheduler.projected_document().get(stage_id);
-#if defined(MEDIASERVER_HAS_GUI)
                     publication_activation=activation.value();
                     publication_message="Publication scheduled at control frame "+std::to_string(activation.value())+", show frame "+std::to_string(show_frame)+".";
-#endif
                     std::cout << "linked-publication permit revision=" << scene::publication::text(active,scene::publication::revision)
                               << " control=" << activation.value() << " show=" << show_frame << " digest=" << digest << '\n';
                 }
@@ -396,18 +388,15 @@ PhaseExit DirectorShowLoop::apply_operator_input(DirectorTick &tick,
             return 1;
         }
     }
-#if defined(MEDIASERVER_HAS_GUI)
     if (const PhaseExit exit = apply_project_load(tick, op)) {
         return exit;
     }
-#endif
     if (!project_loaded_this_frame) {
         for (const auto command : operator_commands) {
             apply_command(transport, command, frame);
         }
     }
     operator_commands.clear();
-#if defined(MEDIASERVER_HAS_GUI)
     apply_preview_transport(op);
     prepare_authoring_context(op);
     if (const PhaseExit exit = apply_publication_requests(op)) {
@@ -466,9 +455,6 @@ PhaseExit DirectorShowLoop::apply_operator_input(DirectorTick &tick,
         scheduler.end_coalescing();
         pending_editor_coalescing_close = false;
     }
-#else
-    static_cast<void>(tick);
-#endif
     return std::nullopt;
 }
 
@@ -523,12 +509,10 @@ server::RendererLockstep DirectorShowLoop::evaluate_renderer_lockstep(
     lockstep.hold_over_budget = director_sync.policy.late_frame == sync::LateFramePolicy::HoldGroup;
     lockstep.conformance_request = conformance_request;
     lockstep.local_drives_output = options.output;
-#if defined(MEDIASERVER_HAS_GUI)
     if (observed_local_renderer.selected == net::RuntimeRendererBackend::Advanced) {
         const auto adapter = observed_local_renderer.conformance.adapter;
         director_conformance.poll(adapter, conformance_request, observed_local_renderer.conformance);
     }
-#endif
     // The Director's editor or scene/output preview is itself a
     // Program renderer. Its most recent actual record establishes the
     // backend every remote output must match. A busy GPU may leave
