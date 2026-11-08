@@ -41,7 +41,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
   // The ruler. Its left end heads the layer list: search, and a new track.
   // Over the graph it reads in timecode, carries the In/Out range as a bar
   // with a handle at each end, and scrubs everywhere else.
-  p.search_id = mix(id_, "search");
+  p.search_id = gui::ui_id(id_, "search");
   auto &search_id = p.search_id;
   ctx.panel(ruler, theme.header);
   // Over the layer list: search, Auto Key, and a new track at the right.
@@ -59,14 +59,14 @@ void TimelinePanel::draw_ruler(Pass &p) {
   static_cast<void>(search_box(ctx, search_id, search_bounds, search_,
                                "Search Timeline..."));
   if (auto_key_width > 0.0F &&
-      text_toggle(ctx, mix(id_, "auto key"), auto_key, "Auto Key", auto_key_,
+      text_toggle(ctx, gui::ui_id(id_, "auto key"), auto_key, "Auto Key", auto_key_,
                   "Auto Key (Shift+K): edits to animated properties create keys. "
                   "Off edits base values; existing animation still plays. "
                   "Use a property diamond to add or remove a key explicitly.")) {
     auto_key_ = !auto_key_;
   }
   if (list_width >= 60.0F &&
-      icon_button(ctx, mix(id_, "create lane"), create_lane,
+      icon_button(ctx, gui::ui_id(id_, "create lane"), create_lane,
                   gui::Icon::Plus, false, "New track", theme.accent)) {
     frame.lane_edits.push_back(
         TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
@@ -79,7 +79,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
     // where the In handle and a cue at frame zero are grabbed.
     const gui::Rect seam{graph.x - 5.0F, rows_bounds.y, 8.0F,
                          rows_bounds.height};
-    const gui::Interaction drag = ctx.grab(mix(id_, "list seam"), seam);
+    const gui::Interaction drag = ctx.grab(gui::ui_id(id_, "list seam"), seam);
     ctx.cursor_for(drag, gui::Cursor::ResizeHorizontal);
     const float widest =
         std::max(bounds.width - minimum_graph_width, minimum_list_width);
@@ -88,7 +88,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
                                widest);
     }
     if (drag.clicked &&
-        clicks_.double_click(mix(id_, "list seam"), ctx.time_seconds())) {
+        clicks_.double_click(gui::ui_id(id_, "list seam"), ctx.time_seconds())) {
       list_width_ = std::clamp(std::max(list_fit_width_, list_width),
                                minimum_list_width, widest);
     }
@@ -197,8 +197,8 @@ void TimelinePanel::draw_ruler(Pass &p) {
     const gui::Rect out_grip{out_x - range_handle_reach, ruler.y,
                              range_handle_reach * 2.0F, ruler.height};
     ctx.push_clip(gui::cell(graph, ruler));
-    const gui::Interaction in_it = ctx.grab(mix(id_, "range in"), in_grip);
-    const gui::Interaction out_it = ctx.grab(mix(id_, "range out"), out_grip);
+    const gui::Interaction in_it = ctx.grab(gui::ui_id(id_, "range in"), in_grip);
+    const gui::Interaction out_it = ctx.grab(gui::ui_id(id_, "range out"), out_grip);
     ctx.pop_clip();
     if (in_it.pressed) {
       ruler_.range_drag = RangeHandle::In;
@@ -264,7 +264,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
   // Scrubbing the ruler pauses/seeks through the shell. It follows the
   // pointer while held, including the release frame.
   const gui::Interaction ruler_it =
-      ctx.grab(mix(id_, "ruler"),
+      ctx.grab(gui::ui_id(id_, "ruler"),
                gui::cell(graph, ruler));
   if (ruler_it.held) {
     frame.seek_to_frame =
@@ -449,7 +449,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
       const gui::Rect hit{x - 5.0F, moments_band.y, said_width + 15.0F,
                           moments_band.height - 1.0F};
       const gui::Interaction interaction =
-          ctx.grab(mix(id_, "moment", order[place]), hit);
+          ctx.grab(gui::ui_id(id_, "moment", order[place]), hit);
       if (interaction.hovered) {
         ctx.outline(hit, alpha(color, 0.6F));
       }
@@ -492,7 +492,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
   ctx.push_clip(strip_graph);
   for (auto hit = marker_hits.rbegin(); hit != marker_hits.rend(); ++hit) {
     const gui::Interaction interaction = ctx.grab(
-        mix(id_, "marker", markers[hit->index].id.value()), hit->bounds);
+        gui::ui_id(id_, "marker", markers[hit->index].id.value()), hit->bounds);
     if (interaction.pressed) {
       pressed_marker = hit->index;
     }
@@ -548,7 +548,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
             markers_.name_node = markers_.click;
             markers_.name_draft = markers[hit->index].name;
             ctx.focus_text_field(
-                mix(id_, "marker name", markers_.name_node.value()),
+                gui::ui_id(id_, "marker name", markers_.name_node.value()),
                 markers_.name_draft);
             markers_.click = doc::NodeId{};
           } else {
@@ -603,7 +603,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
   // The empty strip scrubs like the ruler, and a double-click drops a marker
   // where it lands.
   const gui::Interaction strip_it =
-      ctx.grab(mix(id_, "marker strip"), strip_graph);
+      ctx.grab(gui::ui_id(id_, "marker strip"), strip_graph);
   if (strip_it.pressed) {
     const double now = ctx.time_seconds();
     if (now >= markers_.strip_click_time &&
@@ -754,7 +754,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
   if (markers_.name_node != doc::NodeId{}) {
     if (const auto index = marker_index(p, markers_.name_node)) {
       const gui::UiId name_id =
-          mix(id_, "marker name", markers_.name_node.value());
+          gui::ui_id(id_, "marker name", markers_.name_node.value());
       const float field_x = std::clamp(
           frame_to_x(static_cast<double>(markers[*index].frame)), graph.x,
           std::max(graph.x, graph.right() - 160.0F));

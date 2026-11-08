@@ -433,9 +433,7 @@ class ViewportPanel final {
     [[nodiscard]] bool overlays_visible() const noexcept {
         return show_overlays_;
     }
-    [[nodiscard]] bool gizmo_visible() const noexcept { return show_gizmo_; }
     // Every element's bounding box outlined, selected or not.
-    [[nodiscard]] bool bounds_visible() const noexcept { return show_bounds_; }
     void set_bounds_visible(bool visible) noexcept { show_bounds_ = visible; }
     // Nodes outlined in the caution colour beside the selection, without
     // selecting them: what a hovered History step touched. Empty for none.
@@ -490,9 +488,6 @@ class ViewportPanel final {
     void set_snapping(bool snapping) noexcept { snapping_ = snapping; }
     // Surface snapping, as Unreal's: an element dragged by its body rides
     // over whatever is under the pointer, resting on it.
-    [[nodiscard]] bool surface_snapping() const noexcept {
-        return surface_snapping_;
-    }
     void set_surface_snapping(bool snapping) noexcept {
         surface_snapping_ = snapping;
     }

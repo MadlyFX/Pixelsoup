@@ -90,8 +90,6 @@ enum class ShowClockReferenceState : core::u8 {
 sync_device_availability_name(SyncDeviceAvailability value) noexcept;
 [[nodiscard]] std::string_view
 sync_reference_state_name(SyncReferenceState value) noexcept;
-[[nodiscard]] std::string_view sync_lock_state_name(SyncLockState value)
-    noexcept;
 [[nodiscard]] std::string_view
 present_barrier_state_name(PresentBarrierState value) noexcept;
 [[nodiscard]] std::string_view
@@ -163,7 +161,6 @@ struct NodeSyncStatus final {
     bool operator==(const NodeSyncStatus&) const = default;
 
     [[nodiscard]] core::u32 locked_outputs() const noexcept;
-    [[nodiscard]] core::u32 unlocked_outputs() const noexcept;
 };
 
 // What the Director's own control-frame pacer is running on.

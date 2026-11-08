@@ -50,7 +50,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
     };
 
     gui::Rect tools = rows.control();
-    if (ctx.button(mix(id_, "key selection shape"), gui::cut_left(tools, 53.0F),
+    if (ctx.button(gui::ui_id(id_, "key selection shape"), gui::cut_left(tools, 53.0F),
                    keys_.lasso_mode ? "LASSO" : "BOX")) {
       keys_.lasso_mode = !keys_.lasso_mode;
       keys_.marquee_tracking = false;
@@ -62,7 +62,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
     const gui::Rect fit_selected = gui::cut_left(tools, 59.0F);
     static_cast<void>(gui::cut_left(tools, 3.0F));
     if (!keys.empty()) {
-      if (ctx.button(mix(id_, "fit selected keys"), fit_selected, "FIT SEL")) {
+      if (ctx.button(gui::ui_id(id_, "fit selected keys"), fit_selected, "FIT SEL")) {
         core::i64 selected_first = keys.front().frame;
         core::i64 selected_last = keys.front().frame;
         for (const TimelineKeyAddress &key : keys) {
@@ -112,7 +112,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
     // Zooming and panning either axis is a wheel gesture over the graph, so
     // there are no stepper buttons here for it. What is left is the one thing
     // the wheel cannot do: put the whole animation back on screen.
-    if (ctx.button(mix(id_, "fit curves"), gui::cut_left(tools, 74.0F),
+    if (ctx.button(gui::ui_id(id_, "fit curves"), gui::cut_left(tools, 74.0F),
                    "FIT ALL")) {
       const double span =
           std::max(static_cast<double>(last_i) - static_cast<double>(first_i),
@@ -144,7 +144,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
       static_cast<void>(gui::cut_left(channel_row, 2.0F));
       const gui::Rect visibility = gui::cut_left(channel_row, 50.0F);
       static_cast<void>(gui::cut_left(channel_row, 4.0F));
-      if (ctx.button(mix(id_, "active channel visibility"), visibility,
+      if (ctx.button(gui::ui_id(id_, "active channel visibility"), visibility,
                      hidden ? "SHOW" : "HIDE")) {
         if (hidden) {
           graph_->set_visible(*graph_->active(), true);
@@ -181,7 +181,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
         double changed_value = *sampled;
         const double speed = std::max(std::fabs(*sampled) * 0.01, 0.01);
         if (key_tools_.value_field.draw(
-                ctx, mix(id_, "playhead key value"), channel_row, "",
+                ctx, gui::ui_id(id_, "playhead key value"), channel_row, "",
                 *sampled, speed, changed_value, 4)) {
           frame.keys.push_back(TimelineKeyEdit{
               graph_->active()->target, graph_->active()->property,
@@ -201,7 +201,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
     const gui::Rect scale_button = gui::cut_left(scale_row, 62.0F);
     static_cast<void>(gui::cut_left(scale_row, 7.0F));
     if (!keys.empty()) {
-      if (ctx.button(mix(id_, "toggle key scale"), scale_button,
+      if (ctx.button(gui::ui_id(id_, "toggle key scale"), scale_button,
                      key_tools_.scale_open ? "SCALE*" : "SCALE")) {
         key_tools_.scale_open = !key_tools_.scale_open;
       }
@@ -233,7 +233,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
         const gui::Rect anchor_bounds =
             gui::column(anchor_row, index, anchors.size(), 3.0F);
         const gui::Interaction interaction =
-            ctx.grab(mix(id_, "scale anchor", index), anchor_bounds);
+            ctx.grab(gui::ui_id(id_, "scale anchor", index), anchor_bounds);
         ctx.panel(anchor_bounds,
                   key_tools_.scale_anchor == anchors[index].first
                       ? ctx.theme().selection
@@ -320,7 +320,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
                     ? ctx.theme().warning
                     : ctx.theme().text_muted);
       if (apply_ready) {
-        if (ctx.button(mix(id_, "apply key scale"), apply_bounds, "APPLY")) {
+        if (ctx.button(gui::ui_id(id_, "apply key scale"), apply_bounds, "APPLY")) {
           frame.key_batch = TimelineKeyBatchEdit{TimelineKeyBatchAction::Scale,
                                                  keys, 0, scale};
           key_tools_.scale_open = false;

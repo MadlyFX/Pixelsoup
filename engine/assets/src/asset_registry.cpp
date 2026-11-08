@@ -1,5 +1,7 @@
 #include <mediaserver/assets/asset_registry.hpp>
 
+#include <mediaserver/core/fnv1a.hpp>
+
 #include <algorithm>
 #include <bit>
 #include <cstdint>
@@ -8,39 +10,18 @@
 namespace mediaserver::assets {
 namespace {
 
-constexpr core::u64 fnv_offset = 1469598103934665603ULL;
-constexpr core::u64 fnv_prime = 1099511628211ULL;
-
-void hash_byte(core::u64& hash, core::u8 value) noexcept {
-    hash ^= value;
-    hash *= fnv_prime;
-}
-
-void hash_u64(core::u64& hash, core::u64 value) noexcept {
-    for (core::u32 shift = 0U; shift < 64U; shift += 8U) {
-        hash_byte(hash, static_cast<core::u8>((value >> shift) & 0xFFU));
-    }
-}
-
 void hash_u32(core::u64& hash, core::u32 value) noexcept {
-    hash_u64(hash, static_cast<core::u64>(value));
+    core::fnv1a_u64(hash, static_cast<core::u64>(value));
 }
 
 void hash_double(core::u64& hash, double value) noexcept {
-    hash_u64(hash, std::bit_cast<core::u64>(value));
-}
-
-void hash_text(core::u64& hash, std::string_view value) noexcept {
-    hash_u64(hash, static_cast<core::u64>(value.size()));
-    for (const char character : value) {
-        hash_byte(hash, static_cast<core::u8>(character));
-    }
+    core::fnv1a_u64(hash, std::bit_cast<core::u64>(value));
 }
 
 template <typename T>
 void hash_optional_u32(core::u64& hash,
                        const std::optional<T>& value) noexcept {
-    hash_byte(hash, value.has_value() ? 1U : 0U);
+    core::fnv1a_byte(hash, value.has_value() ? 1U : 0U);
     if (value.has_value()) {
         hash_u32(hash, static_cast<core::u32>(*value));
     }
@@ -49,13 +30,13 @@ void hash_optional_u32(core::u64& hash,
 void hash_fingerprint(
     core::u64& hash,
     const std::optional<ContentFingerprint>& fingerprint) noexcept {
-    hash_byte(hash, fingerprint.has_value() ? 1U : 0U);
+    core::fnv1a_byte(hash, fingerprint.has_value() ? 1U : 0U);
     if (!fingerprint.has_value()) {
         return;
     }
-    hash_u64(hash, fingerprint->byte_length);
+    core::fnv1a_u64(hash, fingerprint->byte_length);
     for (const core::u8 byte : fingerprint->sha256.bytes) {
-        hash_byte(hash, byte);
+        core::fnv1a_byte(hash, byte);
     }
 }
 
@@ -187,68 +168,68 @@ const Asset* AssetRegistry::asset_for_source(
 }
 
 core::u64 digest(const AssetRegistry& registry) noexcept {
-    core::u64 hash = fnv_offset;
-    hash_u64(hash, static_cast<core::u64>(registry.assets.size()));
+    core::u64 hash = core::fnv1a_offset_short;
+    core::fnv1a_u64(hash, static_cast<core::u64>(registry.assets.size()));
     for (const Asset& asset : registry.assets) {
-        hash_u64(hash, asset_id(asset).value());
-        hash_byte(hash, static_cast<core::u8>(asset_kind(asset)));
-        hash_text(hash, asset_display_name(asset));
-        hash_text(hash, asset_source(asset));
-        hash_u64(hash, asset_folder(asset).value());
+        core::fnv1a_u64(hash, asset_id(asset).value());
+        core::fnv1a_byte(hash, static_cast<core::u8>(asset_kind(asset)));
+        core::fnv1a_text(hash, asset_display_name(asset));
+        core::fnv1a_text(hash, asset_source(asset));
+        core::fnv1a_u64(hash, asset_folder(asset).value());
         std::visit(
             [&hash](const auto& held) noexcept {
                 using Held = std::remove_cvref_t<decltype(held)>;
                 if constexpr (std::is_same_v<Held, PlatesetAsset>) {
-                    hash_byte(hash, static_cast<core::u8>(held.rig));
+                    core::fnv1a_byte(hash, static_cast<core::u8>(held.rig));
                     for (const PlatesetSlotAssignment& slot : held.slots) {
-                        hash_u64(hash, slot.media.value());
-                        hash_u64(hash, static_cast<core::u64>(slot.offset));
+                        core::fnv1a_u64(hash, slot.media.value());
+                        core::fnv1a_u64(hash, static_cast<core::u64>(slot.offset));
                     }
-                    hash_byte(hash, held.half_resolution ? 1U : 0U);
-                    hash_u64(hash, static_cast<core::u64>(held.moments.size()));
+                    core::fnv1a_byte(hash, held.half_resolution ? 1U : 0U);
+                    core::fnv1a_u64(hash, static_cast<core::u64>(held.moments.size()));
                     for (const PlatesetMoment& moment : held.moments) {
-                        hash_u64(hash, static_cast<core::u64>(moment.frame));
-                        hash_byte(hash, static_cast<core::u8>(moment.kind));
+                        core::fnv1a_u64(hash, static_cast<core::u64>(moment.frame));
+                        core::fnv1a_byte(hash, static_cast<core::u8>(moment.kind));
                     }
                 } else if constexpr (std::is_same_v<Held, MediaAsset>) {
-                    hash_byte(hash, held.dimensions.has_value() ? 1U : 0U);
+                    core::fnv1a_byte(hash, held.dimensions.has_value() ? 1U : 0U);
                     if (held.dimensions.has_value()) {
                         hash_u32(hash, held.dimensions->width);
                         hash_u32(hash, held.dimensions->height);
                     }
                     hash_optional_u32(hash, held.frame_count);
-                    hash_byte(hash, held.frame_rate.has_value() ? 1U : 0U);
+                    core::fnv1a_byte(hash, held.frame_rate.has_value() ? 1U : 0U);
                     if (held.frame_rate.has_value()) {
                         hash_u32(hash, held.frame_rate->numerator);
                         hash_u32(hash, held.frame_rate->denominator);
                     }
                     hash_fingerprint(hash, held.fingerprint);
-                    hash_byte(hash,
+                    core::fnv1a_byte(hash,
                               held.requested_proxy_profile.has_value() ? 1U
                                                                        : 0U);
                     if (held.requested_proxy_profile.has_value()) {
                         hash_u32(hash, static_cast<core::u32>(
                                            *held.requested_proxy_profile));
                     }
-                    hash_byte(hash, static_cast<core::u8>(
+                    core::fnv1a_byte(hash, static_cast<core::u8>(
                                         held.proxy_playback_policy));
-                    hash_text(hash, held.codec);
-                    hash_text(hash, held.start_timecode);
+                    core::fnv1a_text(hash, held.codec);
+                    core::fnv1a_text(hash, held.start_timecode);
                 } else if constexpr (std::is_same_v<Held,
                                                     ParticleEffectAsset>) {
                     hash_fingerprint(hash, held.fingerprint);
                 } else {
-                    hash_byte(hash, held.projection_mesh ? 1U : 0U);
-                    hash_byte(hash, held.vertex_count.has_value() ? 1U : 0U);
+                    core::fnv1a_byte(hash, held.projection_mesh ? 1U : 0U);
+                    core::fnv1a_byte(hash, held.vertex_count.has_value() ? 1U : 0U);
                     if (held.vertex_count.has_value()) {
-                        hash_u64(hash, *held.vertex_count);
+                        core::fnv1a_u64(hash, *held.vertex_count);
                     }
-                    hash_byte(hash, held.triangle_count.has_value() ? 1U : 0U);
+                    core::fnv1a_byte(hash, held.triangle_count.has_value() ? 1U : 0U);
                     if (held.triangle_count.has_value()) {
-                        hash_u64(hash, *held.triangle_count);
+                        core::fnv1a_u64(hash, *held.triangle_count);
                     }
                     hash_optional_u32(hash, held.material_count);
-                    hash_byte(hash, held.bounds.has_value() ? 1U : 0U);
+                    core::fnv1a_byte(hash, held.bounds.has_value() ? 1U : 0U);
                     if (held.bounds.has_value()) {
                         hash_double(hash, held.bounds->minimum_x);
                         hash_double(hash, held.bounds->minimum_y);
@@ -259,7 +240,7 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
                     }
                     hash_fingerprint(hash, held.fingerprint);
                     hash_optional_u32(hash, held.texture_count);
-                    hash_byte(hash,
+                    core::fnv1a_byte(hash,
                               held.largest_texture.has_value() ? 1U : 0U);
                     if (held.largest_texture.has_value()) {
                         hash_u32(hash, held.largest_texture->width);
@@ -269,11 +250,11 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
             },
             asset);
     }
-    hash_u64(hash, static_cast<core::u64>(registry.folders.size()));
+    core::fnv1a_u64(hash, static_cast<core::u64>(registry.folders.size()));
     for (const AssetFolder& folder : registry.folders) {
-        hash_u64(hash, folder.id.value());
-        hash_text(hash, folder.display_name);
-        hash_u64(hash, folder.parent.value());
+        core::fnv1a_u64(hash, folder.id.value());
+        core::fnv1a_text(hash, folder.display_name);
+        core::fnv1a_u64(hash, folder.parent.value());
     }
     return hash;
 }

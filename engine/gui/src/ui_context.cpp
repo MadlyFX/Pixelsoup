@@ -582,10 +582,6 @@ void UiContext::label_centered(
     list_.pop_clip();
 }
 
-void UiContext::drop_tooltip() noexcept {
-    tooltip_text_.clear();
-}
-
 void UiContext::tooltip(const Rect& bounds, std::string_view text) {
     if (!pointer_blocked() && !text.empty() && bounds.contains(pointer_x(), pointer_y()) &&
         (interaction_clip_stack_.empty() || interaction_clip_stack_.back().contains(pointer_x(), pointer_y()))) {

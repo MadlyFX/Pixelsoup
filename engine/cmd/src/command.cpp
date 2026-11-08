@@ -1,5 +1,7 @@
 #include <mediaserver/cmd/command.hpp>
 
+#include <mediaserver/core/fnv1a.hpp>
+
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -11,28 +13,14 @@ namespace {
 
 class FingerprintBuilder final {
 public:
-    void add_byte(core::u8 value) noexcept {
-        value_ ^= value;
-        value_ *= 1099511628211ULL;
-    }
-
-    void add_u64(core::u64 value) noexcept {
-        for (unsigned shift = 0U; shift < 64U; shift += 8U) {
-            add_byte(static_cast<core::u8>((value >> shift) & 0xffU));
-        }
-    }
-
-    void add_string(std::string_view value) noexcept {
-        add_u64(static_cast<core::u64>(value.size()));
-        for (const char character : value) {
-            add_byte(static_cast<core::u8>(static_cast<unsigned char>(character)));
-        }
-    }
+    void add_byte(core::u8 value) noexcept { core::fnv1a_byte(value_, value); }
+    void add_u64(core::u64 value) noexcept { core::fnv1a_u64(value_, value); }
+    void add_string(std::string_view value) noexcept { core::fnv1a_text(value_, value); }
 
     [[nodiscard]] core::u64 value() const noexcept { return value_; }
 
 private:
-    core::u64 value_{14695981039346656037ULL};
+    core::u64 value_{core::fnv1a_offset};
 };
 
 void add_property(FingerprintBuilder& builder, const doc::PropertyValue& property) noexcept {

@@ -37,20 +37,6 @@ std::string_view sync_reference_state_name(SyncReferenceState value) noexcept {
     return "UNKNOWN";
 }
 
-std::string_view sync_lock_state_name(SyncLockState value) noexcept {
-    switch (value) {
-    case SyncLockState::Unknown:
-        return "UNKNOWN";
-    case SyncLockState::Unlocked:
-        return "UNLOCKED";
-    case SyncLockState::Locked:
-        return "LOCKED";
-    case SyncLockState::Unsupported:
-        return "UNSUPPORTED";
-    }
-    return "UNKNOWN";
-}
-
 std::string_view present_barrier_state_name(PresentBarrierState value)
     noexcept {
     switch (value) {
@@ -95,16 +81,6 @@ core::u32 NodeSyncStatus::locked_outputs() const noexcept {
     core::u32 total{};
     for (const SyncOutputStatus& output : outputs) {
         if (output.lock == SyncLockState::Locked) {
-            ++total;
-        }
-    }
-    return total;
-}
-
-core::u32 NodeSyncStatus::unlocked_outputs() const noexcept {
-    core::u32 total{};
-    for (const SyncOutputStatus& output : outputs) {
-        if (output.lock != SyncLockState::Locked) {
             ++total;
         }
     }

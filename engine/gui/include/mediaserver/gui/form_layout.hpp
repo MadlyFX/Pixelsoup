@@ -117,9 +117,6 @@ public:
     [[nodiscard]] Rect thumb(const Rect& track, float min_height = 0.0F) const noexcept;
     // Back to the top, forgetting what was measured: a dialog reopening.
     void reset() noexcept { *this = ScrollRegion{}; }
-    // Puts the content at `offset`, as a view restored from last time. Kept
-    // as it is until the content has been measured, then clamped by end().
-    void scroll_to(float offset) noexcept { offset_ = offset > 0.0F ? offset : 0.0F; }
 
 private:
     float offset_{};

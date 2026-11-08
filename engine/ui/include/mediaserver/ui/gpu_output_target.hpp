@@ -49,12 +49,6 @@ public:
     [[nodiscard]] core::u32 width() const noexcept { return target_.width(); }
     [[nodiscard]] core::u32 height() const noexcept { return target_.height(); }
 
-    // Instances the last recorded frame needed. Reported because it is the
-    // measure of what the frame path actually uploads.
-    [[nodiscard]] std::size_t last_instance_count() const noexcept {
-        return last_instances_;
-    }
-
     // Reads the target back and digests it. A self-check, not a frame path.
     [[nodiscard]] show::PresenterReadback readback(rhi::Device& device) noexcept;
 
@@ -73,7 +67,6 @@ private:
     rhi::StorageBuffer instances_;
     // Heap-owned so the object stays cheap to move; sized once, never grown.
     std::unique_ptr<std::array<show::PatternQuad, show::max_pattern_quads>> quads_;
-    std::size_t last_instances_{};
 };
 
 } // namespace mediaserver::ui

@@ -1,5 +1,7 @@
 #include <mediaserver/render/particle_package_cache.hpp>
 
+#include <mediaserver/core/fnv1a.hpp>
+
 #include <ajfx/package.hpp>
 
 #include <filesystem>
@@ -10,13 +12,6 @@
 
 namespace mediaserver::render {
 namespace {
-
-core::u64 fnv1a(const std::vector<std::uint8_t>& bytes, core::u64 hash = 0xcbf29ce484222325ULL) {
-    for (const std::uint8_t byte : bytes) {
-        hash = (hash ^ byte) * 0x100000001b3ULL;
-    }
-    return hash;
-}
 
 struct Loaded final {
     std::shared_ptr<const ParticlePackage> package;
@@ -50,7 +45,7 @@ Loaded load(const std::string& source, ajfx::gpu::ShaderFormat format) {
         return {nullptr, meshes.error().message};
     }
     auto package = std::make_shared<ParticlePackage>();
-    package->identity = fnv1a(bytes);
+    package->identity = core::fnv1a(bytes);
     const std::string cache_source = particle_cache_path(source);
     std::error_code missing;
     if (std::filesystem::is_regular_file(cache_source, missing)) {
@@ -59,7 +54,7 @@ Loaded load(const std::string& source, ajfx::gpu::ShaderFormat format) {
             return {nullptr, "the particle cache '" + cache_source + "' cannot be read"};
         }
         std::vector<std::uint8_t> cache_bytes{std::istreambuf_iterator<char>{cache_stream}, {}};
-        package->identity = fnv1a(cache_bytes, package->identity);
+        package->identity = core::fnv1a(cache_bytes, package->identity);
         ajfx::Result<ajfx::Cache> cache =
             ajfx::Cache::open_as_baked(std::move(cache_bytes), effect.value(), meshes.value(), fields.value());
         if (!cache) {

@@ -1,5 +1,7 @@
 #include <mediaserver/scene/scene.hpp>
 
+#include <mediaserver/core/fnv1a.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -75,9 +77,6 @@ namespace {
     return static_cast<float>(static_cast<double>(elapsed) /
                               static_cast<double>(length));
 }
-
-constexpr core::u64 fnv_offset_basis = 14'695'981'039'346'656'037ULL;
-constexpr core::u64 fnv_prime = 1'099'511'628'211ULL;
 
 struct Point2d final {
     double x{};
@@ -316,10 +315,7 @@ using Matrix3d = std::array<double, 9U>;
 }
 
 void mix(core::u64& state, core::u64 value) noexcept {
-    for (core::u32 shift = 0U; shift < 64U; shift += 8U) {
-        state ^= (value >> shift) & 0xffULL;
-        state *= fnv_prime;
-    }
+    core::fnv1a_u64(state, value);
 }
 
 void mix(core::u64& state, float value) noexcept {
@@ -806,7 +802,7 @@ const CanvasRect* Scene::slice_for(core::u32 node_index) const noexcept {
 }
 
 core::u64 digest(const Scene& scene) noexcept {
-    auto state = fnv_offset_basis;
+    auto state = core::fnv1a_offset;
     if (!scene.wall_colors.empty()) mix(state, asset_set_digest(scene));
 
     mix(state, scene.id.value());
@@ -1630,12 +1626,12 @@ core::u64 asset_generation_key(const Scene& source) noexcept {
     // Preview edits must never refresh an immutable Program package.
     if (!source.publication_revision.empty()) return 0;
     if(source.asset_manifest_digest == 0 && source.asset_refresh_generation == 0) return 0;
-    core::u64 state = fnv_offset_basis;
+    core::u64 state = core::fnv1a_offset;
     mix(state,source.asset_manifest_digest); mix(state,source.asset_refresh_generation); return state;
 }
 
 core::u64 asset_set_digest(const Scene& source) noexcept {
-    core::u64 state = fnv_offset_basis;
+    core::u64 state = core::fnv1a_offset;
     bool any = source.renderer_settings.backend == RendererBackend::Advanced;
     if (!source.publication_revision.empty()) {
         any = true;
@@ -2326,7 +2322,7 @@ void set_environment_channel(Environment& environment, PropertyChannel channel, 
 }
 
 core::u64 digest(const ChannelKeyframes& channel) noexcept {
-    auto state = fnv_offset_basis;
+    auto state = core::fnv1a_offset;
     mix(state, 0x4348'414E'4B45'5901ULL); // "CHANKEY", v1
     mix(state, channel.target.value());
     mix(state, static_cast<core::u64>(channel.component));

@@ -212,7 +212,7 @@ void TimelinePanel::handle_actions(Pass &p) {
     if (const auto index = marker_index(p, id)) {
       markers_.name_node = id;
       markers_.name_draft = markers[*index].name;
-      ctx.focus_text_field(mix(id_, "marker name", id.value()),
+      ctx.focus_text_field(gui::ui_id(id_, "marker name", id.value()),
                            markers_.name_draft);
     }
   };
@@ -250,7 +250,7 @@ void TimelinePanel::handle_actions(Pass &p) {
   // Context menus. A right press names what is under it; the menu lists only
   // what applies to that thing, which is what keeps track deletion, cutting,
   // and cue conversion off a toolbar full of buttons that mostly do nothing.
-  const gui::UiId menu_id = mix(id_, "context menu");
+  const gui::UiId menu_id = gui::ui_id(id_, "context menu");
   const auto add_entry = [&](std::string label, MenuCommand command,
                              doc::NodeId node = {}, core::i64 at = 0,
                              doc::NodeId other = {}, core::i64 end = 0) {

@@ -3103,11 +3103,6 @@ std::size_t NodeResumeSession::inflight_frames() const noexcept {
     return inflight_frames_.size();
 }
 
-core::u64 NodeResumeSession::inflight_bytes() const noexcept {
-    const std::lock_guard lock{inflight_mutex_};
-    return inflight_bytes_;
-}
-
 std::size_t NodeResumeSession::pending_frame_acknowledgements() const noexcept {
     const std::lock_guard lock{inflight_mutex_};
     std::size_t count = 0U;

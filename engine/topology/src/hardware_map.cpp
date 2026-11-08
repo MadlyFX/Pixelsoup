@@ -1,5 +1,7 @@
 #include <mediaserver/topology/hardware_map.hpp>
 
+#include <mediaserver/core/fnv1a.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -61,33 +63,12 @@ constexpr std::array<HardwarePort, 1U> wall_ports{{
     {0U, "LED IN", HardwareSignal::Video, HardwarePortDirection::Input},
 }};
 
-constexpr core::u64 fnv_offset = 1469598103934665603ULL;
-constexpr core::u64 fnv_prime = 1099511628211ULL;
-
-void hash_byte(core::u64 &hash, core::u8 byte) noexcept {
-  hash ^= byte;
-  hash *= fnv_prime;
-}
-
-void hash_u64(core::u64 &hash, core::u64 value) noexcept {
-  for (core::u32 shift = 0U; shift < 64U; shift += 8U) {
-    hash_byte(hash, static_cast<core::u8>((value >> shift) & 0xFFU));
-  }
-}
-
 void hash_u32(core::u64 &hash, core::u32 value) noexcept {
-  hash_u64(hash, static_cast<core::u64>(value));
+  core::fnv1a_u64(hash, static_cast<core::u64>(value));
 }
 
 void hash_i32(core::u64 &hash, core::i32 value) noexcept {
   hash_u32(hash, static_cast<core::u32>(value));
-}
-
-void hash_text(core::u64 &hash, std::string_view value) noexcept {
-  hash_u64(hash, static_cast<core::u64>(value.size()));
-  for (const char character : value) {
-    hash_byte(hash, static_cast<core::u8>(character));
-  }
 }
 
 } // namespace
@@ -317,51 +298,51 @@ core::u32 next_free_node_index(const HardwareMap &map) noexcept {
 }
 
 core::u64 digest(const HardwareMap &map) noexcept {
-  core::u64 hash = fnv_offset;
-  hash_u64(hash, static_cast<core::u64>(map.devices.size()));
+  core::u64 hash = core::fnv1a_offset_short;
+  core::fnv1a_u64(hash, static_cast<core::u64>(map.devices.size()));
   for (const HardwareDevice &device : map.devices) {
-    hash_u64(hash, device.node.value());
-    hash_byte(hash, static_cast<core::u8>(device.kind));
-    hash_text(hash, device.name);
+    core::fnv1a_u64(hash, device.node.value());
+    core::fnv1a_byte(hash, static_cast<core::u8>(device.kind));
+    core::fnv1a_text(hash, device.name);
     hash_i32(hash, device.grid_x);
     hash_i32(hash, device.grid_y);
-    hash_text(hash, device.address);
-    hash_text(hash, device.lifecycle_endpoint);
+    core::fnv1a_text(hash, device.address);
+    core::fnv1a_text(hash, device.lifecycle_endpoint);
     hash_u32(hash, device.node_index);
     hash_u32(hash, device.width);
     hash_u32(hash, device.height);
     hash_u32(hash, device.refresh_numerator);
     hash_u32(hash, device.refresh_denominator);
-    hash_byte(hash, static_cast<core::u8>(device.window_mode));
+    core::fnv1a_byte(hash, static_cast<core::u8>(device.window_mode));
     hash_i32(hash, device.desktop_x);
     hash_i32(hash, device.desktop_y);
-    hash_byte(hash, device.main_node ? 1U : 0U);
+    core::fnv1a_byte(hash, device.main_node ? 1U : 0U);
     // Only a vendor protocol is hashed, so maps authored before protocols
     // existed keep their digest.
     if (device.protocol != HardwareProcessorProtocol::Generic) {
       hash_u32(hash, 0x50524f54U);
-      hash_byte(hash, static_cast<core::u8>(device.protocol));
+      core::fnv1a_byte(hash, static_cast<core::u8>(device.protocol));
     }
   }
-  hash_u64(hash, static_cast<core::u64>(map.links.size()));
+  core::fnv1a_u64(hash, static_cast<core::u64>(map.links.size()));
   for (const HardwareLink &link : map.links) {
-    hash_u64(hash, link.node.value());
-    hash_u64(hash, link.from.device.value());
-    hash_byte(hash, link.from.port);
-    hash_u64(hash, link.to.device.value());
-    hash_byte(hash, link.to.port);
-    hash_u64(hash, link.region.x);
-    hash_u64(hash, link.region.y);
-    hash_u64(hash, link.region.width);
-    hash_u64(hash, link.region.height);
+    core::fnv1a_u64(hash, link.node.value());
+    core::fnv1a_u64(hash, link.from.device.value());
+    core::fnv1a_byte(hash, link.from.port);
+    core::fnv1a_u64(hash, link.to.device.value());
+    core::fnv1a_byte(hash, link.to.port);
+    core::fnv1a_u64(hash, link.region.x);
+    core::fnv1a_u64(hash, link.region.y);
+    core::fnv1a_u64(hash, link.region.width);
+    core::fnv1a_u64(hash, link.region.height);
   }
-  hash_u64(hash, static_cast<core::u64>(map.output_bindings.size()));
+  core::fnv1a_u64(hash, static_cast<core::u64>(map.output_bindings.size()));
   for (const HardwareOutputBinding &binding : map.output_bindings) {
-    hash_u64(hash, binding.node.value());
-    hash_u64(hash, binding.render_server.value());
-    hash_byte(hash, binding.logical_port);
+    core::fnv1a_u64(hash, binding.node.value());
+    core::fnv1a_u64(hash, binding.render_server.value());
+    core::fnv1a_byte(hash, binding.logical_port);
     hash_u32(hash, binding.feed_index);
-    hash_u64(hash, binding.target.adapter_id);
+    core::fnv1a_u64(hash, binding.target.adapter_id);
     hash_u32(hash, binding.target.target_id);
     hash_u32(hash, binding.target.connector_instance);
     hash_u32(hash, binding.width);
@@ -369,10 +350,10 @@ core::u64 digest(const HardwareMap &map) noexcept {
     hash_u32(hash, binding.refresh_numerator);
     hash_u32(hash, binding.refresh_denominator);
     if (binding.output_bit_depth != 8U) { hash_u32(hash, 0x42495453U); hash_u32(hash, binding.output_bit_depth); }
-    hash_byte(hash, static_cast<core::u8>(binding.window_mode));
+    core::fnv1a_byte(hash, static_cast<core::u8>(binding.window_mode));
   }
-  hash_byte(hash, map.control.authored ? 1U : 0U);
-  hash_u64(hash, map.control.node.value());
+  core::fnv1a_byte(hash, map.control.authored ? 1U : 0U);
+  core::fnv1a_u64(hash, map.control.node.value());
   hash_u32(hash, map.control.base_port);
   return hash;
 }

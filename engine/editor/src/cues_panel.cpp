@@ -33,18 +33,6 @@ constexpr double fine_scrub_step_ms = 10.0;
 // up on it: a few seconds of drawing, far past any healthy round trip.
 constexpr core::u32 sent_marker_draws = 240U;
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
-                            core::u64 index = 0U) noexcept {
-  core::u64 hash = base ^ 0xC2B2AE3D27D4EB4FULL;
-  for (const char c : name) {
-    hash ^= static_cast<core::u8>(c);
-    hash *= 1099511628211ULL;
-  }
-  hash ^= index + 0x9E3779B9ULL;
-  hash *= 1099511628211ULL;
-  return hash;
-}
-
 [[nodiscard]] gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
   color.a = opacity;
   return color;
@@ -299,7 +287,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::Rect button = gui::cut_right(
           switches, std::max(ctx.font_width(label) + 20.0F, 56.0F));
       static_cast<void>(gui::cut_right(switches, 4.0F));
-      const gui::Interaction it = ctx.grab(mix(id_, name), button);
+      const gui::Interaction it = ctx.grab(gui::ui_id(id_, name), button);
       ctx.panel(button, engaged ? alpha(color, 0.25F)
                                 : (it.hovered ? theme.widget_hover
                                               : theme.widget));
@@ -335,7 +323,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const gui::Rect go = gui::cut_left(
       band_content, std::clamp(band.width * 0.38F, 120.0F, 260.0F));
   {
-    const gui::Interaction it = ctx.grab(mix(id_, "go"), go);
+    const gui::Interaction it = ctx.grab(gui::ui_id(id_, "go"), go);
     if (it.clicked) {
       frame.transport = TransportRequest::Go;
     }
@@ -508,7 +496,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           // Empty, so what is typed replaces the value; Enter on nothing
           // leaves it as it was.
           timing_draft_.clear();
-          ctx.focus_text_field(mix(id_, field_name, marker.id.value()),
+          ctx.focus_text_field(gui::ui_id(id_, field_name, marker.id.value()),
                                timing_draft_);
           timing_click_node_ = doc::NodeId{};
         } else {
@@ -522,7 +510,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       scrubbing_ = false;
     }
     if (timing_node_ == marker.id && timing_field_ == field) {
-      const gui::UiId typed = mix(id_, field_name, marker.id.value());
+      const gui::UiId typed = gui::ui_id(id_, field_name, marker.id.value());
       static_cast<void>(ctx.text_field(typed, cell, timing_draft_));
       if (ctx.focus() != typed) {
         const auto parsed = parse_cue_seconds(timing_draft_, maximum);
@@ -628,13 +616,13 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::Rect name_cell = gui::cell(name_column, bar);
     const gui::Rect note_cell = gui::cell(note_column, bar);
     const gui::Interaction swatch_it =
-        ctx.grab(mix(id_, "swatch", marker.id.value()), swatch);
+        ctx.grab(gui::ui_id(id_, "swatch", marker.id.value()), swatch);
     const gui::Interaction action_it =
-        ctx.grab(mix(id_, "action", marker.id.value()), action);
+        ctx.grab(gui::ui_id(id_, "action", marker.id.value()), action);
     const bool hovered_row = bar.contains(ctx.pointer_x(), ctx.pointer_y());
     const gui::Interaction remove_it =
         hovered_row || chosen
-            ? ctx.grab(mix(id_, "remove", marker.id.value()), remove)
+            ? ctx.grab(gui::ui_id(id_, "remove", marker.id.value()), remove)
             : gui::Interaction{};
     const bool loop_cue = marker.cue == scene::CueAction::Loop;
     const gui::Rect wait_cell =
@@ -643,14 +631,14 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         gui::inset(gui::cell(fade_column, bar), 0.0F, 3.0F);
     const gui::Interaction wait_it =
         loop_cue && timing_columns
-            ? ctx.grab(mix(id_, "wait", marker.id.value()), wait_cell)
+            ? ctx.grab(gui::ui_id(id_, "wait", marker.id.value()), wait_cell)
             : gui::Interaction{};
     const gui::Interaction fade_it =
         loop_cue && timing_columns
-            ? ctx.grab(mix(id_, "fade", marker.id.value()), fade_cell)
+            ? ctx.grab(gui::ui_id(id_, "fade", marker.id.value()), fade_cell)
             : gui::Interaction{};
     const gui::Interaction row_it =
-        ctx.grab(mix(id_, "row", marker.id.value()), bar);
+        ctx.grab(gui::ui_id(id_, "row", marker.id.value()), bar);
     if (swatch_it.clicked) {
       TimelineMarkerEdit edit{TimelineMarkerAction::Update, marker};
       edit.marker.color = static_cast<core::u8>(
@@ -687,12 +675,12 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (second && name_cell.contains(ctx.pointer_x(), ctx.pointer_y())) {
         name_node_ = marker.id;
         name_draft_ = marker.name;
-        ctx.focus_text_field(mix(id_, "name", marker.id.value()), name_draft_);
+        ctx.focus_text_field(gui::ui_id(id_, "name", marker.id.value()), name_draft_);
       } else if (second &&
                  note_cell.contains(ctx.pointer_x(), ctx.pointer_y())) {
         note_node_ = marker.id;
         note_draft_ = marker.note;
-        ctx.focus_text_field(mix(id_, "note", marker.id.value()), note_draft_);
+        ctx.focus_text_field(gui::ui_id(id_, "note", marker.id.value()), note_draft_);
       } else if (second) {
         frame.seek_to_frame =
             static_cast<core::u64>(std::max<core::i64>(marker.frame, 0));
@@ -708,7 +696,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.outline(swatch, theme.text);
     }
     if (name_node_ == marker.id) {
-      const gui::UiId field = mix(id_, "name", marker.id.value());
+      const gui::UiId field = gui::ui_id(id_, "name", marker.id.value());
       static_cast<void>(ctx.text_field(
           field, gui::inset(name_cell, 0.0F, 3.0F), name_draft_));
       if (ctx.focus() != field) {
@@ -746,7 +734,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       loop_timing(marker, wait_cell, wait_it, fade_cell, fade_it);
     }
     if (note_node_ == marker.id) {
-      const gui::UiId field = mix(id_, "note", marker.id.value());
+      const gui::UiId field = gui::ui_id(id_, "note", marker.id.value());
       static_cast<void>(ctx.text_field(
           field, gui::inset(note_cell, 0.0F, 3.0F), note_draft_));
       if (ctx.focus() != field) {
@@ -794,9 +782,9 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::Rect fade_cell =
         gui::inset(gui::cut_left(line, timing_width), 0.0F, 4.0F);
     const gui::Interaction wait_it =
-        ctx.grab(mix(id_, "wait", marker.id.value()), wait_cell);
+        ctx.grab(gui::ui_id(id_, "wait", marker.id.value()), wait_cell);
     const gui::Interaction fade_it =
-        ctx.grab(mix(id_, "fade", marker.id.value()), fade_cell);
+        ctx.grab(gui::ui_id(id_, "fade", marker.id.value()), fade_cell);
     loop_timing(marker, wait_cell, wait_it, fade_cell, fade_it);
   }
 
@@ -813,7 +801,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       const gui::Rect button = gui::cut_left(buttons, width);
       static_cast<void>(gui::cut_left(buttons, 4.0F));
-      if (ctx.button(mix(id_, name), button, label)) {
+      if (ctx.button(gui::ui_id(id_, name), button, label)) {
         TimelineMarkerEdit edit{};
         edit.action = TimelineMarkerAction::Create;
         edit.marker.frame = static_cast<core::i64>(timeline.show_frame);

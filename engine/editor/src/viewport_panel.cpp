@@ -46,13 +46,6 @@ constexpr gui::UiColor screen_selected{0.980F, 0.706F, 0.470F, 1.0F};
 constexpr gui::UiColor screen_muted{0.549F, 0.529F, 0.510F, 0.45F};
 constexpr gui::UiColor surface_yaw{1.0F, 0.74F, 0.22F, 1.0F};
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, core::u64 value) noexcept {
-    core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
-    hash ^= value;
-    hash *= 1099511628211ULL;
-    return hash;
-}
-
 [[nodiscard]] bool selected(std::span<const doc::NodeId> selection,
                             doc::NodeId node) noexcept {
     return std::find(selection.begin(), selection.end(), node) !=
@@ -2596,8 +2589,8 @@ void ViewportPanel::draw_stage_view_menu(gui::UiContext& ctx,
     if (menu.width <= 0.0F) {
         return;
     }
-    const gui::UiId menu_id = mix(id_, 40U);
-    if (toolbar_menu(ctx, mix(id_, 41U), menu, gui::Icon::Projection,
+    const gui::UiId menu_id = gui::ui_id(id_, 40U);
+    if (toolbar_menu(ctx, gui::ui_id(id_, 41U), menu, gui::Icon::Projection,
                      stage_projection_name(stage_projection_),
                      ctx.menu_open(menu_id), false, false, true)) {
         ctx.open_context_menu(menu_id, menu.x, menu.bottom());
@@ -2683,7 +2676,7 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
     if (tools_width + toolbar_group_gap + display_menu_width <= bar.width) {
         const auto tool = [&](core::u64 salt, gui::Icon icon, bool engaged,
                               std::string_view hint) {
-            return icon_button(ctx, mix(id_, salt),
+            return icon_button(ctx, gui::ui_id(id_, salt),
                                gui::cut_left(bar, toolbar_button), icon, hint,
                                engaged);
         };
@@ -2743,8 +2736,8 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
         }
         static_cast<void>(gui::cut_left(bar, snap_gap));
         const gui::Rect distance = gui::cut_left(bar, distance_width);
-        const gui::UiId distance_menu = mix(id_, 22U);
-        if (toolbar_menu(ctx, mix(id_, 16U), distance, gui::Icon::Grid,
+        const gui::UiId distance_menu = gui::ui_id(id_, 22U);
+        if (toolbar_menu(ctx, gui::ui_id(id_, 16U), distance, gui::Icon::Grid,
                          distances[move_step], ctx.menu_open(distance_menu),
                          false, !snapping_)) {
             ctx.open_context_menu(distance_menu, distance.x,
@@ -2761,8 +2754,8 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
         }
         static_cast<void>(gui::cut_left(bar, snap_gap));
         const gui::Rect angle = gui::cut_left(bar, angle_width);
-        const gui::UiId angle_menu = mix(id_, 23U);
-        if (toolbar_menu(ctx, mix(id_, 17U), angle, gui::Icon::Angle,
+        const gui::UiId angle_menu = gui::ui_id(id_, 23U);
+        if (toolbar_menu(ctx, gui::ui_id(id_, 17U), angle, gui::Icon::Angle,
                          degrees[turn_step], ctx.menu_open(angle_menu), true,
                          !snapping_)) {
             ctx.open_context_menu(angle_menu, angle.x,
@@ -2795,7 +2788,7 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
         gui::Rect toggles = gui::cut_right(bar, toggles_width);
         const auto toggle = [&](core::u64 salt, gui::Icon icon, bool& shown,
                                 std::string_view hint) {
-            if (icon_button(ctx, mix(id_, salt),
+            if (icon_button(ctx, gui::ui_id(id_, salt),
                             gui::cut_left(toggles, toolbar_button), icon,
                             hint, shown)) {
                 shown = !shown;
@@ -2814,8 +2807,8 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
         separator(bar.right() + toolbar_group_gap * 0.5F);
         // One menu holds them, so they stay reachable in a narrow dock.
         const gui::Rect show = gui::cut_right(bar, display_menu_width);
-        const gui::UiId show_menu = mix(id_, 20U);
-        const gui::Interaction it = ctx.grab(mix(id_, 21U), show);
+        const gui::UiId show_menu = gui::ui_id(id_, 20U);
+        const gui::Interaction it = ctx.grab(gui::ui_id(id_, 21U), show);
         ctx.cursor_for(it, gui::Cursor::Hand);
         const bool open = ctx.menu_open(show_menu);
         if (it.held && !it.released) {
@@ -2864,8 +2857,8 @@ float ViewportPanel::resolution_control_width(
 void ViewportPanel::draw_resolution_control(gui::UiContext& ctx,
                                              const gui::Rect& bounds) {
     const auto current_index = static_cast<std::size_t>(resolution_);
-    const gui::UiId menu = mix(id_, 24U);
-    if (toolbar_menu(ctx, mix(id_, 4U), bounds, gui::Icon::Screen,
+    const gui::UiId menu = gui::ui_id(id_, 24U);
+    if (toolbar_menu(ctx, gui::ui_id(id_, 4U), bounds, gui::Icon::Screen,
                      resolution_names[current_index], ctx.menu_open(menu))) {
         ctx.open_context_menu(menu, bounds.x, bounds.bottom());
     }
@@ -2894,8 +2887,8 @@ float ViewportPanel::media_control_width(
 void ViewportPanel::draw_media_control(gui::UiContext& ctx,
                                        const gui::Rect& bounds) {
     const MediaRendition drawn = drawn_media();
-    const gui::UiId menu = mix(id_, 25U);
-    if (toolbar_menu(ctx, mix(id_, 5U), bounds,
+    const gui::UiId menu = gui::ui_id(id_, 25U);
+    if (toolbar_menu(ctx, gui::ui_id(id_, 5U), bounds,
                      drawn == MediaRendition::Full
                          ? gui::Icon::FullResolution
                          : gui::Icon::HalfResolution,
@@ -2952,12 +2945,12 @@ void ViewportPanel::draw_media_control(gui::UiContext& ctx,
     ctx.tooltip(bounds, tip);
     if (all_coming) {
         draw_proxy_progress(
-            ctx, mix(id_, 26U), bounds,
+            ctx, gui::ui_id(id_, 26U), bounds,
             static_cast<float>(media_counts_.all_made_frames) /
                 static_cast<float>(media_counts_.all_total_frames));
     } else if (drawn == MediaRendition::Proxy && media_counts_.waiting > 0U) {
         draw_proxy_progress(
-            ctx, mix(id_, 26U), bounds,
+            ctx, gui::ui_id(id_, 26U), bounds,
             media_counts_.waiting_total_frames == 0U
                 ? 0.0F
                 : static_cast<float>(media_counts_.waiting_made_frames) /
@@ -2993,8 +2986,8 @@ void ViewportPanel::draw_stage_shading_menu(gui::UiContext& ctx,
     if (menu.width <= 0.0F) {
         return;
     }
-    const gui::UiId menu_id = mix(id_, 42U);
-    if (toolbar_menu(ctx, mix(id_, 43U), menu, gui::Icon::Shading,
+    const gui::UiId menu_id = gui::ui_id(id_, 42U);
+    if (toolbar_menu(ctx, gui::ui_id(id_, 43U), menu, gui::Icon::Shading,
                      stage_shading_name(stage_shading_),
                      ctx.menu_open(menu_id), false, false, true)) {
         ctx.open_context_menu(menu_id, menu.x, menu.bottom());
@@ -3303,7 +3296,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
 
     // The depth chooser is a context menu: drawn over every panel, floating
     // ones included, and owning the pointer and keyboard while it is open.
-    const gui::UiId deep_menu = mix(id_, 0xD33DU);
+    const gui::UiId deep_menu = gui::ui_id(id_, 0xD33DU);
     const auto offer_deep_menu = [&]() -> std::optional<std::size_t> {
         std::vector<std::string> labels;
         labels.reserve(deep_candidates_.size());
@@ -4301,13 +4294,13 @@ MaskViewportFrame ViewportPanel::draw_masks(
     corner = gui::cut_top(corner, 21.0F);
     const gui::Rect coverage_button = gui::cut_right(corner, 101.0F);
     const gui::Interaction coverage_interaction =
-        ctx.grab(mix(id_, 0x4D41534BU), coverage_button);
+        ctx.grab(gui::ui_id(id_, 0x4D41534BU), coverage_button);
     const gui::Rect mask_interaction_bounds =
         !frame.mapping_valid || coverage_interaction.hovered
         ? gui::Rect{}
         : frame.image;
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, 0x4D41534CULL), mask_interaction_bounds);
+        ctx.grab(gui::ui_id(id_, 0x4D41534CULL), mask_interaction_bounds);
     frame.hovered = interaction.hovered;
     frame.held = interaction.held;
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mediaserver/core/fnv1a.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/layout.hpp>
@@ -37,12 +38,26 @@ using UiId = core::u64;
 // FNV-1a over the name, so callers can identify a widget by a stable string
 // instead of managing integers.
 [[nodiscard]] constexpr UiId ui_id(std::string_view name) noexcept {
-    core::u64 hash = 1469598103934665603ULL;
-    for (const char c : name) {
-        hash ^= static_cast<core::u8>(c);
-        hash *= 1099511628211ULL;
-    }
+    core::u64 hash = core::fnv1a_offset_short;
+    core::fnv1a_chars(hash, name);
     return hash;
+}
+
+// A child of `base`: one widget among several a panel draws, named by a string
+// and, for repeated rows, an index. Panels derive every widget id from their
+// own root id this way, so two panels never collide over the same label.
+[[nodiscard]] constexpr UiId ui_id(
+    UiId base, std::string_view name, core::u64 index = 0U) noexcept {
+    core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
+    core::fnv1a_chars(hash, name);
+    hash ^= index + 0x9E3779B9ULL;
+    hash *= core::fnv1a_prime;
+    return hash;
+}
+
+// A child of `base` named by a number alone: a node id, a row index.
+[[nodiscard]] constexpr UiId ui_id(UiId base, core::u64 value) noexcept {
+    return base ^ (value + 0x9E3779B97F4A7C15ULL + (base << 6U) + (base >> 2U));
 }
 
 // The colours, corner radii and motion the widgets paint with. A caller can
@@ -467,10 +482,6 @@ public:
     void label_centered(const Rect& bounds, std::string_view text, UiColor color);
     // Hover details retain long paths and diagnostics without occupying rows.
     void tooltip(const Rect& bounds, std::string_view text);
-    // Forgets the tooltip asked for so far this frame: what a menu or card
-    // drawn over the interface calls, so the button that opened it does not
-    // explain itself on top of it. Tooltips asked for afterwards still show.
-    void drop_tooltip() noexcept;
 
     // An engine texture drawn into `bounds` - a rendered viewport composited
     // into the widget tree with no copy, which is the whole reason the UI

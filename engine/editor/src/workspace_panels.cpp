@@ -46,18 +46,6 @@ namespace gui = mediaserver::gui;
 
 constexpr float inset = 6.0F;
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
-                            core::u64 index = 0U) noexcept {
-  core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
-  for (const char character : name) {
-    hash ^= static_cast<core::u8>(character);
-    hash *= 1099511628211ULL;
-  }
-  hash ^= index + 0x9E3779B9ULL;
-  hash *= 1099511628211ULL;
-  return hash;
-}
-
 [[nodiscard]] gui::UiColor with_alpha(gui::UiColor color,
                                       float opacity) noexcept {
   color.a = opacity;
@@ -1882,7 +1870,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   gui::Rect search = toolbar;
   const gui::Rect count_box =
       gui::cut_right(search, ctx.font_width(count) + 12.0F);
-  search_field(ctx, mix(id_, "scene.search"), gui::inset(search, 0.0F, 2.0F),
+  search_field(ctx, gui::ui_id(id_, "scene.search"), gui::inset(search, 0.0F, 2.0F),
                search_, "Search scene");
   ctx.label(gui::inset(count_box, gui::Padding{2.0F, 0.0F, 0.0F, 0.0F}), count,
             theme.text_muted);
@@ -1975,7 +1963,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     for (const auto &[target, label] : settings) {
       const gui::Rect row = list.next(row_height, 0.0F);
       const gui::Interaction interaction =
-          clipped_grab(ctx, mix(id_, label), row, list_bounds);
+          clipped_grab(ctx, gui::ui_id(id_, label), row, list_bounds);
       pointer_over_content =
           pointer_over_content || row.contains(pointer_x, pointer_y);
       const bool chosen = settings_selection == target;
@@ -2101,7 +2089,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                        guide_color);
 
     // Visibility, far left like every compositor's eye column.
-    if (row_flag_toggle(ctx, mix(id_, "scene.element.visible",
+    if (row_flag_toggle(ctx, gui::ui_id(id_, "scene.element.visible",
                                  element.node.value()),
                         eye_bounds, RowFlag::Visible, element.visible,
                         row_hovered)) {
@@ -2113,7 +2101,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     if (entry.has_children) {
       const gui::Interaction twirl = clipped_grab(
-          ctx, mix(id_, "scene.twirl", element.node.value()), twirl_bounds,
+          ctx, gui::ui_id(id_, "scene.twirl", element.node.value()), twirl_bounds,
           list_bounds);
       const bool open = !search_.empty() || !collapsed_.contains(element.node);
       draw_twirl(ctx, twirl_bounds.x + twirl_bounds.width * 0.5F, centre_y,
@@ -2150,7 +2138,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     } else {
       if (!element.locked) {
         interaction = clipped_grab(
-            ctx, mix(id_, "scene.element", element.node.value()), body,
+            ctx, gui::ui_id(id_, "scene.element", element.node.value()), body,
             list_bounds);
       }
       const gui::UiColor name_color =
@@ -2170,7 +2158,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
 
     if (row_flag_toggle(
-            ctx, mix(id_, "scene.element.lock", element.node.value()),
+            ctx, gui::ui_id(id_, "scene.element.lock", element.node.value()),
             lock_bounds, RowFlag::Locked, element.locked, row_hovered)) {
       SceneSelectionRequest next{};
       next.node = element.node;
@@ -2274,7 +2262,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               tag, with_alpha(theme.text_muted, 0.85F));
     if (!surface->locked) {
       const gui::Interaction interaction = clipped_grab(
-          ctx, mix(id_, "scene.surface", surface->node.value()),
+          ctx, gui::ui_id(id_, "scene.surface", surface->node.value()),
           gui::Rect{icon_x - 8.0F, row.y,
                     std::max(lock_bounds.x - icon_x + 8.0F, 0.0F), row.height},
           list_bounds);
@@ -2286,7 +2274,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
     if (row_flag_toggle(
-            ctx, mix(id_, "scene.surface.lock", surface->node.value()),
+            ctx, gui::ui_id(id_, "scene.surface.lock", surface->node.value()),
             lock_bounds, RowFlag::Locked, surface->locked, row_hovered)) {
       SceneSelectionRequest next{};
       next.node = surface->node;
@@ -2407,8 +2395,8 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             selection.empty() ? theme.text_muted : theme.text);
 
   // ------------------------------------------------------ context menu
-  const gui::UiId menu_id = mix(id_, "scene.menu");
-  const gui::UiId color_menu_id = mix(id_, "scene.color_menu");
+  const gui::UiId menu_id = gui::ui_id(id_, "scene.menu");
+  const gui::UiId color_menu_id = gui::ui_id(id_, "scene.color_menu");
   const auto add = [&](std::string label, SceneMenuCommand command) {
     menu_entries_.push_back(std::move(label));
     menu_commands_.push_back(static_cast<core::u8>(command));
@@ -2597,7 +2585,7 @@ void CompositorPanel::colour_well_field(
     core::u64 slot, gui::UiColor current,
     const std::array<CompositorProperty, 3U> &channels,
     CompositorFrame &frame) {
-  const gui::UiId id = mix(id_, "compositor.colour", node.value() * 8U + slot);
+  const gui::UiId id = gui::ui_id(id_, "compositor.colour", node.value() * 8U + slot);
   gui::UiColor picked = current;
   if (ctx.color_well(id, well, picked)) {
     colour_target_ = ColourTarget{id, node, channels, picked};
@@ -3229,7 +3217,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // Claimed before the graph so a press on the seam resizes rather than
     // starting a node drag under it.
     const gui::Interaction resize = clipped_grab(
-        ctx, mix(id_, "compositor.parameters.resize"), parameter_splitter,
+        ctx, gui::ui_id(id_, "compositor.parameters.resize"), parameter_splitter,
         content);
     parameter_resize_pressed = resize.pressed;
     ctx.cursor_for(resize, parameter_side ? gui::Cursor::ResizeHorizontal
@@ -3283,7 +3271,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                              button_width("ADD NODE  +", 94.0F), button_height};
   static_cast<void>(add_label);
   // The graph's one coloured button: a node is what this panel makes.
-  if (pill_button(ctx, mix(id_, "compositor.add_menu"), add_button,
+  if (pill_button(ctx, gui::ui_id(id_, "compositor.add_menu"), add_button,
                   gui::Icon::Plus, "Add node",
                   "Add a node (or right-click the canvas)",
                   ButtonTone::Primary, true, add_menu_open_)) {
@@ -3315,7 +3303,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         [&](std::string_view salt, const gui::Rect &button,
             std::string_view label, std::optional<gui::Icon> icon = std::nullopt,
             std::string_view tip = {}, bool engaged = false) {
-          return pill_button(ctx, mix(id_, salt), button, icon,
+          return pill_button(ctx, gui::ui_id(id_, salt), button, icon,
                              icon.has_value() ? std::string_view{} : label,
                              tip, ButtonTone::Quiet, true, engaged);
         };
@@ -3475,7 +3463,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         toolbar.right() - remove_width - 8.0F, toolbar.y + 3.0F,
         remove_width, button_height};
     // Destructive, so red-ringed, and set apart at the toolbar's far end.
-    if (pill_button(ctx, mix(id_, "compositor.remove"), remove_bounds,
+    if (pill_button(ctx, gui::ui_id(id_, "compositor.remove"), remove_bounds,
                     selection_.kind == CompositorSelectionKind::Edge
                         ? gui::Icon::Close
                         : gui::Icon::Trash,
@@ -4154,7 +4142,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     minimap_scale = std::min(minimap.width / minimap_world.width,
                              minimap.height / minimap_world.height);
     const gui::Interaction interaction =
-        clipped_grab(ctx, mix(id_, "compositor.minimap"), minimap, canvas);
+        clipped_grab(ctx, gui::ui_id(id_, "compositor.minimap"), minimap, canvas);
     if (interaction.pressed) {
       selection_pressed = true;
     }
@@ -4191,7 +4179,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   for (const OrderDisc &disc : order_discs_) {
     const float reach = disc.radius + 2.0F;
     const gui::Interaction interaction = clipped_grab(
-        ctx, mix(id_, "compositor.order", disc.edge.value()),
+        ctx, gui::ui_id(id_, "compositor.order", disc.edge.value()),
         gui::Rect{disc.x - reach, disc.y - reach, reach * 2.0F, reach * 2.0F},
         canvas);
     ctx.cursor_for(interaction, gui::Cursor::Move);
@@ -4221,7 +4209,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   for (const CompositorPortVisual &port : outputs) {
     const gui::Interaction interaction =
         clipped_grab(ctx,
-                     mix(id_, "compositor.output_port",
+                     gui::ui_id(id_, "compositor.output_port",
                          port.endpoint.node.value() * 16U + port.endpoint.port),
                      port.hit, canvas);
     ctx.cursor_for(interaction, gui::Cursor::Hand);
@@ -4336,7 +4324,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (chrome_readable) {
     for (const CompositorNodeVisual &visual : nodes) {
       const gui::Interaction toggle = clipped_grab(
-          ctx, mix(id_, "compositor.collapse", visual.node->node.value()),
+          ctx, gui::ui_id(id_, "compositor.collapse", visual.node->node.value()),
           toggle_bounds(visual), canvas);
       if (toggle.pressed) {
         selection_pressed = true;
@@ -4348,7 +4336,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
   for (const CompositorNodeVisual &visual : nodes) {
     const gui::UiId node_id =
-        mix(id_, "compositor.node", visual.node->node.value());
+        gui::ui_id(id_, "compositor.node", visual.node->node.value());
     if (ctx.active() != node_id && over_inline_field(visual)) {
       // The field drawn on the node takes this press, and the node is chosen
       // as if it had been pressed.
@@ -4494,7 +4482,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           // Set down: each moved node starts a little small and springs
           // back to size, so it feels planted where it was let go.
           for (const GroupMember &member : drag_group_) {
-            ctx.settle(mix(id_, "compositor.plant", member.node.value()),
+            ctx.settle(gui::ui_id(id_, "compositor.plant", member.node.value()),
                        0.94F);
           }
         }
@@ -4512,10 +4500,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::Rect corner{box.right() - 14.0F,
                            box.bottom() - 14.0F, 14.0F, 14.0F};
     const gui::Interaction resize = clipped_grab(
-        ctx, mix(id_, "compositor.comment.size", comment->node.value()), corner,
+        ctx, gui::ui_id(id_, "compositor.comment.size", comment->node.value()), corner,
         canvas);
     const gui::Interaction move = clipped_grab(
-        ctx, mix(id_, "compositor.comment", comment->node.value()), title,
+        ctx, gui::ui_id(id_, "compositor.comment", comment->node.value()), title,
         canvas);
     ctx.cursor_for(resize, gui::Cursor::ResizeDiagonal);
     ctx.cursor_for(move, gui::Cursor::Move);
@@ -4718,7 +4706,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                              (point_radius + 2.0F) * 2.0F};
       const gui::Interaction interaction = clipped_grab(
           ctx,
-          mix(id_, "compositor.wire_point",
+          gui::ui_id(id_, "compositor.wire_point",
               visual.edge->node.value() * 32U + index),
           handle, canvas);
       ctx.cursor_for(interaction, gui::Cursor::Move);
@@ -4780,7 +4768,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                             2.0F, 2.0F}
                 : gui::Rect{};
     const gui::Interaction interaction = ctx.grab(
-        mix(id_, "compositor.edge", visual.edge->node.value()), pick);
+        gui::ui_id(id_, "compositor.edge", visual.edge->node.value()), pick);
     ctx.cursor_for(interaction, gui::Cursor::Hand);
     if (!interaction.pressed) {
       continue;
@@ -5274,7 +5262,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       apply_moves(moves);
       const bool horizontal = nudge_x != 0.0F;
       frame.numeric_nudge = NumericNudge{
-          mix(id_, "compositor.nudge"), horizontal ? 1001U : 1002U,
+          gui::ui_id(id_, "compositor.nudge"), horizontal ? 1001U : 1002U,
           (horizontal ? nudge_x : nudge_y) > 0.0F
               ? NumberFieldNudgeDirection::Increase
               : NumberFieldNudgeDirection::Decrease,
@@ -5869,7 +5857,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         continue;
       }
       const gui::UiId field_id =
-          mix(id_, "compositor.inline",
+          gui::ui_id(id_, "compositor.inline",
               visual.node->node.value() * 16U +
                   static_cast<core::u64>(value.property));
       double authored{};
@@ -5984,7 +5972,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // Carried nodes rise a touch; a node just set down springs back from a
     // little small. At rest the factor is exactly one and nothing moves.
     const float plant = ctx.spring(
-        mix(id_, "compositor.plant", visual.node->node.value()),
+        gui::ui_id(id_, "compositor.plant", visual.node->node.value()),
         carried ? 1.025F : 1.0F);
     ctx.draw_list().scale_since(first_vertex, visual.bounds.center_x(),
                                 visual.bounds.center_y(), plant);
@@ -6096,7 +6084,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           gui::cut_right(corner, std::ceil(ctx.font_width(caption)) + 16.0F);
       button.height = std::max(header_height - 10.0F, 18.0F);
       const gui::Interaction pressed = ctx.grab(
-          mix(id_, "compositor.parameters.bypass"), button);
+          gui::ui_id(id_, "compositor.parameters.bypass"), button);
       if (pressed.clicked) {
         if (!is_selected(parameter_node->node)) {
           select_only(parameter_node->node);
@@ -6179,7 +6167,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::Rect row = full_row();
       const core::u32 mask = core::u32{1U} << bit;
       const gui::Interaction interaction = ctx.grab(
-          mix(id_, "compositor.parameters.section", bit), row);
+          gui::ui_id(id_, "compositor.parameters.section", bit), row);
       if (interaction.clicked) {
         collapsed_sections_ ^= mask;
       }
@@ -6198,7 +6186,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       return open;
     };
     const auto field_id = [&](CompositorProperty property) noexcept {
-      return mix(id_, "compositor.parameter",
+      return gui::ui_id(id_, "compositor.parameter",
                  parameter_node->node.value() * 16U +
                      static_cast<core::u64>(property));
     };
@@ -6581,10 +6569,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::Rect add{action_row.x + action_width, action_row.y,
                           action_width, action_row.height};
       const gui::Interaction reset_it = ctx.grab(
-          mix(id_, "compositor.curves.reset", parameter_node->node.value()),
+          gui::ui_id(id_, "compositor.curves.reset", parameter_node->node.value()),
           reset);
       const gui::Interaction add_it = ctx.grab(
-          mix(id_, "compositor.curves.add", parameter_node->node.value()), add);
+          gui::ui_id(id_, "compositor.curves.add", parameter_node->node.value()), add);
       ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
                                         : ctx.theme().widget);
       ctx.panel(add,
@@ -6634,7 +6622,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           double authored{};
           NumberFieldEdit edit{};
           const gui::UiId numeric_id =
-              mix(id_, "compositor.curves.point",
+              gui::ui_id(id_, "compositor.curves.point",
                   parameter_node->node.value() * 64U + salt);
           if (parameter_fields_.draw(ctx, numeric_id, field, {}, value, 0.005,
                                      authored, 3, &edit) &&
@@ -7116,7 +7104,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                          : 0.0F),
           track.width, std::min(thumb_height, track.height)};
       const gui::Interaction drag =
-          ctx.grab(mix(id_, "compositor.parameters.scroll"), thumb);
+          ctx.grab(gui::ui_id(id_, "compositor.parameters.scroll"), thumb);
       if (drag.pressed) {
         parameter_thumb_grab_ = ctx.pointer_y() - thumb.y;
       }
@@ -7144,7 +7132,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                    palette_bounds.y + 4.0F,
                                    std::max(palette_bounds.width - 8.0F, 0.0F),
                                    palette_search_height - 4.0F};
-    search_field(ctx, mix(id_, "compositor.node_search"), palette_search,
+    search_field(ctx, gui::ui_id(id_, "compositor.node_search"), palette_search,
                  node_search_, "Search nodes and effects");
 
     float palette_y = palette_bounds.y + palette_search_height + 4.0F;
@@ -7154,7 +7142,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           item.kind != compositor::NodeKind::Output || output_count == 0U;
       gui::Interaction interaction{};
       if (enabled) {
-        interaction = ctx.grab(mix(id_, "compositor.palette_item", salt), row);
+        interaction = ctx.grab(gui::ui_id(id_, "compositor.palette_item", salt), row);
       }
       ctx.panel(row,
                 enabled ? (interaction.held
@@ -7200,7 +7188,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                             std::max(palette_bounds.width - 8.0F, 0.0F),
                             palette_row_height};
         const gui::Interaction interaction =
-            ctx.grab(mix(id_, "compositor.palette_category", category), row);
+            ctx.grab(gui::ui_id(id_, "compositor.palette_category", category), row);
         const bool open = add_category_ == static_cast<core::u8>(category);
         ctx.panel(row, interaction.hovered ? ctx.theme().widget_hover
                                            : ctx.theme().header);
@@ -7266,7 +7254,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   if (node_menu_.has_value() && menu_bounds.width > 0.0F) {
-    const gui::UiId search_id = mix(id_, "compositor.node_menu.search");
+    const gui::UiId search_id = gui::ui_id(id_, "compositor.node_menu.search");
     if (node_menu_->focus_pending) {
       ctx.focus_text_field(search_id, node_menu_->search);
       node_menu_->focus_pending = false;
@@ -7327,7 +7315,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                             menu_row_height};
         row_y += menu_row_height;
         const gui::Interaction interaction = ctx.grab(
-            mix(id_, "compositor.node_menu.item",
+            gui::ui_id(id_, "compositor.node_menu.item",
                 static_cast<core::u64>(entry.item->kind)),
             row);
         if (interaction.hovered) {
@@ -7401,7 +7389,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         gui::Interaction interaction{};
         if (entry.enabled) {
           interaction =
-              ctx.grab(mix(id_, "compositor.context_item", index), row);
+              ctx.grab(gui::ui_id(id_, "compositor.context_item", index), row);
         }
         if (interaction.hovered) {
           ctx.panel(row, ctx.theme().widget_hover);
@@ -7548,7 +7536,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                         std::max(box.width - 8.0F, 60.0F),
                         std::max(ctx.line_height() + 6.0F, 22.0F)};
     }
-    const gui::UiId rename_id = mix(id_, "compositor.rename");
+    const gui::UiId rename_id = gui::ui_id(id_, "compositor.rename");
     if (!field.has_value() || ctx.key_pressed(gui::Key::Escape)) {
       rename_.reset();
       ctx.clear_focus();
@@ -8038,7 +8026,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::Rect tab_bounds =
         gui::column(tabs, index, category_count, m.gap);
     const bool selected = category_ == category;
-    const gui::Interaction interaction = ctx.grab(mix(id_, id), tab_bounds);
+    const gui::Interaction interaction = ctx.grab(gui::ui_id(id_, id), tab_bounds);
     const gui::UiColor fill =
         selected ? ctx.theme().selection
                  : (interaction.held && !interaction.released
@@ -8066,7 +8054,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (category_ == Category::Tracking) {
     ctx.label(form.heading(), "INNER FRUSTUM", ctx.theme().accent);
     static_cast<void>(ctx.checkbox(
-        mix(id_, "icvfx.enabled"), form.control(),
+        gui::ui_id(id_, "icvfx.enabled"), form.control(),
         renderer_draft_.icvfx.inner_frustum,
         "Draw tracked cameras' plates on the wall"));
 
@@ -8076,7 +8064,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::FormRow row = form.row();
       ctx.label(row.label, label, ctx.theme().text);
       double edited{};
-      if (tracking_fields_.draw(ctx, mix(id_, id), row.field, "",
+      if (tracking_fields_.draw(ctx, gui::ui_id(id_, id), row.field, "",
                                 static_cast<double>(value), 1.0, edited, 0) &&
           std::isfinite(edited)) {
         const double bounded =
@@ -8089,7 +8077,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                  renderer_draft_.icvfx.latency_frames,
                  scene::max_icvfx_latency_frames,
                  "Control frames ahead; prediction estimates the pose at this stamp.");
-    static_cast<void>(ctx.checkbox(mix(id_, "icvfx.predict"), form.control(),
+    static_cast<void>(ctx.checkbox(gui::ui_id(id_, "icvfx.predict"), form.control(),
                                    renderer_draft_.icvfx.pose_prediction,
                                    "Predict camera motion on the Director"));
     unsigned_row("Fit samples", "icvfx.prediction-window",
@@ -8138,13 +8126,13 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     ctx.label(projection.label, "Projection",
               camera_available ? ctx.theme().text : ctx.theme().text_muted);
     gui::Rect choices = projection.field;
-    if (preferences_button(ctx, mix(id_, "lens.calibrated"),
+    if (preferences_button(ctx, gui::ui_id(id_, "lens.calibrated"),
                            gui::cut_left(choices, lens_choice_width),
                            "CALIBRATED", camera_available && !lens_enabled)) {
       lens_draft_ = scene::LensProfile{};
     }
     static_cast<void>(gui::cut_left(choices, m.gap));
-    if (preferences_button(ctx, mix(id_, "lens.legacy"),
+    if (preferences_button(ctx, gui::ui_id(id_, "lens.legacy"),
                            gui::cut_left(choices, lens_choice_width),
                            "LEGACY FOV", camera_available && lens_enabled)) {
       lens_draft_.reset();
@@ -8170,7 +8158,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         const gui::Rect shown = gui::cut_right(cell, lens_value_width);
         static_cast<void>(gui::cut_right(cell, m.gap));
         static_cast<void>(ctx.slider(
-            mix(id_, label), gui::centered(cell, cell.width, lens_track_height),
+            gui::ui_id(id_, label), gui::centered(cell, cell.width, lens_track_height),
             value, minimum, maximum));
         std::array<char, 24U> text{};
         const int length = std::snprintf(text.data(), text.size(), format,
@@ -8244,15 +8232,15 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   static_cast<void>(gui::cut_right(buttons, m.gap));
   const gui::Rect cancel_button = gui::cut_right(buttons, m.button_width);
   const bool reset = preferences_button(
-      ctx, mix(id_, "project.reset"), defaults_button, "DEFAULTS",
+      ctx, gui::ui_id(id_, "project.reset"), defaults_button, "DEFAULTS",
       renderer_draft_.icvfx != scene::IcvfxSettings{} ||
           lens_draft_.has_value());
   const bool cancelled = preferences_button(
-      ctx, mix(id_, "project.cancel"), cancel_button, "CANCEL", true);
-  const bool applied = preferences_button(ctx, mix(id_, "project.apply"),
+      ctx, gui::ui_id(id_, "project.cancel"), cancel_button, "CANCEL", true);
+  const bool applied = preferences_button(ctx, gui::ui_id(id_, "project.apply"),
                                           apply_button, "APPLY", changed);
   const bool dismissed =
-      end_modal(ctx, mix(id_, "project.scrim"), bounds, modal);
+      end_modal(ctx, gui::ui_id(id_, "project.scrim"), bounds, modal);
 
   if (reset) {
     tracking_fields_.cancel(ctx);
@@ -8299,7 +8287,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   for (const PreferencesField &field : preferences_fields()) {
     const gui::FormRow row = form.row();
     ctx.label(row.label, field.label, ctx.theme().text);
-    const gui::UiId field_id = mix(id_, field.label);
+    const gui::UiId field_id = gui::ui_id(id_, field.label);
     static_cast<void>(ctx.text_field(field_id, row.field, draft_.*(field.value)));
     hint(field_id, row.field, draft_.*(field.value), field.hint);
     // Naming what the process is really using matters more than what is
@@ -8325,7 +8313,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     gui::Rect input = row.field;
     const gui::Rect clear = gui::cut_right(input, m.button_width);
     static_cast<void>(gui::cut_right(input, m.gap));
-    const gui::UiId password_id = mix(id_, "preferences.render-node-password");
+    const gui::UiId password_id = gui::ui_id(id_, "preferences.render-node-password");
     if (ctx.password_field(password_id, input, password_draft_)) {
       password_edited_ = true;
       draft_.render_node_password = !password_draft_.empty();
@@ -8333,7 +8321,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     hint(password_id, input, password_draft_,
          draft_.render_node_password ? "Set - type to replace" : "None");
     const bool clearable = draft_.render_node_password;
-    if (preferences_button(ctx, mix(id_, "preferences.render-node-password.clear"),
+    if (preferences_button(ctx, gui::ui_id(id_, "preferences.render-node-password.clear"),
                            clear, "CLEAR", clearable)) {
       password_draft_.clear();
       password_edited_ = true;
@@ -8356,7 +8344,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
 
   // ------------------------------------------------------------- proxies
   static_cast<void>(gui::draw_form_section(ctx, form, "PROXIES"));
-  static_cast<void>(ctx.checkbox(mix(id_, "preferences.proxy.next-to-source"),
+  static_cast<void>(ctx.checkbox(gui::ui_id(id_, "preferences.proxy.next-to-source"),
                                  form.control(),
                                  draft_.proxy_cache_next_to_source,
                                  "Store next to source media"));
@@ -8368,7 +8356,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     static_cast<void>(gui::cut_right(input, m.gap));
     const bool custom_folder_enabled = !draft_.proxy_cache_next_to_source;
     if (custom_folder_enabled) {
-      const gui::UiId folder_id = mix(id_, "preferences.proxy.cache-directory");
+      const gui::UiId folder_id = gui::ui_id(id_, "preferences.proxy.cache-directory");
       static_cast<void>(
           ctx.text_field(folder_id, input, draft_.proxy_cache_directory));
       hint(folder_id, input, draft_.proxy_cache_directory,
@@ -8378,7 +8366,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
       ctx.label(gui::inset(input, m.gap, 0.0F),
                 "Resolved separately for each source", ctx.theme().text_muted);
     }
-    if (preferences_button(ctx, mix(id_, "preferences.proxy.browse"), browse,
+    if (preferences_button(ctx, gui::ui_id(id_, "preferences.proxy.browse"), browse,
                            "BROWSE", custom_folder_enabled)) {
       const char *const selected = tinyfd_selectFolderDialog(
           "Select Proxy Cache Folder", draft_.proxy_cache_directory.empty()
@@ -8403,7 +8391,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     const gui::Rect value =
         gui::cut_right(track_row, slider_value_width);
     const bool changed = ctx.slider(
-        mix(id_, id),
+        gui::ui_id(id_, id),
         gui::centered(track_row, track_row.width, slider_track_height),
         position, minimum, maximum);
     std::string exact = std::to_string(shown);
@@ -8460,7 +8448,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     for (std::size_t index = 0U; index < priorities.size(); ++index) {
       const PriorityChoice &choice = priorities[index];
       if (preferences_button(
-              ctx, mix(id_, choice.key),
+              ctx, gui::ui_id(id_, choice.key),
               gui::column(row.field, index, priorities.size(), m.gap),
               choice.label, draft_.proxy_transcode_priority != choice.value)) {
         draft_.proxy_transcode_priority = choice.value;
@@ -8471,7 +8459,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   {
     const gui::FormRow row = form.row();
     result.clear_proxy_cache = preferences_button(
-        ctx, mix(id_, "preferences.proxy.clear"), row.label, "CLEAR CACHE",
+        ctx, gui::ui_id(id_, "preferences.proxy.clear"), row.label, "CLEAR CACHE",
         true);
     ctx.label(gui::inset(row.field, gui::Padding{m.gap, 0.0F, 0.0F, 0.0F}),
               "Clears the cache currently in use, not this unsaved draft.",
@@ -8497,7 +8485,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     const BufferPreset &preset = presets[index];
     const bool selected = draft_.output_buffer_frames == preset.buffer &&
                           draft_.output_read_ahead_frames == preset.read_ahead;
-    if (preferences_button(ctx, mix(id_, preset.key),
+    if (preferences_button(ctx, gui::ui_id(id_, preset.key),
                            gui::column(preset_row, index, presets.size(), m.gap),
                            preset.label, !selected)) {
       draft_.output_buffer_frames = preset.buffer;
@@ -8537,11 +8525,11 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   static_cast<void>(gui::cut_right(buttons, m.gap));
   const gui::Rect cancel_button = gui::cut_right(buttons, m.button_width);
   const bool cancelled = preferences_button(
-      ctx, mix(id_, "preferences.cancel"), cancel_button, "CANCEL", true);
-  const bool saved = preferences_button(ctx, mix(id_, "preferences.save"),
+      ctx, gui::ui_id(id_, "preferences.cancel"), cancel_button, "CANCEL", true);
+  const bool saved = preferences_button(ctx, gui::ui_id(id_, "preferences.save"),
                                         save_button, "SAVE", changed);
   const bool dismissed =
-      end_modal(ctx, mix(id_, "preferences.scrim"), bounds, modal);
+      end_modal(ctx, gui::ui_id(id_, "preferences.scrim"), bounds, modal);
 
   if (saved) {
     result.save = draft_;
@@ -9142,14 +9130,14 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                   state.playing ? "Program is playing" : "Program is paused");
     }
     if (state.cluster.conformance_active) {
-      if (icon_button(ctx, mix(id_, "conformance.check"),
+      if (icon_button(ctx, gui::ui_id(id_, "conformance.check"),
                       action_bounds(line, 0U), gui::Icon::Restart,
                       "Check the render cohort: every node renders the same "
                       "fixed scene and compares")) {
         frame.check_render_conformance = true;
       }
       const gui::Interaction toggle =
-          clipped_grab(ctx, mix(id_, "program.details"),
+          clipped_grab(ctx, gui::ui_id(id_, "program.details"),
                        gui::Rect{bounds.x, line.y,
                                  actions_x - bounds.x, row_height},
                        list_bounds);
@@ -9163,7 +9151,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       const auto toggle_button = [&](std::string_view key,
                                      std::string_view label) {
         gui::Rect strip = details.next(20.0F, 4.0F);
-        return ctx.button(mix(id_, key), gui::cut_left(strip, 160.0F), label);
+        return ctx.button(gui::ui_id(id_, key), gui::cut_left(strip, 160.0F), label);
       };
       const auto text_line = [&](float indent = 0.0F) {
         return gui::inset(details.next(detail_line, 0.0F),
@@ -9366,7 +9354,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                             bool enabled) {
       const gui::Rect button = action_bounds(line, placed++);
       button_x = button.x;
-      const gui::UiId button_id = mix(
+      const gui::UiId button_id = gui::ui_id(
           id_, suffix, node.device.value() * 8U + static_cast<core::u64>(kind));
       if (row_visible &&
           icon_button(ctx, button_id, button, icon, tip, false, enabled) &&
@@ -9410,7 +9398,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     // The rest of the row opens its details; drawn after the buttons so they
     // keep their presses.
     const gui::Interaction toggle = clipped_grab(
-        ctx, mix(id_, "output.details", node.device.value()),
+        ctx, gui::ui_id(id_, "output.details", node.device.value()),
         gui::Rect{line.x, line.y, std::max(button_x - line.x - 2.0F, 0.0F),
                   row_height},
         list_bounds);
@@ -9515,7 +9503,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     static_cast<void>(gui::cut_right(batch, 6.0F));
     const bool enabled = actionable(action) > 0U;
     const gui::Interaction interaction =
-        enabled ? ctx.grab(mix(id_, suffix), button) : gui::Interaction{};
+        enabled ? ctx.grab(gui::ui_id(id_, suffix), button) : gui::Interaction{};
     if (enabled) {
       ctx.cursor_for(interaction, gui::Cursor::Hand);
     }

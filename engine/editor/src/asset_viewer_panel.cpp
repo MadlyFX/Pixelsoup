@@ -23,15 +23,6 @@ constexpr std::size_t history_limit = 32U;
 // A press on the picture that travels this far is a drag out, not a click.
 constexpr float drag_threshold = 5.0F;
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name) noexcept {
-  core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
-  for (const char c : name) {
-    hash ^= static_cast<core::u8>(c);
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
 [[nodiscard]] gui::UiColor alpha(gui::UiColor color, float a) noexcept {
   color.a = a;
   return color;
@@ -321,7 +312,7 @@ void AssetViewerPanel::request_edit(Pass &p, SourceEditMode mode) {
 void AssetViewerPanel::history_buttons(gui::UiContext &ctx,
                                        const gui::Rect &back,
                                        const gui::Rect &forward) {
-  if (ctx.button(mix(id_, "back"), back, "<") && history_index_ > 0U &&
+  if (ctx.button(gui::ui_id(id_, "back"), back, "<") && history_index_ > 0U &&
       !history_.empty()) {
     --history_index_;
     const doc::NodeId wanted = history_[history_index_];
@@ -329,7 +320,7 @@ void AssetViewerPanel::history_buttons(gui::UiContext &ctx,
     open(wanted);
     // open() already reached this entry; keep the forward history.
   }
-  if (ctx.button(mix(id_, "forward"), forward, ">") &&
+  if (ctx.button(gui::ui_id(id_, "forward"), forward, ">") &&
       history_index_ + 1U < history_.size()) {
     ++history_index_;
     const doc::NodeId wanted = history_[history_index_];
@@ -352,13 +343,13 @@ void AssetViewerPanel::draw_header(Pass &p) {
     std::snprintf(stops.data(), stops.size(), "EV %+.1f", exposure_);
     const gui::Rect value = bar.place(56.0F, 0.0F);
     const gui::Rect minus = bar.place(22.0F);
-    if (ctx.button(mix(id_, "ev-"), minus, "-")) {
+    if (ctx.button(gui::ui_id(id_, "ev-"), minus, "-")) {
       exposure_ = std::max(exposure_ - 0.5F, -8.0F);
     }
-    if (ctx.button(mix(id_, "ev0"), value, stops.data())) {
+    if (ctx.button(gui::ui_id(id_, "ev0"), value, stops.data())) {
       exposure_ = 0.0F;
     }
-    if (ctx.button(mix(id_, "ev+"), plus, "+")) {
+    if (ctx.button(gui::ui_id(id_, "ev+"), plus, "+")) {
       exposure_ = std::min(exposure_ + 0.5F, 8.0F);
     }
     ctx.tooltip(value, "A display-only exposure offset; click to reset");
@@ -367,7 +358,7 @@ void AssetViewerPanel::draw_header(Pass &p) {
     static constexpr std::array<std::string_view, 5U> channels{
         "RGB", "Red", "Green", "Blue", "Luma"};
     std::size_t selected = static_cast<std::size_t>(channel_);
-    if (ctx.dropdown(mix(id_, "channel"), bar.place(78.0F), channels,
+    if (ctx.dropdown(gui::ui_id(id_, "channel"), bar.place(78.0F), channels,
                      selected)) {
       channel_ = static_cast<AssetViewerChannel>(
           std::min<std::size_t>(selected, channels.size() - 1U));
@@ -378,7 +369,7 @@ void AssetViewerPanel::draw_header(Pass &p) {
                                                                  "Full res"};
     std::size_t selected = full_resolution_ ? 1U : 0U;
     const gui::Rect rect = bar.place(84.0F);
-    if (ctx.dropdown(mix(id_, "media"), rect, renditions, selected)) {
+    if (ctx.dropdown(gui::ui_id(id_, "media"), rect, renditions, selected)) {
       full_resolution_ = selected == 1U;
     }
     const std::optional<LibraryEditorProxy> &proxy = p.input.editor_proxy;
@@ -399,7 +390,7 @@ void AssetViewerPanel::draw_header(Pass &p) {
     }
     ctx.tooltip(rect, tip);
     if (coming && !full_resolution_) {
-      draw_proxy_progress(ctx, mix(id_, "media-proxy"), rect,
+      draw_proxy_progress(ctx, gui::ui_id(id_, "media-proxy"), rect,
                          library_editor_proxy_fraction(*proxy));
     }
   }
@@ -414,10 +405,10 @@ void AssetViewerPanel::draw_header(Pass &p) {
     std::snprintf(percent.data(), percent.size(), "%.0f%%",
                   static_cast<double>(scale) * 100.0);
     ctx.label(zoom_text, percent.data(), theme.text_muted);
-    if (ctx.button(mix(id_, "fit"), fit, "Fit")) {
+    if (ctx.button(gui::ui_id(id_, "fit"), fit, "Fit")) {
       framing_ = {};
     }
-    if (ctx.button(mix(id_, "actual"), actual, "1:1")) {
+    if (ctx.button(gui::ui_id(id_, "actual"), actual, "1:1")) {
       framing_.scale = 1.0F;
     }
     ctx.tooltip(actual, "One source pixel to one screen pixel");
@@ -526,7 +517,7 @@ void AssetViewerPanel::draw_image(Pass &p) {
   }
 
   // A left press on the picture drags it out, carrying the marked range.
-  const gui::Interaction grab = ctx.grab(mix(id_, "picture"), picture_area);
+  const gui::Interaction grab = ctx.grab(gui::ui_id(id_, "picture"), picture_area);
   if (grab.pressed) {
     drag_armed_ = true;
     dragging_ = false;
@@ -651,7 +642,7 @@ void AssetViewerPanel::draw_scrub(Pass &p) {
   ctx.panel(gui::Rect{head - 1.0F, p.scrub.y + 1.0F, 2.0F, p.scrub.height - 2.0F},
             theme.playhead);
 
-  const gui::Interaction scrub = ctx.grab(mix(id_, "scrub"), p.scrub);
+  const gui::Interaction scrub = ctx.grab(gui::ui_id(id_, "scrub"), p.scrub);
   if (scrub.pressed) {
     scrubbing_ = true;
     stop();
@@ -694,17 +685,17 @@ void AssetViewerPanel::draw_transport(Pass &p) {
   x += 4.0F;
   const gui::Rect loop = next(26.0F);
   const gui::Rect in_out = next(26.0F);
-  if (tool_key(ctx, mix(id_, "start"), start, gui::Icon::ToStart, false,
+  if (tool_key(ctx, gui::ui_id(id_, "start"), start, gui::Icon::ToStart, false,
                "Go to In, or the first frame (Home)", theme.playhead)) {
     stop();
     seek(marked ? in : 0U, p.count);
   }
-  if (tool_key(ctx, mix(id_, "step-back"), back, gui::Icon::StepBack, false,
+  if (tool_key(ctx, gui::ui_id(id_, "step-back"), back, gui::Icon::StepBack, false,
                "Step back a frame (Left)", theme.playhead)) {
     stop();
     seek(frame_ == 0U ? 0U : frame_ - 1U, p.count);
   }
-  if (tool_key(ctx, mix(id_, "play"), play_button,
+  if (tool_key(ctx, gui::ui_id(id_, "play"), play_button,
                direction_ != 0 ? gui::Icon::Pause : gui::Icon::Play,
                direction_ != 0, "Play or pause (Space; J K L shuttle)",
                theme.good)) {
@@ -714,21 +705,21 @@ void AssetViewerPanel::draw_transport(Pass &p) {
       play(1, now);
     }
   }
-  if (tool_key(ctx, mix(id_, "step-forward"), forward, gui::Icon::StepForward,
+  if (tool_key(ctx, gui::ui_id(id_, "step-forward"), forward, gui::Icon::StepForward,
                false, "Step forward a frame (Right)", theme.playhead)) {
     stop();
     seek(frame_ + 1U, p.count);
   }
-  if (tool_key(ctx, mix(id_, "end"), end, gui::Icon::ToEnd, false,
+  if (tool_key(ctx, gui::ui_id(id_, "end"), end, gui::Icon::ToEnd, false,
                "Go to Out, or the last frame (End)", theme.playhead)) {
     stop();
     seek(marked ? out : p.count - 1U, p.count);
   }
-  if (tool_key(ctx, mix(id_, "loop"), loop, gui::Icon::Loop, loop_,
+  if (tool_key(ctx, gui::ui_id(id_, "loop"), loop, gui::Icon::Loop, loop_,
                "Loop playback", theme.accent)) {
     loop_ = !loop_;
   }
-  if (tool_key(ctx, mix(id_, "in-to-out"), in_out, gui::Icon::PlayRange,
+  if (tool_key(ctx, gui::ui_id(id_, "in-to-out"), in_out, gui::Icon::PlayRange,
                in_to_out_ && direction_ != 0, "Play the marked range",
                theme.accent)) {
     seek(in, p.count);
@@ -768,17 +759,17 @@ void AssetViewerPanel::draw_edit_row(Pass &p) {
   const gui::Rect in_button = next(26.0F);
   const gui::Rect out_button = next(26.0F);
   const gui::Rect clear = next(26.0F);
-  if (tool_key(ctx, mix(id_, "mark-in"), in_button, gui::Icon::MarkIn,
+  if (tool_key(ctx, gui::ui_id(id_, "mark-in"), in_button, gui::Icon::MarkIn,
                mark_in_.has_value(), "Mark In at this frame (I)",
                theme.accent)) {
     mark_in_ = frame_;
   }
-  if (tool_key(ctx, mix(id_, "mark-out"), out_button, gui::Icon::MarkOut,
+  if (tool_key(ctx, gui::ui_id(id_, "mark-out"), out_button, gui::Icon::MarkOut,
                mark_out_.has_value(), "Mark Out at this frame (O)",
                theme.accent)) {
     mark_out_ = frame_;
   }
-  if (tool_key(ctx, mix(id_, "clear"), clear, gui::Icon::Close, false,
+  if (tool_key(ctx, gui::ui_id(id_, "clear"), clear, gui::Icon::Close, false,
                "Clear In and Out", theme.accent)) {
     mark_in_.reset();
     mark_out_.reset();
@@ -800,18 +791,18 @@ void AssetViewerPanel::draw_edit_row(Pass &p) {
   const gui::Rect append = from_right(cut_width("Append"));
   const gui::Rect overwrite = from_right(cut_width("Overwrite"));
   const gui::Rect insert = from_right(cut_width("Insert"));
-  if (pill_button(ctx, mix(id_, "insert"), insert, gui::Icon::Insert, "Insert",
+  if (pill_button(ctx, gui::ui_id(id_, "insert"), insert, gui::Icon::Insert, "Insert",
                   "Insert the range at the playhead on the target track "
                   "(,); later clips move along")) {
     request_edit(p, SourceEditMode::Insert);
   }
-  if (pill_button(ctx, mix(id_, "overwrite"), overwrite, gui::Icon::Overwrite,
+  if (pill_button(ctx, gui::ui_id(id_, "overwrite"), overwrite, gui::Icon::Overwrite,
                   "Overwrite",
                   "Lay the range over the target track at the playhead, in "
                   "front of its clips (.); nothing moves")) {
     request_edit(p, SourceEditMode::Overwrite);
   }
-  if (pill_button(ctx, mix(id_, "append"), append, gui::Icon::Append, "Append",
+  if (pill_button(ctx, gui::ui_id(id_, "append"), append, gui::Icon::Append, "Append",
                   "Add the range after the target track's last clip")) {
     request_edit(p, SourceEditMode::Append);
   }
@@ -852,8 +843,8 @@ void AssetViewerPanel::draw_edit_row(Pass &p) {
   }
   std::string used = "Used " + std::to_string(uses.size());
   const gui::Rect used_button = from_right(ctx.font_width(used) + 16.0F);
-  const gui::UiId menu = mix(id_, "used-in");
-  if (ctx.button(mix(id_, "used"), used_button, used) && !uses.empty()) {
+  const gui::UiId menu = gui::ui_id(id_, "used-in");
+  if (ctx.button(gui::ui_id(id_, "used"), used_button, used) && !uses.empty()) {
     ctx.open_context_menu(menu, used_button.x,
                           used_button.bottom());
   }
@@ -1252,7 +1243,7 @@ void AssetViewerPanel::draw_model_header(Pass &p) {
         "World normals"};
     std::size_t selected = static_cast<std::size_t>(shading_);
     const gui::Rect at = bar.place(112.0F);
-    if (ctx.dropdown(mix(id_, "shading"), at, shadings, selected)) {
+    if (ctx.dropdown(gui::ui_id(id_, "shading"), at, shadings, selected)) {
       shading_ = static_cast<render::ViewShading>(
           std::min<std::size_t>(selected, shadings.size() - 1U));
     }
@@ -1264,7 +1255,7 @@ void AssetViewerPanel::draw_model_header(Pass &p) {
         "Studio", "Stage scene", "HDRI image..."};
     std::size_t selected = static_cast<std::size_t>(look_.environment);
     const gui::Rect at = bar.place(120.0F);
-    if (ctx.dropdown(mix(id_, "environment"), at, environments, selected)) {
+    if (ctx.dropdown(gui::ui_id(id_, "environment"), at, environments, selected)) {
       if (selected == 2U) {
         p.frame.choose_hdri = true;
       } else {
@@ -1355,7 +1346,7 @@ void AssetViewerPanel::draw_model_image(Pass &p) {
     orbit_ = stage_wheel_dolly(orbit_, ctx.wheel());
     navigated_ = true;
   }
-  const gui::Interaction grab = ctx.grab(mix(id_, "model-view"), picture_area);
+  const gui::Interaction grab = ctx.grab(gui::ui_id(id_, "model-view"), picture_area);
   if (grab.pressed) {
     model_drag_ = ctx.shift_held() ? ModelDrag::Rig : ModelDrag::Orbit;
   } else if (hovered && ctx.middle_pointer_pressed()) {
@@ -1455,14 +1446,14 @@ void AssetViewerPanel::draw_model_tools(Pass &p) {
   x += 8.0F;
   const gui::Rect floor = next(48.0F);
   const gui::Rect figure = next(54.0F);
-  if (ctx.button(mix(id_, "frame"), frame, "Frame")) {
+  if (ctx.button(gui::ui_id(id_, "frame"), frame, "Frame")) {
     orbit_ = stage_focus(orbit_, p.bounds);
     navigated_ = true;
   }
-  if (ctx.button(mix(id_, "home"), home, "Home")) {
+  if (ctx.button(gui::ui_id(id_, "home"), home, "Home")) {
     orbit_ = asset_viewer_model_home(p.bounds);
   }
-  if (ctx.button(mix(id_, "turntable"), turntable, "Turntable")) {
+  if (ctx.button(gui::ui_id(id_, "turntable"), turntable, "Turntable")) {
     turntable_ = !turntable_;
   }
   lit(turntable, turntable_);
@@ -1475,15 +1466,15 @@ void AssetViewerPanel::draw_model_tools(Pass &p) {
       chosen = index;
     }
   }
-  if (ctx.dropdown(mix(id_, "period"), period, periods, chosen)) {
+  if (ctx.dropdown(gui::ui_id(id_, "period"), period, periods, chosen)) {
     turntable_period_ =
         period_seconds[std::min(chosen, period_seconds.size() - 1U)];
   }
-  if (ctx.button(mix(id_, "floor"), floor, "Floor")) {
+  if (ctx.button(gui::ui_id(id_, "floor"), floor, "Floor")) {
     look_.floor = !look_.floor;
   }
   lit(floor, look_.floor);
-  if (ctx.button(mix(id_, "figure"), figure, "Figure")) {
+  if (ctx.button(gui::ui_id(id_, "figure"), figure, "Figure")) {
     look_.figure = !look_.figure;
   }
   lit(figure, look_.figure);
@@ -1497,7 +1488,7 @@ void AssetViewerPanel::draw_model_tools(Pass &p) {
   if (part_.has_value()) {
     const gui::Rect all{row.right() - 78.0F, y, 70.0F, h};
     if (all.x > x + 90.0F) {
-      if (ctx.button(mix(id_, "all-parts"), all, "Show all")) {
+      if (ctx.button(gui::ui_id(id_, "all-parts"), all, "Show all")) {
         part_.reset();
       }
       ctx.label(gui::Rect{all.x - 90.0F, row.y, 86.0F, row.height},
@@ -1614,7 +1605,7 @@ void AssetViewerPanel::draw_model_parts(Pass &p, gui::FormLayout &rows) {
                                                       : theme.text);
     if (visible) {
       const gui::Interaction row = ctx.grab(
-          mix(mix(id_, "part"), std::to_string(index)), at);
+          gui::ui_id(gui::ui_id(id_, "part"), std::to_string(index)), at);
       if (row.pressed) {
         if (chosen) {
           part_.reset();
@@ -1650,7 +1641,7 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
     const gui::Rect play{at.x, at.y, 32.0F, at.height};
     const gui::Rect loop{play.right() + 4.0F, at.y, 26.0F, at.height};
     const bool chosen = clip_.has_value() && *clip_ < facts->clips.size();
-    if (tool_key(ctx, mix(id_, "clip-play"), play,
+    if (tool_key(ctx, gui::ui_id(id_, "clip-play"), play,
                  clip_playing_ ? gui::Icon::Pause : gui::Icon::Play,
                  clip_playing_, "Play or pause the clip (Space)", theme.good)) {
       if (!chosen) {
@@ -1663,7 +1654,7 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
         play_clip(now);
       }
     }
-    if (tool_key(ctx, mix(id_, "clip-loop"), loop, gui::Icon::Loop, clip_loop_,
+    if (tool_key(ctx, gui::ui_id(id_, "clip-loop"), loop, gui::Icon::Loop, clip_loop_,
                  "Loop the clip", theme.accent)) {
       clip_loop_ = !clip_loop_;
       clip_origin_time_ = now;
@@ -1689,7 +1680,7 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
         const float head = bar.x + bar.width * static_cast<float>(shown / duration);
         ctx.panel(gui::Rect{head - 1.0F, bar.y - 3.0F, 2.0F, bar.height + 6.0F},
                   theme.playhead);
-        const gui::Interaction scrub = ctx.grab(mix(id_, "clip-scrub"), bar);
+        const gui::Interaction scrub = ctx.grab(gui::ui_id(id_, "clip-scrub"), bar);
         if (scrub.held) {
           clip_playing_ = false;
           const double t = std::clamp(
@@ -1718,7 +1709,7 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
     const bool visible =
         at.bottom() > p.info.y && at.y < p.info.bottom();
     return visible &&
-           ctx.grab(mix(mix(id_, "clip"), std::to_string(index)), at).pressed;
+           ctx.grab(gui::ui_id(gui::ui_id(id_, "clip"), std::to_string(index)), at).pressed;
   };
   if (row(0U, "Bind pose", "", !clip_.has_value())) {
     clip_.reset();
@@ -1757,7 +1748,7 @@ void AssetViewerPanel::draw_model_info(Pass &p) {
   for (std::size_t index = 0U; index < names.size(); ++index) {
     const float width = ctx.font_width(names[index]) + 20.0F;
     const gui::Rect at{x, tabs.y + 2.0F, width, tabs.height - 4.0F};
-    if (ctx.button(mix(mix(id_, "tab"), names[index].substr(0U, 4U)), at,
+    if (ctx.button(gui::ui_id(gui::ui_id(id_, "tab"), names[index].substr(0U, 4U)), at,
                    names[index])) {
       if (tab_ != static_cast<ModelTab>(index)) {
         tab_ = static_cast<ModelTab>(index);

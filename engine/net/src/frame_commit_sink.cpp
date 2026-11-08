@@ -78,7 +78,6 @@ show::FrameCommitReport NodeServiceFrameCommitSink::commit(
 
     auto committed = service_->commit_prepared_frame(frame);
     if (!committed) {
-        ++rejected_commits_;
         return show::FrameCommitReport{
             classify(committed.error()),
             frame,

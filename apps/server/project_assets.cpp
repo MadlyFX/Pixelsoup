@@ -1,6 +1,8 @@
 #include "project_assets.hpp"
 
 #include <mediaserver/assets/asset_path.hpp>
+
+#include <mediaserver/core/fnv1a.hpp>
 #include <mediaserver/assets/content_fingerprint.hpp>
 #include <mediaserver/output/feed_map_schema.hpp>
 #include <mediaserver/scene/linked_scene.hpp>
@@ -16,37 +18,16 @@
 namespace mediaserver::app {
 namespace {
 
-constexpr core::u64 fnv_offset = 1469598103934665603ULL;
-constexpr core::u64 fnv_prime = 1099511628211ULL;
-
-void mix_byte(core::u64& state, core::u8 value) noexcept {
-    state ^= value;
-    state *= fnv_prime;
-}
-
-void mix_u64(core::u64& state, core::u64 value) noexcept {
-    for (core::u32 shift = 0U; shift < 64U; shift += 8U) {
-        mix_byte(state, static_cast<core::u8>((value >> shift) & 0xffU));
-    }
-}
-
-void mix_text(core::u64& state, std::string_view value) noexcept {
-    mix_u64(state, static_cast<core::u64>(value.size()));
-    for (const char character : value) {
-        mix_byte(state, static_cast<core::u8>(character));
-    }
-}
-
 void mix_fingerprint(
     core::u64& state,
     const std::optional<assets::ContentFingerprint>& fingerprint) noexcept {
-    mix_byte(state, fingerprint.has_value() ? 1U : 0U);
+    core::fnv1a_byte(state, fingerprint.has_value() ? 1U : 0U);
     if (!fingerprint.has_value()) {
         return;
     }
-    mix_u64(state, fingerprint->byte_length);
+    core::fnv1a_u64(state, fingerprint->byte_length);
     for (const core::u8 byte : fingerprint->sha256.bytes) {
-        mix_byte(state, byte);
+        core::fnv1a_byte(state, byte);
     }
 }
 
@@ -203,14 +184,14 @@ ProjectAssetManifest collect_project_asset_manifest(
                     }),
         manifest.assets.end());
 
-    core::u64 state = fnv_offset;
-    mix_u64(state, manifest.assets.size());
+    core::u64 state = core::fnv1a_offset_short;
+    core::fnv1a_u64(state, manifest.assets.size());
     for (const RequiredProjectAsset& required : manifest.assets) {
-        mix_byte(state, static_cast<core::u8>(required.kind));
-        mix_text(state, required.source);
+        core::fnv1a_byte(state, static_cast<core::u8>(required.kind));
+        core::fnv1a_text(state, required.source);
         mix_fingerprint(state, required.expected_fingerprint);
     }
-    mix_u64(state, manifest.kind_mismatches);
+    core::fnv1a_u64(state, manifest.kind_mismatches);
     manifest.digest = state;
     return manifest;
 }

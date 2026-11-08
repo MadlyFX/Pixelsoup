@@ -74,7 +74,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                               std::string_view caption, core::u64 value,
                               core::u64 maximum,
                               gui::UiColor color) -> std::optional<core::u64> {
-    const gui::UiId text_id = mix(id, "text");
+    const gui::UiId text_id = gui::ui_id(id, "text");
     std::optional<core::u64> result;
     if (toolbar_.time_edit_id == id) {
       static_cast<void>(ctx.text_field(text_id, field, toolbar_.time_draft));
@@ -143,7 +143,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     const bool fitted = fits(width);
     const gui::Rect at = place(width, 2.0F);
     // Play lights green while the show runs, like the show bar's Program.
-    if (fitted && icon_button(ctx, mix(id_, name), at, icon, engaged, tip,
+    if (fitted && icon_button(ctx, gui::ui_id(id_, name), at, icon, engaged, tip,
                               name == "play" ? theme.good : theme.playhead)) {
       frame.transport = request;
     }
@@ -154,7 +154,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                             float gap_after = 2.0F) {
     const bool fitted = fits(icon_button_width);
     const gui::Rect at = place(icon_button_width, gap_after);
-    return fitted && icon_button(ctx, mix(id_, name), at, icon, engaged, tip,
+    return fitted && icon_button(ctx, gui::ui_id(id_, name), at, icon, engaged, tip,
                                  theme.accent);
   };
   const auto separate = [&] {
@@ -190,7 +190,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     const gui::Rect readout = place(readout_width, 4.0F);
     if (fitted) {
       if (const auto moved = time_field(
-              mix(id_, "playhead time"), readout, {}, timeline.show_frame,
+              gui::ui_id(id_, "playhead time"), readout, {}, timeline.show_frame,
               std::max(last, timeline.show_frame) + 1'000'000U,
               theme.playhead)) {
         frame.seek_to_frame = *moved;
@@ -205,7 +205,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   const gui::Rect rate_slot = place(rate_width, 4.0F);
   if (rate_fits) {
     rate_button = rate_slot;
-    if (ctx.button(mix(id_, "show rate"), rate_button, rate_label(timeline))) {
+    if (ctx.button(gui::ui_id(id_, "show rate"), rate_button, rate_label(timeline))) {
       toolbar_.rate_menu_open = !toolbar_.rate_menu_open;
       key_tools_.open = false;
     }
@@ -264,7 +264,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     const gui::Rect at = gui::centered(gui::cell(place(tool_width, 2.0F), toolbar),
                                        tool_width, tool_height);
     if (fitted &&
-        icon_button(ctx, mix(id_, choice.name), at, choice.icon,
+        icon_button(ctx, gui::ui_id(id_, choice.name), at, choice.icon,
                     edit_tool_ == choice.tool, choice.tip, theme.accent,
                     edit_tool_scale)) {
       edit_tool_ = choice.tool;
@@ -283,7 +283,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   const bool curves_fit = fits(curves_width);
   const gui::Rect curves_toggle = place(curves_width, 2.0F);
   if (curves_fit &&
-      text_toggle(ctx, mix(id_, "graph mode"), curves_toggle, "Curves",
+      text_toggle(ctx, gui::ui_id(id_, "graph mode"), curves_toggle, "Curves",
                   graph_mode_,
                   "Draw animated values as curves instead of keys")) {
     graph_mode_ = !graph_mode_;
@@ -299,7 +299,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   gui::Rect key_tools_button{};
   if (show_key_tools && fits(keys_width)) {
     key_tools_button = place(keys_width, 2.0F);
-    if (text_toggle(ctx, mix(id_, "key tools"), key_tools_button, "Keys",
+    if (text_toggle(ctx, gui::ui_id(id_, "key tools"), key_tools_button, "Keys",
                     key_tools_.open,
                     "Key selection, value and time-scale tools")) {
       key_tools_.open = !key_tools_.open;
@@ -318,11 +318,11 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                  std::max(bounds.x, bounds.right() - key_popup_width)),
       toolbar.bottom() - 2.0F, key_popup_width, 224.0F};
   auto &key_tools_popup = p.key_tools_popup;
-  p.scale_numerator_id = mix(id_, "scale numerator");
+  p.scale_numerator_id = gui::ui_id(id_, "scale numerator");
   auto &scale_numerator_id = p.scale_numerator_id;
-  p.scale_denominator_id = mix(id_, "scale denominator");
+  p.scale_denominator_id = gui::ui_id(id_, "scale denominator");
   auto &scale_denominator_id = p.scale_denominator_id;
-  p.scale_user_anchor_id = mix(id_, "scale user anchor");
+  p.scale_user_anchor_id = gui::ui_id(id_, "scale user anchor");
   auto &scale_user_anchor_id = p.scale_user_anchor_id;
   if (key_tools_.open && ctx.pointer_pressed() &&
       !key_tools_button.contains(ctx.pointer_x(), ctx.pointer_y()) &&
@@ -404,13 +404,13 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     in_field = gui::cut_right(bar, range_field_width);
   }
   if (show_range) {
-    if (const auto entered = time_field(mix(id_, "range first"), in_field,
+    if (const auto entered = time_field(gui::ui_id(id_, "range first"), in_field,
                                         "IN", first, last, theme.text)) {
       frame.range = RangeRequest{*entered, std::max(last, *entered),
                                  timeline.loop};
     }
     if (const auto entered =
-            time_field(mix(id_, "range last"), out_field, "OUT", last,
+            time_field(gui::ui_id(id_, "range last"), out_field, "OUT", last,
                        static_cast<core::u64>(
                            std::numeric_limits<core::i64>::max()),
                        theme.text)) {
@@ -421,7 +421,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
 
   // The cue being acted on, and the one GO reaches next.
   if (any_cue) {
-    if (icon_button(ctx, mix(id_, "cues armed"), armed_button, gui::Icon::Hold,
+    if (icon_button(ctx, gui::ui_id(id_, "cues armed"), armed_button, gui::Icon::Hold,
                     timeline.cues_armed,
                     timeline.cues_armed
                         ? "Cues armed: the show stops and loops on cues"
@@ -432,7 +432,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     // GO does something when the show is held, looping, or stopped short of
     // a cue; while it runs towards one, the button counts down instead.
     const bool running = timeline.playing && timeline.looping_cue == doc::NodeId{};
-    const gui::Interaction go = ctx.grab(mix(id_, "go"), go_button);
+    const gui::Interaction go = ctx.grab(gui::ui_id(id_, "go"), go_button);
     if (go.clicked) {
       frame.transport = TransportRequest::Go;
     }
@@ -565,7 +565,7 @@ void TimelinePanel::draw_rate_menu(Pass &p) {
       const RateChoice &choice = common_rates[index];
       const gui::Rect row = gui::list_row(choices, index, 21.0F);
       const gui::Interaction interaction =
-          ctx.grab(mix(id_, "show rate choice", index), row);
+          ctx.grab(gui::ui_id(id_, "show rate choice", index), row);
       ctx.panel(row, same_rate(timeline, choice.rate)
                          ? ctx.theme().selection
                          : (interaction.hovered ? ctx.theme().widget_hover

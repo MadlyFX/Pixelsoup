@@ -43,18 +43,6 @@ constexpr float scrollbar_size = 10.0F;
 // one warm colour in the palette that is not an error.
 constexpr gui::UiColor changed_color{0.93F, 0.66F, 0.24F, 1.0F};
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
-                            core::u64 index = 0U) noexcept {
-  core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
-  for (const char character : name) {
-    hash ^= static_cast<core::u8>(character);
-    hash *= 1099511628211ULL;
-  }
-  hash ^= index + 0x9E3779B9ULL;
-  hash *= 1099511628211ULL;
-  return hash;
-}
-
 [[nodiscard]] gui::UiColor with_alpha(gui::UiColor color,
                                       float opacity) noexcept {
   color.a = opacity;
@@ -722,11 +710,6 @@ void draw_cpu_decode_warning(gui::UiContext &ctx, const gui::Rect &bounds) {
 
 
 } // namespace
-
-std::string_view library_column_title(LibraryColumn column) {
-  return column == LibraryColumn::Count ? std::string_view{}
-                                        : spec(column).title;
-}
 
 std::string library_column_text(const assets::Asset &asset,
                                 LibraryColumn column) {
@@ -1414,7 +1397,7 @@ LibraryFrame LibraryPanel::draw_impl(
       const gui::Rect chip =
           gui::cut_left(chips, ctx.font_width(label) + 16.0F);
       const gui::Interaction interaction =
-          ctx.grab(mix(id_, "library.accept_all"), chip);
+          ctx.grab(gui::ui_id(id_, "library.accept_all"), chip);
       ctx.panel(chip, interaction.hovered ? changed_color
                                           : scale(changed_color, 0.8F));
       ctx.label(gui::inset(chip, gui::Padding{8.0F, 0.0F, 0.0F, 0.0F}), label,
@@ -1459,19 +1442,19 @@ LibraryFrame LibraryPanel::draw_impl(
   };
   {
     const gui::Rect field = gui::inset(search_bounds, 6.0F, 3.0F);
-    const gui::UiId search_id = mix(id_, "library.search");
+    const gui::UiId search_id = gui::ui_id(id_, "library.search");
     if (search_box(ctx, search_id, field, search_,
                    "Search Assets and Generators...")) {
       scroll_ = 0.0F;
     }
   }
-  const gui::UiId menu_id = mix(id_, "library.menu");
+  const gui::UiId menu_id = gui::ui_id(id_, "library.menu");
   bool open_import_menu = false;
   bool create_folder = false;
   {
     const gui::Rect button = slot_button(folder_slot, 2.0F);
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, "library.new_folder"), button);
+        ctx.grab(gui::ui_id(id_, "library.new_folder"), button);
     if (interaction.hovered) {
       ctx.rounded(button, theme.widget_hover, theme.radius);
     }
@@ -1485,7 +1468,7 @@ LibraryFrame LibraryPanel::draw_impl(
   }
   if (room_for_import) {
     // The panel's one coloured button: what it most wants pressed.
-    if (pill_button(ctx, mix(id_, "library.import"),
+    if (pill_button(ctx, gui::ui_id(id_, "library.import"),
                     slot_button(import_slot, 4.0F), gui::Icon::Import,
                     "Import", "Import media, models or a folder (Ctrl+I)",
                     ButtonTone::Primary)) {
@@ -1493,7 +1476,7 @@ LibraryFrame LibraryPanel::draw_impl(
     }
   }
   if (room_for_rescan) {
-    if (pill_button(ctx, mix(id_, "library.rescan"),
+    if (pill_button(ctx, gui::ui_id(id_, "library.rescan"),
                     slot_button(rescan_slot, 4.0F), gui::Icon::Rescan, {},
                     "Rescan: look for changed and missing source files")) {
       frame.rescan_assets = true;
@@ -1600,7 +1583,7 @@ LibraryFrame LibraryPanel::draw_impl(
     const float range = std::max(length - thumb_length, 0.0F);
     const float start = vertical ? track.y : track.x;
     const float along = vertical ? pointer_y : pointer_x;
-    const gui::Interaction interaction = ctx.grab(mix(id_, name), track);
+    const gui::Interaction interaction = ctx.grab(gui::ui_id(id_, name), track);
     float thumb_at =
         start + (maximum > 0.0F ? range * offset / maximum : 0.0F);
     if (interaction.pressed) {
@@ -2060,11 +2043,11 @@ LibraryFrame LibraryPanel::draw_impl(
       const bool shown = visible(gui::intersection(row, visible_content));
       const gui::UiId row_id =
           entry.kind == Entry::Kind::Generator
-              ? mix(id_, "library.generator",
+              ? gui::ui_id(id_, "library.generator",
                     static_cast<core::u64>(entry.item->action))
           : entry.kind == Entry::Kind::Generators
-              ? mix(id_, "library.generators")
-              : mix(id_, "library.row", entry.id.value());
+              ? gui::ui_id(id_, "library.generators")
+              : gui::ui_id(id_, "library.row", entry.id.value());
       const gui::Interaction interaction =
           shown ? clipped_grab(ctx, row_id, row, visible_content)
                 : gui::Interaction{};
@@ -2265,7 +2248,7 @@ LibraryFrame LibraryPanel::draw_impl(
                                   3.0F};
             ctx.rounded(track, scale(theme.track, 0.78F), 1.5F);
             const float filled =
-                ctx.ease(mix(row_id, "editor-proxy"),
+                ctx.ease(gui::ui_id(row_id, "editor-proxy"),
                          library_editor_proxy_fraction(*editor_proxy));
             if (filled > 0.0F) {
               ctx.rounded(gui::Rect{track.x, track.y, track.width * filled,
@@ -2353,11 +2336,11 @@ LibraryFrame LibraryPanel::draw_impl(
       const bool shown = visible(gui::intersection(tile, visible_content));
       const gui::UiId tile_id =
           entry.kind == Entry::Kind::Generator
-              ? mix(id_, "library.generator",
+              ? gui::ui_id(id_, "library.generator",
                     static_cast<core::u64>(entry.item->action))
           : entry.kind == Entry::Kind::Generators
-              ? mix(id_, "library.generators")
-              : mix(id_, "library.tile", entry.id.value());
+              ? gui::ui_id(id_, "library.generators")
+              : gui::ui_id(id_, "library.tile", entry.id.value());
       const gui::Interaction interaction =
           shown ? clipped_grab(ctx, tile_id, tile, visible_content)
                 : gui::Interaction{};
@@ -2494,10 +2477,10 @@ LibraryFrame LibraryPanel::draw_impl(
                            subheader.height};
       x += width;
       const gui::Interaction sort =
-          clipped_grab(ctx, mix(id_, "library.sort", index), sort_hit,
+          clipped_grab(ctx, gui::ui_id(id_, "library.sort", index), sort_hit,
                        subheader);
       const gui::Interaction resize =
-          clipped_grab(ctx, mix(id_, "library.resize", index), edge,
+          clipped_grab(ctx, gui::ui_id(id_, "library.resize", index), edge,
                        subheader);
       ctx.cursor_for(resize, gui::Cursor::ResizeHorizontal);
       if (resize.pressed) {
@@ -2585,7 +2568,7 @@ LibraryFrame LibraryPanel::draw_impl(
       const gui::Rect crumb{x, subheader.y + 1.0F, width,
                             subheader.height - 2.0F};
       const gui::Interaction interaction = clipped_grab(
-          ctx, mix(id_, "library.crumb", step), crumb, subheader);
+          ctx, gui::ui_id(id_, "library.crumb", step), crumb, subheader);
       const bool drop_here = dragging && !searching && !generators_open_ &&
                              crumb.contains(pointer_x, pointer_y) &&
                              folder_accepts(path[step].first);
@@ -2764,7 +2747,7 @@ LibraryFrame LibraryPanel::draw_impl(
           gui::inset(gui::cut_left(strip, 26.0F),
                      gui::Padding{0.0F, 2.0F, 2.0F, 2.0F});
       const gui::Interaction interaction = ctx.grab(
-          mix(id_, "library.view", static_cast<core::u64>(choice)), button);
+          gui::ui_id(id_, "library.view", static_cast<core::u64>(choice)), button);
       const bool engaged = view_ == choice;
       if (engaged || interaction.hovered) {
         ctx.panel(button,
@@ -2790,7 +2773,7 @@ LibraryFrame LibraryPanel::draw_impl(
       float size = icon_size();
       const gui::Rect slider =
           gui::inset(gui::cut_left(zoom, slider_width), 0.0F, 4.0F);
-      if (ctx.slider(mix(id_, "library.zoom"), slider, size, 0.0F, 1.0F)) {
+      if (ctx.slider(gui::ui_id(id_, "library.zoom"), slider, size, 0.0F, 1.0F)) {
         set_icon_size(size);
       }
       ctx.tooltip(slider, "Thumbnail size (Ctrl+Wheel)");

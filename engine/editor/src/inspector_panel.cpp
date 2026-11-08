@@ -36,18 +36,6 @@ constexpr float label_min = 50.0F;
 constexpr float label_max = 96.0F;
 // A widget id derived from the panel's own, so two Inspectors in one window - a
 // detached copy beside the docked one - never fight over hot/active.
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
-                            std::size_t index) noexcept {
-    core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
-    for (const char c : name) {
-        hash ^= static_cast<core::u8>(c);
-        hash *= 1099511628211ULL;
-    }
-    hash ^= static_cast<core::u64>(index) + 0x9E3779B9ULL;
-    hash *= 1099511628211ULL;
-    return hash;
-}
-
 constexpr float scroll_step = 32.0F;
 
 // The Inspector's rows run `panel_inset` in from the panel's sides and top.
@@ -357,7 +345,7 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
     if (key_requested != nullptr) {
         const gui::Rect key_bounds{row.x + label_width - key_width, row.y,
                                    key_width, row.height};
-        *key_requested = key_button(ctx, mix(id_, label, 9'000U + id_salt), key_bounds,
+        *key_requested = key_button(ctx, gui::ui_id(id_, label, 9'000U + id_salt), key_bounds,
                                     animated, keyed_here, ctx.theme().panel);
     }
     // Any component away from its default carries the reset arrow, at the
@@ -382,7 +370,7 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
                            static_cast<std::size_t>(std::max(length, 0)));
             }
             tip += ")";
-            if (reset_button(ctx, mix(id_, label, 10'000U + id_salt),
+            if (reset_button(ctx, gui::ui_id(id_, label, 10'000U + id_salt),
                              reset_bounds, tip)) {
                 for (std::size_t i = 0U; i < std::min(count, defaults.size());
                      ++i) {
@@ -394,7 +382,7 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
                     NumberFieldEdit edit{};
                     edit.kind = NumberFieldEditKind::Absolute;
                     edit.value = *defaults[i];
-                    emit_numeric(bindings[i], mix(id_, label, i + id_salt), edit,
+                    emit_numeric(bindings[i], gui::ui_id(id_, label, i + id_salt), edit,
                                  summarize(bindings[i], frame), frame);
                 }
             }
@@ -415,7 +403,7 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
         if (summary.mixed) {
             ++frame.mixed_fields;
         }
-        const gui::UiId field = mix(id_, label, i + id_salt);
+        const gui::UiId field = gui::ui_id(id_, label, i + id_salt);
         double out = 0.0;
         NumberFieldEdit edit{};
         if (fields_.draw(ctx, field, boxes[i], axes[i],
@@ -433,7 +421,7 @@ void InspectorPanel::colour_well(gui::UiContext& ctx, const gui::Rect& well,
                                  std::span<const FieldBinding> bindings,
                                  InspectorFrame& frame, bool mixed,
                                  std::size_t salt) {
-    const gui::UiId id = mix(id_, name, 11'000U + salt);
+    const gui::UiId id = gui::ui_id(id_, name, 11'000U + salt);
     gui::UiColor color{channels[0], channels[1], channels[2], 1.0F};
     const bool changed = ctx.color_well(id, well, color);
     if (mixed && !ctx.color_open(id)) {
@@ -1242,14 +1230,14 @@ bool InspectorPanel::section(gui::UiContext& ctx, Cursor& cursor,
     const gui::Rect row = take_row(cursor, section_height);
     cursor.space(row_gap);
 
-    const gui::Interaction it = ctx.grab(mix(id_, title, 1000U), row);
+    const gui::Interaction it = ctx.grab(gui::ui_id(id_, title, 1000U), row);
     if (it.clicked) {
         open = !open;
     }
     // A soft band, eased lighter under the pointer, that twirls its group.
     ctx.cursor_for(it, gui::Cursor::Hand);
     const float hover =
-        ctx.ease(mix(id_, title, 1001U), it.hovered ? 1.0F : 0.0F);
+        ctx.ease(gui::ui_id(id_, title, 1001U), it.hovered ? 1.0F : 0.0F);
     ctx.rounded(row, gui::blend(ctx.theme().header, ctx.theme().widget, hover),
                 ctx.theme().radius);
     draw_twirl(ctx, row.x + 10.0F, row.y + row.height * 0.5F, open,
@@ -1295,7 +1283,7 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
     if (!element.linked_collection) ctx.label(take_row(cursor, row_height), element.linked_held
         ? "Hold shot placement (world)" : "Follow source with offset (local)", ctx.theme().text);
     const auto action = [&](std::string_view name, std::string_view label) {
-        if (ctx.button(mix(id_, name, element.node.value()), take_row(cursor, row_height), label))
+        if (ctx.button(gui::ui_id(id_, name, element.node.value()), take_row(cursor, row_height), label))
             frame.text_edits.push_back({element.node, "link_action", std::string{name}});
         cursor.space(row_gap);
     };
@@ -1309,7 +1297,7 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
         for (std::size_t axis = 0; axis < 3; ++axis) {
             const std::string key = std::string{prefix} + std::to_string(axis);
             double changed = values[axis];
-            if (fields_.draw(ctx, mix(id_, key, element.node.value()), boxes[axis], xyz[axis],
+            if (fields_.draw(ctx, gui::ui_id(id_, key, element.node.value()), boxes[axis], xyz[axis],
                     values[axis], 0.01, changed))
                 frame.named_edits.push_back({element.node, key, changed});
         }
@@ -1460,9 +1448,9 @@ void InspectorPanel::draw_ies(gui::UiContext& ctx, Cursor& cursor,
     const auto field = take_row(cursor, 24.0F);
     constexpr float browse_width = 66.0F;
     const gui::Rect path{field.x, field.y, std::max(field.width - browse_width - 6.0F, 1.0F), field.height};
-    static_cast<void>(ctx.text_field(mix(id_, "ies.path", element.node.value()), path, ies_draft_));
+    static_cast<void>(ctx.text_field(gui::ui_id(id_, "ies.path", element.node.value()), path, ies_draft_));
     ctx.tooltip(path, ies_draft_.empty() ? "Choose an IES light profile" : ies_draft_);
-    if (ctx.button(mix(id_, "ies.browse", element.node.value()),
+    if (ctx.button(gui::ui_id(id_, "ies.browse", element.node.value()),
                    {field.right() - browse_width, field.y, browse_width, field.height}, "Browse...")) {
         FilePickerRequest request{FilePickerKind::IesProfile, ies_draft_, {}};
         for (const auto& item : selected_) {
@@ -1476,8 +1464,8 @@ void InspectorPanel::draw_ies(gui::UiContext& ctx, Cursor& cursor,
     cursor.space(row_gap);
     const auto actions = take_row(cursor, 24.0F);
     const float half = (actions.width - 6.0F) * 0.5F;
-    const bool apply = ctx.button(mix(id_, "ies.apply", element.node.value()), {actions.x, actions.y, half, actions.height}, "Apply");
-    const bool clear = ctx.button(mix(id_, "ies.clear", element.node.value()), {actions.x + half + 6.0F, actions.y, half, actions.height}, "Clear");
+    const bool apply = ctx.button(gui::ui_id(id_, "ies.apply", element.node.value()), {actions.x, actions.y, half, actions.height}, "Apply");
+    const bool clear = ctx.button(gui::ui_id(id_, "ies.clear", element.node.value()), {actions.x + half + 6.0F, actions.y, half, actions.height}, "Clear");
     if (clear || (apply && ies_draft_.size() <= 1024U)) {
         for (const auto& selected : selected_) {
             if (selected.locked || selected.kind != ElementKind::PointLight
@@ -1532,10 +1520,10 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
         bool changed = false;
         if (boolean) {
             bool value = selected != 0U;
-            changed = ctx.checkbox(mix(id_, property, element.node.value() + salt), well, value, "");
+            changed = ctx.checkbox(gui::ui_id(id_, property, element.node.value() + salt), well, value, "");
             selected = value ? 1U : 0U;
         } else {
-            changed = ctx.dropdown(mix(id_, property, element.node.value() + salt), well, options, selected);
+            changed = ctx.dropdown(gui::ui_id(id_, property, element.node.value() + salt), well, options, selected);
         }
         if (changed) frame.named_edits.push_back(NamedEdit{element.node, std::string{property},
             units.empty() ? static_cast<double>(selected) : static_cast<double>(units[selected])});
@@ -1856,7 +1844,7 @@ void InspectorPanel::draw_content(gui::UiContext& ctx, Cursor& cursor,
             ? sizes.size()
             : (element.media_resolution == scene::MediaResolution::Half ? 1U
                                                                         : 0U);
-        if (ctx.dropdown(mix(id_, "media resolution", element.node.value()),
+        if (ctx.dropdown(gui::ui_id(id_, "media resolution", element.node.value()),
                          well, sizes, next) &&
             next < sizes.size() && !element.locked) {
             const std::string value{
@@ -1913,7 +1901,7 @@ void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,
                          std::max(row.width - label_width, 1.0F),
                          row.height - 2.0F};
     bool aspect_locked = element.aspect_locked;
-    if (ctx.checkbox(mix(id_, "aspect lock", element.node.value()), well, aspect_locked, "Lock ratio") && !element.locked) {
+    if (ctx.checkbox(gui::ui_id(id_, "aspect lock", element.node.value()), well, aspect_locked, "Lock ratio") && !element.locked) {
         frame.named_edits.push_back(
             NamedEdit{element.node,
                       std::string{scene::schema::lane_aspect_locked},
@@ -1945,7 +1933,7 @@ void InspectorPanel::draw_fill(gui::UiContext& ctx, Cursor& cursor,
                              std::max(row.width - label_width, 1.0F),
                              row.height};
         std::size_t selected = static_cast<std::size_t>(fill.mode);
-        if (ctx.dropdown(mix(id_, "fill mode", element.node.value()), well,
+        if (ctx.dropdown(gui::ui_id(id_, "fill mode", element.node.value()), well,
                          modes, selected)) {
             for (const ElementInfo& item : selected_) {
                 if (!item.locked && item.material.fill.has_value()) {
@@ -2054,9 +2042,9 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
             constexpr float controls = 124.0F;
             ctx.label({row.x, row.y, std::max(1.0F, row.width - controls), row.height},
                       labels[role], ctx.theme().text_muted);
-            const bool browse = ctx.button(mix(id_, "generator.texture.browse", element.node.value() ^ role),
+            const bool browse = ctx.button(gui::ui_id(id_, "generator.texture.browse", element.node.value() ^ role),
                 {row.right() - controls, row.y, 74.0F, row.height}, "Browse...");
-            const bool clear = ctx.button(mix(id_, "generator.texture.clear", element.node.value() ^ role),
+            const bool clear = ctx.button(gui::ui_id(id_, "generator.texture.clear", element.node.value() ^ role),
                 {row.right() - 46.0F, row.y, 46.0F, row.height}, "Clear");
             if (browse || clear) {
                 FilePickerRequest request{FilePickerKind::GeneratorTexture,
@@ -2095,7 +2083,7 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
                     material_part_labels_.push_back("Material part " + std::to_string(i + 1U));
                 for (const auto& name : material_part_labels_) material_part_options_.push_back(name);
             }
-            static_cast<void>(ctx.dropdown(mix(id_, "material.part", element.node.value()),
+            static_cast<void>(ctx.dropdown(gui::ui_id(id_, "material.part", element.node.value()),
                 take_row(cursor, row_height), material_part_options_, material_part_));
             cursor.space(row_gap);
             constexpr std::array<std::string_view, 5U> labels{
@@ -2105,9 +2093,9 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
                 cursor.space(row_gap);
                 const float controls = 124.0F;
                 ctx.label({row.x, row.y, std::max(1.0F, row.width - controls), row.height}, labels[role], ctx.theme().text_muted);
-                const bool browse = ctx.button(mix(id_, "texture.browse", role),
+                const bool browse = ctx.button(gui::ui_id(id_, "texture.browse", role),
                     {row.right() - controls, row.y, 74.0F, row.height}, "Browse...");
-                const bool clear = ctx.button(mix(id_, "texture.clear", role),
+                const bool clear = ctx.button(gui::ui_id(id_, "texture.clear", role),
                     {row.right() - 46.0F, row.y, 46.0F, row.height}, "Clear");
                 if (browse || clear) {
                     FilePickerRequest request{FilePickerKind::ModelTexture, {}, {element.node}};
@@ -2346,7 +2334,7 @@ void InspectorPanel::draw_compositing(
     }
     constexpr std::array<std::string_view, 4U> blends{{"Normal", "Add", "Multiply", "Screen"}};
     std::size_t next = blend_mixed ? blends.size() : static_cast<std::size_t>(element.style.blend);
-    if (ctx.dropdown(mix(id_, "blend mode", 7'100U), well, blends, next)) {
+    if (ctx.dropdown(gui::ui_id(id_, "blend mode", 7'100U), well, blends, next)) {
         for (const doc::NodeId node : blend_incompatible) append_unique(frame.skipped_incompatible, node);
         for (const ElementInfo* const target : blend_targets) {
             frame.named_edits.push_back(NamedEdit{
@@ -2370,7 +2358,7 @@ void InspectorPanel::draw_effects(
     const auto add_row = take_row(cursor, row_height);
     cursor.space(row_gap);
     if (const auto kind = draw_effect_picker(
-            ctx, mix(id_, "effects.add", element.node.value()), add_row)) {
+            ctx, gui::ui_id(id_, "effects.add", element.node.value()), add_row)) {
       for (const auto& selected : selected_) {
         if (selected.locked) continue;
         if (is_light(selected.kind) || selected.kind == ElementKind::Camera ||
@@ -2494,7 +2482,7 @@ void InspectorPanel::draw_effects(
     // and a control that answers to another control's press is worse than a
     // longer literal.
     const gui::Interaction enable_it =
-        ctx.grab(mix(id_, "effect switch", id_salt), enable);
+        ctx.grab(gui::ui_id(id_, "effect switch", id_salt), enable);
     ctx.panel(enable, enable_it.hovered ? ctx.theme().widget_hover
                                         : ctx.theme().header);
     gui::draw_eye_glyph(ctx.draw_list(), enable.x + enable.width * 0.5F,
@@ -2518,7 +2506,7 @@ void InspectorPanel::draw_effects(
               effect.enabled ? ctx.theme().text : ctx.theme().text_muted);
     const gui::Rect remove{title_row.right() - remove_width,
                            title_row.y, remove_width, title_row.height};
-    if (pill_button(ctx, mix(id_, title, 8'000U + id_salt), remove,
+    if (pill_button(ctx, gui::ui_id(id_, title, 8'000U + id_salt), remove,
                     gui::Icon::Trash, "Remove", "Remove this effect",
                     ButtonTone::Danger)) {
       frame.effect_deletes.push_back(effect.source);
@@ -2536,7 +2524,7 @@ void InspectorPanel::draw_effects(
                           std::max(note.width - open.width - 14.0F, 0.0F),
                           note.height},
                 "Structured controls in COLOR", ctx.theme().text_muted);
-      if (ctx.button(mix(id_, "open color", id_salt), open, "OPEN COLOR")) {
+      if (ctx.button(gui::ui_id(id_, "open color", id_salt), open, "OPEN COLOR")) {
         frame.panel_request = InspectorPanelRequest::Color;
       }
       return;
@@ -2670,7 +2658,7 @@ void InspectorPanel::draw_effects(
           22.0F,
           swatch.height};
       const gui::Interaction sample_it = ctx.grab(
-          mix(id_, "chroma sample from view", id_salt), sample_button);
+          gui::ui_id(id_, "chroma sample from view", id_salt), sample_button);
       ctx.panel(sample_button,
                 sample_it.held   ? ctx.theme().widget_active
                 : sample_it.hovered ? ctx.theme().widget_hover
@@ -2720,7 +2708,7 @@ void InspectorPanel::draw_effects(
           invert_row.x + invert_label_width, invert_row.y + 1.0F,
           std::max(invert_row.width - invert_label_width, 1.0F),
           std::max(invert_row.height - 2.0F, 1.0F)};
-      if (ctx.button(mix(id_, "luma invert", id_salt), invert_button,
+      if (ctx.button(gui::ui_id(id_, "luma invert", id_salt), invert_button,
                      effect.luma_key.invert ? "INVERTED" : "NORMAL")) {
         frame.named_edits.push_back(NamedEdit{
             effect.source, std::string{scene::schema::luma_key_invert},
@@ -2764,7 +2752,7 @@ void InspectorPanel::draw_effects(
                           std::max(note.width - open.width - 6.0F, 0.0F),
                           note.height},
                 "More controls in TEXTURE", ctx.theme().text_muted);
-      if (ctx.button(mix(id_, "open texture", id_salt), open,
+      if (ctx.button(gui::ui_id(id_, "open texture", id_salt), open,
                      "OPEN TEXTURE")) {
         frame.panel_request = InspectorPanelRequest::Texture;
       }
@@ -2855,7 +2843,7 @@ void InspectorPanel::draw_particles(gui::UiContext& ctx, Cursor& cursor,
         {{FieldDomain::Particles, {}, scene::schema::particle_start_frame}}};
     vector_row(ctx, cursor, "Start frame", number, start, 1.0F, start_binding,
                frame, nullptr, false, false, 0U, 0);
-    if (ctx.button(mix(id_, "particles.start", element.node.value()),
+    if (ctx.button(gui::ui_id(id_, "particles.start", element.node.value()),
                    take_row(cursor, row_height), "Start at the playhead")) {
         for (const auto& item : selected_) {
             if (!item.locked && item.kind == ElementKind::ParticleEffect) {
@@ -2936,7 +2924,7 @@ void InspectorPanel::draw_camera_tracking(
         cursor.space(row_gap);
         const float lw = std::clamp(row.width * label_fraction, label_min, label_max);
         ctx.label({row.x, row.y, lw, row.height}, label, ctx.theme().text_muted);
-        return ctx.checkbox(mix(id_, id, element.node.value() + salt),
+        return ctx.checkbox(gui::ui_id(id_, id, element.node.value() + salt),
             {row.x + lw, row.y, row.width - lw, row.height}, lit, "") && !element.locked;
     };
 
@@ -2951,7 +2939,7 @@ void InspectorPanel::draw_camera_tracking(
     cursor.space(row_gap);
     const float feed_label_width = std::clamp(feed_row_bounds.width * label_fraction, label_min, label_max);
     ctx.label({feed_row_bounds.x, feed_row_bounds.y, feed_label_width, row_height}, "Feed", ctx.theme().text_muted);
-    if (ctx.dropdown(mix(id_, "tracking feed", element.node.value()),
+    if (ctx.dropdown(gui::ui_id(id_, "tracking feed", element.node.value()),
             {feed_row_bounds.x + feed_label_width, feed_row_bounds.y, feed_row_bounds.width - feed_label_width, row_height},
             feed_names, selected_feed) && !element.locked) {
         frame.named_edits.push_back({element.node, std::string{scene::schema::camera_tracking_source},
@@ -2963,7 +2951,7 @@ void InspectorPanel::draw_camera_tracking(
         // wants one is the moment they are pointing a camera at it.
         const gui::Rect row = take_row(cursor, row_height);
         cursor.space(row_gap);
-        if (ctx.button(mix(id_, "tracking.add", element.node.value()),
+        if (ctx.button(gui::ui_id(id_, "tracking.add", element.node.value()),
                        gui::Rect{row.x, row.y, std::min(row.width, 128.0F),
                                  row.height},
                        "+ New feed")
@@ -2987,7 +2975,7 @@ void InspectorPanel::draw_camera_tracking(
             const float lw = std::clamp(row.width * label_fraction, label_min, label_max);
             ctx.label({row.x, row.y, lw, row.height}, label, ctx.theme().text_muted);
             const gui::Rect well{row.x + lw, row.y, row.width - lw, row.height};
-            const auto id = mix(id_, property, bound->node.value() + salt);
+            const auto id = gui::ui_id(id_, property, bound->node.value() + salt);
             if (property == scene::schema::tracking_enabled)
                 return ctx.checkbox(id, well, lit, "Listening") && !element.locked;
             constexpr std::array<std::string_view, 2> axes_choices{
@@ -3071,7 +3059,7 @@ void InspectorPanel::draw_camera_tracking(
                 multicast_authored_ = authored_group;
                 multicast_draft_ = authored_group;
             }
-            if (ctx.text_field(mix(id_, "tracking.multicast",
+            if (ctx.text_field(gui::ui_id(id_, "tracking.multicast",
                                    bound->node.value()),
                                well, multicast_draft_)
                 && !element.locked) {
@@ -3392,7 +3380,7 @@ InspectorFrame InspectorPanel::draw_selection(
         cursor.space(row_gap);
         const auto& animation=displayed->animation;
         const auto toggle=[&](std::string_view property,bool value,std::string_view label) {
-            if (ctx.checkbox(mix(id_,property,displayed->node.value()),take_row(cursor,row_height),value,label))
+            if (ctx.checkbox(gui::ui_id(id_,property,displayed->node.value()),take_row(cursor,row_height),value,label))
                 for (const auto& item:selected_) if (!item.locked && item.kind==ElementKind::Model)
                     frame.named_edits.push_back({item.node,std::string{property},value?1.0:0.0});
             cursor.space(row_gap);
@@ -3406,10 +3394,10 @@ InspectorFrame InspectorPanel::draw_selection(
         if (displayed->linked_animation) ctx.label(take_row(cursor,20.0F),"Published assembly clip",ctx.theme().text_muted);
         else vector_row(ctx,cursor,"Clip (first = 0)",index,clip,1.0F,clip_binding,frame);
         ctx.label(take_row(cursor,20.0F),"Start frame: "+std::to_string(animation.start_frame),ctx.theme().text_muted);
-        if (ctx.button(mix(id_,"animation.start",displayed->node.value()),take_row(cursor,row_height),"START AT CURRENT SHOW FRAME"))
+        if (ctx.button(gui::ui_id(id_,"animation.start",displayed->node.value()),take_row(cursor,row_height),"START AT CURRENT SHOW FRAME"))
             for (const auto& item:selected_) if (!item.locked && item.kind==ElementKind::Model)
                 frame.text_edits.push_back({item.node,std::string{scene::schema::animation_start_frame},std::to_string(show_frame)});
-        if (ctx.button(mix(id_,"animation.zero",displayed->node.value()),take_row(cursor,row_height),"START AT FRAME ZERO"))
+        if (ctx.button(gui::ui_id(id_,"animation.zero",displayed->node.value()),take_row(cursor,row_height),"START AT FRAME ZERO"))
             for (const auto& item:selected_) if (!item.locked && item.kind==ElementKind::Model)
                 frame.text_edits.push_back({item.node,std::string{scene::schema::animation_start_frame},"0"});
         const std::array<float,3> wind{animation.wind.x,animation.wind.y,animation.wind.z};
@@ -3427,7 +3415,7 @@ InspectorFrame InspectorPanel::draw_selection(
         const auto property = light ? scene::schema::bake_indirect : scene::schema::bake_static;
         const std::string_view label = light ? "Bake indirect light" : "Static geometry";
         if (displayed->linked_animation) ctx.label(row,"Dynamic node / skin geometry",ctx.theme().text_muted);
-        else if(ctx.checkbox(mix(id_,"bake contribution",displayed->node.value()),row,checked,label))
+        else if(ctx.checkbox(gui::ui_id(id_,"bake contribution",displayed->node.value()),row,checked,label))
             frame.named_edits.push_back(NamedEdit{displayed->node,std::string{property},checked?1.0:0.0});
     }
 
@@ -3436,7 +3424,7 @@ InspectorFrame InspectorPanel::draw_selection(
     cursor.space(row_gap * 2.0F);
     const auto actions = take_row(cursor, row_height);
     if (!displayed->linked_collection &&
-        pill_button(ctx, mix(id_, "delete", 0U),
+        pill_button(ctx, gui::ui_id(id_, "delete", 0U),
                     {actions.x, actions.y, std::min(actions.width, 96.0F), actions.height},
                     gui::Icon::Trash, "Delete", "Delete the selection (Del)",
                     ButtonTone::Danger))
@@ -3543,7 +3531,7 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
             }
             const gui::Rect key_bounds{row.x + label_width - key_width, row.y,
                                        key_width, row.height};
-            if (key_button(ctx, mix(id_, label, 9'000U + surface.node.value()),
+            if (key_button(ctx, gui::ui_id(id_, label, 9'000U + surface.node.value()),
                            key_bounds, animated, keyed_here,
                            ctx.theme().panel)) {
                 for (std::size_t index = 0U;
@@ -3571,7 +3559,7 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
     const auto number = [&](std::string_view name, const gui::Rect& box,
                             std::string_view axis, double value, double speed,
                             double& out, int precision = 3) {
-        return fields_.draw(ctx, mix(id_, name, surface.node.value()), box,
+        return fields_.draw(ctx, gui::ui_id(id_, name, surface.node.value()), box,
                             axis, value, speed, out, precision);
     };
 
@@ -3646,7 +3634,7 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
                                   pitch_field.height};
             pitch_field.width =
                 std::max(pitch_field.width - reset_button_width - 2.0F, 1.0F);
-            if (reset_button(ctx, mix(id_, "surface.pitch.reset",
+            if (reset_button(ctx, gui::ui_id(id_, "surface.pitch.reset",
                                       surface.node.value()),
                              reset, "Reset to upright (0 turns)")) {
                 set_pitch(0.0);

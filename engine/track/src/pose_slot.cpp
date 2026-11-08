@@ -44,7 +44,6 @@ std::optional<PoseSample> PoseSlot::sample() const noexcept {
         }
         return result;
     }
-    contended_.fetch_add(1U, std::memory_order_relaxed);
     return std::nullopt;
 }
 
@@ -57,10 +56,6 @@ core::u64 PoseSlot::publications() const noexcept {
 
 core::u64 PoseSlot::refusals() const noexcept {
     return refusals_.load(std::memory_order_relaxed);
-}
-
-core::u64 PoseSlot::contended_samples() const noexcept {
-    return contended_.load(std::memory_order_relaxed);
 }
 
 } // namespace mediaserver::track

@@ -9,9 +9,6 @@
 #include <vector>
 
 namespace mediaserver::gui {
-bool copy_text_to_clipboard(const std::string& text) {
-    return SDL_SetClipboardText(text.c_str());
-}
 namespace {
 
 // Build each native tool cursor once from the same vector mark as its toolbar

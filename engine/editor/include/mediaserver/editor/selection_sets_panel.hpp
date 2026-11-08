@@ -49,7 +49,6 @@ public:
        doc::NodeId selected_set, std::size_t scene_selection_count,
        bool authoring_enabled = true);
 
-  [[nodiscard]] std::string_view new_name() const noexcept { return new_name_; }
   [[nodiscard]] std::string_view edit_name() const noexcept {
     return edit_name_;
   }

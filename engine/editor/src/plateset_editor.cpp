@@ -18,16 +18,6 @@ constexpr float header_height = 34.0F;
 constexpr float info_width = 300.0F;
 constexpr float tile_gap = 8.0F;
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
-                            core::u64 salt = 0U) noexcept {
-  core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL ^ (salt * 0x100000001B3ULL);
-  for (const char c : name) {
-    hash ^= static_cast<core::u8>(c);
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
 [[nodiscard]] gui::UiColor alpha(gui::UiColor color, float a) noexcept {
   color.a = a;
   return color;
@@ -153,7 +143,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
       const gui::Rect button =
           gui::cut_right(header, ctx.font_width(label) + 18.0F);
       static_cast<void>(gui::cut_right(header, 4.0F));
-      if (action_button(ctx, mix(id_, "rig", static_cast<core::u64>(*it)),
+      if (action_button(ctx, gui::ui_id(id_, "rig", static_cast<core::u64>(*it)),
                         button, label, true, plateset.rig == *it) &&
           plateset.rig != *it) {
         assets::LibraryEdit edit{};
@@ -283,7 +273,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
       // Clear, at the title's right end.
       const gui::Rect clear = gui::cut_right(title, 16.0F);
       const gui::Interaction interaction =
-          ctx.grab(mix(id_, "clear", index), clear);
+          ctx.grab(gui::ui_id(id_, "clear", index), clear);
       draw_cross(ctx, clear,
                  interaction.hovered ? theme.warning : theme.text_muted);
       ctx.tooltip(clear, "Empty this slot");
@@ -348,7 +338,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
         const bool editing = offset_slot_ == slot;
         const core::i64 shown = editing ? offset_value_ : assignment.offset;
         double out = static_cast<double>(shown);
-        if (offset_field_.draw(ctx, mix(id_, "offset", index), offset_row,
+        if (offset_field_.draw(ctx, gui::ui_id(id_, "offset", index), offset_row,
                                "SYNC", static_cast<double>(shown), 0.25, out,
                                0)) {
           offset_slot_ = slot;
@@ -456,7 +446,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
               over ? theme.caution : theme.text_muted);
     if (over && input.assets != nullptr) {
       const gui::Rect button = line(24.0F);
-      if (pill_button(ctx, mix(id_, "proxies"), button, std::nullopt,
+      if (pill_button(ctx, gui::ui_id(id_, "proxies"), button, std::nullopt,
                       "Prefer 720p proxies for every plate",
                       "Plays each plate from a 720p proxy once it is made, "
                       "falling back to the source until then")) {
@@ -482,7 +472,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
   // make decoding cheaper.
   {
     bool half = plateset.half_resolution;
-    if (ctx.checkbox(mix(id_, "half"), line(22.0F), half,
+    if (ctx.checkbox(gui::ui_id(id_, "half"), line(22.0F), half,
                      "Half resolution decode (all plates)")) {
       assets::LibraryEdit edit{};
       edit.kind = assets::LibraryEdit::Kind::SetPlatesetHalfResolution;
@@ -499,7 +489,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
     const gui::Rect timecode =
         gui::cut_left(row, std::min(row.width * 0.5F - 2.0F, 150.0F));
     static_cast<void>(gui::cut_left(row, 4.0F));
-    if (pill_button(ctx, mix(id_, "sync.timecode"), timecode, std::nullopt,
+    if (pill_button(ctx, gui::ui_id(id_, "sync.timecode"), timecode, std::nullopt,
                     "Sync by Timecode",
                     "Line the plates up by the start timecode each file "
                     "carries",
@@ -523,7 +513,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
         input.analysis != nullptr &&
         (input.analysis->state == PlatesetAnalysisState::Queued ||
          input.analysis->state == PlatesetAnalysisState::Running);
-    if (pill_button(ctx, mix(id_, "sync.analyse"), row, std::nullopt,
+    if (pill_button(ctx, gui::ui_id(id_, "sync.analyse"), row, std::nullopt,
                     running ? "Analysing..." : "Sync by Motion",
                     "Decode every plate and line them up by the bumps they "
                     "share - for plates without timecode",
@@ -542,7 +532,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
     const gui::Rect find =
         gui::cut_left(row, std::min(row.width * 0.5F - 2.0F, 150.0F));
     static_cast<void>(gui::cut_left(row, 4.0F));
-    if (pill_button(ctx, mix(id_, "moments.find"), find, std::nullopt,
+    if (pill_button(ctx, gui::ui_id(id_, "moments.find"), find, std::nullopt,
                     "Find Moments",
                     "Read the front plate alone for stops, turns, bumps and "
                     "shade - quicker than a sync",
@@ -634,7 +624,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
           sure == found ? std::string{"Apply Sync"}
                         : "Apply " + std::to_string(sure) + " of " +
                               std::to_string(found);
-      if (pill_button(ctx, mix(id_, "analysis.apply"), apply, std::nullopt,
+      if (pill_button(ctx, gui::ui_id(id_, "analysis.apply"), apply, std::nullopt,
                       apply_label,
                       "Author the offsets the analysis is sure of on the "
                       "plateset; placed plates follow",
@@ -677,7 +667,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
       const gui::Rect all =
           gui::cut_left(row, std::min(row.width * 0.5F - 2.0F, 150.0F));
       static_cast<void>(gui::cut_left(row, 4.0F));
-      if (pill_button(ctx, mix(id_, "moments.keep"), all, std::nullopt,
+      if (pill_button(ctx, gui::ui_id(id_, "moments.keep"), all, std::nullopt,
                       "Keep All",
                       "Keep every moment found; they show on the Timeline "
                       "wherever the plateset is placed",
@@ -690,7 +680,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
         }
         keep(std::move(moments));
       }
-      if (pill_button(ctx, mix(id_, "moments.clear"), row, std::nullopt,
+      if (pill_button(ctx, gui::ui_id(id_, "moments.clear"), row, std::nullopt,
                       "Clear Kept", "Let every kept moment go",
                       ButtonTone::Quiet, !plateset.moments.empty())) {
         keep({});
@@ -703,7 +693,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
         const bool is_kept = kept(event);
         const gui::Rect event_row = line(18.0F);
         const gui::Interaction interaction =
-            ctx.grab(mix(id_, "analysis.event", index), event_row);
+            ctx.grab(gui::ui_id(id_, "analysis.event", index), event_row);
         if (interaction.hovered) {
           ctx.rounded(event_row, theme.widget_hover, 3.0F);
         }

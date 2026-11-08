@@ -379,14 +379,14 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
   const core::u64 identity = row_identity(row);
   const gui::Rect lane{graph.x, rc.interaction_y, graph.width,
                        rc.interaction_height};
-  p.hits.add(HitTarget{mix(id_, "lane", identity), lane, HitPriority::Lane,
+  p.hits.add(HitTarget{gui::ui_id(id_, "lane", identity), lane, HitPriority::Lane,
                        lane, row_part_tag(rc.index, RowPart::Lane)});
 
   for (std::size_t key = 0U; key < rc.component_x.size(); ++key) {
     const float x = rc.component_x[key];
     const float y = rc.component_y[key];
     HitTarget target{
-        mix(mix(id_, "key", identity), "frame",
+        gui::ui_id(gui::ui_id(id_, "key", identity), "frame",
             static_cast<core::u64>((*rc.component_frames)[key])),
         gui::around(x, y, key_hit_radius * 2.0F, key_hit_radius * 2.0F),
         HitPriority::Key, gui::Rect{x, y, 0.0F, 0.0F},
@@ -407,12 +407,12 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
         continue;
       }
       const gui::Rect &bar = take.bar;
-      const core::u64 take_identity = mix(identity, "take", take.take);
+      const core::u64 take_identity = gui::ui_id(identity, "take", take.take);
       const auto add = [&](std::string_view name, const gui::Rect &bounds,
                            HitPriority priority, const gui::Rect &anchor,
                            RowPart part,
                            float reach = std::numeric_limits<float>::infinity()) {
-        HitTarget target{mix(id_, name, take_identity), bounds, priority,
+        HitTarget target{gui::ui_id(id_, name, take_identity), bounds, priority,
                          anchor, row_part_tag(rc.index, part, take.take)};
         target.reach = reach;
         p.hits.add(target);
@@ -446,7 +446,7 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
     return;
   }
   const gui::Rect &bar = rc.clip_bar;
-  p.hits.add(HitTarget{mix(id_, "clip body", identity), bar,
+  p.hits.add(HitTarget{gui::ui_id(id_, "clip body", identity), bar,
                        HitPriority::ClipBody, bar,
                        row_part_tag(rc.index, RowPart::ClipBody)});
   // A track has no single cut to ripple, roll, slip or slide, so its bar
@@ -460,11 +460,11 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
   const float grab = edge_grab_width(bar.width);
   // Each end answers from just outside the bar to the grab width inside it,
   // and measures from the edge itself.
-  p.hits.add(HitTarget{mix(id_, "trim in", identity),
+  p.hits.add(HitTarget{gui::ui_id(id_, "trim in", identity),
                        gui::span_x(bar, bar.x - trim_outer_reach, bar.x + grab),
                        HitPriority::TrimEdge, gui::rule_x(bar, bar.x, 0.0F),
                        row_part_tag(rc.index, RowPart::TrimIn)});
-  p.hits.add(HitTarget{mix(id_, "trim out", identity),
+  p.hits.add(HitTarget{gui::ui_id(id_, "trim out", identity),
                        gui::span_x(bar, bar.right() - grab,
                                    bar.right() + trim_outer_reach),
                        HitPriority::TrimEdge, gui::rule_x(bar, bar.right(), 0.0F),
@@ -478,7 +478,7 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
   // end is the edge's to trim.
   const auto knob = [&](float x, std::string_view name, RowPart part) {
     const float centre_y = bar.y + 1.0F;
-    HitTarget target{mix(id_, name, identity),
+    HitTarget target{gui::ui_id(id_, name, identity),
                      gui::span_y(gui::rule_x(bar, x, fade_handle_reach * 2.0F),
                                  centre_y - fade_handle_reach,
                                  bar.y + fade_knob_depth),
@@ -503,7 +503,7 @@ void TimelinePanel::collect_list_hits(RowContext &rc) {
   const auto add = [&](const gui::Rect &bounds, std::string_view name,
                        RowPart part) {
     rc.p.hits.add(HitTarget{
-        mix(id_, name, identity), bounds, HitPriority::Key,
+        gui::ui_id(id_, name, identity), bounds, HitPriority::Key,
         gui::Rect{bounds.center_x(), rc.centre_y, 0.0F, 0.0F},
         row_part_tag(rc.index, part)});
   };
@@ -703,7 +703,7 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
                           row.height};
   const bool targeted =
       targeted_lane_.has_value() && *targeted_lane_ == row.node;
-  if (icon_toggle(ctx, mix(id_, "track target", row.node.value()),
+  if (icon_toggle(ctx, gui::ui_id(id_, "track target", row.node.value()),
                   target_chip, gui::Icon::Target, targeted, row_theme.accent,
                   targeted ? "Targeted: Insert and Overwrite land on this "
                              "track. Click to stop aiming them here."
@@ -716,7 +716,7 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
       targeted_lane_ = row.node;
     }
   }
-  if (icon_toggle(ctx, mix(id_, "track sync lock", row.node.value()),
+  if (icon_toggle(ctx, gui::ui_id(id_, "track sync lock", row.node.value()),
                   sync_chip, gui::Icon::SyncLock, row.sync_locked,
                   row_theme.good,
                   row.sync_locked
@@ -745,13 +745,13 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
   }
   // Muting a track hides it, so its switch is the eye every layer has;
   // the toggles double as the state readout, so no badge repeats them.
-  if (row_flag_toggle(ctx, mix(id_, "track mute", row.node.value()),
+  if (row_flag_toggle(ctx, gui::ui_id(id_, "track mute", row.node.value()),
                       eye_bounds, RowFlag::Visible, !row.muted,
                       row_hovered)) {
     frame.lane_edits.push_back(TimelineLaneEdit{
         TimelineLaneAction::ToggleMute, row.node, {}});
   }
-  if (row_flag_toggle(ctx, mix(id_, "track lock", row.node.value()),
+  if (row_flag_toggle(ctx, gui::ui_id(id_, "track lock", row.node.value()),
                       lock_bounds, RowFlag::Locked, row.locked,
                       row_hovered)) {
     frame.lane_edits.push_back(TimelineLaneEdit{
@@ -790,7 +790,7 @@ void TimelinePanel::solo_toggle(RowContext &rc, const gui::Rect &bounds) {
   gui::UiContext &ctx = rc.p.ctx;
   const doc::NodeId node = rc.row.node;
   const bool soloed = soloed_.contains(node);
-  if (icon_toggle(ctx, mix(id_, "solo", node.value()), bounds, gui::Icon::Solo,
+  if (icon_toggle(ctx, gui::ui_id(id_, "solo", node.value()), bounds, gui::Icon::Solo,
                   soloed, ctx.theme().warning,
                   soloed ? "Soloed: the Stage draws only what is soloed and "
                            "what is inside it. Program and the outputs draw "
@@ -886,7 +886,7 @@ void TimelinePanel::layer_list_cell(RowContext &rc) {
   if (row.surface) {
     ctx.label(gui::Rect{lock_x - 60.0F, y, 56.0F, row.height}, "SURFACE",
               row_theme.text_muted);
-    if (row_flag_toggle(ctx, mix(id_, "surface lock", row.node.value()),
+    if (row_flag_toggle(ctx, gui::ui_id(id_, "surface lock", row.node.value()),
                         lock_bounds, RowFlag::Locked, row.locked,
                         row_hovered)) {
       frame.element_flags.push_back(TimelineElementFlagEdit{
@@ -894,13 +894,13 @@ void TimelinePanel::layer_list_cell(RowContext &rc) {
     }
   } else if (has_toggles) {
     const bool hidden = !row.element_visible;
-    if (row_flag_toggle(ctx, mix(id_, "element mute", row.node.value()),
+    if (row_flag_toggle(ctx, gui::ui_id(id_, "element mute", row.node.value()),
                         eye_bounds, RowFlag::Visible, row.element_visible,
                         row_hovered)) {
       frame.element_flags.push_back(TimelineElementFlagEdit{
           row.node, TimelineElementFlag::Visible, hidden});
     }
-    if (row_flag_toggle(ctx, mix(id_, "element lock", row.node.value()),
+    if (row_flag_toggle(ctx, gui::ui_id(id_, "element lock", row.node.value()),
                         lock_bounds, RowFlag::Locked, row.locked,
                         row_hovered)) {
       frame.element_flags.push_back(TimelineElementFlagEdit{
@@ -921,7 +921,7 @@ void TimelinePanel::layer_list_cell(RowContext &rc) {
     const gui::Rect chip{right - resolution_width, centre_y - 8.0F,
                          resolution_width, 16.0F};
     if (icon_toggle(
-            ctx, mix(id_, "clip resolution", row.node.value()), chip,
+            ctx, gui::ui_id(id_, "clip resolution", row.node.value()), chip,
             half ? gui::Icon::HalfResolution : gui::Icon::FullResolution,
             half, row_theme.warning,
             half ? "Half resolution: each decoded frame is held at half "
@@ -1011,7 +1011,7 @@ void TimelinePanel::channel_value_cell(RowContext &rc) {
   const double value = rc.values[0U];
   if (animated && auto_key_ && !row.locked) {
     double edited = value;
-    if (value_fields_.draw(ctx, mix(id_, "row value", row_identity(row)),
+    if (value_fields_.draw(ctx, gui::ui_id(id_, "row value", row_identity(row)),
                            bounds, "", value,
                            std::max(std::fabs(value) * 0.01, 0.01), edited,
                            3) &&
@@ -1082,7 +1082,7 @@ void TimelinePanel::channel_visibility_toggle(RowContext &rc) {
         !graph_->visible(*row_channel_identity);
     const gui::Rect &visibility_bounds = rc.controls.swatch;
     const gui::Interaction visibility = ctx.grab(
-        mix(id_, "channel visibility", row_identity(row)),
+        gui::ui_id(id_, "channel visibility", row_identity(row)),
         visibility_bounds);
     ctx.panel(visibility_bounds,
               channel_hidden ? alpha(ctx.theme().track, 0.82F)
@@ -1160,7 +1160,7 @@ void TimelinePanel::row_key_button(RowContext &rc) {
                  std::find(authored->frames.begin(), authored->frames.end(),
                            show_frame) != authored->frames.end();
   }
-  if (key_button(ctx, mix(id_, "row key", row_identity(row)),
+  if (key_button(ctx, gui::ui_id(id_, "row key", row_identity(row)),
                  rc.controls.key, animated, keyed_here, rc.background)) {
     for (core::u8 offset = 0U; offset < channels->count; ++offset) {
       frame.keys.push_back(TimelineKeyEdit{
@@ -1203,7 +1203,7 @@ void TimelinePanel::row_key_steps(RowContext &rc) {
                         RowPart part, std::optional<core::i64> target,
                         bool forward, std::string_view tooltip) {
     const gui::Interaction it =
-        ctx.grab(mix(id_, name, row_identity(row)), bounds);
+        ctx.grab(gui::ui_id(id_, name, row_identity(row)), bounds);
     const bool owner = p.hover_owner.has_value() &&
                        p.hover_owner->tag == row_part_tag(rc.index, part);
     const gui::UiColor color =
@@ -1260,7 +1260,7 @@ bool TimelinePanel::row_label_press(RowContext &rc) {
           ? std::max(name_x - rows_bounds.x - 4.0F, 0.0F)
           : list_width;
   const gui::Interaction label_it =
-      ctx.grab(mix(id_, "row", row_identity(row)),
+      ctx.grab(gui::ui_id(id_, "row", row_identity(row)),
                gui::Rect{rows_bounds.x, interaction_y, label_width,
                          interaction_height});
   if (label_it.pressed && row.kind == Row::Kind::LaneHeader && !row.locked) {
@@ -1358,7 +1358,7 @@ bool TimelinePanel::row_label_press(RowContext &rc) {
         frame.selection = std::move(next);
       }
       // A double-click opens or closes it, as its twirl does.
-      if (clicks_.double_click(mix(id_, "plateset row", row.node.value()),
+      if (clicks_.double_click(gui::ui_id(id_, "plateset row", row.node.value()),
                                ctx.time_seconds())) {
         if (open) {
           rows_state_.expanded_platesets.erase(row.node);
@@ -1692,12 +1692,12 @@ void TimelinePanel::plateset_header_list_cell(RowContext &rc) {
       frame.lane_edits.push_back(std::move(edit));
     }
   };
-  if (row_flag_toggle(ctx, mix(id_, "plateset mute", row.node.value()),
+  if (row_flag_toggle(ctx, gui::ui_id(id_, "plateset mute", row.node.value()),
                       rc.eye_bounds, RowFlag::Visible, !row.muted,
                       rc.row_hovered)) {
     switch_all(TimelineLaneAction::ToggleMute, !row.muted);
   }
-  if (row_flag_toggle(ctx, mix(id_, "plateset lock", row.node.value()),
+  if (row_flag_toggle(ctx, gui::ui_id(id_, "plateset lock", row.node.value()),
                       rc.lock_bounds, RowFlag::Locked, row.locked,
                       rc.row_hovered)) {
     switch_all(TimelineLaneAction::ToggleLock, !row.locked);
@@ -1708,7 +1708,7 @@ void TimelinePanel::plateset_header_list_cell(RowContext &rc) {
       !group.lanes.empty() &&
       std::all_of(group.lanes.begin(), group.lanes.end(),
                   [&](doc::NodeId lane) { return soloed_.contains(lane); });
-  if (icon_toggle(ctx, mix(id_, "plateset solo", row.node.value()),
+  if (icon_toggle(ctx, gui::ui_id(id_, "plateset solo", row.node.value()),
                   solo_chip, gui::Icon::Solo, soloed, theme.warning,
                   soloed ? "Soloed: the Stage draws only this set's plates "
                            "and whatever else is soloed. Program and the "
@@ -1877,7 +1877,7 @@ void TimelinePanel::press_take_bar(RowContext &rc, ClipDrag part,
     return;
   }
   // A second press on the bar opens or closes the row, as its twirl does.
-  if (clicks_.double_click(mix(id_, "plateset take", row.node.value()),
+  if (clicks_.double_click(gui::ui_id(id_, "plateset take", row.node.value()),
                            ctx.time_seconds())) {
     if (rows_state_.expanded_platesets.contains(row.node)) {
       rows_state_.expanded_platesets.erase(row.node);
@@ -2474,7 +2474,7 @@ void TimelinePanel::lane_press(RowContext &rc) {
   auto &channel = rc.channel;
 
   const gui::Interaction lane_it = ctx.grab(
-      mix(id_, "lane", row_identity(row)),
+      gui::ui_id(id_, "lane", row_identity(row)),
       gui::Rect{graph.x, interaction_y, graph.width, interaction_height});
   note_row_menu_press(rc);
   // The razor cuts where it lands and starts no drag; Shift cuts every
@@ -2849,7 +2849,7 @@ void TimelinePanel::collect_graph(Pass &p,
     }
   }
 
-  p.hits.add(HitTarget{mix(id_, "graph"), area, HitPriority::Lane, area,
+  p.hits.add(HitTarget{gui::ui_id(id_, "graph"), area, HitPriority::Lane, area,
                        row_part_tag(graph_row, RowPart::Lane)});
   for (std::size_t index = 0U; index < graph_keys.size(); ++index) {
     const GraphKey &key = graph_keys[index];
@@ -2858,7 +2858,7 @@ void TimelinePanel::collect_graph(Pass &p,
       continue;
     }
     HitTarget target{
-        mix(mix(mix(id_, "graph key", channel.id.target.value()), "property",
+        gui::ui_id(gui::ui_id(gui::ui_id(id_, "graph key", channel.id.target.value()), "property",
                 static_cast<core::u64>(channel.id.property)),
             "frame", static_cast<core::u64>(key.frame)),
         gui::around(key.x, key.y, key_hit_radius * 2.0F, key_hit_radius * 2.0F),
@@ -2898,7 +2898,7 @@ void TimelinePanel::collect_graph(Pass &p,
         continue;
       }
       HitTarget target{
-          mix(mix(mix(id_, "graph handle", channel.id.target.value()),
+          gui::ui_id(gui::ui_id(gui::ui_id(id_, "graph handle", channel.id.target.value()),
                   "frame", static_cast<core::u64>(key.frame)),
               "side", incoming ? 1U : 2U),
           gui::around(x, y, reach * 2.0F, reach * 2.0F),
@@ -2987,7 +2987,7 @@ void TimelinePanel::draw_graph(Pass &p) {
   const gui::Rect area = graph_area(p);
   graph_->draw(ctx, area, time_axis_, p.graph_channels, p.graph_keys,
                p.graph_handles);
-  const gui::Interaction graph_it = ctx.grab(mix(id_, "graph"), area);
+  const gui::Interaction graph_it = ctx.grab(gui::ui_id(id_, "graph"), area);
   const bool owned_here = graph_it.pressed && p.press_owner.has_value() &&
                           tag_row(p.press_owner->tag) == graph_row;
   if (owned_here) {

@@ -274,8 +274,6 @@ enum class LibraryColumn : core::u8 {
 inline constexpr std::size_t library_column_count =
     static_cast<std::size_t>(LibraryColumn::Count);
 
-[[nodiscard]] std::string_view library_column_title(LibraryColumn column);
-
 // What a column shows for `asset`, from authored probe metadata only.
 // Empty when the column does not apply to this kind of asset or the value
 // was never probed. Status is runtime state and is composed by the panel.
@@ -418,10 +416,6 @@ public:
   }
   [[nodiscard]] bool sort_descending() const noexcept {
     return sort_descending_;
-  }
-  void sort_by(LibraryColumn column, bool descending) noexcept {
-    sort_column_ = column;
-    sort_descending_ = descending;
   }
   // A project load: forget the selection, open folders and any edit.
   void reset_project_state() noexcept;

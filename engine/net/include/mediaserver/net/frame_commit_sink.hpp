@@ -39,9 +39,6 @@ public:
     // Latched diagnostics for the operator surface. These describe the commit
     // path rather than the document, so they are reported separately from the
     // frames handed to playback.
-    [[nodiscard]] core::u64 rejected_commits() const noexcept {
-        return rejected_commits_;
-    }
     [[nodiscard]] core::u64 checkpoint_activations() const noexcept {
         return checkpoint_activations_;
     }
@@ -49,7 +46,6 @@ public:
 private:
     NodeSessionService* service_;
     cmd::NodeCommandBus* node_;
-    core::u64 rejected_commits_{};
     core::u64 checkpoint_activations_{};
 };
 

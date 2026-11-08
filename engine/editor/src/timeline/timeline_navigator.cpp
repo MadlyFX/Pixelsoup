@@ -68,7 +68,7 @@ void TimelinePanel::resize_clip_rows(Pass &p) {
     // it never takes the row's own name or toggles from it.
     const gui::Rect edge_bounds = gui::rule_y(list, bottom, 6.0F);
     const gui::Interaction edge =
-        ctx.grab(mix(id_, "clip row edge", row.node.value()), edge_bounds);
+        ctx.grab(gui::ui_id(id_, "clip row edge", row.node.value()), edge_bounds);
     ctx.cursor_for(edge, gui::Cursor::ResizeVertical);
     if (edge.pressed) {
       row_resize_ = RowResize{row.node, ctx.shift_held(),
@@ -124,7 +124,7 @@ void TimelinePanel::draw_navigator(Pass &p) {
 
   // The keyboard reference, where the hand finds it without a menu.
   if (list_width >= 40.0F &&
-      text_toggle(ctx, mix(id_, "shortcut sheet"),
+      text_toggle(ctx, gui::ui_id(id_, "shortcut sheet"),
                   gui::cut_left(list_foot, 20.0F), "?", shortcut_sheet_open_,
                   "Timeline keyboard shortcuts (?)")) {
     shortcut_sheet_open_ = true;
@@ -148,7 +148,7 @@ void TimelinePanel::draw_navigator(Pass &p) {
       const bool engaged =
           rows_state_.clip_row_heights.empty() &&
           std::fabs(rows_state_.clip_row_height - choice.height) < 0.5F;
-      if (text_toggle(ctx, mix(id_, "clip row height", choice.label.front()),
+      if (text_toggle(ctx, gui::ui_id(id_, "clip row height", choice.label.front()),
                       gui::inset(gui::cut_left(choices, choice_width),
                                  gui::Padding{0.0F, 0.0F, 2.0F, 0.0F}),
                       choice.label, engaged, choice.tip)) {
@@ -209,16 +209,16 @@ void TimelinePanel::draw_navigator(Pass &p) {
   // Grips first, so an end wins over the body it overlaps; the bare track
   // last, so a press beside the thumb jumps the view there.
   const gui::Interaction left_it =
-      ctx.grab(mix(id_, "navigator left"),
+      ctx.grab(gui::ui_id(id_, "navigator left"),
                gui::rule_x(bar, thumb_left, navigator_grip_reach * 2.0F));
   const gui::Interaction right_it =
-      ctx.grab(mix(id_, "navigator right"),
+      ctx.grab(gui::ui_id(id_, "navigator right"),
                gui::rule_x(bar, thumb_right, navigator_grip_reach * 2.0F));
   const gui::Interaction thumb_it =
-      ctx.grab(mix(id_, "navigator thumb"),
+      ctx.grab(gui::ui_id(id_, "navigator thumb"),
                gui::span_x(bar, thumb_left, thumb_right));
   const gui::Interaction track_it =
-      ctx.grab(mix(id_, "navigator track"), bar);
+      ctx.grab(gui::ui_id(id_, "navigator track"), bar);
   ctx.cursor_for(left_it, gui::Cursor::ResizeHorizontal);
   ctx.cursor_for(right_it, gui::Cursor::ResizeHorizontal);
   ctx.cursor_for(thumb_it, gui::Cursor::Move);

@@ -1,24 +1,12 @@
 #include <mediaserver/sync/sync_policy.hpp>
 
+#include <mediaserver/core/fnv1a.hpp>
+
 namespace mediaserver::sync {
 namespace {
 
-constexpr core::u64 fnv_offset = 1469598103934665603ULL;
-constexpr core::u64 fnv_prime = 1099511628211ULL;
-
-void hash_byte(core::u64& hash, core::u8 byte) noexcept {
-    hash ^= byte;
-    hash *= fnv_prime;
-}
-
-void hash_u64(core::u64& hash, core::u64 value) noexcept {
-    for (core::u32 shift = 0U; shift < 64U; shift += 8U) {
-        hash_byte(hash, static_cast<core::u8>((value >> shift) & 0xFFU));
-    }
-}
-
 void hash_u32(core::u64& hash, core::u32 value) noexcept {
-    hash_u64(hash, static_cast<core::u64>(value));
+    core::fnv1a_u64(hash, static_cast<core::u64>(value));
 }
 
 } // namespace
@@ -92,18 +80,18 @@ bool valid_policy(const SyncPolicy& policy) noexcept {
 }
 
 core::u64 digest(const SyncPolicy& policy) noexcept {
-    core::u64 hash = fnv_offset;
-    hash_byte(hash, policy.authored ? 1U : 0U);
-    hash_u64(hash, policy.node.value());
-    hash_byte(hash, static_cast<core::u8>(policy.mode));
+    core::u64 hash = core::fnv1a_offset_short;
+    core::fnv1a_byte(hash, policy.authored ? 1U : 0U);
+    core::fnv1a_u64(hash, policy.node.value());
+    core::fnv1a_byte(hash, static_cast<core::u8>(policy.mode));
     hash_u32(hash, policy.required_timing.width);
     hash_u32(hash, policy.required_timing.height);
     hash_u32(hash, policy.required_timing.refresh_numerator);
     hash_u32(hash, policy.required_timing.refresh_denominator);
     hash_u32(hash, policy.group);
     hash_u32(hash, policy.barrier);
-    hash_byte(hash, static_cast<core::u8>(policy.failure));
-    hash_byte(hash, static_cast<core::u8>(policy.late_frame));
+    core::fnv1a_byte(hash, static_cast<core::u8>(policy.failure));
+    core::fnv1a_byte(hash, static_cast<core::u8>(policy.late_frame));
     return hash;
 }
 

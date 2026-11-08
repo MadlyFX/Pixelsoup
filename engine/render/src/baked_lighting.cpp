@@ -1,4 +1,6 @@
 #include <mediaserver/scene/lighting.hpp>
+
+#include <mediaserver/core/fnv1a.hpp>
 #include <mediaserver/render/baked_lighting.hpp>
 #include <mediaserver/render/ies_profile.hpp>
 #include <mediaserver/render/image_decode.hpp>
@@ -123,14 +125,6 @@ Vec3 probe_position(const scene::BakedLighting &g, unsigned x, unsigned y,
                             static_cast<float>(g.count_y - 1),
           g.minimum.z + (g.maximum.z - g.minimum.z) * static_cast<float>(z) /
                             static_cast<float>(g.count_z - 1)};
-}
-core::u64 hash_bytes(std::span<const core::u8> bytes) {
-  core::u64 h = 14695981039346656037ULL;
-  for (auto b : bytes) {
-    h ^= b;
-    h *= 1099511628211ULL;
-  }
-  return h;
 }
 std::string hex(core::u64 h) {
   std::ostringstream s;
@@ -624,7 +618,7 @@ std::vector<core::u8> encode_probe_asset(const ProbeAsset &a) {
     }
   }
   if (a.input_digest) { put(b, static_cast<core::u32>(a.input_digest)); put(b, static_cast<core::u32>(a.input_digest >> 32)); }
-  const auto h = hash_bytes(b);
+  const auto h = core::fnv1a(b);
   put(b, static_cast<core::u32>(h));
   put(b, static_cast<core::u32>(h >> 32));
   return b;
@@ -699,7 +693,7 @@ BakeResult decode_probe_asset(std::span<const core::u8> b) {
   }
   if (at != b.size() - 8) return fail();
   const core::u64 lo = u(), hi = u(), h = lo | (hi << 32);
-  if (hash_bytes(b.first(b.size() - 8)) != h)
+  if (core::fnv1a(b.first(b.size() - 8)) != h)
     return fail();
   a->content = hex(h);
   return {std::move(a), {}, {}};

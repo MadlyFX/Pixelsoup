@@ -20,18 +20,6 @@ constexpr float pad = 3.0F;
 constexpr float text_inset = 7.0F;
 constexpr double double_click_seconds = 0.35;
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
-                            core::u64 index = 0U) noexcept {
-  core::u64 hash = base ^ 0x9e3779b97f4a7c15ULL;
-  for (const char character : name) {
-    hash ^= static_cast<core::u8>(character);
-    hash *= 1099511628211ULL;
-  }
-  hash ^= index + 0x9e3779b9ULL;
-  hash *= 1099511628211ULL;
-  return hash;
-}
-
 [[nodiscard]] bool valid_name(std::string_view name) noexcept {
   return !name.empty() && name.size() <= scene::max_selection_set_name_bytes;
 }
@@ -79,9 +67,9 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
   gui::Rect new_name_bounds = gui::inset(create_row, pad);
   const gui::Rect save_bounds = gui::cut_right(new_name_bounds, save_width);
   static_cast<void>(gui::cut_right(new_name_bounds, pad));
-  static_cast<void>(ctx.text_field(mix(id_, "selection-set.new-name"),
+  static_cast<void>(ctx.text_field(gui::ui_id(id_, "selection-set.new-name"),
                                    new_name_bounds, new_name_));
-  if (action_button(ctx, mix(id_, "selection-set.save-new"), save_bounds,
+  if (action_button(ctx, gui::ui_id(id_, "selection-set.save-new"), save_bounds,
                     "SAVE NEW",
                     authoring_enabled && scene_selection_count != 0U &&
                         valid_name(new_name_))) {
@@ -103,7 +91,7 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
     const gui::Rect row = gui::list_row(list, row_index, row_height, scroll);
     const gui::Interaction interaction =
         pointer_in_list
-            ? ctx.grab(mix(id_, "selection-set.row", set.node.value()), row)
+            ? ctx.grab(gui::ui_id(id_, "selection-set.row", set.node.value()), row)
             : gui::Interaction{};
     gui::UiColor color =
         row_index % 2U == 0U ? ctx.theme().row : ctx.theme().row_alt;
@@ -156,7 +144,7 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
   const gui::Rect edit_bounds = gui::cut_top(actions, edit_height);
   static_cast<void>(gui::cut_top(actions, pad));
   if (selected_set) {
-    static_cast<void>(ctx.text_field(mix(id_, "selection-set.edit-name"),
+    static_cast<void>(ctx.text_field(gui::ui_id(id_, "selection-set.edit-name"),
                                      edit_bounds, edit_name_));
   } else {
     ctx.panel(edit_bounds, ctx.theme().track);
@@ -168,23 +156,23 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
     return gui::column(actions, index, action_count, pad);
   };
   if (action_button(
-          ctx, mix(id_, "selection-set.replace"), button_bounds(0U), "REPLACE",
+          ctx, gui::ui_id(id_, "selection-set.replace"), button_bounds(0U), "REPLACE",
           authoring_enabled && selected_set && scene_selection_count != 0U)) {
     frame.intent = SelectionSetPanelIntent{
         SelectionSetPanelAction::ReplaceMembers, selected_set, {}};
   }
-  if (action_button(ctx, mix(id_, "selection-set.recall"), button_bounds(1U),
+  if (action_button(ctx, gui::ui_id(id_, "selection-set.recall"), button_bounds(1U),
                     "RECALL", static_cast<bool>(selected_set))) {
     frame.intent = SelectionSetPanelIntent{
         SelectionSetPanelAction::Recall, selected_set, {}};
   }
   if (action_button(
-          ctx, mix(id_, "selection-set.rename"), button_bounds(2U), "RENAME",
+          ctx, gui::ui_id(id_, "selection-set.rename"), button_bounds(2U), "RENAME",
           authoring_enabled && selected_set && valid_name(edit_name_))) {
     frame.intent = SelectionSetPanelIntent{SelectionSetPanelAction::Rename,
                                            selected_set, edit_name_};
   }
-  if (action_button(ctx, mix(id_, "selection-set.delete"), button_bounds(3U),
+  if (action_button(ctx, gui::ui_id(id_, "selection-set.delete"), button_bounds(3U),
                     "DELETE",
                     authoring_enabled && static_cast<bool>(selected_set))) {
     frame.intent = SelectionSetPanelIntent{

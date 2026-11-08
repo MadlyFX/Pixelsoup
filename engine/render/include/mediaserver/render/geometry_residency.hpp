@@ -99,9 +99,6 @@ public:
     // the arena has no room. `grew` reports an arena growth.
     [[nodiscard]] Entry* procedural(
         scene::MeshKey key, rhi::CommandList& commands, bool& grew);
-    [[nodiscard]] std::size_t procedural_count() const noexcept {
-        return procedural_.size();
-    }
     // The entry another renderer already made for this decoded model.
     [[nodiscard]] Handle find(const ModelAsset& asset) const noexcept;
     // Slots for a decoded model's mesh, registered so later renderers share

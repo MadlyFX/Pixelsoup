@@ -1,4 +1,6 @@
 #include <mediaserver/render/render_conformance.hpp>
+
+#include <mediaserver/core/fnv1a.hpp>
 #include <mediaserver/render/hybrid_scene_renderer.hpp>
 #include <mediaserver/render/output_transform.hpp>
 #include <mediaserver/render/plate_depth_of_field.hpp>
@@ -18,14 +20,10 @@ namespace {
 using Pass = core::ConformancePass;
 constexpr core::u32 width = 128U, height = 128U;
 constexpr scene::CanvasRect whole{0U, 0U, width, height};
-constexpr core::u64 hash_basis = 14695981039346656037ULL;
-void hash_bytes(core::u64& hash, std::span<const core::u8> bytes) noexcept {
-    for (const auto byte : bytes) { hash ^= byte; hash *= 1099511628211ULL; }
-}
 void hash_word(core::u64& hash, core::u32 word) noexcept {
     for (unsigned i = 0; i != 4; ++i) {
         const core::u8 byte = static_cast<core::u8>(word >> (i * 8U));
-        hash_bytes(hash, {&byte, 1U});
+        core::fnv1a_byte(hash, byte);
     }
 }
 core::u32 pixel_size(rhi::TextureFormat format) noexcept {
@@ -235,11 +233,11 @@ private:
         else run_.environment_gpu_nanoseconds += elapsed;
         for (auto& pending : pending_) {
             auto& hash = run_.evidence.passes[static_cast<std::size_t>(pending.pass)];
-            if (!hash) hash = hash_basis;
+            if (!hash) hash = core::fnv1a_offset;
             for (auto word : {pending.width, pending.height, pending.mip, pending.layer, pending.format, pending.frame, pending.size}) hash_word(hash, word);
             const auto mapped = pending.buffer.map();
             if (mapped.size() != pending.size) { pending.buffer.unmap(); return false; }
-            hash_bytes(hash, mapped); pending.buffer.unmap();
+            core::fnv1a_bytes(hash, mapped); pending.buffer.unmap();
         }
         pending_.clear(); return true;
     }

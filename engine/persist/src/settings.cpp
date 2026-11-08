@@ -1,5 +1,7 @@
 #include <mediaserver/persist/settings.hpp>
 
+#include <mediaserver/core/crc32c.hpp>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -80,29 +82,7 @@ enum class PreferenceKey : std::uint8_t {
 constexpr std::uint64_t kMaximumPreferencesPayload =
     19ULL * (3ULL + max_preference_value_bytes);
 
-constexpr std::array<std::uint32_t, 256U> make_crc32c_table() noexcept {
-    std::array<std::uint32_t, 256U> table{};
-    for (std::size_t index = 0U; index < table.size(); ++index) {
-        auto value = static_cast<std::uint32_t>(index);
-        for (std::uint32_t bit = 0U; bit < 8U; ++bit) {
-            value = (value >> 1U) ^ ((value & 1U) != 0U ? 0x82f63b78U : 0U);
-        }
-        table[index] = value;
-    }
-    return table;
-}
-
-constexpr auto kCrc32cTable = make_crc32c_table();
-
-[[nodiscard]] std::uint32_t crc32c(std::span<const std::byte> bytes) noexcept {
-    std::uint32_t crc = 0xffffffffU;
-    for (const auto byte : bytes) {
-        const auto lookup = static_cast<std::uint8_t>(
-            (crc ^ std::to_integer<std::uint8_t>(byte)) & 0xffU);
-        crc = kCrc32cTable[lookup] ^ (crc >> 8U);
-    }
-    return ~crc;
-}
+using core::crc32c;
 
 void put_u16(std::span<std::byte> bytes, std::size_t offset,
              std::uint16_t value) noexcept {

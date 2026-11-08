@@ -75,8 +75,6 @@ struct WindowConfig final {
 // units; the pump passes the inverse of the UI scale.
 [[nodiscard]] bool translate_event(
     const void* sdl_event, InputState& input, float to_logical = 1.0F);
-// Operator-invoked copy; no clipboard work occurs during ordinary frames.
-[[nodiscard]] bool copy_text_to_clipboard(const std::string& text);
 
 class UiWindow final {
 public:

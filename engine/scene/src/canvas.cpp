@@ -944,12 +944,6 @@ ViewMatrices view_for_slice(
                                              encoders));
 }
 
-ViewMatrices view_for_lens(const Camera& camera,
-                           const LensProfile& profile,
-                           const LensEncoders& encoders) noexcept {
-    return view_from_window(camera, window_for_lens(camera, profile, encoders));
-}
-
 ViewMatrices view_for_distorted_lens(
     const Camera& camera,
     const LensProfile& profile,

@@ -17,11 +17,6 @@
 namespace mediaserver::editor {
 namespace {
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, core::u64 value) noexcept {
-    base ^= value + 0x9E3779B97F4A7C15ULL + (base << 6U) + (base >> 2U);
-    return base;
-}
-
 struct ChannelProperties final {
     std::string_view input_black;
     std::string_view input_white;
@@ -312,7 +307,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 section_heading(names[channel_index], colors[channel_index]);
             if (heading_button(
                     heading,
-                    mix(id_, levels->source.value() ^
+                    gui::ui_id(id_, levels->source.value() ^
                                  static_cast<core::u64>(0x100U + channel_index)),
                     "RESET", colors[channel_index])) {
                 const auto emit_reset = [&](std::string_view property,
@@ -367,7 +362,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 const gui::Rect hit{px - 7.0F, rail.y - 6.0F, 14.0F,
                                     rail.height + 12.0F};
                 const gui::Interaction interaction = ctx.grab(
-                    mix(id_, levels->source.value() ^ salt), hit);
+                    gui::ui_id(id_, levels->source.value() ^ salt), hit);
                 const gui::UiColor handle_color = interaction.held
                     ? colors[channel_index]
                     : (interaction.hovered ? ctx.theme().text
@@ -436,7 +431,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                                    double speed, float minimum, float maximum,
                                    core::u64 salt) {
                 number_row(label, muted,
-                           mix(id_, levels->source.value() ^ salt),
+                           gui::ui_id(id_, levels->source.value() ^ salt),
                            levels->source, property, value, speed, 3,
                            minimum, maximum);
             };
@@ -508,7 +503,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 section.identity.x, section.identity.y, section.identity.z}};
             if (heading_button(
                     heading,
-                    mix(id_, lift_gamma_gain->source.value() ^
+                    gui::ui_id(id_, lift_gamma_gain->source.value() ^
                                  static_cast<core::u64>(0x400U + section_index)),
                     "RESET", ctx.theme().keyframe)) {
                 for (std::size_t component = 0U; component < 3U; ++component) {
@@ -574,7 +569,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 knob_y /= knob_length;
             }
             const gui::Interaction wheel_it = ctx.grab(
-                mix(id_, lift_gamma_gain->source.value() ^
+                gui::ui_id(id_, lift_gamma_gain->source.value() ^
                              (0x1400U + section_index)),
                 wheel);
             if (wheel_it.held) {
@@ -624,7 +619,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 0.0F, 1.0F);
             float luma_y = luma.y + (1.0F - luma_t) * luma.height;
             const gui::Interaction luma_it = ctx.grab(
-                mix(id_, lift_gamma_gain->source.value() ^
+                gui::ui_id(id_, lift_gamma_gain->source.value() ^
                              (0x1500U + section_index)),
                 luma);
             if (luma_it.held) {
@@ -662,7 +657,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     static_cast<core::u64>(component);
                 number_row(component_names[component],
                            component_colors[component],
-                           mix(id_, lift_gamma_gain->source.value() ^ salt),
+                           gui::ui_id(id_, lift_gamma_gain->source.value() ^ salt),
                            lift_gamma_gain->source,
                            section.properties[component], values[component],
                            0.01, 3, section.minimum, section.maximum);
@@ -676,7 +671,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
         const gui::Rect heading = section_heading(
             "CONTRAST / PIVOT", gui::UiColor{0.72F, 0.48F, 0.98F, 1.0F});
         if (heading_button(heading,
-                           mix(id_, contrast_pivot->source.value() ^ 0x700U),
+                           gui::ui_id(id_, contrast_pivot->source.value() ^ 0x700U),
                            "RESET", ctx.theme().keyframe)) {
             if (parameters.contrast != 1.0F) {
                 frame.edits.push_back(ColorCorrectionEdit{
@@ -693,7 +688,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                                std::string_view property, float value,
                                float minimum, float maximum, core::u64 salt) {
             number_row(label, muted,
-                       mix(id_, contrast_pivot->source.value() ^ salt),
+                       gui::ui_id(id_, contrast_pivot->source.value() ^ salt),
                        contrast_pivot->source, property, value, 0.01, 3,
                        minimum, maximum);
         };
@@ -711,7 +706,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
         const gui::Rect heading = section_heading(
             "WHITE BALANCE", gui::UiColor{0.98F, 0.70F, 0.42F, 1.0F});
         if (heading_button(heading,
-                           mix(id_, white_balance->source.value() ^ 0xA00U),
+                           gui::ui_id(id_, white_balance->source.value() ^ 0xA00U),
                            "RESET", ctx.theme().keyframe)) {
             if (parameters.temperature_kelvin !=
                 scene::d65_white_balance_temperature_kelvin) {
@@ -731,7 +726,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                                float minimum, float maximum, double speed,
                                int decimals, core::u64 salt) {
             number_row(label, muted,
-                       mix(id_, white_balance->source.value() ^ salt),
+                       gui::ui_id(id_, white_balance->source.value() ^ salt),
                        white_balance->source, property, value, speed,
                        decimals, minimum, maximum);
         };
@@ -782,7 +777,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                           ctx.theme().text);
                 if (heading_button(
                         heading,
-                        mix(id_, curves->source.value() ^
+                        gui::ui_id(id_, curves->source.value() ^
                                      static_cast<core::u64>(0xC00U +
                                          section_index)),
                         "ENABLE", section.color, 54.0F)) {
@@ -810,7 +805,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
             const bool can_add = points.size() < scene::max_curve_control_points;
             if (heading_button(
                     heading,
-                    mix(id_, curves->source.value() ^
+                    gui::ui_id(id_, curves->source.value() ^
                                  static_cast<core::u64>(0xC10U + section_index)),
                     "RESET", section.color)) {
                 for (std::size_t point = 0U; point < points.size(); ++point) {
@@ -828,7 +823,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
             const gui::Rect plot = form.next(plot_height, m.row_gap);
             ctx.panel(plot, ctx.theme().track);
             const gui::Interaction plot_it = ctx.grab(
-                mix(id_, curves->source.value() ^
+                gui::ui_id(id_, curves->source.value() ^
                              static_cast<core::u64>(0xC20U + section_index)),
                 plot);
             for (std::size_t division = 1U; division < 4U; ++division) {
@@ -1003,7 +998,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     const std::string property =
                         curve_property(section.prefix, point, suffix);
                     number_row(label, muted,
-                               mix(id_, curves->source.value() ^ salt ^
+                               gui::ui_id(id_, curves->source.value() ^ salt ^
                                             static_cast<core::u64>(point * 2U)),
                                curves->source, property, value, 0.005, 3,
                                minimum, maximum);
@@ -1065,7 +1060,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 section.color);
             if (heading_button(
                     heading,
-                    mix(id_, color_matrix->source.value() ^
+                    gui::ui_id(id_, color_matrix->source.value() ^
                                  static_cast<core::u64>(0x800U + section_index)),
                     "RESET", section.color)) {
                 for (std::size_t index = 0U; index < 4U; ++index) {
@@ -1082,7 +1077,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     0x900U + static_cast<core::u64>(section_index) * 8U +
                     static_cast<core::u64>(index);
                 number_row(field_names[index], muted,
-                           mix(id_, color_matrix->source.value() ^ salt),
+                           gui::ui_id(id_, color_matrix->source.value() ^ salt),
                            color_matrix->source, section.properties[index],
                            section.values[index], 0.01, 3,
                            scene::min_color_matrix_coefficient,

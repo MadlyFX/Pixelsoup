@@ -346,18 +346,6 @@ inline constexpr std::array<RateChoice, 8U> common_rates{{
                      static_cast<std::size_t>(std::max(length, 0))};
 }
 
-[[nodiscard]] inline gui::UiId mix(gui::UiId base, std::string_view name,
-                            core::u64 index = 0U) noexcept {
-  core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
-  for (const char c : name) {
-    hash ^= static_cast<core::u8>(c);
-    hash *= 1099511628211ULL;
-  }
-  hash ^= index + 0x9E3779B9ULL;
-  hash *= 1099511628211ULL;
-  return hash;
-}
-
 [[nodiscard]] inline gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
   color.a = opacity;
   return color;

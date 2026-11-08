@@ -1,5 +1,7 @@
 #include <mediaserver/compositor/compositor_graph.hpp>
 
+#include <mediaserver/core/fnv1a.hpp>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -112,26 +114,12 @@ constexpr std::array<PortDescriptor, 1U> output_inputs{{
     {0U, "IMAGE", PortValueType::Image, PortDirection::Input, false, true},
 }};
 
-constexpr core::u64 fnv_offset = 1469598103934665603ULL;
-constexpr core::u64 fnv_prime = 1099511628211ULL;
-
-void hash_byte(core::u64& hash, core::u8 value) noexcept {
-    hash ^= value;
-    hash *= fnv_prime;
-}
-
-void hash_u64(core::u64& hash, core::u64 value) noexcept {
-    for (core::u32 shift = 0U; shift < 64U; shift += 8U) {
-        hash_byte(hash, static_cast<core::u8>((value >> shift) & 0xFFU));
-    }
-}
-
 void hash_u32(core::u64& hash, core::u32 value) noexcept {
-    hash_u64(hash, static_cast<core::u64>(value));
+    core::fnv1a_u64(hash, static_cast<core::u64>(value));
 }
 
 void hash_i64(core::u64& hash, core::i64 value) noexcept {
-    hash_u64(hash, static_cast<core::u64>(value));
+    core::fnv1a_u64(hash, static_cast<core::u64>(value));
 }
 
 void hash_float(core::u64& hash, float value) noexcept {
@@ -192,7 +180,7 @@ void hash_white_balance(
 void hash_curves(core::u64& hash, const CurvesParameters& value) noexcept {
     const auto hash_channel = [&hash](
                                   const scene::CurveChannelParameters& channel) {
-        hash_u64(hash, static_cast<core::u64>(channel.points.size()));
+        core::fnv1a_u64(hash, static_cast<core::u64>(channel.points.size()));
         for (const scene::CurveControlPoint point : channel.points) {
             hash_float(hash, point.x);
             hash_float(hash, point.y);
@@ -200,7 +188,7 @@ void hash_curves(core::u64& hash, const CurvesParameters& value) noexcept {
     };
     hash_channel(value.master);
     for (const auto* const channel : {&value.red, &value.green, &value.blue}) {
-        hash_byte(hash, channel->has_value() ? 1U : 0U);
+        core::fnv1a_byte(hash, channel->has_value() ? 1U : 0U);
         if (channel->has_value()) {
             hash_channel(**channel);
         }
@@ -213,7 +201,7 @@ void hash_film_grain(
     hash_float(hash, value.pixel_scale);
     hash_float(hash, value.chroma_ratio);
     hash_u32(hash, value.seed);
-    hash_byte(hash, static_cast<core::u8>(value.mode));
+    core::fnv1a_byte(hash, static_cast<core::u8>(value.mode));
 }
 
 void hash_chroma_key(core::u64& hash,
@@ -234,26 +222,19 @@ void hash_luma_key(core::u64& hash,
     hash_float(hash, value.high_threshold);
     hash_float(hash, value.low_softness);
     hash_float(hash, value.high_softness);
-    hash_byte(hash, value.invert ? 1U : 0U);
+    core::fnv1a_byte(hash, value.invert ? 1U : 0U);
     hash_float(hash, value.mix);
-}
-
-void hash_text(core::u64& hash, std::string_view value) noexcept {
-    hash_u64(hash, static_cast<core::u64>(value.size()));
-    for (const char character : value) {
-        hash_byte(hash, static_cast<core::u8>(character));
-    }
 }
 
 void hash_connection(core::u64& hash,
                      const PlanConnection& connection) noexcept {
-    hash_u64(hash, connection.edge.value());
-    hash_u64(hash, connection.source.value());
-    hash_byte(hash, connection.source_port);
-    hash_u64(hash, connection.target.value());
-    hash_byte(hash, connection.target_port);
+    core::fnv1a_u64(hash, connection.edge.value());
+    core::fnv1a_u64(hash, connection.source.value());
+    core::fnv1a_byte(hash, connection.source_port);
+    core::fnv1a_u64(hash, connection.target.value());
+    core::fnv1a_byte(hash, connection.target_port);
     hash_i64(hash, connection.order);
-    hash_byte(hash, static_cast<core::u8>(connection.type));
+    core::fnv1a_byte(hash, static_cast<core::u8>(connection.type));
 }
 
 } // namespace
@@ -511,22 +492,22 @@ CompositorGraph::metadata(doc::NodeId id) const noexcept {
 }
 
 core::u64 digest(const CompositorGraph& graph) noexcept {
-    core::u64 hash = fnv_offset;
-    hash_u64(hash, static_cast<core::u64>(graph.nodes.size()));
+    core::u64 hash = core::fnv1a_offset_short;
+    core::fnv1a_u64(hash, static_cast<core::u64>(graph.nodes.size()));
     for (const GraphNode& node : graph.nodes) {
-        hash_u64(hash, node.node.value());
-        hash_u64(hash, node.scene.value());
-        hash_byte(hash, static_cast<core::u8>(node.kind));
-        hash_text(hash, node.label);
+        core::fnv1a_u64(hash, node.node.value());
+        core::fnv1a_u64(hash, node.scene.value());
+        core::fnv1a_byte(hash, static_cast<core::u8>(node.kind));
+        core::fnv1a_text(hash, node.label);
         hash_float(hash, node.editor_x);
         hash_float(hash, node.editor_y);
-        hash_byte(hash, node.bypassed ? 1U : 0U);
+        core::fnv1a_byte(hash, node.bypassed ? 1U : 0U);
         std::visit(
             [&hash](const auto& parameters) noexcept {
                 using Parameters = std::decay_t<decltype(parameters)>;
                 if constexpr (std::is_same_v<Parameters,
                                              SceneLayerParameters>) {
-                    hash_u64(hash, parameters.scene_node.value());
+                    core::fnv1a_u64(hash, parameters.scene_node.value());
                 } else if constexpr (std::is_same_v<Parameters,
                                                     BrightnessParameters>) {
                     hash_float(hash, parameters.amount);
@@ -578,9 +559,9 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
                     hash_luma_key(hash, parameters);
                 } else if constexpr (std::is_same_v<Parameters,
                                                     MatteParameters>) {
-                    hash_byte(hash, static_cast<core::u8>(parameters.mode));
-                    hash_byte(hash, parameters.invert ? 1U : 0U);
-                    hash_byte(hash, parameters.clamp_input ? 1U : 0U);
+                    core::fnv1a_byte(hash, static_cast<core::u8>(parameters.mode));
+                    core::fnv1a_byte(hash, parameters.invert ? 1U : 0U);
+                    core::fnv1a_byte(hash, parameters.clamp_input ? 1U : 0U);
                 } else if constexpr (std::is_same_v<Parameters,
                                                     RadialArrayParameters>) {
                     hash_u32(hash, parameters.count);
@@ -605,15 +586,15 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
                     hash_float(hash, parameters.horizontal_blend);
                 } else if constexpr (std::is_same_v<Parameters,
                                                     OutputParameters>) {
-                    hash_byte(hash, parameters.replace_scene ? 1U : 0U);
+                    core::fnv1a_byte(hash, parameters.replace_scene ? 1U : 0U);
                 } else if constexpr (std::is_same_v<Parameters,
                                                     MergeParameters>) {
-                    hash_byte(hash, static_cast<core::u8>(parameters.blend));
+                    core::fnv1a_byte(hash, static_cast<core::u8>(parameters.blend));
                     hash_float(hash, parameters.opacity);
                     hash_float(hash, parameters.value);
                 } else if constexpr (std::is_same_v<Parameters,
                                                     BackgroundParameters>) {
-                    hash_byte(hash, static_cast<core::u8>(parameters.mode));
+                    core::fnv1a_byte(hash, static_cast<core::u8>(parameters.mode));
                     for (const BackgroundColor& color :
                          {parameters.color_a, parameters.color_b}) {
                         hash_float(hash, color.r);
@@ -630,46 +611,46 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
             node.parameters);
     }
 
-    hash_u64(hash, static_cast<core::u64>(graph.edges.size()));
+    core::fnv1a_u64(hash, static_cast<core::u64>(graph.edges.size()));
     for (const GraphEdge& edge : graph.edges) {
-        hash_u64(hash, edge.node.value());
-        hash_u64(hash, edge.from.node.value());
-        hash_byte(hash, edge.from.port);
-        hash_u64(hash, edge.to.node.value());
-        hash_byte(hash, edge.to.port);
+        core::fnv1a_u64(hash, edge.node.value());
+        core::fnv1a_u64(hash, edge.from.node.value());
+        core::fnv1a_byte(hash, edge.from.port);
+        core::fnv1a_u64(hash, edge.to.node.value());
+        core::fnv1a_byte(hash, edge.to.port);
         hash_i64(hash, edge.order);
     }
 
-    hash_u64(hash, static_cast<core::u64>(graph.diagnostics.size()));
+    core::fnv1a_u64(hash, static_cast<core::u64>(graph.diagnostics.size()));
     for (const GraphDiagnostic& diagnostic : graph.diagnostics) {
-        hash_byte(hash, static_cast<core::u8>(diagnostic.code));
-        hash_u64(hash, diagnostic.subject.value());
-        hash_u64(hash, diagnostic.related.value());
-        hash_byte(hash, diagnostic.port);
-        hash_byte(hash, static_cast<core::u8>(diagnostic.severity));
+        core::fnv1a_byte(hash, static_cast<core::u8>(diagnostic.code));
+        core::fnv1a_u64(hash, diagnostic.subject.value());
+        core::fnv1a_u64(hash, diagnostic.related.value());
+        core::fnv1a_byte(hash, diagnostic.port);
+        core::fnv1a_byte(hash, static_cast<core::u8>(diagnostic.severity));
     }
 
-    hash_u64(hash, static_cast<core::u64>(graph.node_metadata.size()));
+    core::fnv1a_u64(hash, static_cast<core::u64>(graph.node_metadata.size()));
     for (const GraphNodeMetadata& metadata : graph.node_metadata) {
-        hash_u64(hash, metadata.node.value());
-        hash_byte(hash, static_cast<core::u8>(metadata.execution_domain));
-        hash_byte(hash, static_cast<core::u8>(metadata.identity));
-        hash_u64(hash,
+        core::fnv1a_u64(hash, metadata.node.value());
+        core::fnv1a_byte(hash, static_cast<core::u8>(metadata.execution_domain));
+        core::fnv1a_byte(hash, static_cast<core::u8>(metadata.identity));
+        core::fnv1a_u64(hash,
                  static_cast<core::u64>(metadata.path_to_output.size()));
         for (const doc::NodeId node : metadata.path_to_output) {
-            hash_u64(hash, node.value());
+            core::fnv1a_u64(hash, node.value());
         }
-        hash_u64(hash,
+        core::fnv1a_u64(hash,
                  static_cast<core::u64>(metadata.edges_to_output.size()));
         for (const doc::NodeId edge : metadata.edges_to_output) {
-            hash_u64(hash, edge.value());
+            core::fnv1a_u64(hash, edge.value());
         }
         hash_float(hash, metadata.bounds_expansion.x);
         hash_float(hash, metadata.bounds_expansion.y);
-        hash_byte(hash, metadata.disabled ? 1U : 0U);
+        core::fnv1a_byte(hash, metadata.disabled ? 1U : 0U);
     }
 
-    hash_byte(hash, graph.resources.available ? 1U : 0U);
+    core::fnv1a_byte(hash, graph.resources.available ? 1U : 0U);
     hash_u32(hash, graph.resources.canvas.width);
     hash_u32(hash, graph.resources.canvas.height);
     hash_u32(hash, graph.resources.effect_settings.blur_taps);
@@ -677,7 +658,7 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
     hash_u32(hash, graph.resources.effect_settings.blur_passes);
     hash_u32(hash,
              graph.resources.effect_settings.directional_blur_taps);
-    hash_byte(hash, static_cast<core::u8>(
+    core::fnv1a_byte(hash, static_cast<core::u8>(
                         graph.resources.effect_settings.brightness_curve));
     hash_float(hash, graph.resources.effect_settings.brightness_gamma);
     hash_float(hash, graph.resources.effect_settings.graph_texture_budget_gb);
@@ -692,27 +673,27 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
     hash_u32(hash, graph.resources.background_nodes);
     hash_u32(hash, graph.resources.merge_nesting);
     hash_u32(hash, graph.resources.offscreen_textures);
-    hash_u64(hash, graph.resources.bytes_per_texture);
-    hash_u64(hash, graph.resources.offscreen_texture_bytes);
+    core::fnv1a_u64(hash, graph.resources.bytes_per_texture);
+    core::fnv1a_u64(hash, graph.resources.offscreen_texture_bytes);
     hash_u32(hash, graph.resources.render_passes);
-    hash_u64(hash, graph.resources.blur_taps_per_pixel);
+    core::fnv1a_u64(hash, graph.resources.blur_taps_per_pixel);
     hash_float(hash, graph.resources.max_layer_bounds_expansion.x);
     hash_float(hash, graph.resources.max_layer_bounds_expansion.y);
 
-    hash_u64(hash, static_cast<core::u64>(graph.plan.steps.size()));
+    core::fnv1a_u64(hash, static_cast<core::u64>(graph.plan.steps.size()));
     for (const PlanStep& step : graph.plan.steps) {
-        hash_u64(hash, step.node.value());
-        hash_byte(hash, static_cast<core::u8>(step.kind));
-        hash_byte(hash, step.requires_offscreen ? 1U : 0U);
-        hash_u64(hash, static_cast<core::u64>(step.inputs.size()));
+        core::fnv1a_u64(hash, step.node.value());
+        core::fnv1a_byte(hash, static_cast<core::u8>(step.kind));
+        core::fnv1a_byte(hash, step.requires_offscreen ? 1U : 0U);
+        core::fnv1a_u64(hash, static_cast<core::u64>(step.inputs.size()));
         for (const PlanConnection& connection : step.inputs) {
             hash_connection(hash, connection);
         }
-        hash_u64(hash, static_cast<core::u64>(step.consumers.size()));
+        core::fnv1a_u64(hash, static_cast<core::u64>(step.consumers.size()));
         for (const PlanConnection& connection : step.consumers) {
             hash_connection(hash, connection);
         }
-        hash_u64(hash, static_cast<core::u64>(step.radial_instances.size()));
+        core::fnv1a_u64(hash, static_cast<core::u64>(step.radial_instances.size()));
         for (const RadialInstance& instance : step.radial_instances) {
             hash_u32(hash, instance.index);
             hash_float(hash, instance.angle);

@@ -179,8 +179,6 @@ bool GpuOutputTarget::record(
         // rather than a frame with pieces missing.
         return false;
     }
-    last_instances_ = described.count;
-
     const std::span<const core::u8> instance_bytes{
         reinterpret_cast<const core::u8*>(quads_->data()),
         described.count * sizeof(show::PatternQuad)};

@@ -357,10 +357,6 @@ struct ViewMatrices final {
     const Camera& camera,
     const LensProfile& profile,
     const LensEncoders& encoders) noexcept;
-[[nodiscard]] ViewMatrices view_for_lens(
-    const Camera& camera,
-    const LensProfile& profile,
-    const LensEncoders& encoders) noexcept;
 [[nodiscard]] ViewMatrices view_for_distorted_lens(
     const Camera& camera,
     const LensProfile& profile,

@@ -222,9 +222,6 @@ public:
   [[nodiscard]] std::string_view edit_name() const noexcept {
     return rename_draft_;
   }
-  [[nodiscard]] bool numeric_edit_live() const noexcept {
-    return number_field_.live();
-  }
 
 private:
   gui::UiId id_{};

@@ -197,15 +197,6 @@ const gui::PanelId panel_live_data = gui::ui_id("editor.panel.live-data");
 const gui::PanelId panel_asset_viewer =
     gui::ui_id("editor.panel.asset-viewer");
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name) noexcept {
-  core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
-  for (const char c : name) {
-    hash ^= static_cast<core::u8>(c);
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
 // The editor's palette is gui::Theme's own (see ui_context.hpp for what each
 // colour means); the editor only packs its forms a little tighter.
 [[nodiscard]] constexpr gui::Theme editor_theme() noexcept {
@@ -1102,7 +1093,7 @@ draw_application_header(gui::UiContext &ui, float width,
   for (std::size_t index = 0U; index < menus.size(); ++index) {
     const MenuBarEntry &entry = menu_bar_entries[index];
     const gui::Rect menu = menus[index];
-    const gui::UiId menu_id = mix(gui::ui_id("editor.menu"), entry.label);
+    const gui::UiId menu_id = gui::ui_id(gui::ui_id("editor.menu"), entry.label);
     const gui::Interaction it = ui.grab(menu_id, menu);
     ui.cursor_for(it, gui::Cursor::Hand);
     const bool active =
@@ -1450,7 +1441,7 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
       for (std::size_t index = 0U; index < recent_projects.size(); ++index) {
         const std::string &path = recent_projects[index];
         const gui::Rect row = recent_project_row(recent_popup, index);
-        if (ui.grab(mix(gui::ui_id("editor.file-menu.recent"), path), row).clicked) {
+        if (ui.grab(gui::ui_id(gui::ui_id("editor.file-menu.recent"), path), row).clicked) {
           result.action = ApplicationMenuAction::OpenRecentProject;
           result.project_path = path;
           open_menu = ApplicationMenu::None;
@@ -1464,10 +1455,10 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
       const auto &[label, action] = file_menu_items[index];
       const gui::Rect row = rows[index].row;
       if (action == ApplicationMenuAction::RecentProjects) {
-        static_cast<void>(ui.grab(mix(gui::ui_id("editor.file-menu"), label), row));
+        static_cast<void>(ui.grab(gui::ui_id(gui::ui_id("editor.file-menu"), label), row));
         continue;
       }
-      if (ui.grab(mix(gui::ui_id("editor.file-menu"), label), row).clicked) {
+      if (ui.grab(gui::ui_id(gui::ui_id("editor.file-menu"), label), row).clicked) {
         result.action = action;
         open_menu = ApplicationMenu::None;
         recent_submenu_open = false;
@@ -1481,7 +1472,7 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
   if (open_menu == ApplicationMenu::View) {
     for (std::size_t index = 0U; index < view_menu_items.size(); ++index) {
       const ViewMenuItem &item = view_menu_items[index];
-      if (ui.grab(mix(gui::ui_id("editor.view-menu"), item.label),
+      if (ui.grab(gui::ui_id(gui::ui_id("editor.view-menu"), item.label),
                   rows[index].row)
               .clicked) {
         result.action = item.action;
@@ -1502,7 +1493,7 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
         }};
     for (std::size_t index = 0U; index < items.size(); ++index) {
       const auto &[label, action] = items[index];
-      if (ui.grab(mix(gui::ui_id("editor.edit-menu"), label), rows[index].row)
+      if (ui.grab(gui::ui_id(gui::ui_id("editor.edit-menu"), label), rows[index].row)
               .clicked) {
         result.action = action;
         open_menu = ApplicationMenu::None;
@@ -1515,7 +1506,7 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
   for (std::size_t index = 0U; index < window_panel_entries().size();
        ++index) {
     const WindowPanelEntry &entry = window_panel_entries()[index];
-    if (ui.grab(mix(gui::ui_id("editor.window-menu"), entry.title),
+    if (ui.grab(gui::ui_id(gui::ui_id("editor.window-menu"), entry.title),
                 rows[index].row)
             .clicked) {
       result.action = ApplicationMenuAction::TogglePanel;
@@ -1573,7 +1564,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
       const std::string_view label = item.label;
       rule(rows[index]);
       const gui::Rect row = rows[index].row;
-      draw_row(mix(gui::ui_id("editor.file-menu"), label), row, label,
+      draw_row(gui::ui_id(gui::ui_id("editor.file-menu"), label), row, label,
                item.action == ApplicationMenuAction::RecentProjects &&
                    recent_submenu_open);
       if (item.action == ApplicationMenuAction::RecentProjects) {
@@ -1585,7 +1576,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
     for (std::size_t index = 0U; index < view_menu_items.size(); ++index) {
       const ViewMenuItem &item = view_menu_items[index];
       const gui::Rect row = rows[index].row;
-      draw_row(mix(gui::ui_id("editor.view-menu"), item.label), row,
+      draw_row(gui::ui_id(gui::ui_id("editor.view-menu"), item.label), row,
                item.label);
       gui::Rect shortcut = gui::inset(row, gui::Padding{0.0F, 0.0F, 8.0F, 0.0F});
       ui.label(gui::cut_right(shortcut, ui.font_width(item.shortcut) + 2.0F),
@@ -1599,7 +1590,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
                                                    "Paste"};
     for (std::size_t index = 0U; index < labels.size(); ++index) {
       rule(rows[index]);
-      draw_row(mix(gui::ui_id("editor.edit-menu"), ids[index]),
+      draw_row(gui::ui_id(gui::ui_id("editor.edit-menu"), ids[index]),
                rows[index].row, labels[index]);
     }
   } else {
@@ -1609,7 +1600,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
       const bool open = docks.leaf_of(entry.panel) != gui::no_dock;
       std::string label = open ? "[x] " : "[ ] ";
       label.append(entry.title);
-      draw_row(mix(gui::ui_id("editor.window-menu"), entry.title),
+      draw_row(gui::ui_id(gui::ui_id("editor.window-menu"), entry.title),
                rows[index].row, label);
     }
   }
@@ -1624,7 +1615,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
     } else {
       for (std::size_t index = 0U; index < recent_projects.size(); ++index) {
         const std::string &path = recent_projects[index];
-        draw_row(mix(gui::ui_id("editor.file-menu.recent"), path),
+        draw_row(gui::ui_id(gui::ui_id("editor.file-menu.recent"), path),
                  recent_project_row(submenu, index),
                  recent_project_label(path));
       }
@@ -6258,7 +6249,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       ui.tooltip(output_name, feed_map.maps.size() > 1U
                                   ? "Show the next output"
                                   : "The output this preview shows");
-      if (chrome_button(ui, mix(gui::ui_id("editor.program"), "output"),
+      if (chrome_button(ui, gui::ui_id(gui::ui_id("editor.program"), "output"),
                         output_name, output_identity.data(), false,
                         feed_map.maps.size() > 1U)) {
         const auto current =

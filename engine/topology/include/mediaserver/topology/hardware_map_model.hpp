@@ -26,8 +26,6 @@ struct HardwareMapCounters final {
     bool operator==(const HardwareMapCounters&) const = default;
 
     [[nodiscard]] core::u32 devices_over_capacity() const noexcept;
-    [[nodiscard]] core::u32 links_over_capacity() const noexcept;
-    [[nodiscard]] core::u32 output_bindings_over_capacity() const noexcept;
 };
 
 class HardwareMapModel final {

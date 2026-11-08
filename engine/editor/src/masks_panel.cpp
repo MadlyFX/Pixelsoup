@@ -28,18 +28,6 @@ constexpr float maximum_list_height = 130.0F;
 // second one inside this window opens its name.
 constexpr double rename_click_seconds = 0.35;
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
-                            core::u64 index = 0U) noexcept {
-  core::u64 hash = base ^ 0x9e3779b97f4a7c15ULL;
-  for (const char character : name) {
-    hash ^= static_cast<core::u8>(character);
-    hash *= 1099511628211ULL;
-  }
-  hash ^= index + 0x9e3779b9ULL;
-  hash *= 1099511628211ULL;
-  return hash;
-}
-
 [[nodiscard]] std::string_view kind_label(scene::MaskKind kind) noexcept {
   switch (kind) {
   case scene::MaskKind::Rectangle:
@@ -274,15 +262,15 @@ MasksPanelFrame MasksPanel::draw(
             gui::has_mod(modifiers, gui::KeyMods::Shift),
             gui::has_mod(modifiers, gui::KeyMods::Alt)}};
   };
-  if (action_button(ctx, mix(id_, "mask.create.rectangle"), tool_bounds(0U),
+  if (action_button(ctx, gui::ui_id(id_, "mask.create.rectangle"), tool_bounds(0U),
                     "RECTANGLE", can_create)) {
     create(MaskCreateTool::Rectangle);
   }
-  if (action_button(ctx, mix(id_, "mask.create.ellipse"), tool_bounds(1U),
+  if (action_button(ctx, gui::ui_id(id_, "mask.create.ellipse"), tool_bounds(1U),
                     "ELLIPSE", can_create)) {
     create(MaskCreateTool::Ellipse);
   }
-  if (action_button(ctx, mix(id_, "mask.create.bezier"), tool_bounds(2U),
+  if (action_button(ctx, gui::ui_id(id_, "mask.create.bezier"), tool_bounds(2U),
                     "PEN", can_create)) {
     create(MaskCreateTool::Bezier);
   }
@@ -332,7 +320,7 @@ MasksPanelFrame MasksPanel::draw(
     gui::Rect controls = gui::inset(row, gap);
     constexpr float toggle_width = 29.0F;
     const gui::Rect enabled_bounds = gui::cut_left(controls, toggle_width);
-    if (action_button(ctx, mix(id_, "mask.enabled", mask.source.value()),
+    if (action_button(ctx, gui::ui_id(id_, "mask.enabled", mask.source.value()),
                       enabled_bounds, mask.enabled ? "ON" : "OFF",
                       authoring_enabled, mask.enabled)) {
       if (!is_selected) {
@@ -350,7 +338,7 @@ MasksPanelFrame MasksPanel::draw(
     // distant footer before acting.
     constexpr float delete_width = 52.0F;
     const gui::Rect delete_bounds = gui::cut_right(controls, delete_width);
-    if (action_button(ctx, mix(id_, "mask.delete", mask.source.value()),
+    if (action_button(ctx, gui::ui_id(id_, "mask.delete", mask.source.value()),
                       delete_bounds, "DELETE", authoring_enabled)) {
       frame.intent = MaskDeleteIntent{
           target.scene, target.target, mask.source};
@@ -369,13 +357,13 @@ MasksPanelFrame MasksPanel::draw(
     const gui::Rect grab_bounds = renaming ? columns : body;
     const gui::Interaction interaction =
         pointer_in_list
-            ? ctx.grab(mix(id_, "mask.row", mask.source.value()), grab_bounds)
+            ? ctx.grab(gui::ui_id(id_, "mask.row", mask.source.value()), grab_bounds)
             : gui::Interaction{};
     if (interaction.hovered && !is_selected) {
       ctx.panel(grab_bounds, ctx.theme().widget_hover);
     }
     if (renaming) {
-      const gui::UiId name_id = mix(id_, "mask.name", mask.source.value());
+      const gui::UiId name_id = gui::ui_id(id_, "mask.name", mask.source.value());
       if (ctx.text_field(name_id, name_bounds, rename_draft_) &&
           valid_name(rename_draft_)) {
         frame.intent = MaskRenameIntent{
@@ -418,7 +406,7 @@ MasksPanelFrame MasksPanel::draw(
         // The field is not drawn until the next frame, so the click that
         // opened it cannot also focus it. Say so rather than making the
         // operator click a third time.
-        ctx.focus_text_field(mix(id_, "mask.name", mask.source.value()),
+        ctx.focus_text_field(gui::ui_id(id_, "mask.name", mask.source.value()),
                              rename_draft_);
         click_node_ = {};
         click_time_ = 0.0;
@@ -471,13 +459,13 @@ MasksPanelFrame MasksPanel::draw(
   gui::Rect combine_strip = form.control();
   const gui::Rect invert_button = gui::cut_left(combine_strip, invert_width);
   static_cast<void>(gui::cut_left(combine_strip, gap));
-  if (action_button(ctx, mix(id_, "mask.invert"), invert_button, "INVERT",
+  if (action_button(ctx, gui::ui_id(id_, "mask.invert"), invert_button, "INVERT",
                     authoring_enabled, selected->invert)) {
     frame.intent = MaskInvertIntent{target.scene, target.target,
                                     selected->source, !selected->invert};
   }
   for (std::size_t index = 0U; index < combines.size(); ++index) {
-    if (action_button(ctx, mix(id_, "mask.combine", index),
+    if (action_button(ctx, gui::ui_id(id_, "mask.combine", index),
                       gui::column(combine_strip, index, combines.size(), gap),
                       combine_label(combines[index]), authoring_enabled,
                       selected->combine == combines[index])) {
@@ -515,7 +503,7 @@ MasksPanelFrame MasksPanel::draw(
         gui::column(scalar_strip, index, scalar_properties.size(), gap);
     double value{};
     NumberFieldEdit edit{};
-    if (draw_number(mix(id_, "mask.scalar", index), field,
+    if (draw_number(gui::ui_id(id_, "mask.scalar", index), field,
                     scalar_labels[index], scalar_values[index],
                     scalar_speeds[index], index == 0U ? 3 : 1, value, edit)) {
       float canonical = static_cast<float>(value);
@@ -551,7 +539,7 @@ MasksPanelFrame MasksPanel::draw(
           gui::column(bounds_strip, index, components.size(), gap);
       double value{};
       NumberFieldEdit edit{};
-      if (draw_number(mix(id_, "mask.bounds", index), field, labels[index],
+      if (draw_number(gui::ui_id(id_, "mask.bounds", index), field, labels[index],
                       values[index], 0.005, 3, value, edit)) {
         scene::MaskBounds changed = selected->bounds;
         const float canonical =
@@ -630,7 +618,7 @@ MasksPanelFrame MasksPanel::draw(
         const gui::Rect field = gui::column(pair_strip, index % 2U, 2U, gap);
         double value{};
         NumberFieldEdit edit{};
-        if (draw_number(mix(id_, "mask.point-value", index), field,
+        if (draw_number(gui::ui_id(id_, "mask.point-value", index), field,
                         labels[index], values[index], 0.005, 3, value, edit)) {
           const float canonical =
               std::clamp(static_cast<float>(value), 0.0F, 1.0F);
@@ -664,7 +652,7 @@ MasksPanelFrame MasksPanel::draw(
     }
 
     const gui::Rect point_actions = form.control();
-    if (action_button(ctx, mix(id_, "mask.point.insert"),
+    if (action_button(ctx, gui::ui_id(id_, "mask.point.insert"),
                       gui::column(point_actions, 0U, 2U, gap),
                       "INSERT POINT", authoring_enabled &&
                           selected->points.size() <
@@ -677,7 +665,7 @@ MasksPanelFrame MasksPanel::draw(
           target.scene, target.target, selected->source, insertion_index,
           insertion_geometry(*selected, frame.selection.point)};
     }
-    if (action_button(ctx, mix(id_, "mask.point.delete"),
+    if (action_button(ctx, gui::ui_id(id_, "mask.point.delete"),
                       gui::column(point_actions, 1U, 2U, gap),
                       "DELETE POINT",
                       authoring_enabled && frame.selection.point.has_value() &&

@@ -879,9 +879,6 @@ public:
   [[nodiscard]] bool dragging_layer() const noexcept {
     return reorder_.layer_node != doc::NodeId{};
   }
-  [[nodiscard]] doc::NodeId dragging_layer_node() const noexcept {
-    return reorder_.layer_node;
-  }
   [[nodiscard]] bool dragging_compositor_source() const noexcept {
     return reorder_.lane_node != doc::NodeId{} || dragging_layer();
   }
@@ -894,10 +891,6 @@ public:
   }
   [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
   [[nodiscard]] bool auto_key_enabled() const noexcept { return auto_key_; }
-  // Whether kept plateset moments have their band under the markers.
-  [[nodiscard]] bool moments_visible() const noexcept {
-    return moments_visible_;
-  }
   [[nodiscard]] bool playback_overlay_enabled() const noexcept {
     return playback_overlay_;
   }

@@ -297,7 +297,6 @@ public:
     void overlay(UiContext& ctx);
 
     [[nodiscard]] bool dragging() const noexcept { return drag_active_; }
-    [[nodiscard]] PanelId dragged_panel() const noexcept { return dragging_; }
 
 private:
     void run_seam(UiContext& ctx, DockId seam);

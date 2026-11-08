@@ -13,11 +13,6 @@
 namespace mediaserver::editor {
 namespace {
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, core::u64 value) noexcept {
-  base ^= value + 0x9E3779B97F4A7C15ULL + (base << 6U) + (base >> 2U);
-  return base;
-}
-
 [[nodiscard]] bool matches(std::string_view value,
                            std::string_view query) noexcept {
   if (query.empty()) {
@@ -339,7 +334,7 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   constexpr float search_height = 27.0F;
   gui::Rect search_row = gui::cut_top(area, search_height);
   const gui::Rect search_bounds = gui::inset(search_row, 7.0F, 3.0F);
-  const gui::UiId search_id = mix(id_, 0xEFFE'C75EU);
+  const gui::UiId search_id = gui::ui_id(id_, 0xEFFE'C75EU);
   static_cast<void>(ctx.text_field(search_id, search_bounds, search_));
   if (search_.empty() && ctx.focus() != search_id) {
     ctx.label(gui::inset(search_bounds, gui::Padding{8.0F, 0.0F, 4.0F, 0.0F}),
@@ -388,7 +383,7 @@ EffectsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     const gui::Rect row = list.next(card_height, card_gap);
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, static_cast<core::u64>(index + 1U)), row);
+        ctx.grab(gui::ui_id(id_, static_cast<core::u64>(index + 1U)), row);
     ctx.panel(row, interaction.held
                        ? ctx.theme().widget_active
                        : (interaction.hovered ? ctx.theme().widget_hover

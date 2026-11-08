@@ -2,6 +2,8 @@
 
 #include <mediaserver/net/director_frame_barrier.hpp>
 
+#include <mediaserver/core/fnv1a.hpp>
+
 #include <mediaserver/net/director_frame_barrier.hpp>
 
 #include <algorithm>
@@ -24,30 +26,6 @@ namespace {
 using Status = editor::OutputMonitorState::Node::Status;
 using ContentStatus = editor::OutputMonitorState::Node::ContentStatus;
 
-inline constexpr core::u64 deployment_fnv_offset = 14695981039346656037ULL;
-inline constexpr core::u64 deployment_fnv_prime = 1099511628211ULL;
-
-void deployment_hash_byte(core::u64& hash, core::u8 value) noexcept {
-    hash ^= value;
-    hash *= deployment_fnv_prime;
-}
-
-void deployment_hash_u64(core::u64& hash, core::u64 value) noexcept {
-    for (core::u8 shift = 0U; shift < 64U; shift += 8U) {
-        deployment_hash_byte(
-            hash, static_cast<core::u8>((value >> shift) & 0xffU));
-    }
-}
-
-void deployment_hash_text(core::u64& hash, std::string_view value) noexcept {
-    deployment_hash_u64(hash, static_cast<core::u64>(value.size()));
-    for (const char character : value) {
-        deployment_hash_byte(
-            hash, static_cast<core::u8>(
-                      static_cast<unsigned char>(character)));
-    }
-}
-
 // topology::digest fences every authored hardware value (including window and
 // output geometry). The derived suffix additionally fences the exact listener
 // endpoint and eligibility classification consumed by this controller, rather
@@ -55,12 +33,12 @@ void deployment_hash_text(core::u64& hash, std::string_view value) noexcept {
 [[nodiscard]] core::u64 controller_deployment_digest(
     const topology::HardwareMap& map,
     std::string_view shared_secret) {
-    core::u64 hash = deployment_fnv_offset;
-    deployment_hash_u64(hash, topology::digest(map));
+    core::u64 hash = core::fnv1a_offset;
+    core::fnv1a_u64(hash, topology::digest(map));
     const bool secret_available = shared_secret.size() >= 32U &&
                                   shared_secret.size() <= 256U;
-    deployment_hash_byte(hash, secret_available ? 1U : 0U);
-    deployment_hash_text(hash, shared_secret);
+    core::fnv1a_byte(hash, secret_available ? 1U : 0U);
+    core::fnv1a_text(hash, shared_secret);
 
     // Parked cards (no cable, no binding) are not part of the deployment.
     std::size_t render_server_count{};
@@ -69,7 +47,7 @@ void deployment_hash_text(core::u64& hash, std::string_view value) noexcept {
             ++render_server_count;
         }
     }
-    deployment_hash_u64(
+    core::fnv1a_u64(
         hash, static_cast<core::u64>(render_server_count));
     for (const topology::HardwareDevice& device : map.devices) {
         if (!topology::render_server_active(map, device)) {
@@ -89,15 +67,15 @@ void deployment_hash_text(core::u64& hash, std::string_view value) noexcept {
         const bool duplicate = duplicate_count != 1U;
         const bool eligible = secret_available && parsed.has_value() &&
                               !duplicate;
-        deployment_hash_u64(hash, device.node.value());
-        deployment_hash_u64(hash, device.node_index);
-        deployment_hash_byte(hash, endpoint.has_value() ? 1U : 0U);
+        core::fnv1a_u64(hash, device.node.value());
+        core::fnv1a_u64(hash, device.node_index);
+        core::fnv1a_byte(hash, endpoint.has_value() ? 1U : 0U);
         if (endpoint.has_value()) {
-            deployment_hash_text(hash, *endpoint);
+            core::fnv1a_text(hash, *endpoint);
         }
-        deployment_hash_byte(hash, parsed.has_value() ? 1U : 0U);
-        deployment_hash_byte(hash, duplicate ? 1U : 0U);
-        deployment_hash_byte(hash, eligible ? 1U : 0U);
+        core::fnv1a_byte(hash, parsed.has_value() ? 1U : 0U);
+        core::fnv1a_byte(hash, duplicate ? 1U : 0U);
+        core::fnv1a_byte(hash, eligible ? 1U : 0U);
     }
     return hash;
 }

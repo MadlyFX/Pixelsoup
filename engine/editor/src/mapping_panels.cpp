@@ -389,18 +389,6 @@ runtime_is_current(const topology::HardwareRuntimeNode *runtime) noexcept {
   return presentation;
 }
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
-                            core::u64 index = 0U) noexcept {
-  core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
-  for (const char character : name) {
-    hash ^= static_cast<core::u8>(character);
-    hash *= 1099511628211ULL;
-  }
-  hash ^= index + 0x9E3779B9ULL;
-  hash *= 1099511628211ULL;
-  return hash;
-}
-
 [[nodiscard]] gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
   color.a = opacity;
   return color;
@@ -1817,7 +1805,7 @@ discovered_processor_device(
 [[nodiscard]] gui::UiId
 discovered_processor_id(gui::UiId panel,
                         const topology::HardwareDiscoveredProcessor &found) noexcept {
-  return mix(panel, found.address,
+  return gui::ui_id(panel, found.address,
              0x50524f00U + static_cast<core::u64>(found.protocol));
 }
 
@@ -2184,7 +2172,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         selection_.kind == HardwareSelectionKind::Device
             ? std::string_view{"REMOVE DEVICE"}
             : std::string_view{"DISCONNECT CABLE"};
-    if (ctx.button(mix(id_, "hardware.remove"), remove_bounds, label)) {
+    if (ctx.button(gui::ui_id(id_, "hardware.remove"), remove_bounds, label)) {
       frame.remove = HardwareDeleteRequest{selection_};
     }
   }
@@ -2417,7 +2405,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       continue;
     }
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, "hardware.palette", index), item);
+        ctx.grab(gui::ui_id(id_, "hardware.palette", index), item);
     ctx.rounded(item,
                 interaction.held
                     ? ctx.theme().selection
@@ -2480,7 +2468,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               ctx.theme().text_muted);
     double changed_port{};
     if (settings_numbers_.draw(
-            ctx, mix(id_, "hardware.settings.control-port"),
+            ctx, gui::ui_id(id_, "hardware.settings.control-port"),
             layout.control_port.field, {},
             static_cast<double>(map.control.base_port), 1.0, changed_port, 0)) {
       const auto rounded = static_cast<core::i64>(std::llround(std::clamp(
@@ -2512,7 +2500,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       double edited{};
       if (!canvas_numbers_.draw(
               ctx,
-              mix(id_, height ? "hardware.settings.canvas-height"
+              gui::ui_id(id_, height ? "hardware.settings.canvas-height"
                               : "hardware.settings.canvas-width"),
               row.field, "px", static_cast<double>(current), 1.0, edited, 0)) {
         return;
@@ -2553,7 +2541,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (!fits(button)) {
         return false;
       }
-      const gui::Interaction interaction = ctx.grab(mix(id_, suffix), button);
+      const gui::Interaction interaction = ctx.grab(gui::ui_id(id_, suffix), button);
       const gui::UiColor base = emphasised
                                     ? scale(ctx.theme().selection, 0.9F)
                                     : ctx.theme().widget;
@@ -2592,7 +2580,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       ctx.label(row.label, label, ctx.theme().text_muted);
       double edited_value{};
-      if (!sync_numbers_.draw(ctx, mix(id_, suffix), row.field, {}, value, 1.0,
+      if (!sync_numbers_.draw(ctx, gui::ui_id(id_, suffix), row.field, {}, value, 1.0,
                               edited_value, 0)) {
         return false;
       }
@@ -2627,7 +2615,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         if (fits(row.field)) {
           ctx.label(row.label, "Refresh", ctx.theme().text_muted);
           double typed{};
-          if (sync_numbers_.draw(ctx, mix(id_, "hardware.sync.refresh"),
+          if (sync_numbers_.draw(ctx, gui::ui_id(id_, "hardware.sync.refresh"),
                                  row.field, {},
                                  static_cast<double>(millihertz) / 1000.0,
                                  0.01, typed,
@@ -2872,7 +2860,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::Rect hit{point.x - port_hit_radius, point.y - port_hit_radius,
                           port_hit_radius * 2.0F, port_hit_radius * 2.0F};
       const gui::Interaction interaction = ctx.grab(
-          mix(id_, "hardware.port", original.node.value() * 64U + port.index),
+          gui::ui_id(id_, "hardware.port", original.node.value() * 64U + port.index),
           hit);
       const topology::HardwareEndpoint endpoint{original.node, port.index};
       if (port.direction == topology::HardwarePortDirection::Output) {
@@ -2950,7 +2938,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::Rect device_bounds =
         presented_device_bounds(projection, device, presentation);
     const gui::Interaction interaction = ctx.grab(
-        mix(id_, "hardware.device", original.node.value()), device_bounds);
+        gui::ui_id(id_, "hardware.device", original.node.value()), device_bounds);
     if (interaction.hovered) {
       hovered_device = original.node;
     }
@@ -2999,7 +2987,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                         2.0F}
             : gui::Rect{};
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, "hardware.link", link.node.value()), hit_bounds);
+        ctx.grab(gui::ui_id(id_, "hardware.link", link.node.value()), hit_bounds);
     if (interaction.clicked) {
       const HardwareSelection chosen{HardwareSelectionKind::Link, link.node};
       selection_ = chosen;
@@ -3254,7 +3242,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       view.bottom() - 21.0F, navigation_width, 17.0F},
             navigation_label, ctx.theme().text_muted);
   if (!map.devices.empty() &&
-      icon_button(ctx, mix(id_, "hardware.frame"),
+      icon_button(ctx, gui::ui_id(id_, "hardware.frame"),
                   gui::Rect{view.right() - navigation_width - 40.0F,
                             view.bottom() - 25.0F, 24.0F, 24.0F},
                   gui::Icon::Fit, "Frame every device")) {
@@ -3335,7 +3323,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::Rect search{strip.right() - search_width - 6.0F,
                              strip.y + 2.0F, search_width,
                              discovery_header_height - 4.0F};
-      if (pill_button(ctx, mix(id_, "hardware.processors.search"), search,
+      if (pill_button(ctx, gui::ui_id(id_, "hardware.processors.search"), search,
                       gui::Icon::Search,
                       discovery.processor_search_running ? "Searching..."
                                                          : "Find processors",
@@ -3385,14 +3373,14 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     gui::Interaction right_interaction{};
     if (can_scroll_left) {
       left_interaction =
-          ctx.grab(mix(id_, "hardware.discovered.left"), left_arrow);
+          ctx.grab(gui::ui_id(id_, "hardware.discovered.left"), left_arrow);
       if (left_interaction.clicked) {
         discovered_scroll_ = std::max(discovered_scroll_ - step, 0.0F);
       }
     }
     if (can_scroll_right) {
       right_interaction =
-          ctx.grab(mix(id_, "hardware.discovered.right"), right_arrow);
+          ctx.grab(gui::ui_id(id_, "hardware.discovered.right"), right_arrow);
       if (right_interaction.clicked) {
         discovered_scroll_ = std::min(discovered_scroll_ + step, max_scroll);
       }
@@ -3405,7 +3393,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       card.x -= discovered_scroll_;
       const core::u64 key = discovered_key(machine);
       const gui::Interaction interaction =
-          ctx.grab(mix(id_, "hardware.discovered", key), card);
+          ctx.grab(gui::ui_id(id_, "hardware.discovered", key), card);
       const DiscoveredStatus status =
           discovered_status(map, discovery, machine);
       if (interaction.pressed) {
@@ -3548,7 +3536,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // the pointer captured: keep reading that capture so its release lands.
     if (!dragged.has_value()) {
       dragged = ctx.grab(
-          mix(id_, "hardware.discovered", discovered_key(discovered_drag_)),
+          gui::ui_id(id_, "hardware.discovered", discovered_key(discovered_drag_)),
           gui::Rect{});
     }
     if (dragged->released) {
@@ -3650,13 +3638,13 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         return form.next(height, gap);
       };
       const gui::UiId name_id =
-          mix(id_, "hardware.details.name", details_node_.value());
+          gui::ui_id(id_, "hardware.details.name", details_node_.value());
       const gui::Rect name_bounds = labelled_bounds("Name");
       if (ctx.text_field(name_id, name_bounds, details_name_)) {
         details_name_dirty_ = true;
       }
       const gui::UiId address_id =
-          mix(id_, "hardware.details.address", details_node_.value());
+          gui::ui_id(id_, "hardware.details.address", details_node_.value());
       const bool render_server =
           selected_device->kind == topology::HardwareDeviceKind::RenderServer;
       const bool processor =
@@ -3665,7 +3653,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         // How the Director reaches it. NovaStar COEX reads the processor's
         // inputs, EDIDs and screens; Generic leaves it a box with cables.
         const gui::Rect protocol_bounds = labelled_bounds("Protocol");
-        if (ctx.button(mix(id_, "hardware.details.protocol",
+        if (ctx.button(gui::ui_id(id_, "hardware.details.protocol",
                            details_node_.value()),
                        protocol_bounds,
                        topology::processor_protocol_name(
@@ -3731,7 +3719,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         const gui::Rect field = labelled_bounds(label);
         double changed{};
         if (!details_numbers_.draw(ctx,
-                                   mix(id_, "hardware.details.number",
+                                   gui::ui_id(id_, "hardware.details.number",
                                        details_node_.value() * 8U + salt),
                                    field, {}, static_cast<double>(value), 1.0,
                                    changed, 0)) {
@@ -3749,7 +3737,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         const gui::Rect field = labelled_bounds(label);
         double changed{};
         if (!details_numbers_.draw(ctx,
-                                   mix(id_, "hardware.details.number",
+                                   gui::ui_id(id_, "hardware.details.number",
                                        details_node_.value() * 8U + salt),
                                    field, {}, static_cast<double>(value), 1.0,
                                    changed, 0)) {
@@ -3770,7 +3758,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           // Whose playhead the Timeline draws beside the editor's.
           const gui::Rect main_bounds = labelled_bounds("Timeline");
           bool main = selected_device->main_node;
-          if (ctx.checkbox(mix(id_, "hardware.details.main-node",
+          if (ctx.checkbox(gui::ui_id(id_, "hardware.details.main-node",
                                details_node_.value()),
                            main_bounds, main, "Main node")) {
             frame.property_edit = HardwarePropertyEdit{
@@ -3851,7 +3839,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               (!current ? "  MISSING"
                         : (mode_matches ? "  READY" : "  MODE MISMATCH"));
           const gui::Rect row = line(22.0F, 2.0F);
-          if (ctx.button(mix(id_, "hardware.binding.select",
+          if (ctx.button(gui::ui_id(id_, "hardware.binding.select",
                              binding->node.value()),
                          row, label)) {
             details_output_binding_ = binding->node;
@@ -3880,7 +3868,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             double changed{};
             if (details_numbers_.draw(
                     ctx,
-                    mix(id_, "hardware.binding.number",
+                    gui::ui_id(id_, "hardware.binding.number",
                         selected_binding->node.value() * 8U + salt),
                     field, {}, static_cast<double>(value), 1.0, changed, 0)) {
               destination = static_cast<core::u32>(std::llround(std::clamp(
@@ -3894,7 +3882,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                               topology::max_hardware_node_index,
                               changed_binding.feed_index);
           const gui::Rect binding_mode = labelled_bounds("Mode");
-          if (ctx.button(mix(id_, "hardware.binding.mode",
+          if (ctx.button(gui::ui_id(id_, "hardware.binding.mode",
                              selected_binding->node.value()),
                          binding_mode,
                          window_mode_label(selected_binding->window_mode))) {
@@ -3917,7 +3905,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                 changed_binding};
           }
           const auto precision_field = labelled_bounds("Precision");
-          if (ctx.button(mix(id_, "hardware.binding.precision", selected_binding->node.value()),
+          if (ctx.button(gui::ui_id(id_, "hardware.binding.precision", selected_binding->node.value()),
               precision_field, selected_binding->output_bit_depth == 10U ? "10-BIT RGB"
                 : selected_binding->output_bit_depth == 16U ? "16-FLOAT LINEAR" : "8-BIT RGB")) {
             changed_binding.output_bit_depth = selected_binding->output_bit_depth == 8U ? 10U
@@ -3937,7 +3925,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             double changed{};
             if (details_numbers_.draw(
                     ctx,
-                    mix(id_, "hardware.binding.number",
+                    gui::ui_id(id_, "hardware.binding.number",
                         selected_binding->node.value() * 8U + 3U),
                     labelled_bounds("Refresh"), {},
                     static_cast<double>(millihertz) / 1000.0, 0.01, changed,
@@ -3957,7 +3945,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           if (target_for(selected_binding->target) == nullptr &&
               replacement != nullptr) {
             const gui::Rect repair = line(22.0F, 3.0F);
-            if (ctx.button(mix(id_, "hardware.binding.repair",
+            if (ctx.button(gui::ui_id(id_, "hardware.binding.repair",
                                selected_binding->node.value()),
                            repair, "REPAIR WITH NEXT ACTIVE OUTPUT")) {
               changed_binding.target = replacement->target;
@@ -3978,7 +3966,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         if (!explicit_output_bindings) {
           const gui::Rect mode_bounds = labelled_bounds("Window");
           if (ctx.button(
-                  mix(id_, "hardware.details.window-mode",
+                  gui::ui_id(id_, "hardware.details.window-mode",
                       details_node_.value()),
                   mode_bounds,
                   window_mode_label(selected_device->window_mode))) {
@@ -4026,7 +4014,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           double changed{};
           if (details_numbers_.draw(
                   ctx,
-                  mix(id_, "hardware.details.number",
+                  gui::ui_id(id_, "hardware.details.number",
                       details_node_.value() * 8U + 2U),
                   labelled_bounds("Refresh"), {},
                   static_cast<double>(millihertz) / 1000.0, 0.01, changed,
@@ -4282,7 +4270,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               topology::format_video_mode(check.width, check.height,
                                           check.refresh_millihertz);
           const gui::Rect button = line(22.0F, 3.0F);
-          if (ctx.button(mix(id_, "hardware.details.edid",
+          if (ctx.button(gui::ui_id(id_, "hardware.details.edid",
                              details_node_.value() * 32U + check.input),
                          button, label)) {
             frame.processor_edid = HardwareProcessorEdidRequest{
@@ -4376,7 +4364,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                 check->edid_writable) {
               static_cast<void>(gui::cut_top(lines, 4.0F));
               const gui::Rect button = gui::cut_top(lines, 22.0F);
-              if (ctx.button(mix(id_, "hardware.link.edid", link->node.value()),
+              if (ctx.button(gui::ui_id(id_, "hardware.link.edid", link->node.value()),
                              button, "MATCH PROCESSOR EDID")) {
                 frame.processor_edid = HardwareProcessorEdidRequest{
                     check->processor, check->input, check->width,
@@ -4405,7 +4393,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             const gui::Rect reset =
                 gui::cut_right(heading, reset_button_width);
             if (reset_button(ctx,
-                             mix(id_, "hardware.link.region.reset",
+                             gui::ui_id(id_, "hardware.link.region.reset",
                                  link->node.value()),
                              reset, "Reset to its share of the output")) {
               frame.link_region_edit =
@@ -4449,7 +4437,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             double changed{};
             if (!link_numbers_.draw(
                     ctx,
-                    mix(id_, "hardware.link.region",
+                    gui::ui_id(id_, "hardware.link.region",
                         link->node.value() * 4U + index),
                     row, {}, static_cast<double>(fields[index].second), 1.0,
                     changed, 0)) {
@@ -4598,10 +4586,10 @@ FeedMappingFrame FeedMappingPanel::draw(
     if (next == surface_details_node_) {
       if (surface != nullptr && surface->name != surface_name_ &&
           !surface_name_dirty_ &&
-          ctx.focus() != mix(id_, "feed.surface.name", next.value())) {
+          ctx.focus() != gui::ui_id(id_, "feed.surface.name", next.value())) {
         surface_name_ = surface->name;
       }
-      const auto camera_field = mix(id_, "feed.surface.camera-inverse", next.value());
+      const auto camera_field = gui::ui_id(id_, "feed.surface.camera-inverse", next.value());
       if (surface != nullptr && surface->color != surface_color_observed_
           && !surface_numbers_.live() && ctx.focus() != camera_field) {
         // Follow undo/redo without reverting a local gesture while its command
@@ -4709,7 +4697,7 @@ FeedMappingFrame FeedMappingPanel::draw(
                 status, ctx.theme().text_muted);
     }
     if (pill_button(
-            ctx, mix(id_, "feed.build"), build, gui::Icon::Map,
+            ctx, gui::ui_id(id_, "feed.build"), build, gui::Icon::Map,
             "Build from hardware",
             cabled ? "Lay out the canvas and the viewports of every cabled "
                      "window from Hardware Map and what its processors "
@@ -4810,7 +4798,7 @@ FeedMappingFrame FeedMappingPanel::draw(
   const bool can_add = canvas.width > 0U && canvas.height > 0U && below_limit;
   const gui::Rect add_bounds = list_column.next(
       feed_add_button_height, feed_add_button_step - feed_add_button_height);
-  if (add_button(mix(id_, "feed.add"), add_bounds,
+  if (add_button(gui::ui_id(id_, "feed.add"), add_bounds,
                  !below_limit
                      ? std::string_view{"VIEWPORT LIMIT"}
                      : (can_add ? std::string_view{"+ ADD VIEWPORT"}
@@ -4906,12 +4894,12 @@ FeedMappingFrame FeedMappingPanel::draw(
     const bool renaming = rename_.editing(map.node.value());
     const gui::Interaction interaction =
         renaming ? gui::Interaction{}
-                 : ctx.grab(mix(id_, "feed.row", map.node.value()),
+                 : ctx.grab(gui::ui_id(id_, "feed.row", map.node.value()),
                             row_content);
     const gui::Interaction duplicate_interaction = ctx.grab(
-        mix(id_, "feed.row.duplicate", map.node.value()), duplicate);
+        gui::ui_id(id_, "feed.row.duplicate", map.node.value()), duplicate);
     const gui::Interaction remove_interaction =
-        ctx.grab(mix(id_, "feed.row.remove", map.node.value()), remove);
+        ctx.grab(gui::ui_id(id_, "feed.row.remove", map.node.value()), remove);
     const bool selected = selected_map_node_ == map.node;
     ctx.panel(row,
               selected ? ctx.theme().selection
@@ -5024,7 +5012,7 @@ FeedMappingFrame FeedMappingPanel::draw(
   const bool can_add_surface =
       scene::valid(canvas) &&
       feed_map.surfaces.size() < output::max_projection_surfaces;
-  if (add_button(mix(id_, "feed.surface.add"),
+  if (add_button(gui::ui_id(id_, "feed.surface.add"),
                  list_column.next(feed_add_button_height,
                              feed_add_button_step - feed_add_button_height),
                  can_add_surface ? std::string_view{"+ ADD SURFACE"}
@@ -5034,7 +5022,7 @@ FeedMappingFrame FeedMappingPanel::draw(
         FeedSurfaceAddRequest{default_surface_name(feed_map.surfaces.size()),
                               default_surface(canvas)};
   }
-  if (add_button(mix(id_, "feed.surface.import-mesh"),
+  if (add_button(gui::ui_id(id_, "feed.surface.import-mesh"),
                  list_column.next(feed_add_button_height,
                              feed_surface_row_step - feed_add_button_height),
                  can_add_surface ? std::string_view{"+ IMPORT UV MESH"}
@@ -5069,17 +5057,17 @@ FeedMappingFrame FeedMappingPanel::draw(
     const gui::Interaction interaction =
         surface.locked || renaming
             ? gui::Interaction{}
-            : ctx.grab(mix(id_, "feed.surface.row", surface.node.value()),
+            : ctx.grab(gui::ui_id(id_, "feed.surface.row", surface.node.value()),
                        row_content);
     const gui::Interaction duplicate_interaction = ctx.grab(
-        mix(id_, "feed.surface.row.duplicate", surface.node.value()),
+        gui::ui_id(id_, "feed.surface.row.duplicate", surface.node.value()),
         duplicate);
     const gui::Interaction lock_interaction = ctx.grab(
-        mix(id_, "feed.surface.row.lock", surface.node.value()), lock);
+        gui::ui_id(id_, "feed.surface.row.lock", surface.node.value()), lock);
     const gui::Interaction remove_interaction =
         surface.locked
             ? gui::Interaction{}
-            : ctx.grab(mix(id_, "feed.surface.row.remove", surface.node.value()),
+            : ctx.grab(gui::ui_id(id_, "feed.surface.row.remove", surface.node.value()),
                        remove);
     const bool selected = selected_surface_node_ == surface.node;
     ctx.panel(row,
@@ -5172,13 +5160,13 @@ FeedMappingFrame FeedMappingPanel::draw(
     const gui::Rect reset = gui::cut_right(heading, reset_button_width);
     ctx.label(heading, "Stage", ctx.theme().text_muted);
     if (stage_.anchor != output::StageAnchor::World &&
-        reset_button(ctx, mix(id_, "feed.stage.anchor.reset"), reset,
+        reset_button(ctx, gui::ui_id(id_, "feed.stage.anchor.reset"), reset,
                      "Reset to fixed in the world")) {
       stage_.anchor = output::StageAnchor::World;
       emit_stage();
     }
     const gui::Rect choice = list_column.next(feed_add_button_height, 4.0F);
-    if (pill_button(ctx, mix(id_, "feed.stage.world"),
+    if (pill_button(ctx, gui::ui_id(id_, "feed.stage.world"),
                     gui::column(choice, 0U, 2U, 3.0F), std::nullopt, "Fixed",
                     "Surfaces stand still in the world and the camera moves "
                     "among them, as in a virtual-production volume",
@@ -5188,7 +5176,7 @@ FeedMappingFrame FeedMappingPanel::draw(
       stage_.anchor = output::StageAnchor::World;
       emit_stage();
     }
-    if (pill_button(ctx, mix(id_, "feed.stage.camera"),
+    if (pill_button(ctx, gui::ui_id(id_, "feed.stage.camera"),
                     gui::column(choice, 1U, 2U, 3.0F), std::nullopt,
                     "Follows camera",
                     "The whole stage travels and turns with the scene camera: "
@@ -5210,7 +5198,7 @@ FeedMappingFrame FeedMappingPanel::draw(
                   "Where the viewer stands in the room, in stage metres. This "
                   "point rides on the scene camera's eye");
       if (stage_.eye != scene::Vec3{} &&
-          reset_button(ctx, mix(id_, "feed.stage.eye.reset"), eye_reset,
+          reset_button(ctx, gui::ui_id(id_, "feed.stage.eye.reset"), eye_reset,
                        "Reset to the stage origin (0, 0, 0)")) {
         stage_.eye = scene::Vec3{};
         emit_stage();
@@ -5223,7 +5211,7 @@ FeedMappingFrame FeedMappingPanel::draw(
       }};
       for (std::size_t axis = 0U; axis < axes.size(); ++axis) {
         double changed{};
-        if (stage_numbers_.draw(ctx, mix(id_, "feed.stage.eye", axis),
+        if (stage_numbers_.draw(ctx, gui::ui_id(id_, "feed.stage.eye", axis),
                                 gui::column(strip, axis, axes.size(), 3.0F),
                                 axes[axis].first,
                                 static_cast<double>(*axes[axis].second), 0.01,
@@ -5326,7 +5314,7 @@ FeedMappingFrame FeedMappingPanel::draw(
       gui::Interaction handle_interaction{};
       if (selected) {
         handle_interaction =
-            ctx.grab(mix(id_, "feed.resize", map.node.value()), handle);
+            ctx.grab(gui::ui_id(id_, "feed.resize", map.node.value()), handle);
         if (handle_interaction.pressed) {
           drag_kind_ = DragKind::Resize;
           drag_node_ = map.node;
@@ -5358,7 +5346,7 @@ FeedMappingFrame FeedMappingPanel::draw(
       }
 
       const gui::Interaction body_interaction =
-          ctx.grab(mix(id_, "feed.rectangle", map.node.value()), rectangle);
+          ctx.grab(gui::ui_id(id_, "feed.rectangle", map.node.value()), rectangle);
       if (body_interaction.pressed) {
         selected_map_node_ = map.node;
         frame.selection = map.node;
@@ -5527,7 +5515,7 @@ FeedMappingFrame FeedMappingPanel::draw(
         const std::string key = std::string{domain} + "." +
                                 std::string{names[index]};
         if (!rectangle_numbers_.draw(
-                ctx, mix(id_, key, selected_map->node.value()),
+                ctx, gui::ui_id(id_, key, selected_map->node.value()),
                 gui::Rect{rectangle_controls.x +
                               static_cast<float>(index) * (field_width + 3.0F),
                           y + 17.0F, field_width, 20.0F},
@@ -5619,7 +5607,7 @@ FeedMappingFrame FeedMappingPanel::draw(
       const gui::Rect canvas_mode =
           has_surfaces ? gui::column(modes, 0U, 2U, field_gap) : modes;
       const gui::Rect physical_mode = gui::column(modes, 1U, 2U, field_gap);
-      if (ctx.button(mix(id_, "feed.mode.canvas", selected_map->node.value()),
+      if (ctx.button(gui::ui_id(id_, "feed.mode.canvas", selected_map->node.value()),
                      canvas_mode, "CANVAS") &&
           selected_map->projection != output::FeedProjection::CanvasSlice) {
         const scene::CanvasRect source =
@@ -5633,7 +5621,7 @@ FeedMappingFrame FeedMappingPanel::draw(
                                source};
       }
       if (has_surfaces &&
-          ctx.button(mix(id_, "feed.mode.physical", selected_map->node.value()),
+          ctx.button(gui::ui_id(id_, "feed.mode.physical", selected_map->node.value()),
                      physical_mode, "PHYSICAL") &&
           selected_map->projection != output::FeedProjection::PlanarSurface) {
         const output::ProjectionSurface *target =
@@ -5686,7 +5674,7 @@ FeedMappingFrame FeedMappingPanel::draw(
           feed_map.surface_for(selected_map->surface);
       const gui::Interaction assignment_interaction =
           assigned != nullptr
-              ? ctx.grab(mix(id_, "feed.surface.choice",
+              ? ctx.grab(gui::ui_id(id_, "feed.surface.choice",
                              selected_map->node.value()),
                          surface_choice)
               : gui::Interaction{};
@@ -5803,16 +5791,16 @@ FeedMappingFrame FeedMappingPanel::draw(
       };
 
       const auto page_fields = field_columns(2U, 7.0F);
-      if (ctx.button(mix(id_, "feed.surface.geometry-page"), page_fields[0], "GEOMETRY")) surface_color_page_ = false;
-      if (ctx.button(mix(id_, "feed.surface.color-page"), page_fields[1], "COLOUR")) surface_color_page_ = true;
-      const gui::UiId name_id = mix(id_, "feed.surface.name", surface_details_node_.value());
-      const gui::UiId camera_id = mix(id_, "feed.surface.camera-inverse", surface_details_node_.value());
+      if (ctx.button(gui::ui_id(id_, "feed.surface.geometry-page"), page_fields[0], "GEOMETRY")) surface_color_page_ = false;
+      if (ctx.button(gui::ui_id(id_, "feed.surface.color-page"), page_fields[1], "COLOUR")) surface_color_page_ = true;
+      const gui::UiId name_id = gui::ui_id(id_, "feed.surface.name", surface_details_node_.value());
+      const gui::UiId camera_id = gui::ui_id(id_, "feed.surface.camera-inverse", surface_details_node_.value());
       if (!surface_color_page_) {
       auto fields = field_columns(3U, 5.0F);
       const gui::Rect planar_shape = fields[0U];
       const gui::Rect arc_shape = fields[1U];
       const gui::Rect mesh_shape = fields[2U];
-      if (ctx.button(mix(id_, "feed.surface.shape.planar",
+      if (ctx.button(gui::ui_id(id_, "feed.surface.shape.planar",
                          surface_details_node_.value()),
                      planar_shape, "FLAT") &&
           surface_shape_ != output::ProjectionSurfaceShape::Planar) {
@@ -5820,13 +5808,13 @@ FeedMappingFrame FeedMappingPanel::draw(
         emit_surface_edit();
       }
       if (ctx.button(
-              mix(id_, "feed.surface.shape.arc", surface_details_node_.value()),
+              gui::ui_id(id_, "feed.surface.shape.arc", surface_details_node_.value()),
               arc_shape, "ARC") &&
           surface_shape_ != output::ProjectionSurfaceShape::HorizontalArc) {
         surface_shape_ = output::ProjectionSurfaceShape::HorizontalArc;
         emit_surface_edit();
       }
-      if (ctx.button(mix(id_, "feed.surface.shape.mesh",
+      if (ctx.button(gui::ui_id(id_, "feed.surface.shape.mesh",
                          surface_details_node_.value()),
                      mesh_shape, "UV MESH") &&
           surface_shape_ != output::ProjectionSurfaceShape::ImportedMesh) {
@@ -5857,15 +5845,15 @@ FeedMappingFrame FeedMappingPanel::draw(
               : std::string_view{"CENTER"},
           3U);
       draw_float(
-          mix(id_, "feed.surface.center.x", surface_details_node_.value()),
+          gui::ui_id(id_, "feed.surface.center.x", surface_details_node_.value()),
           fields[0U], "X", surface_geometry_.center.x, 0.01, -1'000'000.0,
           1'000'000.0, 3, FeedSurfaceTransform::PositionX);
       draw_float(
-          mix(id_, "feed.surface.center.y", surface_details_node_.value()),
+          gui::ui_id(id_, "feed.surface.center.y", surface_details_node_.value()),
           fields[1U], "Y", surface_geometry_.center.y, 0.01, -1'000'000.0,
           1'000'000.0, 3, FeedSurfaceTransform::PositionY);
       draw_float(
-          mix(id_, "feed.surface.center.z", surface_details_node_.value()),
+          gui::ui_id(id_, "feed.surface.center.z", surface_details_node_.value()),
           fields[2U], "Z", surface_geometry_.center.z, 0.01, -1'000'000.0,
           1'000'000.0, 3, FeedSurfaceTransform::PositionZ);
 
@@ -5877,7 +5865,7 @@ FeedMappingFrame FeedMappingPanel::draw(
       double changed_yaw{};
       fields = labelled_columns("YAW", 1U);
       if (surface_numbers_.draw(
-              ctx, mix(id_, "feed.surface.yaw", surface_details_node_.value()),
+              ctx, gui::ui_id(id_, "feed.surface.yaw", surface_details_node_.value()),
               fields[0U], "YAW", yaw_degrees, 0.25, changed_yaw, 1)) {
         output::set_yaw_keeping_pitch(
             surface_geometry_,
@@ -5906,7 +5894,7 @@ FeedMappingFrame FeedMappingPanel::draw(
         const gui::Rect reset = gui::cut_right(pitch_field, reset_button_width);
         static_cast<void>(gui::cut_right(pitch_field, field_gap));
         if (reset_button(ctx,
-                         mix(id_, "feed.surface.pitch.reset",
+                         gui::ui_id(id_, "feed.surface.pitch.reset",
                              surface_details_node_.value()),
                          reset, "Reset to upright (0 degrees)")) {
           set_pitch(0.0);
@@ -5915,7 +5903,7 @@ FeedMappingFrame FeedMappingPanel::draw(
       double changed_pitch{};
       if (surface_numbers_.draw(
               ctx,
-              mix(id_, "feed.surface.pitch", surface_details_node_.value()),
+              gui::ui_id(id_, "feed.surface.pitch", surface_details_node_.value()),
               pitch_field, "PITCH", pitch_degrees, 0.25, changed_pitch, 1)) {
         set_pitch(std::clamp(changed_pitch, -180.0, 180.0));
       }
@@ -5927,7 +5915,7 @@ FeedMappingFrame FeedMappingPanel::draw(
         double changed_bend{};
         if (surface_numbers_.draw(
                 ctx,
-                mix(id_, "feed.surface.arc", surface_details_node_.value()),
+                gui::ui_id(id_, "feed.surface.arc", surface_details_node_.value()),
                 fields[0U], "DEG", bend_degrees, 0.25, changed_bend, 1)) {
           changed_bend = std::clamp(changed_bend, -179.0, 179.0);
           if (std::abs(changed_bend) < 0.1) {
@@ -5940,7 +5928,7 @@ FeedMappingFrame FeedMappingPanel::draw(
         double changed_columns{};
         if (surface_numbers_.draw(
                 ctx,
-                mix(id_, "feed.surface.columns", surface_details_node_.value()),
+                gui::ui_id(id_, "feed.surface.columns", surface_details_node_.value()),
                 fields[1U], "COL", static_cast<double>(surface_mesh_columns_),
                 1.0, changed_columns, 0)) {
           surface_mesh_columns_ =
@@ -5958,7 +5946,7 @@ FeedMappingFrame FeedMappingPanel::draw(
         ctx.label(details_column.next(16.0F, 0.0F), mesh_status,
                   surface_mesh_source_.empty() ? ctx.theme().warning
                                                : ctx.theme().text_muted);
-        if (ctx.button(mix(id_, "feed.surface.mesh.browse",
+        if (ctx.button(gui::ui_id(id_, "feed.surface.mesh.browse",
                            surface_details_node_.value()),
                        details_column.next(field_height, 5.0F),
                        surface_mesh_source_.empty() ? "CHOOSE UV MESH"
@@ -5986,7 +5974,7 @@ FeedMappingFrame FeedMappingPanel::draw(
         fields = labelled_columns("SCALE", 1U);
         double changed_scale{};
         if (surface_numbers_.draw(ctx,
-                                  mix(id_, "feed.surface.mesh.scale",
+                                  gui::ui_id(id_, "feed.surface.mesh.scale",
                                       surface_details_node_.value()),
                                   fields[0U], "S",
                                   static_cast<double>(surface_mesh_scale_),
@@ -6003,11 +5991,11 @@ FeedMappingFrame FeedMappingPanel::draw(
       if (surface_shape_ != output::ProjectionSurfaceShape::ImportedMesh) {
         fields = labelled_columns("SIZE", 2U);
         draw_float(
-            mix(id_, "feed.surface.width", surface_details_node_.value()),
+            gui::ui_id(id_, "feed.surface.width", surface_details_node_.value()),
             fields[0U], "W", surface_geometry_.width, 0.01, 0.01, 1'000'000.0,
             3);
         draw_float(
-            mix(id_, "feed.surface.height", surface_details_node_.value()),
+            gui::ui_id(id_, "feed.surface.height", surface_details_node_.value()),
             fields[1U], "H", surface_geometry_.height, 0.01, 0.01, 1'000'000.0,
             3);
       } else {
@@ -6030,14 +6018,14 @@ FeedMappingFrame FeedMappingPanel::draw(
         emit_surface_edit();
       };
       draw_raster(
-          mix(id_, "feed.surface.raster.width", surface_details_node_.value()),
+          gui::ui_id(id_, "feed.surface.raster.width", surface_details_node_.value()),
           fields[0U], "W", surface_geometry_.raster.width);
       draw_raster(
-          mix(id_, "feed.surface.raster.height", surface_details_node_.value()),
+          gui::ui_id(id_, "feed.surface.raster.height", surface_details_node_.value()),
           fields[1U], "H", surface_geometry_.raster.height);
 
       } else {
-        bool changed = ctx.checkbox(mix(id_, "feed.surface.color-enabled", surface_details_node_.value()),
+        bool changed = ctx.checkbox(gui::ui_id(id_, "feed.surface.color-enabled", surface_details_node_.value()),
             details_column.next(24.0F, 8.0F), surface_color_.enabled,
             "Enable compensation");
         ctx.label(details_column.next(20.0F, 4.0F), "WALL PRIMARIES (LINEAR)",
@@ -6048,7 +6036,7 @@ FeedMappingFrame FeedMappingPanel::draw(
           for (std::size_t column = 0; column < 3U; ++column) {
             const std::size_t index = row * 3U + column;
             double value{};
-            if (surface_numbers_.draw(ctx, mix(id_, "feed.surface.primary", surface_details_node_.value() * 9U + index),
+            if (surface_numbers_.draw(ctx, gui::ui_id(id_, "feed.surface.primary", surface_details_node_.value() * 9U + index),
                 cells[column], {}, surface_color_.primaries[index], 0.001, value, 4)) {
               surface_color_.primaries[index] = static_cast<float>(std::clamp(value, -16.0, 16.0)); changed = true;
             }

@@ -58,10 +58,6 @@ public:
     // synchronization beyond a relaxed load.
     [[nodiscard]] core::u64 publications() const noexcept;
     [[nodiscard]] core::u64 refusals() const noexcept;
-    // Reads that gave up because the writer was mid-publish every time. A
-    // nonzero value on a settled stage means the tracker thread is publishing
-    // far faster than the frame rate, not that anything is wrong.
-    [[nodiscard]] core::u64 contended_samples() const noexcept;
 
 private:
     // Even means settled, odd means a publish is in progress.
@@ -69,7 +65,6 @@ private:
     TrackedPose pose_{};
     core::u64 publications_{};
     std::atomic<core::u64> refusals_{0U};
-    mutable std::atomic<core::u64> contended_{0U};
 };
 
 } // namespace mediaserver::track

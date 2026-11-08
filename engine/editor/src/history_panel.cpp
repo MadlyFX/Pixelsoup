@@ -20,18 +20,6 @@ constexpr float chip_icon = 22.0F;
 // How long an on-air jump waits for its second click.
 constexpr double arm_seconds = 4.0;
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
-                            core::u64 index = 0U) noexcept {
-  core::u64 hash = base ^ 0xC2B2AE3D27D4EB4FULL;
-  for (const char c : name) {
-    hash ^= static_cast<core::u8>(c);
-    hash *= 1099511628211ULL;
-  }
-  hash ^= index + 0x9E3779B9ULL;
-  hash *= 1099511628211ULL;
-  return hash;
-}
-
 [[nodiscard]] gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
   color.a = opacity;
   return color;
@@ -128,7 +116,7 @@ HistoryPanelFrame HistoryPanel::draw(gui::UiContext &ctx,
   };
 
   // --- Put the strip away; the status bar offers it back.
-  if (history_toggle(ctx, mix(id_, "hide"), row_slot(area, chip_height),
+  if (history_toggle(ctx, gui::ui_id(id_, "hide"), row_slot(area, chip_height),
                      true)) {
     frame.hide = true;
   }
@@ -150,7 +138,7 @@ HistoryPanelFrame HistoryPanel::draw(gui::UiContext &ctx,
             ? "Showing the " + std::string{name} +
                   " history because you last edited there. Click to pin it"
             : "Show the " + std::string{name} + " history";
-    if (pill_button(ctx, mix(id_, "context", static_cast<core::u64>(option)),
+    if (pill_button(ctx, gui::ui_id(id_, "context", static_cast<core::u64>(option)),
                     button, std::nullopt, name, tip, ButtonTone::Quiet, true,
                     option == context)) {
       pinned_ = pinned_here ? std::nullopt : std::optional{option};
@@ -165,13 +153,13 @@ HistoryPanelFrame HistoryPanel::draw(gui::UiContext &ctx,
   // --- Step back and forward, the same as Ctrl+Z and Ctrl+Shift+Z.
   const bool can_undo = applied > 0U;
   const bool can_redo = applied < history.steps.size();
-  if (icon_button(ctx, mix(id_, "undo"), row_slot(area, chip_height),
+  if (icon_button(ctx, gui::ui_id(id_, "undo"), row_slot(area, chip_height),
                   gui::Icon::StepBack, "Undo", false, can_undo) &&
       can_undo) {
     frame.request = HistoryRequest{HistoryAction::Undo, context, 0U, 0U, 1U};
   }
   static_cast<void>(gui::cut_left(area, 2.0F));
-  if (icon_button(ctx, mix(id_, "redo"), row_slot(area, chip_height),
+  if (icon_button(ctx, gui::ui_id(id_, "redo"), row_slot(area, chip_height),
                   gui::Icon::StepForward, "Redo", false, can_redo) &&
       can_redo) {
     frame.request = HistoryRequest{HistoryAction::Redo, context, 0U, 0U, 1U};
@@ -236,7 +224,7 @@ HistoryPanelFrame HistoryPanel::draw(gui::UiContext &ctx,
     const auto thumb_at = [&] {
       return strip.x + scroll_ / max_scroll * travel;
     };
-    const gui::Interaction it = ctx.grab(mix(id_, "scrollbar"), hit);
+    const gui::Interaction it = ctx.grab(gui::ui_id(id_, "scrollbar"), hit);
     if (it.pressed) {
       const float thumb_x = thumb_at();
       const bool on_thumb = ctx.pointer_x() >= thumb_x &&
@@ -276,7 +264,7 @@ HistoryPanelFrame HistoryPanel::draw(gui::UiContext &ctx,
     const bool armed_here = armed_.has_value() && *armed_ == jump;
 
     const gui::Interaction it = ctx.grab(
-        mix(id_, "step", is_step ? history.steps[*chip.index].step : 0U), box);
+        gui::ui_id(id_, "step", is_step ? history.steps[*chip.index].step : 0U), box);
     if (jump.steps > 0U) {
       ctx.cursor_for(it, gui::Cursor::Hand);
     }
@@ -360,7 +348,7 @@ HistoryPanelFrame HistoryPanel::draw(gui::UiContext &ctx,
   // The marker: after the current step, where the next edit will go.
   const float marker_x =
       strip.x + current.x + current.width + chip_gap * 0.5F - scroll_;
-  const float eased = ctx.ease(mix(id_, "marker"), marker_x, 1.5F);
+  const float eased = ctx.ease(gui::ui_id(id_, "marker"), marker_x, 1.5F);
   // Kept to the chips' height so it stops short of the scroll bar.
   ctx.panel(gui::Rect{eased - 1.0F, row_y - 1.0F, 2.0F, chip_height + 2.0F},
            theme.accent);

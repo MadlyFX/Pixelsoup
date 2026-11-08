@@ -578,7 +578,6 @@ public:
         return delivered_cursor_;
     }
     [[nodiscard]] std::size_t inflight_frames() const noexcept;
-    [[nodiscard]] core::u64 inflight_bytes() const noexcept;
     [[nodiscard]] std::size_t pending_frame_acknowledgements() const noexcept;
     [[nodiscard]] std::size_t pending_control_messages() const noexcept;
     [[nodiscard]] std::size_t permitted_frames() const noexcept;

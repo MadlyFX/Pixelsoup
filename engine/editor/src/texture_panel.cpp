@@ -11,11 +11,6 @@
 namespace mediaserver::editor {
 namespace {
 
-[[nodiscard]] gui::UiId mix(gui::UiId base, core::u64 value) noexcept {
-    base ^= value + 0x9E3779B97F4A7C15ULL + (base << 6U) + (base >> 2U);
-    return base;
-}
-
 } // namespace
 
 TexturePanelFrame TexturePanel::draw(
@@ -95,7 +90,7 @@ TexturePanelFrame TexturePanel::draw(
                                  const auto& assign) {
         const gui::FormRow row = form.row();
         ctx.label(row.label, label, ctx.theme().text_muted);
-        const gui::UiId field_id = mix(id_, property);
+        const gui::UiId field_id = gui::ui_id(id_, property);
         double authored{};
         NumberFieldEdit edit{};
         if (fields_.draw(ctx, field_id, row.field, {}, value, speed, authored,
@@ -134,7 +129,7 @@ TexturePanelFrame TexturePanel::draw(
     ctx.label(mode_row.label, "CHANNEL MODE", ctx.theme().text_muted);
     const gui::Rect mode_button = mode_row.field;
     const gui::Interaction mode_it =
-        ctx.grab(mix(id_, 5U), mode_button);
+        ctx.grab(gui::ui_id(id_, 5U), mode_button);
     ctx.panel(mode_button, mode_it.hovered ? ctx.theme().widget_hover
                                            : ctx.theme().widget);
     ctx.label(mode_button,
@@ -146,18 +141,18 @@ TexturePanelFrame TexturePanel::draw(
         changed.mode = parameters.mode == scene::FilmGrainMode::RGB
             ? scene::FilmGrainMode::Monochrome
             : scene::FilmGrainMode::RGB;
-        emit(changed, mix(id_, 5U), 5U, nullptr);
+        emit(changed, gui::ui_id(id_, 5U), 5U, nullptr);
     }
 
     const gui::Rect reset = form.control();
-    const gui::Interaction reset_it = ctx.grab(mix(id_, 6U), reset);
+    const gui::Interaction reset_it = ctx.grab(gui::ui_id(id_, 6U), reset);
     ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
                                       : ctx.theme().widget);
     ctx.label(reset, "RESET FILM GRAIN",
               reset_it.hovered ? ctx.theme().warning
                                : ctx.theme().text_muted);
     if (reset_it.clicked) {
-        emit(scene::FilmGrainParameters{}, mix(id_, 6U), 6U, nullptr);
+        emit(scene::FilmGrainParameters{}, gui::ui_id(id_, 6U), 6U, nullptr);
     }
 
     frame.editing = fields_.live();

@@ -162,16 +162,6 @@ core::u32 HardwareMapCounters::devices_over_capacity() const noexcept {
     return devices > max_hardware_devices ? devices - max_hardware_devices : 0U;
 }
 
-core::u32 HardwareMapCounters::links_over_capacity() const noexcept {
-    return links > max_hardware_links ? links - max_hardware_links : 0U;
-}
-
-core::u32 HardwareMapCounters::output_bindings_over_capacity() const noexcept {
-    return output_bindings > max_hardware_output_bindings
-        ? output_bindings - max_hardware_output_bindings
-        : 0U;
-}
-
 void HardwareMapModel::forget(doc::NodeId id) noexcept {
     devices_.erase(id);
     links_.erase(id);
