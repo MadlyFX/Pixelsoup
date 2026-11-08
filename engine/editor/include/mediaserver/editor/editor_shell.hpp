@@ -1172,6 +1172,8 @@ public:
 
 private:
   struct Impl;
+  // One frame() call's working state and phases; see src/shell/shell_frame.hpp.
+  struct Frame;
 
   explicit EditorShell(std::unique_ptr<Impl> impl) noexcept;
 

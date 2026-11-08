@@ -1,4 +1,4 @@
-#include <mediaserver/editor/workspace_panels.hpp>
+#include <mediaserver/editor/scene_settings_panel.hpp>
 
 #include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/gui/form_layout.hpp>
@@ -28,6 +28,59 @@ double sample(const scene::ChannelKeyframes &channel, core::u64 frame,
   return value.has_value() && std::isfinite(*value) ? *value : base;
 }
 } // namespace
+
+std::string_view environment_status_text(
+    EnvironmentStatus status) noexcept {
+  switch (status) {
+  case EnvironmentStatus::NotAuthored:
+    return "Empty: the two-colour hemisphere lights the scene.";
+  case EnvironmentStatus::Loading:
+    return "Reading the map.";
+  case EnvironmentStatus::Failed:
+    return "Could not read the HDR/EXR image or its colour-space tag.";
+  case EnvironmentStatus::BackendUnsupported:
+    // Names the selected backend rather than the authored one, because the
+    // usual reason this appears is a project that authored Advanced and had it
+    // refused - most often for requesting a pass that does not exist yet, which
+    // the Renderer page offers to clear.
+    return "Ignored: the Advanced renderer is not running for this project.";
+  case EnvironmentStatus::NoStage:
+    return "This scene has no stage node, so there is nowhere to store it.";
+  case EnvironmentStatus::Ready:
+    return "Lighting the scene and drawing as the sky.";
+  }
+  return "Empty: the two-colour hemisphere lights the scene.";
+}
+
+std::string_view color_status_text(ColorStatus status) noexcept {
+  switch (status) {
+  case ColorStatus::Loading:
+    return "Baking the table on the residency worker.";
+  case ColorStatus::Ready:
+    return "Baked and live on the output.";
+  case ColorStatus::Failed:
+    return "Look could not be read. 3D .cube only; the transform is live "
+           "without it.";
+  case ColorStatus::BackendUnsupported:
+    return "Ignored: colour is applied on the scene-linear path, and this "
+           "project is running Basic rather than Advanced.";
+  }
+  return "Baked and live on the output.";
+}
+
+ColorStatus color_status_for(render::DisplayLutState state) noexcept {
+  switch (state) {
+  case render::DisplayLutState::Ready:
+    return ColorStatus::Ready;
+  case render::DisplayLutState::Failed:
+    return ColorStatus::Failed;
+  case render::DisplayLutState::Unseen:
+  case render::DisplayLutState::Pending:
+  case render::DisplayLutState::Busy:
+    return ColorStatus::Loading;
+  }
+  return ColorStatus::Loading;
+}
 
 SceneSettingsFrame SceneSettingsPanel::draw(
     gui::UiContext &ctx, const gui::Rect &bounds, SceneSettingsTarget target,

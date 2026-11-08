@@ -60,7 +60,7 @@ suggests. They also explain several of the constraints below.
   `frame_media_cache`. Stage's views 2-4 create their
   `CompositorSceneExecutor` and `OutputTransform` lazily at 64x64 with
   `stage_view_limits()` and then follow their pane size
-  (`engine/editor/src/editor_shell.cpp`). A second scene device would switch
+  (`engine/editor/src/shell/shell_frame_start.cpp`). A second scene device would switch
   off decoding onto the renderer's device
   ([media playback](docs/media-playback.md#decoding-onto-the-renderers-device)).
   Executors are expensive in VRAM: one measured about 1.7 GB at 1080p on
