@@ -14,9 +14,7 @@
 
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/assets/derivative_profile_id.hpp>
-#if defined(MEDIASERVER_HAS_GUI)
 #include <mediaserver/editor/asset_viewer.hpp>
-#endif
 #include <mediaserver/core/asset_publication.hpp>
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/doc/ids.hpp>
@@ -262,9 +260,7 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                 if (keep.value()) scene_frame.publication_retained_models=scene_model.evaluate(keep,time,show_loop).models;
             }
         }
-#if defined(MEDIASERVER_HAS_GUI)
         scene_frame.publication_verified=director_publication_verification.observe(document,scene_frame.id);
-#endif
         // The same scene at the frame the loop is leaving, as every node
         // evaluates it. A switcher dissolve owns the mix while one runs.
         if (!switcher_progress.active) {
@@ -301,7 +297,6 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
         // panel keep the frames above.
         tick.stage_view_frame.reset();
         tick.stage_view_caption.clear();
-#if defined(MEDIASERVER_HAS_GUI)
         if (options.edit &&
             (stage_edit_request.has_value() || stage_solo_request.has_value())) {
             const core::u64 shown = stage_edit_request.has_value()
@@ -338,7 +333,6 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             edited.asset_cohort_required =
                 stage_scene_frame.asset_cohort_required;
         }
-#endif
 
         // Camera tracking, at the frame boundary and not in the UI loop.
         //
@@ -565,7 +559,6 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                 stage_media_registry, director_asset_availability,
                 repeated));
         }
-#if defined(MEDIASERVER_HAS_GUI)
         // The Asset Viewer's one clip, finished the way the Stage is: its
         // media resolved to the file this machine decodes, by the asset's
         // own proxy policy. An asset nothing in the project uses has no
@@ -634,7 +627,6 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                 asset_viewer_frame = std::move(viewer);
             }
         }
-#endif
         report_proxy_status_changes("Director", observations,
                                     director_proxy_observations);
         director_proxy_observations = std::move(observations);

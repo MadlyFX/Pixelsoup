@@ -2,9 +2,7 @@
 
 #include <mediaserver/core/render_conformance.hpp>
 
-#if defined(MEDIASERVER_HAS_GUI)
 #include <mediaserver/ui/sdl_presenter.hpp>
-#endif
 
 #include <charconv>
 #include <iostream>
@@ -276,7 +274,6 @@ make_presenter(const PlaybackOptions &options, const std::string &title,
                bool accepts_commands,
                const PresenterWindowSettings *applied_window) {
     if (options.windowed) {
-#if defined(MEDIASERVER_HAS_GUI)
         ui::SdlPresenterConfig config{};
         config.title = title;
         config.width = options.surface_width;
@@ -317,14 +314,6 @@ make_presenter(const PlaybackOptions &options, const std::string &title,
             return nullptr;
         }
         return std::move(created).value();
-#else
-        static_cast<void>(title);
-        static_cast<void>(accepts_commands);
-        static_cast<void>(applied_window);
-        std::cerr << "this build has no window output; configure with "
-                     "MEDIASERVER_ENABLE_GUI=ON and the vcpkg gui feature\n";
-        return nullptr;
-#endif
     }
 
     auto created = show::HeadlessPresenter::create(options.surface_width,

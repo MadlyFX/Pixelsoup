@@ -7,9 +7,7 @@
 #include <mediaserver/assets/derivative_cache.hpp>
 #include <mediaserver/assets/derivative_profile_id.hpp>
 
-#if defined(MEDIASERVER_HAS_GUI)
 #include <mediaserver/persist/settings.hpp>
-#endif
 
 #include <iterator>
 #include <span>
@@ -302,8 +300,6 @@ resolve_scene_proxies(ProxyPlaybackService &playback, scene::Scene &frame,
     return ready;
 }
 
-#if defined(MEDIASERVER_HAS_GUI)
-
 [[nodiscard]] net::RuntimeProxyState
 runtime_proxy_state(ProxyAssetRuntimeState state) noexcept {
     switch (state) {
@@ -522,7 +518,5 @@ void project_output_node_media_runtime(
         destination.push_back(std::move(projected));
     }
 }
-
-#endif
 
 } // namespace mediaserver::app
