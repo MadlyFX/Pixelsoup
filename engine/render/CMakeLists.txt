@@ -158,11 +158,18 @@ if(BUILD_TESTING)
         MediaServer::Show MediaServer::Persist MediaServer::Assets MediaServer::Cmd)
     mediaserver_set_project_options(mediaserver_linked_qualification_tests)
     set_target_properties(mediaserver_linked_qualification_tests PROPERTIES FOLDER "tests")
+    # --gpu runs every scenario of the plain run and then renders the published
+    # revision in the Advanced D3D12 renderer, so it is the one entry where
+    # that renderer exists.
+    if(WIN32)
+        set(_linked_qualification_mode --gpu)
+    else()
+        set(_linked_qualification_mode)
+    endif()
     add_test(NAME mediaserver.linked_qualification COMMAND mediaserver_linked_qualification_tests
-        "${PROJECT_SOURCE_DIR}/tests/fixtures/blender-scene-link" "${CMAKE_CURRENT_BINARY_DIR}/qualification-evidence")
-    add_test(NAME mediaserver.linked_qualification_gpu COMMAND mediaserver_linked_qualification_tests
-        "${PROJECT_SOURCE_DIR}/tests/fixtures/blender-scene-link" "${CMAKE_CURRENT_BINARY_DIR}/qualification-gpu-evidence" --gpu)
-    set_tests_properties(mediaserver.linked_qualification mediaserver.linked_qualification_gpu PROPERTIES TIMEOUT 300)
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/blender-scene-link" "${CMAKE_CURRENT_BINARY_DIR}/qualification-evidence"
+        ${_linked_qualification_mode})
+    set_tests_properties(mediaserver.linked_qualification PROPERTIES TIMEOUT 300)
     add_executable(mediaserver_blender_publisher_host tests/blender_publisher_host.cpp)
     target_link_libraries(mediaserver_blender_publisher_host PRIVATE MediaServer::Render MediaServer::Cmd MediaServer::Persist)
     mediaserver_set_project_options(mediaserver_blender_publisher_host)

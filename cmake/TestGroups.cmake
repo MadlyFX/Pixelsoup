@@ -17,7 +17,6 @@
 # (out/build/<preset>/Testing/Temporary/CTestCostData.txt records the times).
 set(MEDIASERVER_SLOW_TESTS
     mediaserver.linked_qualification
-    mediaserver.linked_qualification_gpu
     mediaserver.net_resume_session
     mediaserver.render_compositor_scene
     mediaserver.render_integration
