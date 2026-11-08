@@ -830,6 +830,36 @@ private:
     // and so does any cycle.
     void order_composites_by_planes(const SceneRenderView& view) noexcept;
 
+    // One render() recording as an object, and its phases in the order
+    // render() runs them; each returns false to refuse the recording.
+    // See src/scene_renderer_frame.hpp.
+    struct Frame;
+    [[nodiscard]] bool begin_recording(Frame& f);
+    [[nodiscard]] bool resolve_view(Frame& f);
+    [[nodiscard]] bool record_planar_reflection(Frame& f);
+    [[nodiscard]] bool prepare_texture_streaming(Frame& f);
+    [[nodiscard]] bool upload_material_fallbacks(Frame& f);
+    [[nodiscard]] bool prepare_light_assets(Frame& f);
+    [[nodiscard]] bool prepare_baked_lighting(Frame& f);
+    [[nodiscard]] bool prepare_environment(Frame& f);
+    [[nodiscard]] bool begin_history(Frame& f);
+    [[nodiscard]] bool gather_instances(Frame& f);
+    [[nodiscard]] bool gather_models(Frame& f);
+    [[nodiscard]] bool build_opaque_batches(Frame& f);
+    [[nodiscard]] bool gather_media(Frame& f);
+    [[nodiscard]] bool order_composites(Frame& f);
+    [[nodiscard]] bool pack_lights(Frame& f);
+    [[nodiscard]] bool prepare_view_constants(Frame& f);
+    [[nodiscard]] bool fit_shadow_cascades(Frame& f);
+    [[nodiscard]] bool prepare_scene_constants(Frame& f);
+    [[nodiscard]] bool prepare_bindings(Frame& f);
+    [[nodiscard]] bool record_shadow_maps(Frame& f);
+    [[nodiscard]] bool record_auxiliary_passes(Frame& f);
+    [[nodiscard]] bool record_lit_pass(Frame& f);
+    [[nodiscard]] bool record_composites(Frame& f);
+    [[nodiscard]] bool record_particles_and_coverage(Frame& f);
+    [[nodiscard]] bool commit_history(Frame& f);
+
     struct InlineProgramRange final {
         core::u32 first{};
         core::u32 count{};

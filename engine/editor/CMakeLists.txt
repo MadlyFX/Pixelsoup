@@ -63,7 +63,17 @@ add_library(mediaserver_editor STATIC
     src/preferences_panel.cpp
     src/project_settings_panel.cpp
     src/scene_settings_panel.cpp
-    src/mapping_panels.cpp
+    src/mapping/feed_map_support.cpp
+    src/mapping/feed_mapping_details.cpp
+    src/mapping/feed_mapping_lists.cpp
+    src/mapping/feed_mapping_panel.cpp
+    src/mapping/feed_mapping_work_area.cpp
+    src/mapping/hardware_map_support.cpp
+    src/mapping/hardware_mapping_details.cpp
+    src/mapping/hardware_mapping_discovery.cpp
+    src/mapping/hardware_mapping_palette.cpp
+    src/mapping/hardware_mapping_panel.cpp
+    src/mapping/hardware_mapping_stage.cpp
     src/hardware_sprites.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/generated/hardware_sprites_png.cpp"
 )
@@ -688,7 +698,17 @@ if(BUILD_TESTING)
 
     add_executable(mediaserver_editor_mapping_tests
         tests/mapping_panels_tests.cpp
-        src/mapping_panels.cpp
+        src/mapping/feed_map_support.cpp
+        src/mapping/feed_mapping_details.cpp
+        src/mapping/feed_mapping_lists.cpp
+        src/mapping/feed_mapping_panel.cpp
+        src/mapping/feed_mapping_work_area.cpp
+        src/mapping/hardware_map_support.cpp
+        src/mapping/hardware_mapping_details.cpp
+        src/mapping/hardware_mapping_discovery.cpp
+        src/mapping/hardware_mapping_palette.cpp
+        src/mapping/hardware_mapping_panel.cpp
+        src/mapping/hardware_mapping_stage.cpp
         src/hardware_sprites.cpp
         "${CMAKE_CURRENT_BINARY_DIR}/generated/hardware_sprites_png.cpp"
         src/number_field.cpp

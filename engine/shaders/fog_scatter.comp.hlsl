@@ -18,7 +18,7 @@
 
 #include "fog_common.hlsli"
 
-// Matches `GpuLight` in scene_renderer.cpp and `Light` in scene.frag.hlsl.
+// Matches `GpuLight` in scene_renderer_internal.hpp and `Light` in scene.frag.hlsl.
 #include "light.hlsli"
 #include "ies.hlsli"
 #include "area_shape.hlsli"

@@ -19,6 +19,14 @@ add_library(mediaserver_render STATIC
     src/ies_cache.cpp
     src/ltc_asset.cpp
     src/scene_renderer.cpp
+    src/scene_renderer_environment.cpp
+    src/scene_renderer_gather.cpp
+    src/scene_renderer_lighting.cpp
+    src/scene_renderer_particles.cpp
+    src/scene_renderer_passes.cpp
+    src/scene_renderer_render.cpp
+    src/scene_renderer_residency.cpp
+    src/scene_renderer_support.cpp
     src/geometry_arena.cpp
     src/geometry_residency.cpp
     src/geometry_visibility.cpp

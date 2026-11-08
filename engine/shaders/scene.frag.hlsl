@@ -618,8 +618,9 @@ float3 apply_inline_effects(
     return colour;
 }
 
-// A Background surface's fill (scene_renderer.cpp: SurfaceFillOp), carried as
-// an inline operation that apply_inline_effects ignores. The ramp is measured
+// A Background surface's fill (scene_renderer_internal.hpp:
+// surface_fill_inline_kind), carried as an inline operation that
+// apply_inline_effects ignores. The ramp is measured
 // on the CPU in the surface's world size, so this only places the pixel and
 // interpolates - the same arithmetic as compositor_merge.frag.hlsl generate().
 // Returns linear colour and straight alpha; white and opaque without a fill.
