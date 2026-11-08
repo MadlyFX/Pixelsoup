@@ -67,7 +67,18 @@ add_library(mediaserver_editor STATIC
     src/history_panel.cpp
     src/operator_widgets.cpp
     src/scene_panel.cpp
-    src/compositor_panel.cpp
+    src/compositor/compositor_support.cpp
+    src/compositor/compositor_panel.cpp
+    src/compositor/compositor_toolbar.cpp
+    src/compositor/compositor_menus.cpp
+    src/compositor/compositor_canvas_input.cpp
+    src/compositor/compositor_node_input.cpp
+    src/compositor/compositor_wire_input.cpp
+    src/compositor/compositor_layout_tools.cpp
+    src/compositor/compositor_graph_draw.cpp
+    src/compositor/compositor_node_draw.cpp
+    src/compositor/compositor_parameters.cpp
+    src/compositor/compositor_overview.cpp
     src/output_monitor_panel.cpp
     src/preferences_panel.cpp
     src/project_settings_panel.cpp

@@ -743,6 +743,28 @@ private:
 
   [[nodiscard]] gui::UiPoint node_size(const compositor::GraphNode &node) const noexcept;
 
+  // One draw as an object, and its phases in the order draw() runs them.
+  // See src/compositor/compositor_frame.hpp.
+  struct Frame;
+  [[nodiscard]] bool begin_frame(Frame &f);
+  void draw_toolbar(Frame &f);
+  void build_menus(Frame &f);
+  [[nodiscard]] bool begin_canvas(Frame &f);
+  void interact_ports(Frame &f);
+  void interact_nodes(Frame &f);
+  void interact_wires(Frame &f);
+  void handle_keyboard(Frame &f);
+  void draw_backdrop(Frame &f);
+  void draw_wires(Frame &f);
+  void draw_nodes(Frame &f);
+  void draw_overlays(Frame &f);
+  void draw_parameters(Frame &f);
+  void draw_add_palette(Frame &f);
+  void draw_node_search(Frame &f);
+  void draw_context_menu(Frame &f);
+  void draw_rename(Frame &f);
+  void finish_frame(Frame &f);
+
   gui::UiId id_{};
   CompositorSelection selection_{};
   std::vector<PendingMove> pending_moves_;
