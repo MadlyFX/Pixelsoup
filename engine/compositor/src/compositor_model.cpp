@@ -541,8 +541,7 @@ read_wire_points(const doc::PropertyMap& properties) {
     GraphNode parsed{};
     parsed.node = node.id;
     parsed.kind = kind;
-    // Zero stays zero: an absent owner is legacy content, resolved against the
-    // default scene when the graph is evaluated rather than guessed here.
+    // Zero is no owner: the object belongs to no scene's graph.
     static_cast<void>(as_node(reader.integer(schema::scene_id, 0),
                               parsed.scene));
     parsed.label = reader.text(schema::label, node_kind_name(kind));
@@ -1053,22 +1052,16 @@ void CompositorModel::apply(const doc::Delta& delta) {
 }
 
 CompositorGraph CompositorModel::evaluate() const {
-    return build(nullptr, doc::NodeId{});
+    return build(nullptr);
 }
 
-CompositorGraph CompositorModel::evaluate(doc::NodeId scene,
-                                          doc::NodeId legacy_owner) const {
-    return build(&scene, legacy_owner);
+CompositorGraph CompositorModel::evaluate(doc::NodeId scene) const {
+    return build(&scene);
 }
 
-CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
-                                       doc::NodeId legacy_owner) const {
+CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene) const {
     const auto in_scope = [&](doc::NodeId owner) noexcept {
-        if (scoped_scene == nullptr) {
-            return true;
-        }
-        return (owner == doc::NodeId{} ? legacy_owner : owner) ==
-            *scoped_scene;
+        return scoped_scene == nullptr || owner == *scoped_scene;
     };
 
     CompositorGraph result{};
@@ -1888,16 +1881,15 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
 
 namespace {
 
-[[nodiscard]] doc::NodeId owner_of(const doc::Node& node,
-                                   doc::NodeId legacy_owner) noexcept {
+[[nodiscard]] doc::NodeId owner_of(const doc::Node& node) noexcept {
     const doc::PropertyValue* const value =
         find(node.properties, schema::scene_id);
     if (value == nullptr) {
-        return legacy_owner;
+        return doc::NodeId{};
     }
     const auto* const whole = std::get_if<std::int64_t>(value);
     if (whole == nullptr || *whole <= 0) {
-        return legacy_owner;
+        return doc::NodeId{};
     }
     return doc::NodeId{static_cast<core::u64>(*whole)};
 }
@@ -1954,8 +1946,7 @@ snapshot_graph_selection(const doc::Root& root,
 
 core::Result<GraphPastePlan, GraphCloneError> plan_paste_graph(
     const doc::Root& root, std::span<const doc::Node> snapshot,
-    doc::NodeId destination, doc::NodeId legacy_owner, float dx, float dy,
-    doc::NodeId first_id) {
+    doc::NodeId destination, float dx, float dy, doc::NodeId first_id) {
     using Result = core::Result<GraphPastePlan, GraphCloneError>;
     constexpr core::u64 max_reference_id =
         static_cast<core::u64>(std::numeric_limits<std::int64_t>::max());
@@ -1974,7 +1965,7 @@ core::Result<GraphPastePlan, GraphCloneError> plan_paste_graph(
              doc::diff(doc::Root{}, root).changes) {
             if (change.after &&
                 change.after->type == schema::scene_layer_type &&
-                owner_of(*change.after, legacy_owner) == destination) {
+                owner_of(*change.after) == destination) {
                 if (const auto source =
                         reference(*change.after, schema::scene_node)) {
                     layered.insert(*source);
@@ -2090,7 +2081,6 @@ core::Result<GraphClonePlan, GraphCloneError> plan_clone_graph(
     const doc::Root& root,
     doc::NodeId source,
     doc::NodeId destination,
-    doc::NodeId legacy_owner,
     std::span<const std::pair<doc::NodeId, doc::NodeId>> element_remap,
     doc::NodeId first_id) {
     using Result = core::Result<GraphClonePlan, GraphCloneError>;
@@ -2115,7 +2105,7 @@ core::Result<GraphClonePlan, GraphCloneError> plan_clone_graph(
         for (const auto& [id, node] : all) {
             if ((!kind_for_type(node.type).has_value() &&
                  node.type != schema::comment_type) ||
-                owner_of(node, legacy_owner) != source) {
+                owner_of(node) != source) {
                 continue;
             }
             selected.insert(id);

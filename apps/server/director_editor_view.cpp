@@ -489,10 +489,6 @@ namespace mediaserver::app {
         std::set<doc::NodeId> listed;
         for (const auto &element : elements) listed.insert(element.node);
         const doc::Delta contents = doc::diff(doc::Root{}, scheduler.projected_document());
-        doc::NodeId default_scene{scene::legacy_scene_id};
-        for (const auto &change : contents.changes) {
-            if (change.after->type == scene::schema::stage_type) { default_scene = change.id; break; }
-        }
         for (const auto &change : contents.changes) {
             const doc::Node &node = *change.after;
             const bool model = node.type == scene::schema::model_type;
@@ -500,7 +496,7 @@ namespace mediaserver::app {
             if ((!model && !particles && node.type != scene::schema::object_type) || listed.contains(change.id)
                 || scene::is_linked_occurrence(node)) continue;
             const auto owner = static_cast<core::u64>(read_transform(node, scene::schema::scene_id, 0));
-            if ((owner != 0U ? doc::NodeId{owner} : default_scene) != scene.id) continue;
+            if (doc::NodeId{owner} != scene.id) continue;
             auto info = read(change.id, model ? editor::ElementKind::Model
                 : particles ? editor::ElementKind::ParticleEffect : editor::ElementKind::Object);
             apply_parent_state(info);

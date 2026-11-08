@@ -338,8 +338,8 @@ using NodeParameters =
 
 struct GraphNode final {
     doc::NodeId node{};
-    // The scene that owns this graph object, exactly as authored. Zero is
-    // legacy content with no owner, which belongs to the default scene.
+    // The scene that owns this graph object, exactly as authored. Zero is no
+    // owner.
     doc::NodeId scene{};
     NodeKind kind{NodeKind::SceneLayer};
     std::string label;

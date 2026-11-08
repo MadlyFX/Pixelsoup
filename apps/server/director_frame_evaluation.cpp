@@ -211,15 +211,6 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                                           input.rate.denominator};
         scene_infos = scene_model.scenes();
         switcher_anchor = show::read_switcher(document);
-        // A graph object authored before graphs were scene-scoped carries
-        // no owner. It used to apply to whatever Program was showing, so
-        // that is the scene it is adopted into - which keeps the wall
-        // looking exactly as it did when the project was saved.
-        const scene::SceneId legacy_graph_owner =
-            switcher_anchor.has_value()
-                ? switcher_anchor->program_scene
-                : (scene_infos.empty() ? scene::SceneId{}
-                                       : scene_infos.front().id);
         if (switcher_anchor.has_value()) {
             switcher_progress = show::derive_switcher_progress(
                 *switcher_anchor, control_frame);
@@ -230,10 +221,10 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             stage_scene_frame =
                 scene_model.evaluate(stage_scene, stage_time);
             program_compositor_graph = compositor_model.evaluate(
-                switcher_anchor->program_scene, legacy_graph_owner);
+                switcher_anchor->program_scene);
             compositor_graph = rehearsal_mode
                                    ? compositor_model.evaluate(
-                                         stage_scene, legacy_graph_owner)
+                                         stage_scene)
                                    : program_compositor_graph;
             if (switcher_progress.active) {
                 transition_from_frame = scene_model.evaluate(
@@ -241,9 +232,9 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                 transition_to_frame = scene_model.evaluate(
                     switcher_progress.to, time, show_loop);
                 transition_from_graph = compositor_model.evaluate(
-                    switcher_progress.from, legacy_graph_owner);
+                    switcher_progress.from);
                 transition_to_graph = compositor_model.evaluate(
-                    switcher_progress.to, legacy_graph_owner);
+                    switcher_progress.to);
                 if (!show::dissolve_canvases_compatible(
                         transition_from_frame.canvas,
                         transition_to_frame.canvas)) {
@@ -255,7 +246,7 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             stage_scene_frame = scene_frame;
             stage_scene = scene_frame.id;
             compositor_graph = compositor_model.evaluate(
-                scene_frame.id, legacy_graph_owner);
+                scene_frame.id);
             program_compositor_graph = compositor_graph;
         }
 
@@ -263,7 +254,7 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             const auto publication_scene=scene::publication::render_scene(document,switcher_anchor->program_scene);
             if (publication_scene != switcher_anchor->program_scene) {
                 scene_frame=scene_model.evaluate(publication_scene,time,show_loop);
-                program_compositor_graph=compositor_model.evaluate(publication_scene,legacy_graph_owner);
+                program_compositor_graph=compositor_model.evaluate(publication_scene);
             }
             if (publication_scene != switcher_anchor->program_scene || !scene_frame.publication_revision.empty()) {
                 const auto keep=publication_scene != switcher_anchor->program_scene ? switcher_anchor->program_scene
@@ -709,9 +700,8 @@ void DirectorShowLoop::evaluate_feed_and_sync(DirectorTick &tick) {
             const scene::SceneId program_scene =
                 switched.has_value()
                     ? switched->program_scene
-                    : (authored_scenes.empty()
-                           ? scene::legacy_scene_id
-                           : authored_scenes.front().id);
+                    : (authored_scenes.empty() ? scene::SceneId{}
+                                               : authored_scenes.front().id);
             try {
                 const auto program_cues = scene_cue_sheet(
                     scene_model, program_scene, cued_rate);

@@ -418,8 +418,10 @@ void explicit_scene_and_target_ownership_fail_with_stable_diagnostics() {
     MASK_CHECK(has_diagnostic(
         diagnostics, scene::MaskDiagnosticKind::InvalidSceneOwner,
         doc::NodeId{21U}));
+    // A target without a scene_id is refused by the model, so the mask finds
+    // no target at all.
     MASK_CHECK(has_diagnostic(
-        diagnostics, scene::MaskDiagnosticKind::MissingTargetSceneOwner,
+        diagnostics, scene::MaskDiagnosticKind::MissingTarget,
         doc::NodeId{22U}));
     MASK_CHECK(has_diagnostic(
         diagnostics, scene::MaskDiagnosticKind::CrossSceneTarget,
@@ -437,15 +439,13 @@ void explicit_scene_and_target_ownership_fail_with_stable_diagnostics() {
         diagnostics, scene::MaskDiagnosticKind::InvalidSceneOwner,
         doc::NodeId{61U}));
 
+    // A document with no Stage has no scene, so nothing is evaluated or
+    // diagnosed for one.
     scene::SceneModel stage_less;
     stage_less.reset(root_of({object_node(10U, 1U), mask_node(20U, 1U, 10U)}));
-    const auto stage_less_diagnostics =
-        stage_less.mask_diagnostics(scene::legacy_scene_id);
-    MASK_CHECK(has_diagnostic(
-        stage_less_diagnostics, scene::MaskDiagnosticKind::InvalidSceneOwner,
-        doc::NodeId{20U}));
+    MASK_CHECK(stage_less.mask_diagnostics(scene::SceneId{}).empty());
     MASK_CHECK(stage_less.evaluate(
-        scene::legacy_scene_id, scene::SceneTime{}).mask_programs.empty());
+        scene::SceneId{}, scene::SceneTime{}).mask_programs.empty());
 }
 
 void malformed_paths_and_child_references_are_reported_without_repair() {

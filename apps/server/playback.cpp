@@ -1189,28 +1189,18 @@ int run_node_playback(net::NodeSessionService &service,
                                             transport->last_frame.value(),
                                             transport->loop}
                           : scene::ShowLoop{};
-            // A graph object authored before graphs were scene-scoped carries
-            // no owner. It used to apply to whatever Program was showing, so
-            // Program is the scene it is adopted into. Both the Director and
-            // every node resolve it the same way, from the same document.
-            const auto node_scenes = scene_model.scenes();
             const auto switcher = show::read_switcher(presented.root);
-            const scene::SceneId legacy_graph_owner =
-                switcher.has_value()
-                    ? switcher->program_scene
-                    : (node_scenes.empty() ? scene::SceneId{}
-                                           : node_scenes.front().id);
             if (switcher.has_value()) {
                 switcher_progress = show::derive_switcher_progress(
                     *switcher, input.control_frame);
                 scene_frame = scene_model.evaluate(switcher->program_scene,
                                                    time, show_loop);
                 compositor_graph = compositor_model.evaluate(
-                    switcher->program_scene, legacy_graph_owner);
+                    switcher->program_scene);
                 const auto publication_scene=scene::publication::render_scene(presented.root,switcher->program_scene);
                 if (publication_scene != switcher->program_scene) {
                     scene_frame=scene_model.evaluate(publication_scene,time,show_loop);
-                    compositor_graph=compositor_model.evaluate(publication_scene,legacy_graph_owner);
+                    compositor_graph=compositor_model.evaluate(publication_scene);
                 }
                 if (publication_scene != switcher->program_scene || !scene_frame.publication_revision.empty()) {
                     const auto keep=publication_scene != switcher->program_scene ? switcher->program_scene
@@ -1223,9 +1213,9 @@ int run_node_playback(net::NodeSessionService &service,
                     transition_to_frame = scene_model.evaluate(
                         switcher_progress.to, time, show_loop);
                     transition_from_graph = compositor_model.evaluate(
-                        switcher_progress.from, legacy_graph_owner);
+                        switcher_progress.from);
                     transition_to_graph = compositor_model.evaluate(
-                        switcher_progress.to, legacy_graph_owner);
+                        switcher_progress.to);
                     // Older documents may contain a dissolve authored before
                     // canvas compatibility was enforced. Never hand an
                     // impossible pair to Presenter; promote Program as a cut.
@@ -1238,7 +1228,7 @@ int run_node_playback(net::NodeSessionService &service,
             } else {
                 scene_frame = scene_model.evaluate(time, show_loop);
                 compositor_graph = compositor_model.evaluate(
-                    scene_frame.id, legacy_graph_owner);
+                    scene_frame.id);
             }
             // A Loop cue's crossfade is a dissolve within one scene: the
             // scene at the show frame the loop is leaving, mixed into the one

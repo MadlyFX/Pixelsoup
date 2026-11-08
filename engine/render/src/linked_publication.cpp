@@ -325,7 +325,7 @@ scene::LinkedPlanResult install_linked_publication(const doc::Root& current, con
             node.properties[std::string{ss::scene_name}]=source_name+" (published "+prepared.revision.substr(0,6)+")";
         result=result.set(std::move(node));
     }
-    auto graph=compositor::plan_clone_graph(prepared.document,prepared.scene,clone.value().destination,program,clone.value().remap,doc::NodeId{next});
+    auto graph=compositor::plan_clone_graph(prepared.document,prepared.scene,clone.value().destination,clone.value().remap,doc::NodeId{next});
     if (!graph) return fail("Cannot clone publication compositor");
     for (auto node : graph.value().puts) { next=std::max(next,node.id.value()+1); result=result.set(std::move(node)); }
     const bool scoped_settings=std::any_of(clone.value().puts.begin(),clone.value().puts.end(),[](const auto& n) { return n.type == pub::settings_type; });

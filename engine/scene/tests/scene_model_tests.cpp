@@ -13,6 +13,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -49,6 +50,52 @@ using Property = std::pair<std::string, doc::PropertyValue>;
         built.properties.emplace(property.first, property.second);
     }
     return built;
+}
+
+// Scene-scoped nodes must name their Stage. Fixtures that do not say which
+// belong to the document's lowest-id Stage, and a fixture with no Stage gets
+// one, so each test states only the ownership it is about.
+constexpr core::u64 fixture_stage = 9'999'999U;
+
+[[nodiscard]] doc::Root scoped(const doc::Root& root) {
+    static constexpr std::array scoped_types{
+        schema::camera_type, schema::object_type, schema::group_type,
+        schema::timeline_lane_type, schema::timeline_marker_type,
+        schema::media_type, schema::model_type, schema::particle_effect_type,
+        schema::light_type};
+    if (root.empty()) {
+        return root;
+    }
+    const doc::Delta all = doc::diff(doc::Root{}, root);
+    std::optional<doc::NodeId> lowest;
+    for (const doc::NodeChange& change : all.changes) {
+        if (change.after && change.after->type == schema::stage_type &&
+            (!lowest || change.id < *lowest)) {
+            lowest = change.id;
+        }
+    }
+    doc::Root result = root;
+    if (!lowest) {
+        lowest = doc::NodeId{fixture_stage};
+        doc::Node stage{};
+        stage.id = *lowest;
+        stage.type = std::string{schema::stage_type};
+        result = result.set(stage);
+    }
+    for (const doc::NodeChange& change : all.changes) {
+        if (!change.after ||
+            std::find(scoped_types.begin(), scoped_types.end(),
+                      std::string_view{change.after->type}) == scoped_types.end() ||
+            change.after->properties.contains(std::string{schema::scene_id})) {
+            continue;
+        }
+        doc::Node owned = *change.after;
+        owned.properties.emplace(
+            std::string{schema::scene_id},
+            doc::PropertyValue{static_cast<std::int64_t>(lowest->value())});
+        result = result.set(owned);
+    }
+    return result;
 }
 
 [[nodiscard]] Property real(std::string_view name, double value) {
@@ -427,7 +474,7 @@ constexpr scene::SceneTime at_start{0U, 60U, 1U};
 
 void a_document_becomes_the_scene_it_describes() {
     scene::SceneModel model;
-    model.reset(root_of(demo_nodes()));
+    model.reset(scoped(root_of(demo_nodes())));
 
     MODEL_CHECK(model.counters().rejected == 0U);
     MODEL_CHECK(model.counters().duplicate_singletons() == 0U);
@@ -490,7 +537,7 @@ void a_camera_is_placed_by_position_and_rotation() {
                           real(schema::position_z, 3.0),
                           real(schema::rotation_yaw, 0.25)}));
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     const auto placed = model.evaluate(at_start);
     MODEL_CHECK(scene::valid(placed.camera));
@@ -506,12 +553,12 @@ void a_camera_is_placed_by_position_and_rotation() {
     // Pitch tips the view up; roll turns the horizon about the view.
     doc::Root tipped = root.set(node(2U, schema::camera_type,
                                      {real(schema::rotation_pitch, 0.25)}));
-    model.reset(tipped);
+    model.reset(scoped(tipped));
     MODEL_CHECK(close_to(forward(model.evaluate(at_start).camera),
                          scene::Vec3{0.0F, 1.0F, 0.0F}));
     doc::Root rolled = root.set(node(2U, schema::camera_type,
                                      {real(schema::rotation_roll, 0.25)}));
-    model.reset(rolled);
+    model.reset(scoped(rolled));
     const auto roll = model.evaluate(at_start).camera;
     MODEL_CHECK(close_to(forward(roll), scene::Vec3{0.0F, 0.0F, -1.0F}));
     MODEL_CHECK(close_to(roll.up, scene::Vec3{1.0F, 0.0F, 0.0F}));
@@ -526,7 +573,7 @@ void a_camera_is_placed_by_position_and_rotation() {
                                      real(schema::target_x, 3.0),
                                      real(schema::target_y, 1.0),
                                      real(schema::target_z, 0.0)}));
-    model.reset(aimed);
+    model.reset(scoped(aimed));
     const auto legacy = model.evaluate(at_start).camera;
     MODEL_CHECK(legacy.eye == (scene::Vec3{0.0F, 2.5F, 7.0F}));
     const scene::Vec3 legacy_forward = scene::normalize(
@@ -536,7 +583,7 @@ void a_camera_is_placed_by_position_and_rotation() {
     doc::Node partly = *aimed.get(doc::NodeId{2U});
     partly.properties.insert_or_assign(std::string{schema::rotation_roll},
                                        doc::PropertyValue{0.0});
-    model.reset(aimed.set(partly));
+    model.reset(scoped(aimed.set(partly)));
     MODEL_CHECK(close_to(forward(model.evaluate(at_start).camera),
                          legacy_forward));
     MODEL_CHECK(close_to(model.cameras(placed.id).front().rotation, legacy_turns));
@@ -545,7 +592,7 @@ void a_camera_is_placed_by_position_and_rotation() {
     doc::Root keyed = root.set(channel_node(
         9U, 2U, schema::rotation_yaw,
         {{0, 0.0, schema::interp_linear}, {60, 0.5, schema::interp_linear}}));
-    model.reset(keyed);
+    model.reset(scoped(keyed));
     MODEL_CHECK(close_to(forward(model.evaluate(at_start).camera),
                          scene::Vec3{0.0F, 0.0F, -1.0F}));
     MODEL_CHECK(close_to(
@@ -559,7 +606,7 @@ void a_camera_is_placed_by_position_and_rotation() {
                                        {real(schema::position_z, 4.0),
                                         real(schema::orbit_turns_per_second,
                                              0.25)}));
-    model.reset(orbiting);
+    model.reset(scoped(orbiting));
     const auto swept = model.evaluate(scene::SceneTime{60U, 60U, 1U}).camera;
     MODEL_CHECK(close_to(swept.eye, scene::Vec3{4.0F, 0.0F, 0.0F}));
     MODEL_CHECK(close_to(forward(swept), scene::Vec3{-1.0F, 0.0F, 0.0F}));
@@ -573,13 +620,13 @@ void a_checkpoint_and_a_stream_of_deltas_agree_exactly() {
     const auto nodes = demo_nodes();
 
     scene::SceneModel checkpointed;
-    checkpointed.reset(root_of(nodes));
+    checkpointed.reset(scoped(root_of(nodes)));
 
     scene::SceneModel streamed;
     doc::Root running;
     for (const auto& one : nodes) {
         const auto next = running.set(one);
-        streamed.apply(diff(running, next));
+        streamed.apply(diff(scoped(running), scoped(next)));
         running = next;
     }
 
@@ -594,7 +641,7 @@ void a_checkpoint_and_a_stream_of_deltas_agree_exactly() {
 
 void evaluation_is_a_pure_function_of_the_frame() {
     scene::SceneModel model;
-    model.reset(root_of(demo_nodes()));
+    model.reset(scoped(root_of(demo_nodes())));
 
     const scene::SceneTime moment{1'234U, 60U, 1U};
     const auto first = scene::digest(model.evaluate(moment));
@@ -613,7 +660,7 @@ void a_long_show_keeps_moving_rather_than_seizing_up() {
     // accumulated angle live in a float would have quantised to a standstill
     // long before here, and the wall would freeze mid-show.
     scene::SceneModel model;
-    model.reset(root_of(demo_nodes()));
+    model.reset(scoped(root_of(demo_nodes())));
 
     constexpr core::u64 ten_hours = 60ULL * 60ULL * 60ULL * 10ULL;
     const auto a = scene::digest(model.evaluate(scene::SceneTime{ten_hours, 60U, 1U}));
@@ -641,20 +688,20 @@ void a_property_of_the_wrong_type_rejects_its_node() {
         1U,
         schema::object_type,
         {text(schema::primitive, "box"), text(schema::position_x, "over there")}));
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 1U);
     MODEL_CHECK(model.evaluate(at_start).instances.empty());
 
     // An unknown primitive is the same kind of mistake.
     scene::SceneModel other;
-    other.reset(doc::Root{}.set(
-        node(1U, schema::object_type, {text(schema::primitive, "teapot")})));
+    other.reset(scoped(doc::Root{}.set(
+        node(1U, schema::object_type, {text(schema::primitive, "teapot")}))));
     MODEL_CHECK(other.counters().rejected == 1U);
 
     // An absent property, by contrast, is not a mistake: it takes its default,
     // so a scene authored before a property existed still loads.
     scene::SceneModel sparse;
-    sparse.reset(doc::Root{}.set(node(1U, schema::object_type, {})));
+    sparse.reset(scoped(doc::Root{}.set(node(1U, schema::object_type, {}))));
     MODEL_CHECK(sparse.counters().rejected == 0U);
     MODEL_CHECK(sparse.evaluate(at_start).instances.size() == 1U);
 }
@@ -663,23 +710,24 @@ void retyping_or_erasing_a_node_removes_what_it_drew() {
     scene::SceneModel model;
     doc::Root root = doc::Root{}.set(
         node(1U, schema::object_type, {text(schema::primitive, "box")}));
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.evaluate(at_start).instances.size() == 1U);
 
     // Retyped to something the scene does not know. The object has to go: a
     // node that stops being a scene object stops being drawn.
     const auto retyped = root.set(node(1U, "layer.text", {}));
-    model.apply(diff(root, retyped));
+    model.apply(diff(scoped(root), scoped(retyped)));
     MODEL_CHECK(model.evaluate(at_start).instances.empty());
     MODEL_CHECK(model.counters().objects == 0U);
-    MODEL_CHECK(model.size() == 0U);
+    // Only the fixture's Stage is left.
+    MODEL_CHECK(model.size() == 1U);
 
     // And erased outright.
     scene::SceneModel erased_model;
-    erased_model.reset(root);
+    erased_model.reset(scoped(root));
     const auto erased = root.erase(doc::NodeId{1U});
     MODEL_CHECK(erased.has_value());
-    erased_model.apply(diff(root, *erased));
+    erased_model.apply(diff(scoped(root), scoped(*erased)));
     MODEL_CHECK(erased_model.evaluate(at_start).instances.empty());
     MODEL_CHECK(erased_model.counters().objects == 0U);
 }
@@ -693,7 +741,7 @@ void stages_are_scenes_and_the_lowest_is_the_default() {
     root = root.set(node(
         4U, schema::stage_type, {whole(schema::canvas_width, 1'024),
                                  whole(schema::canvas_height, 768)}));
-    model.reset(root);
+    model.reset(scoped(root));
 
     MODEL_CHECK(model.counters().stages == 2U);
     MODEL_CHECK(model.counters().duplicate_singletons() == 0U);
@@ -715,7 +763,7 @@ void the_digest_separates_scenes_a_single_bit_apart() {
     MODEL_CHECK(scene::digest(first_identity) != scene::digest(second_identity));
 
     scene::SceneModel base;
-    base.reset(root_of(demo_nodes()));
+    base.reset(scoped(root_of(demo_nodes())));
     const auto reference = scene::digest(base.evaluate(at_start));
 
     auto nudged = demo_nodes();
@@ -730,27 +778,32 @@ void the_digest_separates_scenes_a_single_bit_apart() {
         doc::PropertyValue{static_cast<double>(shifted)});
 
     scene::SceneModel moved;
-    moved.reset(root_of(nudged));
+    moved.reset(scoped(root_of(nudged)));
     MODEL_CHECK(scene::digest(moved.evaluate(at_start)) != reference);
 
     // A scene that is a prefix of another does not collide with it.
     auto shorter = demo_nodes();
     shorter.pop_back();
     scene::SceneModel truncated;
-    truncated.reset(root_of(shorter));
+    truncated.reset(scoped(root_of(shorter)));
     MODEL_CHECK(scene::digest(truncated.evaluate(at_start)) != reference);
 }
 
 void a_document_past_capacity_truncates_the_same_way_everywhere() {
+    // Owners are authored here rather than added by the fixture helper: the
+    // stream below diffs thousands of growing documents.
+    constexpr core::u64 stage_id = 1'000'000U;
     scene::SceneModel model;
-    doc::Root root;
+    const doc::Root staged = doc::Root{}.set(node(stage_id, schema::stage_type, {}));
+    doc::Root root = staged;
     const auto count = scene::max_scene_instances + 32U;
     for (core::u32 index = 0U; index < count; ++index) {
         root = root.set(node(
             static_cast<core::u64>(index) + 1U,
             schema::object_type,
             {text(schema::primitive, "box"),
-             real(schema::position_x, static_cast<double>(index))}));
+             real(schema::position_x, static_cast<double>(index)),
+             whole(schema::scene_id, static_cast<std::int64_t>(stage_id))}));
     }
     model.reset(root);
     MODEL_CHECK(model.counters().objects == count);
@@ -762,7 +815,8 @@ void a_document_past_capacity_truncates_the_same_way_everywhere() {
     // Truncation is by node id, so a node that streamed the document and a
     // node that was handed it whole drop the same objects.
     scene::SceneModel streamed;
-    doc::Root running;
+    doc::Root running = staged;
+    streamed.reset(running);
     for (core::u32 index = 0U; index < count; ++index) {
         const auto next = root.get(doc::NodeId{static_cast<core::u64>(index) + 1U});
         MODEL_CHECK(next != nullptr);
@@ -788,7 +842,7 @@ void a_point_light_is_carried_through_as_one() {
          real(schema::intensity, 12.0)}));
     root = root.set(node(
         2U, schema::light_type, {text(schema::light_kind, "tube")}));
-    model.reset(root);
+    model.reset(scoped(root));
 
     MODEL_CHECK(model.counters().rejected == 1U);
     const auto built = model.evaluate(at_start);
@@ -805,7 +859,7 @@ void atmosphere_is_clamped_on_the_way_in() {
                          {real(schema::environment_fog_density, 1.0e6),
                           real(schema::environment_fog_anisotropy, 5.0)}));
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     const scene::Scene built = model.evaluate(at_start);
     MODEL_CHECK(built.environment.fog_density == scene::max_fog_density);
     MODEL_CHECK(built.environment.fog_anisotropy
@@ -816,7 +870,7 @@ void atmosphere_is_clamped_on_the_way_in() {
     back = back.set(node(1U, schema::stage_type,
                          {real(schema::environment_fog_anisotropy, -5.0)}));
     scene::SceneModel backward;
-    backward.reset(back);
+    backward.reset(scoped(back));
     MODEL_CHECK(backward.evaluate(at_start).environment.fog_anisotropy
                 == -scene::max_fog_anisotropy);
 }
@@ -846,7 +900,7 @@ void a_background_fill_is_read_clamped_and_blends_when_translucent() {
          real(schema::fill_b_a, 0.0)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     const scene::Scene built = model.evaluate(at_start);
     MODEL_CHECK(built.instances.size() == 3U);
@@ -876,7 +930,7 @@ void a_background_fill_is_read_clamped_and_blends_when_translucent() {
         4U, schema::object_type,
         {text(schema::primitive, "quad"), text(schema::fill_mode, "conic")}));
     scene::SceneModel damaged;
-    damaged.reset(root);
+    damaged.reset(scoped(root));
     MODEL_CHECK(damaged.counters().rejected == 1U);
     MODEL_CHECK(!scene::read_surface_fill(root.get(doc::NodeId{4U})->properties)
                      .has_value());
@@ -934,10 +988,10 @@ void physical_renderer_inputs_are_replicated_without_resolving_assets() {
          real(schema::angular_radius_turns, 0.01)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     const scene::Scene built = model.evaluate(at_start);
-    MODEL_CHECK(built.document_version == root.version());
+    MODEL_CHECK(built.document_version == scoped(root).version());
     MODEL_CHECK(built.environment.map_source == "assets/stage_sky.exr");
     MODEL_CHECK(built.environment.map_intensity == 2.5F);
     MODEL_CHECK(built.environment.map_rotation == 0.25F);
@@ -1019,7 +1073,7 @@ void camera_lens_calibration_is_authored_clamped_and_part_of_scene_identity() {
 
     const doc::Root root = doc::Root{}.set(camera);
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     const scene::Scene built = model.evaluate(at_start);
     MODEL_CHECK(built.camera.lens_profile.has_value());
@@ -1063,7 +1117,7 @@ void selection_locks_are_carried_by_every_element_kind() {
                           flag(schema::locked, true)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     const scene::Scene built = model.evaluate(at_start);
     MODEL_CHECK(built.instances.size() == 1U);
     MODEL_CHECK(built.media.size() == 1U);
@@ -1077,7 +1131,7 @@ void selection_locks_are_carried_by_every_element_kind() {
 
 void a_media_clip_advances_with_the_show_frame() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         1U,
         schema::media_type,
         {text(schema::source, "plate_%04u.png"),
@@ -1085,7 +1139,7 @@ void a_media_clip_advances_with_the_show_frame() {
          whole(schema::sequence_count, 24),
          real(schema::position_x, 1.0),
          real(schema::scale_x, 16.0),
-         real(schema::scale_y, 9.0)})));
+         real(schema::scale_y, 9.0)}))));
 
     MODEL_CHECK(model.counters().rejected == 0U);
     MODEL_CHECK(model.counters().media == 1U);
@@ -1115,19 +1169,19 @@ void a_media_clip_advances_with_the_show_frame() {
 
     // A clip with no sequence to load is refused rather than shown blank.
     scene::SceneModel missing;
-    missing.reset(doc::Root{}.set(
-        node(1U, schema::media_type, {whole(schema::sequence_count, 10)})));
+    missing.reset(scoped(doc::Root{}.set(
+        node(1U, schema::media_type, {whole(schema::sequence_count, 10)}))));
     MODEL_CHECK(missing.counters().rejected == 1U);
     MODEL_CHECK(missing.evaluate(at_start).media.empty());
 }
 
 void a_media_clip_carries_its_persistent_library_asset_identity() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         7U, schema::media_type,
         {text(schema::source, "identity.mov"),
          whole(schema::asset_id, 501),
-         whole(schema::sequence_count, 3)})));
+         whole(schema::sequence_count, 3)}))));
 
     MODEL_CHECK(model.counters().rejected == 0U);
     const scene::Scene evaluated = model.evaluate(at_start);
@@ -1136,24 +1190,24 @@ void a_media_clip_carries_its_persistent_library_asset_identity() {
     MODEL_CHECK(evaluated.media.front().source_node == doc::NodeId{7U});
 
     scene::SceneModel malformed;
-    malformed.reset(doc::Root{}.set(node(
+    malformed.reset(scoped(doc::Root{}.set(node(
         8U, schema::media_type,
         {text(schema::source, "identity.mov"),
-         whole(schema::asset_id, 0)})));
+         whole(schema::asset_id, 0)}))));
     MODEL_CHECK(malformed.counters().rejected == 1U);
     MODEL_CHECK(malformed.evaluate(at_start).media.empty());
 }
 
 void native_media_rate_resamples_show_time_exactly() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         1U,
         schema::media_type,
         {text(schema::source, "native-rate.mp4"),
          whole(schema::sequence_start, 100),
          whole(schema::sequence_count, 97),
          whole(schema::source_rate_numerator, 24'000),
-         whole(schema::source_rate_denominator, 1'001)})));
+         whole(schema::source_rate_denominator, 1'001)}))));
 
     MODEL_CHECK(model.counters().rejected == 0U);
     const auto frame_at = [&](core::u64 frame) {
@@ -1187,13 +1241,13 @@ void native_media_rate_resamples_show_time_exactly() {
     // Source rates above the show rate can advance by multiple ordinals at a
     // boundary; the integer quotient portion participates in the same mapping.
     scene::SceneModel faster;
-    faster.reset(doc::Root{}.set(node(
+    faster.reset(scoped(doc::Root{}.set(node(
         2U,
         schema::media_type,
         {text(schema::source, "high-rate.mp4"),
          whole(schema::sequence_count, 100),
          whole(schema::source_rate_numerator, 60'000),
-         whole(schema::source_rate_denominator, 1'001)})));
+         whole(schema::source_rate_denominator, 1'001)}))));
     MODEL_CHECK(
         faster.evaluate(scene::SceneTime{3U, 24'000U, 1'001U})
             .media.front()
@@ -1202,19 +1256,19 @@ void native_media_rate_resamples_show_time_exactly() {
     // A partially authored or non-positive pair is malformed; it must not be
     // mistaken for the legacy absent-rate contract.
     scene::SceneModel partial;
-    partial.reset(doc::Root{}.set(node(
+    partial.reset(scoped(doc::Root{}.set(node(
         3U, schema::media_type,
         {text(schema::source, "partial.mp4"),
-         whole(schema::source_rate_numerator, 24'000)})));
+         whole(schema::source_rate_numerator, 24'000)}))));
     MODEL_CHECK(partial.counters().rejected == 1U);
     MODEL_CHECK(partial.evaluate(at_start).media.empty());
 
     scene::SceneModel zero;
-    zero.reset(doc::Root{}.set(node(
+    zero.reset(scoped(doc::Root{}.set(node(
         4U, schema::media_type,
         {text(schema::source, "zero.mp4"),
          whole(schema::source_rate_numerator, 24'000),
-         whole(schema::source_rate_denominator, 0)})));
+         whole(schema::source_rate_denominator, 0)}))));
     MODEL_CHECK(zero.counters().rejected == 1U);
     MODEL_CHECK(zero.evaluate(at_start).media.empty());
 }
@@ -1245,7 +1299,7 @@ void first_class_effects_are_ordered_folded_and_keep_orphans() {
         effect_node(50U, 999U, schema::brightness_kind, 0, 4.0));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     MODEL_CHECK(model.counters().effects == 5U);
     const auto authored = model.effects();
@@ -1275,7 +1329,7 @@ void first_class_effects_are_ordered_folded_and_keep_orphans() {
 
     const auto resolved = root.set(
         node(999U, schema::object_type, {text(schema::primitive, "box")}));
-    model.apply(diff(root, resolved));
+    model.apply(diff(scoped(root), scoped(resolved)));
     const auto with_target = model.evaluate(at_start);
     MODEL_CHECK(with_target.effects == authored);
     const auto resolved_instance = std::find_if(
@@ -1291,7 +1345,7 @@ void first_class_effects_are_ordered_folded_and_keep_orphans() {
 
     const auto removed = resolved.erase(doc::NodeId{999U});
     MODEL_CHECK(removed.has_value());
-    model.apply(diff(resolved, *removed));
+    model.apply(diff(scoped(resolved), scoped(*removed)));
     MODEL_CHECK(model.counters().effects == 5U);
     MODEL_CHECK(model.effects().size() == 5U);
     MODEL_CHECK(model.evaluate(at_start).instances.size() == 1U);
@@ -1307,7 +1361,7 @@ void first_class_effects_are_ordered_folded_and_keep_orphans() {
          real(schema::brightness, 0.25), flag(schema::blur_enabled, false),
          real(schema::blur_radius, 40.0)}));
     scene::SceneModel dormant_only_model;
-    dormant_only_model.reset(dormant);
+    dormant_only_model.reset(scoped(dormant));
     const auto dormant_only =
         dormant_only_model.evaluate(at_start).instances.front().style.effects;
     MODEL_CHECK(!dormant_only.brightness_enabled);
@@ -1320,7 +1374,7 @@ void first_class_effects_are_ordered_folded_and_keep_orphans() {
     dormant = dormant.set(
         effect_node(2U, 100U, schema::blur_kind, 1, 3.0));
     scene::SceneModel dormant_model;
-    dormant_model.reset(dormant);
+    dormant_model.reset(scoped(dormant));
     const auto activated = dormant_model.evaluate(at_start);
     MODEL_CHECK(activated.instances.front().style.effects.brightness == 2.0F);
     MODEL_CHECK(activated.instances.front().style.effects.blur_radius == 3.0F);
@@ -1335,7 +1389,7 @@ void first_class_effects_are_ordered_folded_and_keep_orphans() {
     associative = associative.set(
         effect_node(3U, 100U, schema::brightness_kind, 2, 0.01));
     scene::SceneModel associative_model;
-    associative_model.reset(associative);
+    associative_model.reset(scoped(associative));
     const auto brightness =
         associative_model.evaluate(at_start)
             .instances.front()
@@ -1369,7 +1423,7 @@ void malformed_effects_are_refused_and_values_are_bounded() {
     malformed = malformed.set(wrong_enable);
     malformed = malformed.set(non_finite_enable);
     scene::SceneModel rejected;
-    rejected.reset(malformed);
+    rejected.reset(scoped(malformed));
     MODEL_CHECK(rejected.counters().rejected == 4U);
     MODEL_CHECK(rejected.counters().effects == 0U);
     MODEL_CHECK(rejected.effects().empty());
@@ -1385,7 +1439,7 @@ void malformed_effects_are_refused_and_values_are_bounded() {
         effect_node(5U, 100U, schema::blur_kind, 1, -10.0));
     bounded = bounded.set(numeric_disable);
     scene::SceneModel accepted;
-    accepted.reset(bounded);
+    accepted.reset(scoped(bounded));
     MODEL_CHECK(accepted.counters().rejected == 0U);
     const auto effects = accepted.effects();
     MODEL_CHECK(effects.size() == 3U);
@@ -1408,7 +1462,7 @@ void saturation_effects_normalize_fold_and_animate() {
         effect_node(4U, 100U, schema::saturation_kind, 2, 0.25));
 
     scene::SceneModel folded_model;
-    folded_model.reset(root);
+    folded_model.reset(scoped(root));
     const scene::Scene folded = folded_model.evaluate(at_start);
     MODEL_CHECK(folded.instances.size() == 1U);
     MODEL_CHECK(folded.instances.front().style.effects.saturation_enabled);
@@ -1433,7 +1487,7 @@ void saturation_effects_normalize_fold_and_animate() {
     keyed_base = keyed_base.set(
         effect_node(3U, 100U, schema::saturation_kind, 1, 4.0));
     scene::SceneModel keyed_model;
-    keyed_model.reset(keyed_base);
+    keyed_model.reset(scoped(keyed_base));
     const scene::Scene keyed = keyed_model.evaluate(at_start);
     const auto& keyed_saturation =
         keyed.instances.front().style.effects;
@@ -1453,7 +1507,7 @@ void saturation_effects_normalize_fold_and_animate() {
     // move the complete Saturation node without changing its identity/value.
     const doc::Root reordered = root.set(
         effect_node(4U, 100U, schema::saturation_kind, -1, 0.25));
-    folded_model.apply(diff(root, reordered));
+    folded_model.apply(diff(scoped(root), scoped(reordered)));
     const auto reordered_effects = folded_model.effects();
     MODEL_CHECK(reordered_effects.size() == 3U);
     MODEL_CHECK(reordered_effects[0].source == doc::NodeId{4U});
@@ -1477,7 +1531,7 @@ void saturation_effects_normalize_fold_and_animate() {
         effect_node(12U, 100U, schema::saturation_kind, 2, 4.1));
 
     scene::SceneModel normalized_model;
-    normalized_model.reset(normalized);
+    normalized_model.reset(scoped(normalized));
     MODEL_CHECK(normalized_model.counters().rejected == 0U);
     const scene::Scene identities = normalized_model.evaluate(at_start);
     MODEL_CHECK(identities.effects.size() == 3U);
@@ -1492,7 +1546,7 @@ void saturation_effects_normalize_fold_and_animate() {
         30U, 20U, schema::saturation,
         {{0, 0.5, schema::interp_linear},
          {10, 1.5, schema::interp_linear}}));
-    normalized_model.reset(normalized);
+    normalized_model.reset(scoped(normalized));
     const scene::Scene animated =
         normalized_model.evaluate(scene::SceneTime{10U, 60U, 1U});
     const auto effect = std::find_if(
@@ -1556,7 +1610,7 @@ void levels_is_canonical_typed_and_preserves_inline_order() {
         effect_node(30U, 100U, schema::saturation_kind, 2, 0.5));
 
     scene::SceneModel checkpointed;
-    checkpointed.reset(root);
+    checkpointed.reset(scoped(root));
     MODEL_CHECK(checkpointed.counters().rejected == 0U);
     const scene::Scene built = checkpointed.evaluate(at_start);
     MODEL_CHECK(built.effects.size() == 3U);
@@ -1574,8 +1628,8 @@ void levels_is_canonical_typed_and_preserves_inline_order() {
     doc::Root before;
     before = before.set(node(
         100U, schema::object_type, {text(schema::primitive, "box")}));
-    streamed.reset(before);
-    streamed.apply(diff(before, root));
+    streamed.reset(scoped(before));
+    streamed.apply(diff(scoped(before), scoped(root)));
     MODEL_CHECK(streamed.effects() == checkpointed.effects());
     MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
                 scene::digest(built));
@@ -1584,14 +1638,14 @@ void levels_is_canonical_typed_and_preserves_inline_order() {
     changed.master.gamma = 3.0F;
     const doc::Root changed_root =
         root.set(levels_effect_node(20U, 100U, 1, changed));
-    checkpointed.apply(diff(root, changed_root));
+    checkpointed.apply(diff(scoped(root), scoped(changed_root)));
     MODEL_CHECK(scene::digest(checkpointed.evaluate(at_start)) !=
                 scene::digest(built));
 
     const doc::Root malformed = root.set(
         levels_effect_node(20U, 100U, 1, invalid));
     scene::SceneModel rejected;
-    rejected.reset(malformed);
+    rejected.reset(scoped(malformed));
     MODEL_CHECK(rejected.counters().rejected == 1U);
     MODEL_CHECK(rejected.effects().size() == 2U);
 }
@@ -1634,7 +1688,7 @@ void lift_gamma_gain_is_canonical_persistent_and_ordered() {
         50U, 100U, 4, scene::LiftGammaGainParameters{}));
 
     scene::SceneModel checkpointed;
-    checkpointed.reset(root);
+    checkpointed.reset(scoped(root));
     const scene::Scene built = checkpointed.evaluate(at_start);
     MODEL_CHECK(checkpointed.counters().rejected == 0U);
     MODEL_CHECK(built.effects.size() == 5U);
@@ -1652,8 +1706,8 @@ void lift_gamma_gain_is_canonical_persistent_and_ordered() {
 
     scene::SceneModel streamed;
     doc::Root empty;
-    streamed.reset(empty);
-    streamed.apply(diff(empty, root));
+    streamed.reset(scoped(empty));
+    streamed.apply(diff(scoped(empty), scoped(root)));
     MODEL_CHECK(streamed.effects() == checkpointed.effects());
     MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
                 scene::digest(built));
@@ -1662,13 +1716,13 @@ void lift_gamma_gain_is_canonical_persistent_and_ordered() {
     changed.gain.x = 1.2F;
     const doc::Root changed_root = root.set(
         lift_gamma_gain_effect_node(20U, 100U, 1, changed));
-    checkpointed.apply(diff(root, changed_root));
+    checkpointed.apply(diff(scoped(root), scoped(changed_root)));
     MODEL_CHECK(scene::digest(checkpointed.evaluate(at_start)) !=
                 scene::digest(built));
 
     scene::SceneModel rejected;
-    rejected.reset(root.set(
-        lift_gamma_gain_effect_node(20U, 100U, 1, non_finite)));
+    rejected.reset(scoped(root.set(
+        lift_gamma_gain_effect_node(20U, 100U, 1, non_finite))));
     MODEL_CHECK(rejected.counters().rejected == 1U);
     MODEL_CHECK(rejected.effects().size() == 4U);
 }
@@ -1710,7 +1764,7 @@ void contrast_pivot_is_canonical_persistent_and_ordered() {
     root = root.set(contrast_pivot_effect_node(50U, 100U, 4, inert));
 
     scene::SceneModel checkpointed;
-    checkpointed.reset(root);
+    checkpointed.reset(scoped(root));
     const scene::Scene built = checkpointed.evaluate(at_start);
     MODEL_CHECK(checkpointed.counters().rejected == 0U);
     MODEL_CHECK(built.effects.size() == 5U);
@@ -1728,8 +1782,8 @@ void contrast_pivot_is_canonical_persistent_and_ordered() {
 
     scene::SceneModel streamed;
     doc::Root empty;
-    streamed.reset(empty);
-    streamed.apply(diff(empty, root));
+    streamed.reset(scoped(empty));
+    streamed.apply(diff(scoped(empty), scoped(root)));
     MODEL_CHECK(streamed.effects() == checkpointed.effects());
     MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
                 scene::digest(built));
@@ -1739,15 +1793,15 @@ void contrast_pivot_is_canonical_persistent_and_ordered() {
         contrast_pivot_effect_node(
             50U, 100U, 4, scene::ContrastPivotParameters{1.0F, 0.1F}));
     scene::SceneModel changed;
-    changed.reset(changed_identity);
+    changed.reset(scoped(changed_identity));
     const scene::Scene changed_scene = changed.evaluate(at_start);
     MODEL_CHECK(changed_scene.instances.front()
                     .style.effects.inline_operations == program);
     MODEL_CHECK(scene::digest(changed_scene) != scene::digest(built));
 
     scene::SceneModel rejected;
-    rejected.reset(root.set(
-        contrast_pivot_effect_node(30U, 100U, 2, non_finite)));
+    rejected.reset(scoped(root.set(
+        contrast_pivot_effect_node(30U, 100U, 2, non_finite))));
     MODEL_CHECK(rejected.counters().rejected == 1U);
     MODEL_CHECK(rejected.effects().size() == 4U);
 }
@@ -1793,7 +1847,7 @@ void color_matrix_is_canonical_persistent_and_ordered() {
         50U, 100U, 4, scene::ColorMatrixParameters{}));
 
     scene::SceneModel checkpointed;
-    checkpointed.reset(root);
+    checkpointed.reset(scoped(root));
     const scene::Scene built = checkpointed.evaluate(at_start);
     MODEL_CHECK(checkpointed.counters().rejected == 0U);
     MODEL_CHECK(built.effects.size() == 5U);
@@ -1810,8 +1864,8 @@ void color_matrix_is_canonical_persistent_and_ordered() {
 
     scene::SceneModel streamed;
     doc::Root empty;
-    streamed.reset(empty);
-    streamed.apply(diff(empty, root));
+    streamed.reset(scoped(empty));
+    streamed.apply(diff(scoped(empty), scoped(root)));
     MODEL_CHECK(streamed.effects() == checkpointed.effects());
     MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
                 scene::digest(built));
@@ -1819,14 +1873,14 @@ void color_matrix_is_canonical_persistent_and_ordered() {
     scene::ColorMatrixParameters changed = mixer;
     changed.offset.z = 0.15F;
     scene::SceneModel different;
-    different.reset(root.set(color_matrix_effect_node(
-        40U, 100U, 3, changed)));
+    different.reset(scoped(root.set(color_matrix_effect_node(
+        40U, 100U, 3, changed))));
     MODEL_CHECK(scene::digest(different.evaluate(at_start)) !=
                 scene::digest(built));
 
     scene::SceneModel rejected;
-    rejected.reset(root.set(
-        color_matrix_effect_node(40U, 100U, 3, non_finite)));
+    rejected.reset(scoped(root.set(
+        color_matrix_effect_node(40U, 100U, 3, non_finite))));
     MODEL_CHECK(rejected.counters().rejected == 1U);
     MODEL_CHECK(rejected.effects().size() == 4U);
 }
@@ -1883,7 +1937,7 @@ void white_balance_is_canonical_persistent_and_ordered() {
         50U, 100U, 4, scene::WhiteBalanceParameters{}));
 
     scene::SceneModel checkpointed;
-    checkpointed.reset(root);
+    checkpointed.reset(scoped(root));
     const scene::Scene built = checkpointed.evaluate(at_start);
     MODEL_CHECK(checkpointed.counters().rejected == 0U);
     MODEL_CHECK(built.effects.size() == 5U);
@@ -1900,8 +1954,8 @@ void white_balance_is_canonical_persistent_and_ordered() {
 
     scene::SceneModel streamed;
     doc::Root empty;
-    streamed.reset(empty);
-    streamed.apply(diff(empty, root));
+    streamed.reset(scoped(empty));
+    streamed.apply(diff(scoped(empty), scoped(root)));
     MODEL_CHECK(streamed.effects() == checkpointed.effects());
     MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
                 scene::digest(built));
@@ -1909,14 +1963,14 @@ void white_balance_is_canonical_persistent_and_ordered() {
     scene::WhiteBalanceParameters changed = authored;
     changed.tint = -0.25F;
     scene::SceneModel different;
-    different.reset(root.set(white_balance_effect_node(
-        30U, 100U, 2, changed)));
+    different.reset(scoped(root.set(white_balance_effect_node(
+        30U, 100U, 2, changed))));
     MODEL_CHECK(scene::digest(different.evaluate(at_start)) !=
                 scene::digest(built));
 
     scene::SceneModel rejected;
-    rejected.reset(root.set(
-        white_balance_effect_node(30U, 100U, 2, non_finite)));
+    rejected.reset(scoped(root.set(
+        white_balance_effect_node(30U, 100U, 2, non_finite))));
     MODEL_CHECK(rejected.counters().rejected == 1U);
     MODEL_CHECK(rejected.effects().size() == 4U);
 }
@@ -1975,7 +2029,7 @@ void curves_are_canonical_sampled_persistent_and_ordered() {
         40U, 100U, 3, scene::CurvesParameters{}));
 
     scene::SceneModel checkpointed;
-    checkpointed.reset(root);
+    checkpointed.reset(scoped(root));
     const scene::Scene built = checkpointed.evaluate(at_start);
     MODEL_CHECK(checkpointed.counters().rejected == 0U);
     MODEL_CHECK(built.effects.size() == 4U);
@@ -1991,8 +2045,8 @@ void curves_are_canonical_sampled_persistent_and_ordered() {
 
     scene::SceneModel streamed;
     doc::Root empty;
-    streamed.reset(empty);
-    streamed.apply(diff(empty, root));
+    streamed.reset(scoped(empty));
+    streamed.apply(diff(scoped(empty), scoped(root)));
     MODEL_CHECK(streamed.effects() == checkpointed.effects());
     MODEL_CHECK(scene::digest(streamed.evaluate(at_start)) ==
                 scene::digest(built));
@@ -2000,12 +2054,12 @@ void curves_are_canonical_sampled_persistent_and_ordered() {
     scene::CurvesParameters changed = authored;
     changed.master.points[1U].y = 0.4F;
     scene::SceneModel different;
-    different.reset(root.set(curves_effect_node(20U, 100U, 1, changed)));
+    different.reset(scoped(root.set(curves_effect_node(20U, 100U, 1, changed))));
     MODEL_CHECK(scene::digest(different.evaluate(at_start)) !=
                 scene::digest(built));
 
     scene::SceneModel rejected;
-    rejected.reset(root.set(curves_effect_node(20U, 100U, 1, duplicate)));
+    rejected.reset(scoped(root.set(curves_effect_node(20U, 100U, 1, duplicate))));
     MODEL_CHECK(rejected.counters().rejected == 1U);
     MODEL_CHECK(rejected.effects().size() == 3U);
 }
@@ -2048,7 +2102,7 @@ void film_grain_is_canonical_persistent_temporal_and_ordered() {
         40U, 100U, 3, scene::FilmGrainParameters{}));
 
     scene::SceneModel checkpointed;
-    checkpointed.reset(root);
+    checkpointed.reset(scoped(root));
     constexpr scene::SceneTime frame{0x1'0000'002AULL, 60U, 1U};
     const scene::Scene built = checkpointed.evaluate(frame);
     MODEL_CHECK(checkpointed.counters().rejected == 0U);
@@ -2066,8 +2120,8 @@ void film_grain_is_canonical_persistent_temporal_and_ordered() {
 
     scene::SceneModel streamed;
     doc::Root empty;
-    streamed.reset(empty);
-    streamed.apply(diff(empty, root));
+    streamed.reset(scoped(empty));
+    streamed.apply(diff(scoped(empty), scoped(root)));
     MODEL_CHECK(streamed.effects() == checkpointed.effects());
     MODEL_CHECK(scene::digest(streamed.evaluate(frame)) ==
                 scene::digest(built));
@@ -2075,8 +2129,8 @@ void film_grain_is_canonical_persistent_temporal_and_ordered() {
     scene::FilmGrainParameters changed = authored;
     changed.seed = 0xF123'4568U;
     scene::SceneModel different;
-    different.reset(root.set(film_grain_effect_node(
-        20U, 100U, 1, changed)));
+    different.reset(scoped(root.set(film_grain_effect_node(
+        20U, 100U, 1, changed))));
     MODEL_CHECK(scene::digest(different.evaluate(frame)) !=
                 scene::digest(built));
     MODEL_CHECK(scene::digest(checkpointed.evaluate(
@@ -2088,7 +2142,7 @@ void film_grain_is_canonical_persistent_temporal_and_ordered() {
         {{0, 0.1, schema::interp_linear},
          {10, 0.9, schema::interp_linear}}));
     scene::SceneModel animated;
-    animated.reset(animated_root);
+    animated.reset(scoped(animated_root));
     const scene::Scene middle =
         animated.evaluate(scene::SceneTime{5U, 60U, 1U});
     MODEL_CHECK(middle.effects[1U].film_grain.amount == 0.5F);
@@ -2110,14 +2164,14 @@ void film_grain_is_canonical_persistent_temporal_and_ordered() {
     bad_mode.properties[std::string{schema::mode}] =
         doc::PropertyValue{std::string{"local_random"}};
     scene::SceneModel rejected;
-    rejected.reset(root.set(bad_mode));
+    rejected.reset(scoped(root.set(bad_mode)));
     MODEL_CHECK(rejected.counters().rejected == 1U);
     MODEL_CHECK(rejected.effects().size() == 3U);
 
     doc::Node bad_seed = film_grain_effect_node(20U, 100U, 1, authored);
     bad_seed.properties[std::string{schema::seed}] =
         doc::PropertyValue{static_cast<std::int64_t>(-1)};
-    rejected.reset(root.set(bad_seed));
+    rejected.reset(scoped(root.set(bad_seed)));
     MODEL_CHECK(rejected.counters().rejected == 1U);
 }
 
@@ -2150,7 +2204,7 @@ void property_channels_drive_opacity_and_individual_effects() {
          {10, 20.0, schema::interp_linear}}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     MODEL_CHECK(model.counters().channels == 3U);
     MODEL_CHECK(model.counters().effects == 2U);
@@ -2189,7 +2243,7 @@ void the_lowest_id_property_channel_wins_everywhere() {
          {10, 0.8, schema::interp_linear}}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().channels == 4U);
     const auto built = model.evaluate(scene::SceneTime{10U, 60U, 1U});
     MODEL_CHECK(built.effects.size() == 1U);
@@ -2231,7 +2285,7 @@ void effect_identity_order_and_animation_participate_in_the_digest() {
         effect_node(2U, 1U, schema::brightness_kind, 0, 2.0));
     const auto digest_of = [](const doc::Root& root, core::u64 frame = 0U) {
         scene::SceneModel model;
-        model.reset(root);
+        model.reset(scoped(root));
         return scene::digest(
             model.evaluate(scene::SceneTime{frame, 60U, 1U}));
     };
@@ -2269,7 +2323,7 @@ void a_channel_drives_a_component_over_show_frames() {
         1U,
         schema::position_x,
         {{0, 0.0, schema::interp_linear}, {10, 10.0, schema::interp_linear}}));
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     MODEL_CHECK(model.counters().channels == 1U);
     MODEL_CHECK(model.counters().media == 1U);
@@ -2311,7 +2365,7 @@ void channel_interpolation_modes_differ() {
         1U,
         schema::position_z,
         {{0, 0.0, schema::interp_linear}, {10, 10.0, schema::interp_linear}}));
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().channels == 3U);
 
     // Keep the scene alive: binding a reference straight into evaluate()'s
@@ -2336,7 +2390,7 @@ void the_timeline_query_keeps_values_and_interpolation() {
         schema::position_x,
         {{10, 8.0, schema::interp_cubic},
          {0, 2.0, schema::interp_hold}}));
-    model.reset(root);
+    model.reset(scoped(root));
 
     const auto channels = model.channel_keyframes();
     MODEL_CHECK(channels.size() == 1U);
@@ -2360,7 +2414,7 @@ void the_lowest_id_channel_wins_a_component() {
         channel_node(5U, 1U, schema::position_x, {{0, 5.0, schema::interp_hold}}));
     root = root.set(
         channel_node(3U, 1U, schema::position_x, {{0, 3.0, schema::interp_hold}}));
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().channels == 2U);
     MODEL_CHECK(
         std::abs(model.evaluate(at_start).media.front().world.at(0U, 3U) - 3.0F)
@@ -2381,12 +2435,12 @@ void a_channel_replicates_bit_exact() {
          {60, -3.0, schema::interp_linear}}));
 
     scene::SceneModel checkpointed;
-    checkpointed.reset(root_of(nodes));
+    checkpointed.reset(scoped(root_of(nodes)));
     scene::SceneModel streamed;
     doc::Root running;
     for (const auto& one : nodes) {
         const auto grown = running.set(one);
-        streamed.apply(diff(running, grown));
+        streamed.apply(diff(scoped(running), scoped(grown)));
         running = grown;
     }
     for (core::u64 frame = 0U; frame <= 90U; ++frame) {
@@ -2412,7 +2466,7 @@ void camera_lens_channels_evaluate_and_replicate() {
                      {{0, 2.0, schema::interp_linear}, {20, 6.0, schema::interp_linear}}),
     };
     scene::SceneModel checkpointed;
-    checkpointed.reset(root_of(nodes));
+    checkpointed.reset(scoped(root_of(nodes)));
     MODEL_CHECK(checkpointed.counters().rejected == 0U);
     MODEL_CHECK(checkpointed.counters().channels == 4U);
     const auto middle = checkpointed.evaluate(scene::SceneTime{10U, 60U, 1U});
@@ -2431,7 +2485,7 @@ void camera_lens_channels_evaluate_and_replicate() {
     doc::Root running;
     for (const auto& one : nodes) {
         const auto grown = running.set(one);
-        streamed.apply(diff(running, grown));
+        streamed.apply(diff(scoped(running), scoped(grown)));
         running = grown;
     }
     for (core::u64 frame = 0U; frame <= 30U; ++frame) {
@@ -2441,7 +2495,7 @@ void camera_lens_channels_evaluate_and_replicate() {
     }
     const auto limited = running.set(channel_node(20U, 2U, schema::fov_turns,
         {{0, 4.0, schema::interp_linear}}));
-    checkpointed.reset(limited);
+    checkpointed.reset(scoped(limited));
     MODEL_CHECK(checkpointed.evaluate(at_start).camera.field_of_view == 0.499F);
 }
 
@@ -2450,7 +2504,7 @@ void published_keyframes_use_the_canonical_cubic_sampler() {
     auto authored = channel_node(20U, 2U, schema::fov_turns,
         {{0, 0.1, schema::interp_cubic}, {20, 0.2, schema::interp_cubic}});
     scene::SceneModel model;
-    model.reset(root_of({node(1U, schema::stage_type, {}), camera, authored}));
+    model.reset(scoped(root_of({node(1U, schema::stage_type, {}), camera, authored})));
     auto channels = model.channel_keyframes();
     MODEL_CHECK(channels.size() == 1U);
     // Two auto keys have the secant as both tangents: a straight line,
@@ -2473,7 +2527,7 @@ void published_keyframes_use_the_canonical_cubic_sampler() {
     authored.properties[property(0U, schema::channel_key_out_weight_suffix)] = 4.0;
     authored.properties[property(1U, schema::channel_key_in_slope_suffix)] = -0.005;
     authored.properties[property(1U, schema::channel_key_in_weight_suffix)] = 12.0;
-    model.reset(root_of({node(1U, schema::stage_type, {}), camera, authored}));
+    model.reset(scoped(root_of({node(1U, schema::stage_type, {}), camera, authored})));
     channels = model.channel_keyframes();
     MODEL_CHECK(channels.size() == 1U);
     // At Bezier t=1/2, X=(0+3*4+3*20+32)/8=13, and
@@ -2497,38 +2551,38 @@ void published_keyframes_use_the_canonical_cubic_sampler() {
 void a_malformed_channel_is_refused() {
     // No keys: a channel that animates nothing is a mistake, not an empty curve.
     scene::SceneModel no_keys;
-    no_keys.reset(doc::Root{}.set(channel_node(1U, 2U, schema::position_x, {})));
+    no_keys.reset(scoped(doc::Root{}.set(channel_node(1U, 2U, schema::position_x, {}))));
     MODEL_CHECK(no_keys.counters().rejected == 1U);
     MODEL_CHECK(no_keys.counters().channels == 0U);
 
     // A component name that is not a transform property.
     scene::SceneModel bad_component;
-    bad_component.reset(doc::Root{}.set(
-        channel_node(1U, 2U, "wobble", {{0, 0.0, schema::interp_linear}})));
+    bad_component.reset(scoped(doc::Root{}.set(
+        channel_node(1U, 2U, "wobble", {{0, 0.0, schema::interp_linear}}))));
     MODEL_CHECK(bad_component.counters().rejected == 1U);
 
     // An interpolation name that does not name a mode.
     scene::SceneModel bad_interp;
-    bad_interp.reset(doc::Root{}.set(
-        channel_node(1U, 2U, schema::position_x, {{0, 0.0, "wiggle"}})));
+    bad_interp.reset(scoped(doc::Root{}.set(
+        channel_node(1U, 2U, schema::position_x, {{0, 0.0, "wiggle"}}))));
     MODEL_CHECK(bad_interp.counters().rejected == 1U);
 
     // Non-finite values would poison transforms and effect folds downstream.
     scene::SceneModel non_finite;
-    non_finite.reset(doc::Root{}.set(channel_node(
+    non_finite.reset(scoped(doc::Root{}.set(channel_node(
         1U,
         2U,
         schema::brightness,
         {{0, std::numeric_limits<double>::quiet_NaN(),
-          schema::interp_hold}})));
+          schema::interp_hold}}))));
     MODEL_CHECK(non_finite.counters().rejected == 1U);
 
     scene::SceneModel too_wide;
-    too_wide.reset(doc::Root{}.set(channel_node(
+    too_wide.reset(scoped(doc::Root{}.set(channel_node(
         1U,
         2U,
         schema::opacity,
-        {{0, std::numeric_limits<double>::max(), schema::interp_hold}})));
+        {{0, std::numeric_limits<double>::max(), schema::interp_hold}}))));
     MODEL_CHECK(too_wide.counters().rejected == 1U);
 
     // A negative target cannot name a node.
@@ -2545,7 +2599,7 @@ void a_malformed_channel_is_refused() {
             + std::string{schema::channel_key_frame_suffix},
         doc::PropertyValue{std::int64_t{0}});
     scene::SceneModel negative_target;
-    negative_target.reset(doc::Root{}.set(negative));
+    negative_target.reset(scoped(doc::Root{}.set(negative)));
     MODEL_CHECK(negative_target.counters().rejected == 1U);
 }
 
@@ -2600,7 +2654,7 @@ void scenes_isolate_drawables_lights_channels_and_effects() {
         {whole(schema::scene_id, 999), text(schema::primitive, "box")}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     const auto metadata = model.scenes();
     MODEL_CHECK(metadata.size() == 2U);
@@ -2641,49 +2695,6 @@ void scenes_isolate_drawables_lights_channels_and_effects() {
     MODEL_CHECK(missing.instances.empty() && missing.effects.empty());
 }
 
-void legacy_scope_tracks_the_lowest_stage() {
-    doc::Root running;
-    running = running.set(node(
-        1U, schema::object_type, {text(schema::primitive, "box")}));
-    running = running.set(node(
-        2U, schema::camera_type, {real(schema::eye_x, 2.0)}));
-
-    scene::SceneModel model;
-    model.reset(running);
-    MODEL_CHECK(model.scenes().empty());
-    MODEL_CHECK(model.evaluate(at_start).id == scene::legacy_scene_id);
-    MODEL_CHECK(model.evaluate(at_start).instances.size() == 1U);
-
-    auto next = running.set(node(
-        20U, schema::stage_type, {text(schema::scene_name, "Only")}));
-    model.apply(diff(running, next));
-    running = next;
-    MODEL_CHECK(model.evaluate(at_start).id == doc::NodeId{20U});
-    MODEL_CHECK(model.evaluate(doc::NodeId{20U}, at_start).instances.size() == 1U);
-
-    next = running.set(node(
-        10U, schema::stage_type, {text(schema::scene_name, "New default")}));
-    model.apply(diff(running, next));
-    running = next;
-    MODEL_CHECK(model.evaluate(at_start).id == doc::NodeId{10U});
-    MODEL_CHECK(model.evaluate(doc::NodeId{10U}, at_start).instances.size() == 1U);
-    MODEL_CHECK(model.evaluate(doc::NodeId{20U}, at_start).instances.empty());
-
-    const auto erased = running.erase(doc::NodeId{10U});
-    MODEL_CHECK(erased.has_value());
-    model.apply(diff(running, *erased));
-    MODEL_CHECK(model.evaluate(at_start).id == doc::NodeId{20U});
-    MODEL_CHECK(model.evaluate(at_start).instances.size() == 1U);
-
-    // A present but malformed scope is rejected rather than silently treated
-    // as legacy ownership.
-    scene::SceneModel malformed;
-    malformed.reset(doc::Root{}.set(node(
-        1U, schema::object_type,
-        {text(schema::primitive, "box"), text(schema::scene_id, "Opening")})));
-    MODEL_CHECK(malformed.counters().rejected == 1U);
-}
-
 void cameras_are_singletons_within_each_scene() {
     doc::Root root;
     root = root.set(node(10U, schema::stage_type, {}));
@@ -2707,7 +2718,7 @@ void cameras_are_singletons_within_each_scene() {
         {whole(schema::scene_id, 999), real(schema::eye_x, 50.0)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().cameras == 5U);
     MODEL_CHECK(model.counters().duplicate_singletons() == 2U);
     MODEL_CHECK(model.evaluate(doc::NodeId{10U}, at_start).camera.eye.x == 5.0F);
@@ -2715,7 +2726,7 @@ void cameras_are_singletons_within_each_scene() {
 
     const auto removed = root.erase(doc::NodeId{10U});
     MODEL_CHECK(removed.has_value());
-    model.apply(diff(root, *removed));
+    model.apply(diff(scoped(root), scoped(*removed)));
     // The legacy camera dynamically follows the new lowest stage and now wins
     // over scene 20's explicit camera.
     MODEL_CHECK(model.counters().duplicate_singletons() == 1U);
@@ -2749,12 +2760,12 @@ void multi_scene_reset_and_streamed_deltas_agree() {
 
     const doc::Root final_root = root_of(nodes);
     scene::SceneModel checkpointed;
-    checkpointed.reset(final_root);
+    checkpointed.reset(scoped(final_root));
     scene::SceneModel streamed;
     doc::Root running;
     for (const auto& value : nodes) {
         const auto next = running.set(value);
-        streamed.apply(diff(running, next));
+        streamed.apply(diff(scoped(running), scoped(next)));
         running = next;
     }
     MODEL_CHECK(checkpointed.counters() == streamed.counters());
@@ -2817,6 +2828,7 @@ void clone_planning_is_deterministic_and_rewrites_scene_references() {
         {whole(schema::slice_width, 100), whole(schema::slice_height, 100)}));
     // Occupied allocator slot and unrelated node; both must remain untouched.
     root = root.set(node(1'001U, "editor.note", {text("value", "keep")}));
+    root = scoped(root);
     const auto original_size = root.size();
 
     const auto planned = scene::plan_clone_scene(
@@ -2894,7 +2906,7 @@ void clone_planning_is_deterministic_and_rewrites_scene_references() {
         with_clone = with_clone.set(put);
     }
     scene::SceneModel model;
-    model.reset(with_clone);
+    model.reset(scoped(with_clone));
     const auto source = model.evaluate(doc::NodeId{10U}, at_start);
     const auto clone = model.evaluate(plan.destination, at_start);
     MODEL_CHECK(source.instances.size() == clone.instances.size());
@@ -2908,7 +2920,7 @@ void clone_planning_is_deterministic_and_rewrites_scene_references() {
         std::string{schema::position_x}, doc::PropertyValue{99.0});
     const auto moved_root = with_clone.set(std::move(moved_clone));
     scene::SceneModel moved;
-    moved.reset(moved_root);
+    moved.reset(scoped(moved_root));
     const auto source_after = moved.evaluate(doc::NodeId{10U}, at_start);
     const auto clone_after = moved.evaluate(plan.destination, at_start);
     const auto source_100 = std::find_if(
@@ -2996,26 +3008,6 @@ void scene_delete_planning_cascades_owned_content_and_dependencies() {
     MODEL_CHECK(absent.error() == scene::SceneDeleteError::SceneNotFound);
 }
 
-void deleting_the_default_scene_removes_legacy_scoped_nodes() {
-    doc::Root root;
-    root = root.set(node(10U, schema::stage_type, {}));
-    root = root.set(node(20U, schema::stage_type, {}));
-    root = root.set(node(30U, schema::object_type,
-                         {text(schema::primitive, "box")}));
-    root = root.set(node(40U, schema::object_type,
-                         {whole(schema::scene_id, 20),
-                          text(schema::primitive, "sphere")}));
-    root = root.set(node(50U, "compositor.output", {}));
-    root = root.set(node(60U, "editor.note", {}));
-
-    const auto planned =
-        scene::plan_delete_scene(root, scene::SceneId{10U});
-    MODEL_CHECK(planned.has_value());
-    const std::vector<doc::NodeId> expected{
-        doc::NodeId{10U}, doc::NodeId{30U}, doc::NodeId{50U}};
-    MODEL_CHECK(planned.value().erases == expected);
-}
-
 void effect_delete_planning_cascades_only_its_animation_channels() {
     doc::Root root;
     root = root.set(node(
@@ -3060,13 +3052,13 @@ void effect_delete_planning_cascades_only_its_animation_channels() {
 
 void a_placed_clip_is_on_air_only_inside_its_own_span() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         1U, schema::media_type,
         {text(schema::source, "plate_%04u.png"),
          whole(schema::sequence_start, 100),
          whole(schema::sequence_count, 24),
          whole(schema::clip_start, 50),
-         whole(schema::clip_duration, 10)})));
+         whole(schema::clip_duration, 10)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const auto at = [&](core::u64 frame) {
@@ -3084,10 +3076,10 @@ void a_placed_clip_is_on_air_only_inside_its_own_span() {
 
     // An unplaced clip keeps the legacy always-on, loop-from-zero contract.
     scene::SceneModel legacy;
-    legacy.reset(doc::Root{}.set(node(
+    legacy.reset(scoped(doc::Root{}.set(node(
         2U, schema::media_type,
         {text(schema::source, "plate_%04u.png"),
-         whole(schema::sequence_count, 24)})));
+         whole(schema::sequence_count, 24)}))));
     MODEL_CHECK(
         legacy.evaluate(scene::SceneTime{55U, 60U, 1U}).media.size() == 1U);
     MODEL_CHECK(legacy.evaluate(scene::SceneTime{55U, 60U, 1U})
@@ -3135,7 +3127,7 @@ void a_solo_draws_only_what_it_shows() {
         {whole(schema::scene_id, 100), text(schema::light_kind, "point"),
          real(schema::range, 25.0), real(schema::intensity, 12.0)}));
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     const auto evaluate = [&](const scene::SoloFilter* solo) {
         return model.evaluate(scene::SceneId{100U}, at_start, {}, {}, solo);
     };
@@ -3177,20 +3169,20 @@ void a_solo_draws_only_what_it_shows() {
 
 void a_timing_override_evaluates_a_placement_as_proposed() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
-        1U, schema::media_type,
+    model.reset(scoped(doc::Root{}.set(node(1U, schema::stage_type, {})).set(node(
+        2U, schema::media_type,
         {text(schema::source, "plate_%04u.png"),
          whole(schema::sequence_start, 100),
          whole(schema::sequence_count, 24),
          whole(schema::clip_start, 50),
-         whole(schema::clip_duration, 10)})));
+         whole(schema::clip_duration, 10)}))));
     const scene::SceneTime before{45U, 60U, 1U};
     const scene::SceneId id = model.evaluate(before).id;
     MODEL_CHECK(model.evaluate(before).media.empty());
 
     // Trimmed out to start at 40: on air at 45, five frames into its source.
     const std::array<scene::ClipTimingOverride, 1U> trimmed{
-        {{doc::NodeId{1U}, scene::ClipTiming{40, 20, 0, 0, 0}}}};
+        {{doc::NodeId{2U}, scene::ClipTiming{40, 20, 0, 0, 0}}}};
     const scene::Scene previewed = model.evaluate(id, before, {}, trimmed);
     MODEL_CHECK(previewed.media.size() == 1U);
     MODEL_CHECK(previewed.media.front().frame_index == 105U);
@@ -3199,7 +3191,7 @@ void a_timing_override_evaluates_a_placement_as_proposed() {
     // Slipped seven source frames: the same show frame shows another picture.
     const scene::SceneTime during{52U, 60U, 1U};
     const std::array<scene::ClipTimingOverride, 1U> slipped{
-        {{doc::NodeId{1U}, scene::ClipTiming{50, 10, 7, 0, 0}}}};
+        {{doc::NodeId{2U}, scene::ClipTiming{50, 10, 7, 0, 0}}}};
     MODEL_CHECK(model.evaluate(id, during, {}, slipped).media.front()
                     .frame_index == 109U);
     MODEL_CHECK(model.evaluate(during).media.front().frame_index == 102U);
@@ -3214,14 +3206,14 @@ void a_timing_override_evaluates_a_placement_as_proposed() {
 
 void a_clip_trim_selects_which_source_frames_play() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         1U, schema::media_type,
         {text(schema::source, "plate_%04u.png"),
          whole(schema::sequence_start, 100),
          whole(schema::sequence_count, 24),
          whole(schema::clip_start, 8),
          whole(schema::clip_duration, 6),
-         whole(schema::source_in, 5)})));
+         whole(schema::source_in, 5)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const auto index_at = [&](core::u64 frame) {
@@ -3235,14 +3227,14 @@ void a_clip_trim_selects_which_source_frames_play() {
     // Trimming past the end of the source wraps, exactly as an untrimmed clip
     // does, rather than holding the last frame or refusing the node.
     scene::SceneModel wrapped;
-    wrapped.reset(doc::Root{}.set(node(
+    wrapped.reset(scoped(doc::Root{}.set(node(
         2U, schema::media_type,
         {text(schema::source, "plate_%04u.png"),
          whole(schema::sequence_start, 0),
          whole(schema::sequence_count, 4),
          whole(schema::clip_start, 0),
          whole(schema::clip_duration, 4),
-         whole(schema::source_in, 7)})));
+         whole(schema::source_in, 7)}))));
     MODEL_CHECK(wrapped.evaluate(scene::SceneTime{0U, 60U, 1U})
                     .media.front()
                     .frame_index == 3U);
@@ -3250,14 +3242,14 @@ void a_clip_trim_selects_which_source_frames_play() {
 
 void a_clip_about_to_cut_in_names_its_first_frame_for_decoding() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         1U, schema::media_type,
         {text(schema::source, "clip.mp4"),
          whole(schema::sequence_start, 100),
          whole(schema::sequence_count, 24),
          whole(schema::clip_start, 400),
          whole(schema::clip_duration, 10),
-         whole(schema::source_in, 5)})));
+         whole(schema::source_in, 5)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const auto at = [&](core::u64 frame) {
@@ -3297,7 +3289,7 @@ void prewarming_uses_show_seconds_and_keeps_the_nearest_cuts() {
              whole(schema::clip_duration, 10), whole(schema::asset_id, 99)}));
     }
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     const auto approaching = model.evaluate(scene::SceneTime{30U, 60U, 1U});
     MODEL_CHECK(approaching.media.empty());
     MODEL_CHECK(approaching.media_prewarm.size() == 8U);
@@ -3326,7 +3318,7 @@ void timeline_cuts_keep_the_published_media_set() {
         {text(schema::source, "still.png"),
          whole(schema::clip_start, 20), whole(schema::clip_duration, 5)}));
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     const auto at = [&](core::u64 frame) {
         return model.evaluate(scene::SceneTime{frame, 60U, 1U});
     };
@@ -3356,7 +3348,7 @@ void timeline_cuts_keep_the_published_media_set() {
     root = root.set(node(2U, schema::media_type,
         {text(schema::source, "replacement.png"),
          whole(schema::clip_start, 20), whole(schema::clip_duration, 5)}));
-    model.reset(root);
+    model.reset(scoped(root));
     const auto changed = scene::asset_set_digest(at(0U));
     MODEL_CHECK(changed != assets);
     MODEL_CHECK(!gate.present({changed, true, 0U}, permit, 300U, 0U, true));
@@ -3367,7 +3359,7 @@ void timeline_cuts_keep_the_published_media_set() {
     root = root.set(node(2U, schema::media_type,
         {text(schema::source, "replacement.png"), whole(schema::asset_id, 99),
          whole(schema::clip_start, 20), whole(schema::clip_duration, 5)}));
-    model.reset(root);
+    model.reset(scoped(root));
     auto library_scene = at(0U);
     const auto library_assets = scene::asset_set_digest(library_scene);
     library_scene.media_assets->back().source = "local/proxy.mp4";
@@ -3382,7 +3374,7 @@ void timeline_cuts_keep_the_published_media_set() {
 void a_clip_carries_the_size_it_is_held_at() {
     const auto clip = [](std::optional<std::string_view> resolution) {
         doc::Node built = node(
-            1U, schema::media_type,
+            2U, schema::media_type,
             {text(schema::source, "plate.mp4"),
              whole(schema::sequence_start, 0),
              whole(schema::sequence_count, 100),
@@ -3395,11 +3387,11 @@ void a_clip_carries_the_size_it_is_held_at() {
         return built;
     };
     scene::SceneModel full;
-    full.reset(doc::Root{}.set(clip(std::nullopt)));
+    full.reset(scoped(doc::Root{}.set(node(1U, schema::stage_type, {})).set(clip(std::nullopt))));
     scene::SceneModel half;
-    half.reset(doc::Root{}.set(clip(schema::media_resolution_half)));
+    half.reset(scoped(doc::Root{}.set(node(1U, schema::stage_type, {})).set(clip(schema::media_resolution_half))));
     scene::SceneModel named_full;
-    named_full.reset(doc::Root{}.set(clip(schema::media_resolution_full)));
+    named_full.reset(scoped(doc::Root{}.set(node(1U, schema::stage_type, {})).set(clip(schema::media_resolution_full))));
     MODEL_CHECK(full.counters().rejected == 0U);
     MODEL_CHECK(half.counters().rejected == 0U);
     MODEL_CHECK(named_full.counters().rejected == 0U);
@@ -3425,17 +3417,17 @@ void a_clip_carries_the_size_it_is_held_at() {
                 == scene::MediaResolution::Half);
 
     scene::SceneModel unknown;
-    unknown.reset(doc::Root{}.set(clip("quarter")));
+    unknown.reset(scoped(doc::Root{}.set(node(1U, schema::stage_type, {})).set(clip("quarter"))));
     MODEL_CHECK(unknown.counters().rejected == 1U);
 }
 
 void a_clip_reports_the_range_it_loops_over() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         1U, schema::media_type,
         {text(schema::source, "clip.mp4"),
          whole(schema::sequence_start, 100),
-         whole(schema::sequence_count, 24)})));
+         whole(schema::sequence_count, 24)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     // The renderer reads ahead inside this range, so the frame after the last
@@ -3452,13 +3444,13 @@ void a_clip_on_air_across_the_show_wrap_names_its_landing_frame() {
     // land on the clip's own loop point: the clip never goes off air, yet the
     // frame it must show jumps to an unrelated part of its file.
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         1U, schema::media_type,
         {text(schema::source, "spanning.mp4"),
          whole(schema::sequence_start, 0),
          whole(schema::sequence_count, 1000),
          whole(schema::clip_start, 0),
-         whole(schema::clip_duration, 600)})));
+         whole(schema::clip_duration, 600)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     constexpr scene::ShowLoop show{0U, 599U, true};
@@ -3493,7 +3485,7 @@ void a_clip_on_air_across_the_show_wrap_names_its_landing_frame() {
 
 void clip_ramps_scale_the_authored_opacity() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         1U, schema::media_type,
         {text(schema::source, "plate_%04u.png"),
          whole(schema::sequence_count, 100),
@@ -3501,7 +3493,7 @@ void clip_ramps_scale_the_authored_opacity() {
          whole(schema::clip_duration, 10),
          whole(schema::fade_in, 4),
          whole(schema::fade_out, 2),
-         real(schema::opacity, 0.5)})));
+         real(schema::opacity, 0.5)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const auto opacity_at = [&](core::u64 frame) {
@@ -3540,10 +3532,10 @@ void negative_clip_placements_evaluate_fades_and_replicate_at_frame_zero() {
          whole(schema::clip_duration, 8),
          whole(schema::source_in, 1),
          whole(schema::fade_in, 6), whole(schema::fade_out, 2)}));
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     scene::SceneModel replicated;
-    replicated.apply(doc::diff(doc::Root{}, root));
+    replicated.apply(doc::diff(scoped(doc::Root{}), scoped(root)));
     const auto first = model.evaluate(at_start);
     MODEL_CHECK(first.media.size() == 1U);
     MODEL_CHECK(first.media.front().frame_index == 0U); // (source1 + elapsed3) mod4
@@ -3567,8 +3559,8 @@ void negative_clip_placements_evaluate_fades_and_replicate_at_frame_zero() {
     auto moved = *root.get(doc::NodeId{1U});
     moved.properties[std::string{schema::clip_start}] = core::i64{-4};
     const auto changed = root.set(moved);
-    replicated.apply(doc::diff(root, changed));
-    model.reset(changed);
+    replicated.apply(doc::diff(scoped(root), scoped(changed)));
+    model.reset(scoped(changed));
     MODEL_CHECK(model.evaluate(at_start).media.front().frame_index == 1U);
     MODEL_CHECK(scene::digest(model.evaluate(at_start)) ==
                 scene::digest(replicated.evaluate(at_start)));
@@ -3586,22 +3578,22 @@ void negative_native_placements_keep_exact_source_mapping_and_safe_bounds() {
              whole(schema::clip_duration, duration)}));
     };
     scene::SceneModel model;
-    model.reset(make_root(-1'001, 2'000));
+    model.reset(scoped(make_root(-1'001, 2'000)));
     const auto at_zero = model.evaluate(scene::SceneTime{0U, 60'000U, 1'001U});
     MODEL_CHECK(model.counters().rejected == 0U);
     MODEL_CHECK(at_zero.media.front().frame_index == 116U); //100+(4+floor(1001*2/5))%97
     constexpr auto highest = std::numeric_limits<core::i64>::max();
     constexpr auto lowest = std::numeric_limits<core::i64>::min();
-    model.reset(make_root(-(highest / 2), highest));
+    model.reset(scoped(make_root(-(highest / 2), highest)));
     MODEL_CHECK(model.counters().rejected == 0U);
     // floor(4611686018427387903*2/5)+4, modulo97, is58.
     MODEL_CHECK(model.evaluate(scene::SceneTime{0U, 60'000U, 1'001U})
                     .media.front().frame_index == 158U);
-    model.reset(make_root(lowest, highest));
+    model.reset(scoped(make_root(lowest, highest)));
     MODEL_CHECK(model.counters().rejected == 0U);
     MODEL_CHECK(model.evaluate(at_start).media.empty());
     MODEL_CHECK(model.evaluate(at_start).media_prewarm.empty());
-    model.reset(make_root(highest, 1));
+    model.reset(scoped(make_root(highest, 1)));
     MODEL_CHECK(model.counters().rejected == 1U);
     MODEL_CHECK(model.evaluate(at_start).media.empty());
 
@@ -3631,7 +3623,7 @@ void clip_placements_are_listed_for_the_editor_off_air() {
         {text(schema::source, "b_%04u.png"), whole(schema::sequence_count, 8),
          whole(schema::clip_start, 4), whole(schema::clip_duration, 4)}));
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
 
     // At frame zero only the first clip draws, but the editor must still see
     // both placements or the second one becomes undraggable.
@@ -3687,7 +3679,7 @@ void timeline_lanes_order_mute_lock_and_preserve_implicit_clips() {
          whole(schema::clip_duration, 20)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     MODEL_CHECK(model.counters().lanes == 2U);
 
@@ -3729,8 +3721,8 @@ void timeline_lanes_order_mute_lock_and_preserve_implicit_clips() {
     MODEL_CHECK(scene::digest(changed) != scene::digest(evaluated));
 
     scene::SceneModel streamed;
-    streamed.reset(doc::Root{});
-    streamed.apply(diff(doc::Root{}, root));
+    streamed.reset(scoped(doc::Root{}));
+    streamed.apply(diff(scoped(doc::Root{}), scoped(root)));
     MODEL_CHECK(streamed.lanes(scene::SceneId{100U}) == lanes);
     MODEL_CHECK(scene::digest(
                     streamed.evaluate(scene::SceneId{100U}, at_start))
@@ -3777,7 +3769,7 @@ void a_track_owns_the_screen_its_clips_are_drawn_on() {
          real(schema::position_x, 8.0)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const auto lanes = model.lanes(scene::SceneId{100U});
@@ -3850,8 +3842,8 @@ void a_track_owns_the_screen_its_clips_are_drawn_on() {
     MODEL_CHECK(scene::digest(reformatted) != scene::digest(evaluated));
 
     scene::SceneModel streamed;
-    streamed.reset(doc::Root{});
-    streamed.apply(diff(doc::Root{}, root));
+    streamed.reset(scoped(doc::Root{}));
+    streamed.apply(diff(scoped(doc::Root{}), scoped(root)));
     MODEL_CHECK(streamed.lanes(scene::SceneId{100U}) == lanes);
     MODEL_CHECK(scene::digest(
                     streamed.evaluate(scene::SceneId{100U}, at_start))
@@ -3903,7 +3895,7 @@ void timeline_markers_are_scene_scoped_cues_in_show_order() {
                static_cast<std::int64_t>(scene::max_loop_fade_ms) + 1)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().markers == 4U);
     MODEL_CHECK(model.counters().rejected == 5U);
 
@@ -3937,7 +3929,7 @@ void timeline_markers_are_scene_scoped_cues_in_show_order() {
         cloned = cloned.set(put);
     }
     scene::SceneModel copy;
-    copy.reset(cloned);
+    copy.reset(scoped(cloned));
     const auto copied = copy.markers(planned.value().destination);
     MODEL_CHECK(copied.size() == 3U);
     MODEL_CHECK(copied[2U].name == "Band in");
@@ -3967,7 +3959,7 @@ void an_open_aspect_lock_leaves_the_authored_plane_alone() {
          whole(schema::clip_duration, 20)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     const auto lanes = model.lanes(scene::SceneId{100U});
     MODEL_CHECK(lanes.size() == 1U);
@@ -4000,7 +3992,7 @@ void a_screen_with_no_format_is_refused() {
          whole(schema::clip_duration, 20)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 1U);
     MODEL_CHECK(model.lanes(scene::SceneId{100U}).empty());
     MODEL_CHECK(model.evaluate(scene::SceneId{100U}, at_start).media.empty());
@@ -4022,7 +4014,7 @@ void a_track_grade_runs_after_the_clip_it_is_playing() {
     root = root.set(effect_node(31U, 20U, schema::brightness_kind, 0, 2.0));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected == 0U);
     const auto evaluated = model.evaluate(scene::SceneId{100U}, at_start);
     MODEL_CHECK(evaluated.media.size() == 1U);
@@ -4104,7 +4096,7 @@ void every_renderer_setting_survives_the_document() {
     scene::write_renderer_settings(settings, authored);
 
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(settings));
+    model.reset(scoped(doc::Root{}.set(settings)));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     // Against the clamped form, because that is what the writer emits and what
@@ -4130,14 +4122,14 @@ void texture_budget_reads_back_within_the_envelope() {
         doc::PropertyValue{static_cast<std::int64_t>(65536)});
 
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(settings));
+    model.reset(scoped(doc::Root{}.set(settings)));
     MODEL_CHECK(model.counters().rejected == 0U);
     MODEL_CHECK(model.renderer_settings().texture_budget_mib == 1024U);
 
     settings.properties.insert_or_assign(
         std::string{schema::texture_budget_mib},
         doc::PropertyValue{static_cast<std::int64_t>(0)});
-    model.reset(doc::Root{}.set(settings));
+    model.reset(scoped(doc::Root{}.set(settings)));
     MODEL_CHECK(model.renderer_settings().texture_budget_mib == 1U);
 }
 
@@ -4194,7 +4186,7 @@ void fog_height_round_trips_and_is_clamped() {
                           real(schema::environment_fog_height, 1.25),
                           real(schema::environment_fog_height_falloff, 0.5)}));
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     const scene::Scene built = model.evaluate(at_start);
     MODEL_CHECK(built.environment.fog_height == 1.25F);
     MODEL_CHECK(built.environment.fog_height_falloff == 0.5F);
@@ -4205,7 +4197,7 @@ void fog_height_round_trips_and_is_clamped() {
                           real(schema::environment_fog_height_falloff,
                                1.0e9)}));
     scene::SceneModel clamped_model;
-    clamped_model.reset(wild);
+    clamped_model.reset(scoped(wild));
     const scene::Scene bounded = clamped_model.evaluate(at_start);
     MODEL_CHECK(bounded.environment.fog_height == -scene::max_fog_height);
     MODEL_CHECK(bounded.environment.fog_height_falloff
@@ -4217,7 +4209,7 @@ void fog_height_round_trips_and_is_clamped() {
         1U, schema::stage_type,
         {real(schema::environment_fog_height_falloff, -3.0)}));
     scene::SceneModel negative_model;
-    negative_model.reset(negative);
+    negative_model.reset(scoped(negative));
     MODEL_CHECK(negative_model.evaluate(at_start).environment
                     .fog_height_falloff == 0.0F);
 }
@@ -4225,7 +4217,7 @@ void fog_height_round_trips_and_is_clamped() {
 void background_fog_distance_is_authored_bounded_and_digested() {
     const auto evaluate = [](std::initializer_list<Property> properties) {
         scene::SceneModel model;
-        model.reset(doc::Root{}.set(node(1U, schema::stage_type, properties)));
+        model.reset(scoped(doc::Root{}.set(node(1U, schema::stage_type, properties))));
         auto result = model.evaluate(at_start);
         // Compare the evaluated fog field itself. Authored-document identity
         // differs even for an explicit default and must not make the nonzero
@@ -4251,14 +4243,14 @@ void background_fog_distance_is_authored_bounded_and_digested() {
 
 void project_effect_settings_are_clamped_and_replicated() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         3U, schema::settings_type,
         {whole(schema::blur_taps, 200),
          real(schema::blur_sigma_ratio, 9.0),
          whole(schema::blur_passes, 99),
          text(schema::brightness_curve, schema::gain_curve),
          real(schema::brightness_gamma, 0.0),
-         real(schema::graph_texture_budget_gb, 500.0)})));
+         real(schema::graph_texture_budget_gb, 500.0)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const scene::EffectSettings settings = model.effect_settings();
@@ -4273,21 +4265,21 @@ void project_effect_settings_are_clamped_and_replicated() {
 
     // An in-range budget is kept exactly, and one below the floor rises to it.
     scene::SceneModel budget;
-    budget.reset(doc::Root{}.set(node(
+    budget.reset(scoped(doc::Root{}.set(node(
         4U, schema::settings_type,
-        {real(schema::graph_texture_budget_gb, 12.5)})));
+        {real(schema::graph_texture_budget_gb, 12.5)}))));
     MODEL_CHECK(budget.effect_settings().graph_texture_budget_gb == 12.5F);
-    budget.reset(doc::Root{}.set(node(
+    budget.reset(scoped(doc::Root{}.set(node(
         4U, schema::settings_type,
-        {real(schema::graph_texture_budget_gb, 0.01)})));
+        {real(schema::graph_texture_budget_gb, 0.01)}))));
     MODEL_CHECK(budget.effect_settings().graph_texture_budget_gb ==
                 scene::min_graph_texture_budget_gb);
 
     // An even tap count has no centre sample, so it is rounded up rather than
     // silently filtering off by half a pixel.
     scene::SceneModel even;
-    even.reset(doc::Root{}.set(
-        node(1U, schema::settings_type, {whole(schema::blur_taps, 8)})));
+    even.reset(scoped(doc::Root{}.set(
+        node(1U, schema::settings_type, {whole(schema::blur_taps, 8)}))));
     MODEL_CHECK(even.effect_settings().blur_taps == 9U);
 
     // The evaluated scene carries them, and the digest covers them: two nodes
@@ -4303,15 +4295,15 @@ void project_effect_settings_are_clamped_and_replicated() {
 
     // A project with no settings node is the built-in default, not a refusal.
     scene::SceneModel bare;
-    bare.reset(doc::Root{});
+    bare.reset(scoped(doc::Root{}));
     MODEL_CHECK(bare.effect_settings() == (scene::EffectSettings{}));
     MODEL_CHECK(bare.effect_settings_node() == doc::NodeId{});
 
     // A curve this build does not know is refused rather than guessed at.
     scene::SceneModel unknown;
-    unknown.reset(doc::Root{}.set(node(
+    unknown.reset(scoped(doc::Root{}.set(node(
         1U, schema::settings_type,
-        {text(schema::brightness_curve, "filmic")})));
+        {text(schema::brightness_curve, "filmic")}))));
     MODEL_CHECK(unknown.counters().rejected == 1U);
     MODEL_CHECK(unknown.effect_settings() == (scene::EffectSettings{}));
 }
@@ -4321,7 +4313,7 @@ void project_effect_settings_are_clamped_and_replicated() {
 // listen endpoint is not something a render node has any business holding.
 void tracking_sources_round_trip_and_are_clamped() {
     scene::SceneModel model;
-    model.reset(doc::Root{}
+    model.reset(scoped(doc::Root{}
                     .set(node(7U, schema::tracking_source_type,
                               {text(schema::tracking_source_name, "Stage A"),
                                flag(schema::tracking_enabled, true),
@@ -4333,7 +4325,7 @@ void tracking_sources_round_trip_and_are_clamped() {
                                real(schema::tracking_sensor_aspect, 1.85),
                                real(schema::tracking_fallback_focal_mm, 24.0)}))
                     .set(node(9U, schema::tracking_source_type,
-                              {text(schema::tracking_source_name, "Spare")})));
+                              {text(schema::tracking_source_name, "Spare")}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const std::vector<scene::TrackingSource> sources = model.tracking_sources();
@@ -4363,20 +4355,20 @@ void tracking_sources_round_trip_and_are_clamped() {
     // Enabled with no port cannot be listening, and says so here rather than
     // leaving every reader to guard the same thing.
     scene::SceneModel portless;
-    portless.reset(doc::Root{}.set(node(
+    portless.reset(scoped(doc::Root{}.set(node(
         1U, schema::tracking_source_type,
-        {flag(schema::tracking_enabled, true)})));
+        {flag(schema::tracking_enabled, true)}))));
     MODEL_CHECK(portless.counters().rejected == 0U);
     MODEL_CHECK(!portless.tracking_sources().front().settings.enabled);
 
     // Out-of-contract authoring is clamped once, here.
     scene::SceneModel absurd;
-    absurd.reset(doc::Root{}.set(node(
+    absurd.reset(scoped(doc::Root{}.set(node(
         1U, schema::tracking_source_type,
         {flag(schema::tracking_enabled, true),
          whole(schema::tracking_port, 40000),
          real(schema::tracking_sensor_height_mm, 9000.0),
-         real(schema::tracking_fallback_focal_mm, 0.0)})));
+         real(schema::tracking_fallback_focal_mm, 0.0)}))));
     MODEL_CHECK(absurd.counters().rejected == 0U);
     MODEL_CHECK(absurd.tracking_sources().front().settings.sensor_height_mm ==
                 scene::max_sensor_extent_mm);
@@ -4389,7 +4381,7 @@ void tracking_sources_round_trip_and_are_clamped() {
     // configured with, and takes Motive's defaults when the document is
     // silent about them.
     scene::SceneModel natnet;
-    natnet.reset(doc::Root{}
+    natnet.reset(scoped(doc::Root{}
                      .set(node(1U, schema::tracking_source_type,
                                {text(schema::tracking_protocol,
                                      schema::natnet_protocol),
@@ -4400,7 +4392,7 @@ void tracking_sources_round_trip_and_are_clamped() {
                                      "239.255.42.100")}))
                      .set(node(2U, schema::tracking_source_type,
                                {text(schema::tracking_protocol,
-                                     schema::natnet_protocol)})));
+                                     schema::natnet_protocol)}))));
     MODEL_CHECK(natnet.counters().rejected == 0U);
     const std::vector<scene::TrackingSource> motive_sources =
         natnet.tracking_sources();
@@ -4423,10 +4415,10 @@ void tracking_sources_round_trip_and_are_clamped() {
     for (const std::string_view bad :
          {"239.255.42", "239.255.42.256", "239.255.42.99.1", "group", ""}) {
         scene::SceneModel malformed;
-        malformed.reset(doc::Root{}.set(node(
+        malformed.reset(scoped(doc::Root{}.set(node(
             1U, schema::tracking_source_type,
             {text(schema::tracking_protocol, schema::natnet_protocol),
-             text(schema::tracking_multicast_group, bad)})));
+             text(schema::tracking_multicast_group, bad)}))));
         MODEL_CHECK(malformed.counters().rejected == 1U);
     }
     std::array<core::u8, 4U> parsed{};
@@ -4438,14 +4430,14 @@ void tracking_sources_round_trip_and_are_clamped() {
     // A protocol this build cannot honour is refused rather than guessed at:
     // tracking with the wrong parser is worse than not tracking.
     scene::SceneModel unknown;
-    unknown.reset(doc::Root{}.set(node(
+    unknown.reset(scoped(doc::Root{}.set(node(
         1U, schema::tracking_source_type,
-        {text(schema::tracking_protocol, "vrpn")})));
+        {text(schema::tracking_protocol, "vrpn")}))));
     MODEL_CHECK(unknown.counters().rejected == 1U);
 
     // A project with no feed authors no tracking at all.
     scene::SceneModel bare;
-    bare.reset(doc::Root{});
+    bare.reset(scoped(doc::Root{}));
     MODEL_CHECK(bare.tracking_sources().empty());
 }
 
@@ -4454,14 +4446,14 @@ void tracking_sources_round_trip_and_are_clamped() {
 // frustum from the same authored camera.
 void a_camera_bound_to_a_feed_is_the_tracked_camera() {
     scene::SceneModel model;
-    model.reset(doc::Root{}
+    model.reset(scoped(doc::Root{}
                     .set(node(3U, schema::tracking_source_type,
                               {text(schema::tracking_source_name, "Stage A"),
                                flag(schema::tracking_enabled, true),
                                whole(schema::tracking_port, 6301)}))
                     .set(node(4U, schema::camera_type,
                               {real(schema::eye_x, 2.0),
-                               whole(schema::camera_tracking_source, 3)})));
+                               whole(schema::camera_tracking_source, 3)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const scene::Scene built = model.evaluate(at_start);
@@ -4481,14 +4473,14 @@ void a_camera_bound_to_a_feed_is_the_tracked_camera() {
     // binding is dropped rather than half-kept, so no node derives a plate
     // from a pose that can never arrive.
     scene::SceneModel dangling;
-    dangling.reset(doc::Root{}.set(node(
-        4U, schema::camera_type, {whole(schema::camera_tracking_source, 3)})));
+    dangling.reset(scoped(doc::Root{}.set(node(
+        4U, schema::camera_type, {whole(schema::camera_tracking_source, 3)}))));
     const scene::Scene loose = dangling.evaluate(at_start);
     MODEL_CHECK(loose.tracked_cameras.empty());
 
     // An unbound camera is an ordinary camera, and the scene says so.
     scene::SceneModel plain;
-    plain.reset(doc::Root{}.set(node(4U, schema::camera_type, {})));
+    plain.reset(scoped(doc::Root{}.set(node(4U, schema::camera_type, {}))));
     const scene::Scene ordinary = plain.evaluate(at_start);
     MODEL_CHECK(plain.cameras(ordinary.id).size() == 1U);
     MODEL_CHECK(ordinary.tracked_cameras.empty());
@@ -4503,7 +4495,7 @@ void a_camera_bound_to_a_feed_is_the_tracked_camera() {
 // scene's first camera.
 void every_tracked_camera_follows_its_position_keys() {
     scene::SceneModel model;
-    model.reset(
+    model.reset(scoped(
         doc::Root{}
             .set(node(2U, schema::tracking_source_type,
                       {flag(schema::tracking_enabled, true),
@@ -4519,7 +4511,7 @@ void every_tracked_camera_follows_its_position_keys() {
                                {20, 6.0, schema::interp_linear}}))
             .set(channel_node(21U, 11U, schema::rotation_yaw,
                               {{0, 0.0, schema::interp_linear},
-                               {20, 0.5, schema::interp_linear}})));
+                               {20, 0.5, schema::interp_linear}}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const scene::Scene middle =
@@ -4543,7 +4535,7 @@ void every_tracked_camera_follows_its_position_keys() {
 // camera's gizmo there.
 void every_camera_is_placed_in_the_evaluated_scene() {
     scene::SceneModel model;
-    model.reset(
+    model.reset(scoped(
         doc::Root{}
             .set(node(10U, schema::camera_type,
                       {real(schema::position_z, 4.0)}))
@@ -4554,7 +4546,7 @@ void every_camera_is_placed_in_the_evaluated_scene() {
                                {20, 6.0, schema::interp_linear}}))
             .set(channel_node(21U, 11U, schema::rotation_yaw,
                               {{0, 0.0, schema::interp_linear},
-                               {20, 0.5, schema::interp_linear}})));
+                               {20, 0.5, schema::interp_linear}}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const scene::Scene middle =
@@ -4583,7 +4575,7 @@ void tracked_cameras_stack_in_one_replicated_order() {
                      whole(schema::tracking_port, 6301)});
     };
     scene::SceneModel model;
-    model.reset(
+    model.reset(scoped(
         doc::Root{}
             .set(feed(2U))
             .set(node(10U, schema::camera_type,
@@ -4594,7 +4586,7 @@ void tracked_cameras_stack_in_one_replicated_order() {
                        whole(schema::camera_render_order, -3)}))
             .set(node(12U, schema::camera_type,
                       {whole(schema::camera_tracking_source, 2),
-                       whole(schema::camera_render_order, 5)})));
+                       whole(schema::camera_render_order, 5)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const scene::Scene built = model.evaluate(at_start);
@@ -4610,7 +4602,7 @@ void tracked_cameras_stack_in_one_replicated_order() {
     // two nodes compositing the same plates the other way round disagree
     // wherever two of them overlap.
     scene::SceneModel swapped;
-    swapped.reset(
+    swapped.reset(scoped(
         doc::Root{}
             .set(feed(2U))
             .set(node(10U, schema::camera_type,
@@ -4621,7 +4613,7 @@ void tracked_cameras_stack_in_one_replicated_order() {
                        whole(schema::camera_render_order, 9)}))
             .set(node(12U, schema::camera_type,
                       {whole(schema::camera_tracking_source, 2),
-                       whole(schema::camera_render_order, 5)})));
+                       whole(schema::camera_render_order, 5)}))));
     MODEL_CHECK(scene::digest(swapped.evaluate(at_start))
                 != scene::digest(built));
 
@@ -4634,19 +4626,19 @@ void tracked_cameras_stack_in_one_replicated_order() {
                              {whole(schema::camera_tracking_source, 2)}));
     }
     scene::SceneModel crowded;
-    crowded.reset(many);
+    crowded.reset(scoped(many));
     MODEL_CHECK(crowded.evaluate(at_start).tracked_cameras.size()
                 == scene::max_tracked_cameras);
 }
 
 void project_shadow_and_bounce_policy_is_clamped_and_replicated() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    model.reset(scoped(doc::Root{}.set(node(
         4U, schema::settings_type,
         {text(schema::renderer_backend, schema::advanced_renderer),
          whole(schema::frame_budget_us, 12'345),
          whole(schema::shadow_cascades, 3),
-         real(schema::gi_strength, 2.5)})));
+         real(schema::gi_strength, 2.5)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
     const scene::RendererSettings renderer = model.renderer_settings();
@@ -4658,10 +4650,10 @@ void project_shadow_and_bounce_policy_is_clamped_and_replicated() {
     // Out-of-contract authoring is clamped once here rather than guarded again
     // by whichever renderer happens to read it.
     scene::SceneModel excessive;
-    excessive.reset(doc::Root{}.set(node(
+    excessive.reset(scoped(doc::Root{}.set(node(
         1U, schema::settings_type,
         {whole(schema::shadow_cascades, 99),
-         real(schema::gi_strength, 900.0)})));
+         real(schema::gi_strength, 900.0)}))));
     MODEL_CHECK(excessive.counters().rejected == 0U);
     MODEL_CHECK(excessive.renderer_settings().shadow_cascades ==
                 scene::max_shadow_cascades);
@@ -4670,16 +4662,16 @@ void project_shadow_and_bounce_policy_is_clamped_and_replicated() {
 
     // Zero cascades is an authored "no directional shadows", not a rejection.
     scene::SceneModel off;
-    off.reset(doc::Root{}.set(node(
+    off.reset(scoped(doc::Root{}.set(node(
         1U, schema::settings_type,
-        {whole(schema::shadow_cascades, 0), real(schema::gi_strength, 0.0)})));
+        {whole(schema::shadow_cascades, 0), real(schema::gi_strength, 0.0)}))));
     MODEL_CHECK(off.counters().rejected == 0U);
     MODEL_CHECK(off.renderer_settings().shadow_cascades == 0U);
     MODEL_CHECK(off.renderer_settings().gi_strength == 0.0F);
 
     // A project with no settings node keeps the built-in policy.
     scene::SceneModel bare;
-    bare.reset(doc::Root{});
+    bare.reset(scoped(doc::Root{}));
     MODEL_CHECK(bare.renderer_settings() == (scene::RendererSettings{}));
 
     // The evaluated scene carries the policy and the digest covers it: two
@@ -4710,7 +4702,7 @@ void the_brightness_gamma_shapes_the_folded_multiplier() {
          real(schema::brightness, 0.5)}));
 
     scene::SceneModel plain;
-    plain.reset(root);
+    plain.reset(scoped(root));
     const scene::Scene neutral_scene = plain.evaluate(at_start);
     const auto& neutral = neutral_scene.instances.front().style.effects;
     MODEL_CHECK(neutral.brightness_enabled);
@@ -4720,8 +4712,8 @@ void the_brightness_gamma_shapes_the_folded_multiplier() {
     // two brightness nodes of 4 and 0.5 mean one of 2, and squaring that has
     // to give 4 rather than 4 * 0.25.
     scene::SceneModel shaped;
-    shaped.reset(root.set(node(4U, schema::settings_type,
-                               {real(schema::brightness_gamma, 2.0)})));
+    shaped.reset(scoped(root.set(node(4U, schema::settings_type,
+                               {real(schema::brightness_gamma, 2.0)}))));
     const scene::Scene curved_scene = shaped.evaluate(at_start);
     const auto& curved = curved_scene.instances.front().style.effects;
     MODEL_CHECK(std::abs(curved.brightness - 4.0F) < 1.0e-5F);
@@ -4753,7 +4745,7 @@ void groups_compose_local_transforms_and_inherit_lock_visibility() {
          {10, 5.0, schema::interp_linear}}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.counters().groups == 3U);
     MODEL_CHECK(model.counters().rejected == 0U);
     const auto authored = model.groups(doc::NodeId{1U});
@@ -4806,7 +4798,7 @@ void invalid_group_graphs_are_omitted_and_diagnosed_deterministically() {
         {whole(schema::scene_id, 1), whole(schema::parent_group, 20)}));
 
     scene::SceneModel model;
-    model.reset(root);
+    model.reset(scoped(root));
     MODEL_CHECK(model.groups(doc::NodeId{1U}).empty());
     const scene::Scene evaluated =
         model.evaluate(doc::NodeId{1U}, at_start);
@@ -4836,7 +4828,7 @@ void invalid_group_graphs_are_omitted_and_diagnosed_deterministically() {
     changed_missing.properties.insert_or_assign(
         std::string{schema::parent_group}, std::int64_t{98});
     scene::SceneModel changed;
-    changed.reset(root.set(std::move(changed_missing)));
+    changed.reset(scoped(root.set(std::move(changed_missing))));
     MODEL_CHECK(scene::digest(changed.evaluate(doc::NodeId{1U}, at_start))
                 != scene::digest(evaluated));
 }
@@ -4851,12 +4843,12 @@ void group_projection_streaming_checkpoint_clone_and_digest_agree() {
     };
     const doc::Root final_root = root_of(nodes);
     scene::SceneModel checkpoint;
-    checkpoint.reset(final_root);
+    checkpoint.reset(scoped(final_root));
     scene::SceneModel streamed;
     doc::Root running;
     for (const doc::Node& value : nodes) {
         const doc::Root next = running.set(value);
-        streamed.apply(doc::diff(running, next));
+        streamed.apply(doc::diff(scoped(running), scoped(next)));
         running = next;
     }
     MODEL_CHECK(checkpoint.counters() == streamed.counters());
@@ -4872,7 +4864,7 @@ void group_projection_streaming_checkpoint_clone_and_digest_agree() {
     renamed.properties.insert_or_assign(std::string{schema::group_name},
                                         std::string{"Renamed"});
     scene::SceneModel changed;
-    changed.reset(final_root.set(std::move(renamed)));
+    changed.reset(scoped(final_root.set(std::move(renamed))));
     MODEL_CHECK(scene::digest(changed.evaluate(doc::NodeId{1U}, at_start))
                 != scene::digest(
                     checkpoint.evaluate(doc::NodeId{1U}, at_start)));
@@ -4908,7 +4900,7 @@ void group_planning_is_canonical_and_preserves_world_transforms() {
         {whole(schema::scene_id, 1), whole(schema::group_order, 2),
          real(schema::position_y, 2.0)}));
     scene::SceneModel before_model;
-    before_model.reset(root);
+    before_model.reset(scoped(root));
     const scene::Scene before = before_model.evaluate(doc::NodeId{1U}, at_start);
 
     const std::array selection{doc::NodeId{3U}, doc::NodeId{4U}};
@@ -4933,7 +4925,7 @@ void group_planning_is_canonical_and_preserves_world_transforms() {
                 == 1);
 
     scene::SceneModel after_model;
-    after_model.reset(plan.after);
+    after_model.reset(scoped(plan.after));
     const scene::Scene after = after_model.evaluate(doc::NodeId{1U}, at_start);
     MODEL_CHECK(after.groups.size() == 1U);
     MODEL_CHECK(after.groups.front().name == "Pair");
@@ -5020,7 +5012,7 @@ void an_empty_group_is_created_in_front_with_its_kind() {
                 == schema::group_kind_vehicle_process);
 
     scene::SceneModel model;
-    model.reset(inside.value().after);
+    model.reset(scoped(inside.value().after));
     const scene::Scene evaluated = model.evaluate(doc::NodeId{1U}, at_start);
     const auto group_of = [&](doc::NodeId id) {
         return std::find_if(evaluated.groups.begin(), evaluated.groups.end(),
@@ -5052,7 +5044,7 @@ void an_empty_group_is_created_in_front_with_its_kind() {
             std::string{schema::group_kind},
             std::string{schema::group_kind_folder});
         scene::SceneModel variant;
-        variant.reset(inside.value().after.set(std::move(spelled)));
+        variant.reset(scoped(inside.value().after.set(std::move(spelled))));
         const scene::Scene read = variant.evaluate(doc::NodeId{1U}, at_start);
         const auto found = std::find_if(
             read.groups.begin(), read.groups.end(),
@@ -5067,7 +5059,7 @@ void an_empty_group_is_created_in_front_with_its_kind() {
         damaged.properties.insert_or_assign(std::string{schema::group_kind},
                                             std::string{"truck"});
         scene::SceneModel variant;
-        variant.reset(inside.value().after.set(std::move(damaged)));
+        variant.reset(scoped(inside.value().after.set(std::move(damaged))));
         const scene::Scene refused =
             variant.evaluate(doc::NodeId{1U}, at_start);
         MODEL_CHECK(std::none_of(refused.groups.begin(), refused.groups.end(),
@@ -5120,7 +5112,7 @@ void moving_into_a_group_preserves_world_and_order() {
          real(schema::position_x, 1.0), real(schema::position_y, 2.0),
          real(schema::position_z, 3.0), real(schema::rotation_pitch, 0.05)}));
     scene::SceneModel before_model;
-    before_model.reset(root);
+    before_model.reset(scoped(root));
     const scene::Scene before = before_model.evaluate(doc::NodeId{1U}, at_start);
     const auto world_of = [](const scene::Scene& scene, doc::NodeId source) {
         const auto found = std::find_if(
@@ -5152,7 +5144,7 @@ void moving_into_a_group_preserves_world_and_order() {
     MODEL_CHECK(order(3U) < order(12U));
 
     scene::SceneModel after_model;
-    after_model.reset(after);
+    after_model.reset(scoped(after));
     const scene::Scene evaluated = after_model.evaluate(doc::NodeId{1U}, at_start);
     const scene::Mat4 was = world_of(before, doc::NodeId{3U});
     const scene::Mat4 now = world_of(evaluated, doc::NodeId{3U});
@@ -5167,7 +5159,7 @@ void moving_into_a_group_preserves_world_and_order() {
     MODEL_CHECK(!out.value().after.get(doc::NodeId{3U})->properties.contains(
         std::string{schema::parent_group}));
     scene::SceneModel out_model;
-    out_model.reset(out.value().after);
+    out_model.reset(scoped(out.value().after));
     const scene::Mat4 back =
         world_of(out_model.evaluate(doc::NodeId{1U}, at_start), doc::NodeId{3U});
     for (std::size_t index = 0U; index < was.m.size(); ++index) {
@@ -5242,7 +5234,7 @@ void layer_reordering_is_dense_typed_and_drives_clip_projection() {
         scene::LayerOrderPlacement::Before);
     MODEL_CHECK(clips.has_value());
     scene::SceneModel projected;
-    projected.reset(clips.value().after);
+    projected.reset(scoped(clips.value().after));
     const auto placements = projected.clips(doc::NodeId{1U});
     const auto in_lane = [&]() {
         std::vector<doc::NodeId> result;
@@ -5280,7 +5272,7 @@ void ungroup_preserves_world_and_rejects_lossy_inverse_operations() {
          whole(schema::group_order, 5), real(schema::position_x, 1.0)});
     root = root.set(child);
     scene::SceneModel before_model;
-    before_model.reset(root);
+    before_model.reset(scoped(root));
     const scene::Mat4 before =
         before_model.evaluate(doc::NodeId{1U}, at_start)
             .instances.front().world;
@@ -5301,7 +5293,7 @@ void ungroup_preserves_world_and_rejects_lossy_inverse_operations() {
                         std::string{schema::group_order}))
                 == 7);
     scene::SceneModel after_model;
-    after_model.reset(planned.value().after);
+    after_model.reset(scoped(planned.value().after));
     const scene::Mat4 after =
         after_model.evaluate(doc::NodeId{1U}, at_start)
             .instances.front().world;
@@ -5357,7 +5349,7 @@ void environment_channels_evaluate_per_scene_without_overwriting_base_values() {
     root=root.set(channel_node(31,10,schema::environment_map_intensity,{{0,1.0,"hold"},{60,3.0,"linear"}}));
     root=root.set(channel_node(32,10,schema::environment_map_rotation,{{0,0.0,"linear"},{60,1.0,"linear"}}));
     root=root.set(channel_node(33,10,schema::sky_haze,{{0,0.0,"linear"},{60,100.0,"linear"}}));
-    scene::SceneModel model;model.reset(root);
+    scene::SceneModel model;model.reset(scoped(root));
     MODEL_CHECK(model.counters().rejected==0);
     const auto middle=model.evaluate(doc::NodeId{10},{30,60,1});
     MODEL_CHECK(std::abs(middle.environment.fog_density-0.3F)<1e-6F);
@@ -5369,7 +5361,7 @@ void environment_channels_evaluate_per_scene_without_overwriting_base_values() {
     MODEL_CHECK(model.environment(doc::NodeId{10}).fog_density==0.1F);
     MODEL_CHECK(model.environment(doc::NodeId{10}).map_intensity==1.0F);
     MODEL_CHECK(model.environment(doc::NodeId{99})==scene::Environment{});
-    scene::SceneModel replay;replay.reset(root);
+    scene::SceneModel replay;replay.reset(scoped(root));
     MODEL_CHECK(scene::digest(middle)==scene::digest(replay.evaluate(doc::NodeId{10},{30,60,1})));
 }
 
@@ -5378,7 +5370,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 91U> cases{{
+constexpr std::array<Case, 89U> cases{{
     {"a solo draws only what it shows",
      &a_solo_draws_only_what_it_shows},
     {"a timing override evaluates a placement as proposed",
@@ -5529,8 +5521,6 @@ constexpr std::array<Case, 91U> cases{{
     {"a malformed channel is refused", &a_malformed_channel_is_refused},
     {"scenes isolate drawables lights channels and effects",
      &scenes_isolate_drawables_lights_channels_and_effects},
-    {"legacy scope tracks the lowest stage",
-     &legacy_scope_tracks_the_lowest_stage},
     {"cameras are singletons within each scene",
      &cameras_are_singletons_within_each_scene},
     {"multi scene reset and streamed deltas agree",
@@ -5541,8 +5531,6 @@ constexpr std::array<Case, 91U> cases{{
      &clone_planning_reports_source_and_id_errors},
     {"scene delete planning cascades owned content and dependencies",
      &scene_delete_planning_cascades_owned_content_and_dependencies},
-    {"deleting the default scene removes legacy scoped nodes",
-     &deleting_the_default_scene_removes_legacy_scoped_nodes},
     {"effect delete planning cascades only its animation channels",
      &effect_delete_planning_cascades_only_its_animation_channels},
     {"groups compose local transforms and inherit lock visibility",

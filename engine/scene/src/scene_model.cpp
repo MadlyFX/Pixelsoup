@@ -630,6 +630,17 @@ read_luma_key(Reader& reader) noexcept {
     return SceneId{static_cast<core::u64>(value)};
 }
 
+// Every scene-scoped node names its Stage; a node without one is refused.
+[[nodiscard]] SceneId read_required_scene_id(
+    Reader& reader,
+    const doc::PropertyMap& properties) noexcept {
+    if (find(properties, schema::scene_id) == nullptr) {
+        reader.fail();
+        return SceneId{};
+    }
+    return read_scene_id(reader, properties).value_or(SceneId{});
+}
+
 [[nodiscard]] std::optional<doc::NodeId> read_parent_group(
     Reader& reader,
     const doc::PropertyMap& properties) noexcept {
@@ -1037,7 +1048,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{stage};
     } else if (node.type == schema::camera_type) {
         CameraEntry camera{};
-        camera.scene = read_scene_id(reader, node.properties);
+        camera.scene = read_required_scene_id(reader, node.properties);
         const Camera defaults{};
         // Placed like every other element. A camera authored before cameras
         // had a rotation was aimed at a target instead; its eye, target and
@@ -1201,7 +1212,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{camera};
     } else if (node.type == schema::object_type) {
         ObjectEntry object{};
-        object.scene = read_scene_id(reader, node.properties);
+        object.scene = read_required_scene_id(reader, node.properties);
         object.parent_group = read_parent_group(reader, node.properties);
         object.group_order = reader.integer(schema::group_order, 0);
         auto primitive = Primitive::Box;
@@ -1247,7 +1258,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{object};
     } else if (node.type == schema::group_type) {
         GroupEntry group{};
-        group.scene = read_scene_id(reader, node.properties);
+        group.scene = read_required_scene_id(reader, node.properties);
         group.parent_group = read_parent_group(reader, node.properties);
         group.group_order = reader.integer(schema::group_order, 0);
         group.name = std::string{reader.text(schema::group_name, "Group")};
@@ -1600,7 +1611,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{source};
     } else if (node.type == schema::timeline_lane_type) {
         LaneEntry lane{};
-        lane.scene = read_scene_id(reader, node.properties);
+        lane.scene = read_required_scene_id(reader, node.properties);
         lane.order = reader.integer(schema::lane_order, 0);
         lane.name = std::string{reader.text(schema::lane_name, "Layer")};
         if (lane.name.empty()) {
@@ -1663,7 +1674,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{std::move(lane)};
     } else if (node.type == schema::timeline_marker_type) {
         MarkerEntry marker{};
-        marker.scene = read_scene_id(reader, node.properties);
+        marker.scene = read_required_scene_id(reader, node.properties);
         marker.frame = reader.integer(schema::marker_frame, 0);
         // A marker at a negative frame is not before the show, it is a
         // damaged node: the show has no time before frame zero to put it in.
@@ -1704,7 +1715,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{std::move(marker)};
     } else if (node.type == schema::media_type) {
         MediaEntry media{};
-        media.scene = read_scene_id(reader, node.properties);
+        media.scene = read_required_scene_id(reader, node.properties);
         media.parent_group = read_parent_group(reader, node.properties);
         media.group_order = reader.integer(schema::group_order, 0);
         media.source = std::string{reader.text(schema::source, "")};
@@ -1794,7 +1805,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{media};
     } else if (node.type == schema::model_type) {
         ModelEntry model{};
-        model.scene = read_scene_id(reader, node.properties);
+        model.scene = read_required_scene_id(reader, node.properties);
         model.parent_group = read_parent_group(reader, node.properties);
         model.group_order = reader.integer(schema::group_order, 0);
         model.source = std::string{reader.text(schema::source, "")};
@@ -1862,7 +1873,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{std::move(model)};
     } else if (node.type == schema::particle_effect_type) {
         ParticleEffectEntry effect{};
-        effect.scene = read_scene_id(reader, node.properties);
+        effect.scene = read_required_scene_id(reader, node.properties);
         effect.parent_group = read_parent_group(reader, node.properties);
         effect.group_order = reader.integer(schema::group_order, 0);
         effect.source = std::string{reader.text(schema::source, "")};
@@ -1914,7 +1925,7 @@ void SceneModel::put(const doc::Node& node) {
         parsed = Entry{std::move(effect)};
     } else if (node.type == schema::light_type) {
         LightEntry light{};
-        light.scene = read_scene_id(reader, node.properties);
+        light.scene = read_required_scene_id(reader, node.properties);
         const auto kind = reader.text(schema::light_kind, schema::directional_kind);
         if (kind == schema::directional_kind) {
             light.directional = true;
@@ -2601,13 +2612,10 @@ SceneId SceneModel::default_scene_id() const noexcept {
             return id;
         }
     }
-    return legacy_scene_id;
+    return SceneId{};
 }
 
 bool SceneModel::valid_scene(SceneId scene) const noexcept {
-    if (counters_.stages == 0U) {
-        return scene == legacy_scene_id;
-    }
     const auto found = entries_.find(scene);
     return found != entries_.end()
         && std::holds_alternative<StageEntry>(found->second);
@@ -2627,36 +2635,35 @@ bool SceneModel::effect_target(doc::NodeId id) const noexcept {
         || std::holds_alternative<LaneEntry>(found->second);
 }
 
-std::optional<SceneId> SceneModel::scope_of(
-    doc::NodeId id, SceneId default_scene) const noexcept {
-    const auto direct_scope = [default_scene](const Entry& entry)
+std::optional<SceneId> SceneModel::scope_of(doc::NodeId id) const noexcept {
+    const auto direct_scope = [](const Entry& entry)
         -> std::optional<SceneId> {
         if (const auto* value = std::get_if<CameraEntry>(&entry)) {
-            return value->scene.value_or(default_scene);
+            return value->scene;
         }
         if (const auto* value = std::get_if<ObjectEntry>(&entry)) {
-            return value->scene.value_or(default_scene);
+            return value->scene;
         }
         if (const auto* value = std::get_if<GroupEntry>(&entry)) {
-            return value->scene.value_or(default_scene);
+            return value->scene;
         }
         if (const auto* value = std::get_if<LaneEntry>(&entry)) {
-            return value->scene.value_or(default_scene);
+            return value->scene;
         }
         if (const auto* value = std::get_if<MarkerEntry>(&entry)) {
-            return value->scene.value_or(default_scene);
+            return value->scene;
         }
         if (const auto* value = std::get_if<MediaEntry>(&entry)) {
-            return value->scene.value_or(default_scene);
+            return value->scene;
         }
         if (const auto* value = std::get_if<ModelEntry>(&entry)) {
-            return value->scene.value_or(default_scene);
+            return value->scene;
         }
         if (const auto* value = std::get_if<ParticleEffectEntry>(&entry)) {
-            return value->scene.value_or(default_scene);
+            return value->scene;
         }
         if (const auto* value = std::get_if<LightEntry>(&entry)) {
-            return value->scene.value_or(default_scene);
+            return value->scene;
         }
         if (const auto* value = std::get_if<MaskEntry>(&entry)) {
             return value->scene;
@@ -2711,7 +2718,6 @@ SceneModel::GroupProjection SceneModel::resolve_groups(
     if (!valid_scene(scene_id)) {
         return projection;
     }
-    const SceneId default_scene = default_scene_id();
 
     enum class Visit : core::u8 { Unknown, Visiting, Valid, Invalid };
     std::map<doc::NodeId, Visit> visits;
@@ -2723,9 +2729,9 @@ SceneModel::GroupProjection SceneModel::resolve_groups(
             ? nullptr
             : std::get_if<GroupEntry>(&found->second);
     };
-    const auto in_scene = [default_scene, scene_id](
+    const auto in_scene = [scene_id](
                               const GroupEntry& group) noexcept {
-        return group.scene.value_or(default_scene) == scene_id;
+        return group.scene == scene_id;
     };
     const auto diagnose = [&projection](GroupDiagnosticKind kind,
                                         doc::NodeId subject,
@@ -2834,7 +2840,7 @@ SceneModel::GroupProjection SceneModel::resolve_groups(
     const auto diagnose_drawable = [&](doc::NodeId id,
                                        const auto& drawable) {
         if (!drawable.parent_group.has_value()
-            || drawable.scene.value_or(default_scene) != scene_id) {
+            || drawable.scene != scene_id) {
             return;
         }
         const doc::NodeId parent = *drawable.parent_group;
@@ -3133,7 +3139,7 @@ SceneModel::MaskProjection SceneModel::resolve_masks(
                      mask.target);
             return std::nullopt;
         }
-        std::optional<SceneId> owner;
+        SceneId owner{};
         bool is_group{};
         if (const auto* object =
                 std::get_if<ObjectEntry>(&found->second)) {
@@ -3156,12 +3162,7 @@ SceneModel::MaskProjection SceneModel::resolve_masks(
                      mask.target);
             return std::nullopt;
         }
-        if (!owner.has_value()) {
-            diagnose(MaskDiagnosticKind::MissingTargetSceneOwner,
-                     mask.source, mask.target);
-            return std::nullopt;
-        }
-        if (*owner != scene_id) {
+        if (owner != scene_id) {
             diagnose(MaskDiagnosticKind::CrossSceneTarget, mask.source,
                      mask.target);
             return std::nullopt;
@@ -3231,12 +3232,11 @@ SceneModel::MaskProjection SceneModel::resolve_masks(
 void SceneModel::refresh_duplicate_cameras() noexcept {
     counters_.duplicate_cameras = 0U;
     std::map<SceneId, core::u32> per_scene;
-    const SceneId default_scene = default_scene_id();
     for (const auto& [id, entry] : entries_) {
         if (!std::holds_alternative<CameraEntry>(entry)) {
             continue;
         }
-        const auto scene = scope_of(id, default_scene);
+        const auto scene = scope_of(id);
         if (!scene.has_value() || !valid_scene(*scene)) {
             continue;
         }
@@ -3727,11 +3727,10 @@ std::vector<CameraPlacement> SceneModel::cameras(SceneId scene_id) const {
     if (!valid_scene(scene_id)) {
         return placements;
     }
-    const SceneId default_scene = default_scene_id();
     for (const auto& [id, entry] : entries_) {
         const auto* const camera = std::get_if<CameraEntry>(&entry);
         if (camera == nullptr ||
-            camera->scene.value_or(default_scene) != scene_id) {
+            camera->scene != scene_id) {
             continue;
         }
         placements.push_back(CameraPlacement{
@@ -3770,11 +3769,10 @@ std::vector<ClipPlacement> SceneModel::clips(SceneId scene_id) const {
     if (!valid_scene(scene_id)) {
         return result;
     }
-    const SceneId default_scene = default_scene_id();
     for (const auto& [id, entry] : entries_) {
         const auto* const clip = std::get_if<MediaEntry>(&entry);
         if (clip == nullptr ||
-            clip->scene.value_or(default_scene) != scene_id) {
+            clip->scene != scene_id) {
             continue;
         }
         result.push_back(ClipPlacement{
@@ -3788,7 +3786,7 @@ std::vector<ClipPlacement> SceneModel::clips(SceneId scene_id) const {
     lane_orders.emplace(doc::NodeId{}, 0);
     for (const auto& [id, entry] : entries_) {
         const auto* const lane = std::get_if<LaneEntry>(&entry);
-        if (lane != nullptr && lane->scene.value_or(default_scene) == scene_id) {
+        if (lane != nullptr && lane->scene == scene_id) {
             lane_orders.emplace(id, lane->order);
         }
     }
@@ -3824,11 +3822,10 @@ std::vector<TimelineMarker> SceneModel::markers(SceneId scene_id) const {
     if (!valid_scene(scene_id)) {
         return result;
     }
-    const SceneId default_scene = default_scene_id();
     for (const auto& [id, entry] : entries_) {
         const auto* const marker = std::get_if<MarkerEntry>(&entry);
         if (marker == nullptr
-            || marker->scene.value_or(default_scene) != scene_id) {
+            || marker->scene != scene_id) {
             continue;
         }
         result.push_back(TimelineMarker{id, scene_id, marker->frame,
@@ -3852,11 +3849,10 @@ std::vector<TimelineLane> SceneModel::lanes(SceneId scene_id) const {
     if (!valid_scene(scene_id)) {
         return result;
     }
-    const SceneId default_scene = default_scene_id();
     bool has_implicit{};
     for (const auto& [id, entry] : entries_) {
         if (const auto* const lane = std::get_if<LaneEntry>(&entry)) {
-            if (lane->scene.value_or(default_scene) == scene_id) {
+            if (lane->scene == scene_id) {
                 TimelineLane projected{
                     id, scene_id, lane->order, lane->name, lane->muted,
                     lane->locked, lane->compositing, false};
@@ -3880,7 +3876,7 @@ std::vector<TimelineLane> SceneModel::lanes(SceneId scene_id) const {
             }
         } else if (const auto* const clip = std::get_if<MediaEntry>(&entry)) {
             has_implicit = has_implicit
-                || (clip->scene.value_or(default_scene) == scene_id
+                || (clip->scene == scene_id
                     && !clip->lane.has_value());
         }
     }
@@ -4001,7 +3997,6 @@ Scene SceneModel::evaluate(
         return scene;
     }
     const auto seconds = time.seconds();
-    const SceneId default_scene = default_scene_id();
 
     const auto stage_entry = entries_.find(scene_id);
     if (stage_entry != entries_.end()) {
@@ -4019,7 +4014,7 @@ Scene SceneModel::evaluate(
     for (const auto& held : entries_) {
         const auto* const camera = std::get_if<CameraEntry>(&held.second);
         if (camera == nullptr
-            || scope_of(held.first, default_scene) != scene_id) {
+            || scope_of(held.first) != scene_id) {
             continue;
         }
         scene.camera = camera->camera;
@@ -4044,7 +4039,7 @@ Scene SceneModel::evaluate(
         }
         const auto* const camera = std::get_if<CameraEntry>(&held.second);
         if (camera == nullptr || camera->tracking_source.value() == 0U
-            || scope_of(held.first, default_scene) != scene_id) {
+            || scope_of(held.first) != scene_id) {
             continue;
         }
         const auto source = entries_.find(camera->tracking_source);
@@ -4090,7 +4085,7 @@ Scene SceneModel::evaluate(
     core::u32 channels_seen = 0U;
     for (const auto& [id, entry] : entries_) {
         const auto* const channel = std::get_if<ChannelEntry>(&entry);
-        if (channel == nullptr || scope_of(id, default_scene) != scene_id) {
+        if (channel == nullptr || scope_of(id) != scene_id) {
             continue;
         }
         if (channels_seen >= max_scene_channels) {
@@ -4173,7 +4168,7 @@ Scene SceneModel::evaluate(
     for (const auto& held : entries_) {
         const auto* const camera = std::get_if<CameraEntry>(&held.second);
         if (camera == nullptr
-            || scope_of(held.first, default_scene) != scene_id) {
+            || scope_of(held.first) != scene_id) {
             continue;
         }
         SceneCamera placed{held.first, camera->camera};
@@ -4273,7 +4268,7 @@ Scene SceneModel::evaluate(
     for (const auto& [id, entry] : entries_) {
         const auto* const group = std::get_if<GroupEntry>(&entry);
         if (group == nullptr
-            || group->scene.value_or(default_scene) != scene_id) {
+            || group->scene != scene_id) {
             continue;
         }
         GroupLocal local{group->position, group->yaw, group->pitch,
@@ -4297,7 +4292,7 @@ Scene SceneModel::evaluate(
     scene.effects.reserve(std::min(counters_.effects, max_scene_effects));
     for (const auto& [id, entry] : entries_) {
         const auto* const effect = std::get_if<EffectEntry>(&entry);
-        if (effect == nullptr || scope_of(id, default_scene) != scene_id
+        if (effect == nullptr || scope_of(id) != scene_id
             || scene.effects.size() >= max_scene_effects) {
             continue;
         }
@@ -4765,7 +4760,7 @@ Scene SceneModel::evaluate(
     for (const auto& [id, entry] : entries_) {
         const auto* const lane = std::get_if<LaneEntry>(&entry);
         if (lane != nullptr
-            && lane->scene.value_or(default_scene) == scene_id) {
+            && lane->scene == scene_id) {
             lanes_by_id.emplace(id, lane);
         }
     }
@@ -4774,7 +4769,7 @@ Scene SceneModel::evaluate(
     for (const auto& [id, entry] : entries_) {
         const auto* const clip = std::get_if<MediaEntry>(&entry);
         if (clip == nullptr
-            || clip->scene.value_or(default_scene) != scene_id) {
+            || clip->scene != scene_id) {
             continue;
         }
         if (!clip->visible) {
@@ -4879,7 +4874,7 @@ Scene SceneModel::evaluate(
 
     for (const auto& [id, entry] : entries_) {
         if (const auto* const object = std::get_if<ObjectEntry>(&entry)) {
-            if (scope_of(id, default_scene) != scene_id ||
+            if (scope_of(id) != scene_id ||
                 (solo != nullptr && !solo->shows(id))) {
                 continue;
             }
@@ -4941,7 +4936,7 @@ Scene SceneModel::evaluate(
         }
 
         if (const auto* const clip = std::get_if<MediaEntry>(&entry)) {
-            if (scope_of(id, default_scene) != scene_id) {
+            if (scope_of(id) != scene_id) {
                 continue;
             }
             const ClipTiming& timing = timing_of(id, *clip);
@@ -5101,7 +5096,7 @@ Scene SceneModel::evaluate(
         }
 
         if (const auto* const model = std::get_if<ModelEntry>(&entry)) {
-            if (scope_of(id, default_scene) != scene_id ||
+            if (scope_of(id) != scene_id ||
                 (solo != nullptr && !solo->shows(id))) {
                 continue;
             }
@@ -5153,7 +5148,7 @@ Scene SceneModel::evaluate(
         }
 
         if (const auto* const effect = std::get_if<ParticleEffectEntry>(&entry)) {
-            if (scope_of(id, default_scene) != scene_id || !effect->visible ||
+            if (scope_of(id) != scene_id || !effect->visible ||
                 (solo != nullptr && !solo->shows(id)) ||
                 scene.particle_effects.size() >= max_scene_particle_effects) {
                 continue;
@@ -5203,7 +5198,7 @@ Scene SceneModel::evaluate(
         }
 
         if (const auto* const authored = std::get_if<LightEntry>(&entry)) {
-            if (scope_of(id, default_scene) != scene_id || !authored->visible ||
+            if (scope_of(id) != scene_id || !authored->visible ||
                 (solo != nullptr && solo->lights && !solo->shows(id))) {
                 continue;
             }

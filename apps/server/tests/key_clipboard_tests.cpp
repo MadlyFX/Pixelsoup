@@ -337,6 +337,8 @@ void locked_and_incompatible_targets_are_reported_without_authorship() {
 
 void frame_overflow_rejects_the_complete_batch() {
   doc::Root source;
+  source = source.set(
+      doc::Node{doc::NodeId{1U}, std::string{scene::schema::stage_type}, {}});
   source = source.set(target(10U));
   constexpr core::i64 maximum = std::numeric_limits<core::i64>::max();
   constexpr std::array frames{core::i64{0}, maximum};
@@ -351,13 +353,13 @@ void frame_overflow_rejects_the_complete_batch() {
                       maximum}};
   app::KeyClipboard clipboard;
   KEY_CHECK(
-      clipboard.copy(source, scene::legacy_scene_id, selection).captured == 2U);
-  auto pasted = clipboard.paste(source, scene::legacy_scene_id, 1U);
+      clipboard.copy(source, scene::SceneId{1U}, selection).captured == 2U);
+  auto pasted = clipboard.paste(source, scene::SceneId{1U}, 1U);
   KEY_CHECK(!pasted);
   KEY_CHECK(pasted.error() == app::KeyPasteError::FrameOutOfRange);
 
   auto duplicated =
-      app::duplicate_keys(source, scene::legacy_scene_id, selection, 1);
+      app::duplicate_keys(source, scene::SceneId{1U}, selection, 1);
   KEY_CHECK(!duplicated);
   KEY_CHECK(duplicated.error() == app::KeyPasteError::FrameOutOfRange);
 }

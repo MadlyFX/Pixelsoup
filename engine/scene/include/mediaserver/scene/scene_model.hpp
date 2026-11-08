@@ -299,7 +299,7 @@ private:
     };
 
     struct CameraEntry final {
-        std::optional<SceneId> scene;
+        SceneId scene{};
         // Already placed from `position` and `rotation`.
         Camera camera{};
         Vec3 position{};
@@ -319,7 +319,7 @@ private:
 
     struct ObjectEntry final {
         bool bake_static{true};
-        std::optional<SceneId> scene;
+        SceneId scene{};
         std::optional<doc::NodeId> parent_group;
         core::i64 group_order{};
         MeshKey mesh{};
@@ -339,7 +339,7 @@ private:
 
     struct LightEntry final {
         bool bake_indirect{true};
-        std::optional<SceneId> scene;
+        SceneId scene{};
         bool directional{true};
         LocalLightKind local_kind{LocalLightKind::Point};
         LightUnit unit{LightUnit::Unitless};
@@ -367,7 +367,7 @@ private:
     };
 
     struct MediaEntry final {
-        std::optional<SceneId> scene;
+        SceneId scene{};
         std::optional<doc::NodeId> parent_group;
         core::i64 group_order{};
         MeshKey mesh{Primitive::Quad, 1U};
@@ -391,7 +391,7 @@ private:
     };
 
     struct LaneEntry final {
-        std::optional<SceneId> scene;
+        SceneId scene{};
         core::i64 order{};
         std::string name{"Track 1"};
         bool muted{};
@@ -412,7 +412,7 @@ private:
     };
 
     struct MarkerEntry final {
-        std::optional<SceneId> scene;
+        SceneId scene{};
         core::i64 frame{};
         std::string name;
         std::string note;
@@ -423,7 +423,7 @@ private:
     };
 
     struct GroupEntry final {
-        std::optional<SceneId> scene;
+        SceneId scene{};
         std::optional<doc::NodeId> parent_group;
         core::i64 group_order{};
         std::string name{"Group"};
@@ -450,7 +450,7 @@ private:
         core::u32 material_override_mask{};
         bool bake_static{true};
         ModelAnimation animation{};
-        std::optional<SceneId> scene;
+        SceneId scene{};
         std::optional<doc::NodeId> parent_group;
         core::i64 group_order{};
         Vec3 position{};
@@ -467,7 +467,7 @@ private:
     };
 
     struct ParticleEffectEntry final {
-        std::optional<SceneId> scene;
+        SceneId scene{};
         std::optional<doc::NodeId> parent_group;
         core::i64 group_order{};
         Vec3 position{};
@@ -630,8 +630,7 @@ private:
     void note(const Entry& entry, bool added) noexcept;
     [[nodiscard]] SceneId default_scene_id() const noexcept;
     [[nodiscard]] bool valid_scene(SceneId scene) const noexcept;
-    [[nodiscard]] std::optional<SceneId> scope_of(
-        doc::NodeId id, SceneId default_scene) const noexcept;
+    [[nodiscard]] std::optional<SceneId> scope_of(doc::NodeId id) const noexcept;
     // Whether a node is something an effect may target: a drawable, or a
     // track, whose screen carries a look for whatever is playing on it.
     [[nodiscard]] bool effect_target(doc::NodeId id) const noexcept;

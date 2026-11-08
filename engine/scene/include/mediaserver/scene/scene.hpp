@@ -36,11 +36,10 @@ class ActionProvider;
 // output resolutions, and different GPUs.
 namespace mediaserver::scene {
 
-// A scene is identified by the document node that defines its stage. Zero
-// denotes the implicit compatibility scene when a document has no stage nodes
-// (and remains an ordinary authored identity if a stage node itself is id 0).
+// A scene is identified by the document node that defines its stage. Every
+// scene-scoped node names its stage in `scene_id`; a document needs at least
+// one stage to have a scene at all.
 using SceneId = doc::NodeId;
-inline constexpr SceneId legacy_scene_id{};
 
 // Show position, expressed without depending on the transport.
 //
@@ -2497,8 +2496,7 @@ struct Scene final {
     core::u64 asset_manifest_digest{};
     core::u64 asset_refresh_generation{};
     bool asset_commit_released{true};
-    // The stage node this value was evaluated from. The implicit legacy scene
-    // uses legacy_scene_id when the document contains no stage nodes.
+    // The stage node this value was evaluated from.
     SceneId id{};
     // Replicated immutable-document revision which produced this evaluation.
     // It changes on an operator commit but not while timeline animation is

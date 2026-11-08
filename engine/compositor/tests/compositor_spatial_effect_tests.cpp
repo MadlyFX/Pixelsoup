@@ -68,7 +68,37 @@ constexpr std::int64_t filters_port = 2;
                whole(schema::order, order)});
 }
 
+// A fixture with exactly one Stage owns every graph and scene node that does
+// not name a Stage itself; fixtures with several Stages say which they mean.
+[[nodiscard]] std::vector<doc::Node> owned_by_the_only_stage(std::vector<doc::Node> nodes) {
+    const doc::Node* only{};
+    std::size_t stages{};
+    for (const doc::Node& value : nodes) {
+        if (value.type == "scene.stage") {
+            only = &value;
+            ++stages;
+        }
+    }
+    if (stages != 1U) {
+        return nodes;
+    }
+    const auto owner = static_cast<std::int64_t>(only->id.value());
+    for (doc::Node& value : nodes) {
+        const std::string_view type{value.type};
+        constexpr std::array<std::string_view, 9U> scoped{
+            "scene.camera", "scene.object", "scene.group", "scene.light",
+            "scene.media", "scene.timeline_lane", "scene.timeline_marker",
+            "scene.model", "scene.particle_effect"};
+        if ((type.starts_with("compositor.") && type != "compositor.edge") ||
+            std::find(scoped.begin(), scoped.end(), type) != scoped.end()) {
+            value.properties.emplace("scene_id", doc::PropertyValue{owner});
+        }
+    }
+    return nodes;
+}
+
 [[nodiscard]] doc::Root root_of(std::vector<doc::Node> nodes) {
+  nodes = owned_by_the_only_stage(std::move(nodes));
   doc::Root root;
   for (doc::Node &value : nodes) {
     root = root.set(std::move(value));
@@ -104,7 +134,7 @@ void typed_graph_plans_exact_resources_and_bounds() {
   compositor::CompositorModel model;
   model.reset(root);
   const compositor::CompositorGraph graph =
-      model.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+      model.evaluate(doc::NodeId{100U});
   GRAPH_CHECK(graph.valid());
 
   const auto *box = graph.node(doc::NodeId{1U});
@@ -146,7 +176,7 @@ void apply_retains_authored_spatial_order() {
   compositor::CompositorModel compositor_model;
   compositor_model.reset(root);
   const compositor::CompositorGraph graph =
-      compositor_model.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+      compositor_model.evaluate(doc::NodeId{100U});
   scene::SceneModel scene_model;
   scene_model.reset(root);
   const scene::Scene source =
@@ -164,7 +194,7 @@ void identities_are_retained_but_allocate_nothing() {
   compositor::CompositorModel model;
   model.reset(spatial_graph(true));
   const compositor::CompositorGraph graph =
-      model.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+      model.evaluate(doc::NodeId{100U});
   GRAPH_CHECK(graph.valid());
   GRAPH_CHECK(!graph.step(doc::NodeId{1U})->requires_offscreen);
   GRAPH_CHECK(!graph.step(doc::NodeId{2U})->requires_offscreen);
@@ -196,12 +226,13 @@ void malformed_parameters_and_reverse_domain_order_fail_closed() {
   // after the blurs, it is refused rather than run out of order.
   doc::Root reversed = spatial_graph();
   reversed = reversed.set(
-      node(5U, schema::brightness_type, {real(schema::amount, 2.0)}));
+      node(5U, schema::brightness_type,
+           {real(schema::amount, 2.0), whole(scene::schema::scene_id, 100)}));
   reversed = reversed.set(edge(13U, 5U, 3U, 2, filters_port));
   compositor::CompositorModel reversed_model;
   reversed_model.reset(reversed);
   const compositor::CompositorGraph graph =
-      reversed_model.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+      reversed_model.evaluate(doc::NodeId{100U});
   GRAPH_CHECK(!graph.valid());
   GRAPH_CHECK(
       std::any_of(graph.diagnostics.begin(), graph.diagnostics.end(),

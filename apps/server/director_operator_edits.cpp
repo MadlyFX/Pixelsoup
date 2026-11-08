@@ -1956,15 +1956,8 @@ PhaseExit DirectorShowLoop::apply_compositor_and_delete_requests(OperatorFrame &
                 dx = request.x - left;
                 dy = request.y - top;
             }
-            // Graph objects with no owner of their own belong to the
-            // lowest-id stage, as everywhere else.
-            scene::SceneModel stages;
-            stages.reset(root);
-            const auto scenes = stages.scenes();
-            const doc::NodeId legacy_owner =
-                scenes.empty() ? doc::NodeId{} : scenes.front().id;
             auto planned = compositor::plan_paste_graph(
-                root, snapshot, authoring_scene(), legacy_owner, dx, dy,
+                root, snapshot, authoring_scene(), dx, dy,
                 doc::NodeId{std::max<core::u64>(next_new_node, 1U)});
             if (planned && !schedule_compositor_paste(
                                scheduler, planned.value().puts,

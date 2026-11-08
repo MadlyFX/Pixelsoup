@@ -585,19 +585,11 @@ PhaseExit DirectorShowLoop::apply_switcher_request(OperatorFrame &op) {
         // how they are stacked and treated, and a copy that lost
         // the graph would look nothing like the scene it came from
         // the moment it was promoted.
-        const scene::SceneId legacy_graph_owner =
-            anchor.has_value()
-                ? anchor->program_scene
-                : (!scenes.empty() ? scenes.front().id
-                                   : scene::SceneId{});
         const auto author_graph_clone =
             [&](const scene::SceneClonePlan &plan) -> bool {
-            if (legacy_graph_owner == scene::SceneId{}) {
-                return true;
-            }
             auto planned = compositor::plan_clone_graph(
                 scheduler.projected_document(), plan.source,
-                plan.destination, legacy_graph_owner, plan.remap,
+                plan.destination, plan.remap,
                 doc::NodeId{next_new_node});
             if (!planned) {
                 return false;

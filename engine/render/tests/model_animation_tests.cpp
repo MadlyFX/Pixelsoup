@@ -236,9 +236,13 @@ void cpu(const std::filesystem::path &dir) {
       {"animation_loop", false},
       {"animation_start_frame", std::int64_t{9007199254740993LL}},
       {"wind_x", .5},
-      {"wind_period_frames", std::int64_t{90}}};
+      {"wind_period_frames", std::int64_t{90}},
+      {"scene_id", std::int64_t{8}}};
+  doc::Node stage;
+  stage.id = doc::NodeId{8};
+  stage.type = std::string{scene::schema::stage_type};
   scene::SceneModel model;
-  model.reset(doc::Root{}.set(node));
+  model.reset(doc::Root{}.set(stage).set(node));
   const auto s = model.evaluate({7, 60, 1});
   CHECK(s.models.size() == 1);
   CHECK(s.models[0].animation.start_frame == 9007199254740993ULL);

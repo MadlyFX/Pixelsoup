@@ -71,7 +71,7 @@ inline constexpr std::array<std::string_view, 22U> node_types{{
 // field the scene vocabulary uses for cameras, drawables, and lights. That is
 // what lets Preview carry its own composite: an operator can rebuild the graph
 // of the scene they are rehearsing without touching the graph Program renders.
-// A missing field is legacy content and belongs to the lowest-id stage.
+// An object without the field belongs to no scene's graph.
 inline constexpr std::string_view scene_id = "scene_id";
 
 inline constexpr std::string_view label = "label";

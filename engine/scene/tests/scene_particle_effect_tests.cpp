@@ -39,7 +39,20 @@ using Property = std::pair<std::string, doc::PropertyValue>;
     for (const auto& property : properties) {
         built.properties.emplace(property.first, property.second);
     }
+    if (type == schema::particle_effect_type || type == schema::object_type ||
+        type == schema::group_type) {
+        built.properties.emplace(std::string{schema::scene_id},
+                                 doc::PropertyValue{std::int64_t{9'000}});
+    }
     return built;
+}
+
+// Every fixture document has the one Stage its scene-scoped nodes name.
+[[nodiscard]] doc::Root staged() {
+    doc::Node stage{};
+    stage.id = doc::NodeId{9'000U};
+    stage.type = std::string{schema::stage_type};
+    return doc::Root{}.set(stage);
 }
 
 [[nodiscard]] Property real(std::string_view name, double value) {
@@ -98,7 +111,7 @@ constexpr scene::SceneTime at_start{0U, 60U, 1U};
 }
 
 void an_effect_evaluates_with_its_placement_seed_and_start() {
-    const scene::Scene built = evaluate(doc::Root{}.set(sparks(7U)));
+    const scene::Scene built = evaluate(staged().set(sparks(7U)));
     EFFECT_CHECK(built.particle_effects.size() == 1U);
     const scene::ParticleEffect& effect = built.particle_effects.front();
     EFFECT_CHECK(effect.source == "effects/sparks.ajfx");
@@ -118,16 +131,16 @@ void damaged_effects_are_refused_not_clamped() {
              sparks(1U, {whole(schema::particle_start_frame, -24)}),                      // before the show
          }) {
         scene::SceneModel model;
-        model.reset(doc::Root{}.set(damaged));
+        model.reset(staged().set(damaged));
         EFFECT_CHECK(model.counters().rejected == 1U);
         EFFECT_CHECK(model.evaluate(at_start).particle_effects.empty());
     }
 }
 
 void groups_and_visibility_apply_as_to_a_model() {
-    EFFECT_CHECK(evaluate(doc::Root{}.set(sparks(1U, {flag(schema::visible, false)}))).particle_effects.empty());
+    EFFECT_CHECK(evaluate(staged().set(sparks(1U, {flag(schema::visible, false)}))).particle_effects.empty());
 
-    doc::Root grouped = doc::Root{}
+    doc::Root grouped = staged()
                             .set(node(2U, schema::group_type, {real(schema::position_x, 1.0), flag(schema::locked, true)}))
                             .set(sparks(3U, {whole(schema::parent_group, 2)}));
     const scene::Scene built = evaluate(grouped);
@@ -142,7 +155,7 @@ void groups_and_visibility_apply_as_to_a_model() {
 }
 
 void keyframes_move_an_effect() {
-    const doc::Root root = doc::Root{}.set(sparks(1U)).set(position_channel(9U, 1U, 60, 0.0, 6.0));
+    const doc::Root root = staged().set(sparks(1U)).set(position_channel(9U, 1U, 60, 0.0, 6.0));
     EFFECT_CHECK(evaluate(root, scene::SceneTime{30U, 60U, 1U}).particle_effects.front().world.at(0U, 3U) == 3.0F);
     EFFECT_CHECK(evaluate(root, scene::SceneTime{60U, 60U, 1U}).particle_effects.front().world.at(0U, 3U) == 6.0F);
 }
@@ -159,7 +172,7 @@ void keyframes_move_an_effect() {
 
 void parameters_are_named_valued_and_keyed() {
     // Values by key, a channel on one of them, and one on an unrelated node.
-    const doc::Root root = doc::Root{}
+    const doc::Root root = staged()
                                .set(sparks(1U, {real("particle_parameter.rate.0", 120.0),
                                                 real("particle_parameter.wind.2", -0.5)}))
                                .set(parameter_channel(9U, 1U, "tint.3", 10, 0.0, 1.0))
@@ -210,13 +223,13 @@ void parameters_are_named_valued_and_keyed() {
                                      sparks(1U, {text("particle_parameter.rate.0", "fast")}),
                                      parameter_channel(2U, 1U, "rate.9", 10, 0.0, 1.0)}) {
         scene::SceneModel refused;
-        refused.reset(doc::Root{}.set(damaged));
+        refused.reset(staged().set(damaged));
         EFFECT_CHECK(refused.counters().rejected == 1U);
     }
 }
 
 void the_digests_carry_every_field_that_changes_the_picture() {
-    const auto digest_of = [](const doc::Node& effect) { return scene::digest(evaluate(doc::Root{}.set(effect))); };
+    const auto digest_of = [](const doc::Node& effect) { return scene::digest(evaluate(staged().set(effect))); };
     const core::u64 base = digest_of(sparks(1U));
     EFFECT_CHECK(digest_of(sparks(1U)) == base);
     EFFECT_CHECK(digest_of(sparks(1U, {whole(schema::particle_seed, 6)})) != base);
@@ -227,7 +240,7 @@ void the_digests_carry_every_field_that_changes_the_picture() {
 
     // The package is an asset every node must hold.
     const auto assets_of = [](const doc::Node& effect) {
-        return scene::asset_set_digest(evaluate(doc::Root{}.set(effect)));
+        return scene::asset_set_digest(evaluate(staged().set(effect)));
     };
     EFFECT_CHECK(assets_of(sparks(1U)) != assets_of(sparks(1U, {text(schema::source, "effects/smoke.ajfx")})));
 
@@ -235,7 +248,7 @@ void the_digests_carry_every_field_that_changes_the_picture() {
     // scene without particles keeps the digest it had before they existed is
     // pinned by the golden digests in scene_model_tests.)
     const doc::Node object = node(4U, schema::object_type, {text(schema::primitive, "box")});
-    const scene::Scene with = evaluate(doc::Root{}.set(object).set(sparks(1U)));
+    const scene::Scene with = evaluate(staged().set(object).set(sparks(1U)));
     scene::Scene without = with;
     without.particle_effects.clear();
     EFFECT_CHECK(scene::digest(with) != scene::digest(without));
@@ -263,7 +276,7 @@ void seeds_and_effect_time_are_derived_alike_everywhere() {
 }
 
 void the_scene_holds_a_bounded_number_of_effects() {
-    doc::Root root;
+    doc::Root root = staged();
     for (core::u64 id = 1U; id <= scene::max_scene_particle_effects + 3U; ++id) {
         root = root.set(sparks(id));
     }

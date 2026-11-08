@@ -259,16 +259,12 @@ void invalid_copy_replaces_the_clipboard_and_paste_reports_bounds() {
     CLIP_CHECK(clipboard.empty());
     CLIP_CHECK(!clipboard.anchor().has_value());
 
-    // A pre-stage document's implicit SceneId{} remains a valid destination.
-    doc::Root legacy;
-    legacy = legacy.set(media(5U, 0, 10));
-    constexpr std::array legacy_selection{doc::NodeId{5U}};
-    CLIP_CHECK(clipboard.copy(legacy, legacy_selection));
-    auto legacy_paste = clipboard.paste(
-        legacy, scene::legacy_scene_id, 10U, 100U);
-    CLIP_CHECK(legacy_paste);
-    CLIP_CHECK(integer(
-        legacy_paste.value().created.front(), scene::schema::scene_id) == 0);
+    // A document with no Stage has no scene to paste into.
+    doc::Root stage_less;
+    stage_less = stage_less.set(media(5U, 0, 10));
+    constexpr std::array stage_less_selection{doc::NodeId{5U}};
+    CLIP_CHECK(clipboard.copy(stage_less, stage_less_selection));
+    CLIP_CHECK(!clipboard.paste(stage_less, scene::SceneId{}, 10U, 100U));
 }
 
 void negative_clipboard_anchors_preserve_spacing_and_reject_overflow() {

@@ -96,7 +96,37 @@ using Property = std::pair<std::string, doc::PropertyValue>;
                  whole(schema::to_port, to_port), whole(schema::order, order)});
 }
 
-[[nodiscard]] doc::Root root_of(const std::vector<doc::Node>& nodes) {
+// A fixture with exactly one Stage owns every graph and scene node that does
+// not name a Stage itself; fixtures with several Stages say which they mean.
+[[nodiscard]] std::vector<doc::Node> owned_by_the_only_stage(std::vector<doc::Node> nodes) {
+    const doc::Node* only{};
+    std::size_t stages{};
+    for (const doc::Node& value : nodes) {
+        if (value.type == "scene.stage") {
+            only = &value;
+            ++stages;
+        }
+    }
+    if (stages != 1U) {
+        return nodes;
+    }
+    const auto owner = static_cast<std::int64_t>(only->id.value());
+    for (doc::Node& value : nodes) {
+        const std::string_view type{value.type};
+        constexpr std::array<std::string_view, 9U> scoped{
+            "scene.camera", "scene.object", "scene.group", "scene.light",
+            "scene.media", "scene.timeline_lane", "scene.timeline_marker",
+            "scene.model", "scene.particle_effect"};
+        if ((type.starts_with("compositor.") && type != "compositor.edge") ||
+            std::find(scoped.begin(), scoped.end(), type) != scoped.end()) {
+            value.properties.emplace("scene_id", doc::PropertyValue{owner});
+        }
+    }
+    return nodes;
+}
+
+[[nodiscard]] doc::Root root_of(const std::vector<doc::Node>& authored) {
+    const std::vector<doc::Node> nodes = owned_by_the_only_stage(authored);
     doc::Root root;
     for (const doc::Node& one : nodes) {
         root = root.set(one);
@@ -1716,10 +1746,8 @@ void disconnected_scene_layers_never_modify_program() {
     COMPOSITOR_CHECK(untouched->style.effects.brightness == 1.0F);
 }
 
-// Two scenes, each with a complete one-layer graph, plus one legacy graph node
-// carrying no owner at all. Scene 10 is the lowest-id stage, so the legacy node
-// belongs to it - which is where a project authored before graphs were scoped
-// already composited it.
+// Two scenes, each with a complete one-layer graph, plus one graph node
+// carrying no owner at all, which belongs to neither scene.
 [[nodiscard]] std::vector<doc::Node> two_scene_graph() {
     const auto owned = [](core::u64 id, std::string_view type, core::u64 scene,
                           std::initializer_list<Property> extra = {}) {
@@ -1745,7 +1773,7 @@ void disconnected_scene_layers_never_modify_program() {
         owned(3U, schema::blur_type, 10U, {real(schema::radius, 4.0)}),
         owned_layer(4U, 200U, 20U),
         owned(5U, schema::output_type, 20U),
-        // No scene_id: legacy content, and therefore scene 10's.
+        // No scene_id: no scene's graph.
         node(6U, schema::brightness_type, {real(schema::amount, 0.5)}),
         edge(30U, 3U, 0U, 1U, 2U),
         edge(31U, 1U, 0U, 2U, 0U),
@@ -1757,17 +1785,17 @@ void a_graph_belongs_to_one_scene() {
     compositor::CompositorModel model;
     model.reset(root_of(two_scene_graph()));
 
-    const auto program = model.evaluate(doc::NodeId{10U}, doc::NodeId{10U});
+    const auto program = model.evaluate(doc::NodeId{10U});
     COMPOSITOR_CHECK(program.valid());
-    COMPOSITOR_CHECK(program.nodes.size() == 4U);
+    COMPOSITOR_CHECK(program.nodes.size() == 3U);
     COMPOSITOR_CHECK(program.node(doc::NodeId{1U}) != nullptr);
     COMPOSITOR_CHECK(program.node(doc::NodeId{4U}) == nullptr);
-    // The unowned legacy node lands in the default scene, not in both.
-    COMPOSITOR_CHECK(program.node(doc::NodeId{6U}) != nullptr);
+    // The unowned node is in neither scene, not adopted by the lowest stage.
+    COMPOSITOR_CHECK(program.node(doc::NodeId{6U}) == nullptr);
     // Only edges whose endpoints are both in scope survive.
     COMPOSITOR_CHECK(program.edges.size() == 2U);
 
-    const auto preview = model.evaluate(doc::NodeId{20U}, doc::NodeId{10U});
+    const auto preview = model.evaluate(doc::NodeId{20U});
     COMPOSITOR_CHECK(preview.valid());
     COMPOSITOR_CHECK(preview.nodes.size() == 2U);
     COMPOSITOR_CHECK(preview.node(doc::NodeId{4U}) != nullptr);
@@ -1789,7 +1817,7 @@ void editing_one_scene_graph_leaves_the_other_untouched() {
     doc::Root root = root_of(nodes);
     compositor::CompositorModel model;
     model.reset(root);
-    const auto before = model.evaluate(doc::NodeId{10U}, doc::NodeId{10U});
+    const auto before = model.evaluate(doc::NodeId{10U});
 
     // Retune the blur that belongs to scene 20 only.
     doc::Node retuned = node(7U, schema::blur_type, {real(schema::radius, 9.0)});
@@ -1802,12 +1830,12 @@ void editing_one_scene_graph_leaves_the_other_untouched() {
               whole(schema::to_node, 4), whole(schema::to_port, 2)}));
     model.apply(doc::diff(root, edited));
 
-    const auto after = model.evaluate(doc::NodeId{10U}, doc::NodeId{10U});
+    const auto after = model.evaluate(doc::NodeId{10U});
     COMPOSITOR_CHECK(after.nodes == before.nodes);
     COMPOSITOR_CHECK(after.edges == before.edges);
     COMPOSITOR_CHECK(after.plan == before.plan);
 
-    const auto preview = model.evaluate(doc::NodeId{20U}, doc::NodeId{10U});
+    const auto preview = model.evaluate(doc::NodeId{20U});
     COMPOSITOR_CHECK(preview.node(doc::NodeId{7U}) != nullptr);
     COMPOSITOR_CHECK(preview.edges.size() == 2U);
 }
@@ -1818,13 +1846,13 @@ void a_scene_copy_carries_its_graph() {
     const std::array<std::pair<doc::NodeId, doc::NodeId>, 1U> elements{
         {{doc::NodeId{100U}, doc::NodeId{500U}}}};
     auto planned = compositor::plan_clone_graph(
-        root, doc::NodeId{10U}, doc::NodeId{400U}, doc::NodeId{10U}, elements,
+        root, doc::NodeId{10U}, doc::NodeId{400U}, elements,
         doc::NodeId{1'000U});
     COMPOSITOR_CHECK(static_cast<bool>(planned));
     const compositor::GraphClonePlan plan = std::move(planned).value();
-    // Scene 10 owns three graph nodes plus the legacy brightness, and the two
-    // edges that join them.
-    COMPOSITOR_CHECK(plan.puts.size() == 6U);
+    // Scene 10 owns three graph nodes and the two edges that join them; the
+    // unowned brightness stays behind.
+    COMPOSITOR_CHECK(plan.puts.size() == 5U);
 
     // The scene clone that produced `elements` also created the copied
     // drawable; without it the copied layer would reference nothing.
@@ -1836,8 +1864,8 @@ void a_scene_copy_carries_its_graph() {
     compositor::CompositorModel model;
     model.reset(copied);
 
-    const auto source = model.evaluate(doc::NodeId{10U}, doc::NodeId{10U});
-    const auto copy = model.evaluate(doc::NodeId{400U}, doc::NodeId{10U});
+    const auto source = model.evaluate(doc::NodeId{10U});
+    const auto copy = model.evaluate(doc::NodeId{400U});
     COMPOSITOR_CHECK(copy.valid());
     COMPOSITOR_CHECK(copy.nodes.size() == source.nodes.size());
     COMPOSITOR_CHECK(copy.edges.size() == source.edges.size());
@@ -1858,7 +1886,7 @@ void a_scene_copy_carries_its_graph() {
     compositor::CompositorModel original;
     original.reset(root);
     COMPOSITOR_CHECK(
-        original.evaluate(doc::NodeId{10U}, doc::NodeId{10U}).plan ==
+        original.evaluate(doc::NodeId{10U}).plan ==
         source.plan);
 }
 
@@ -2049,7 +2077,7 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
     compositor::CompositorModel model;
     model.reset(ordinary_root);
     const compositor::CompositorGraph graph =
-        model.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+        model.evaluate(doc::NodeId{1000U});
     COMPOSITOR_CHECK(graph.valid());
     COMPOSITOR_CHECK(graph.resources.available);
     COMPOSITOR_CHECK(graph.resources.canvas == scene::Canvas{3840U, 2160U});
@@ -2068,7 +2096,7 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
     compositor::CompositorModel streamed;
     streamed.apply(doc::diff(doc::Root{}, ordinary_root));
     const compositor::CompositorGraph streamed_graph =
-        streamed.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+        streamed.evaluate(doc::NodeId{1000U});
     COMPOSITOR_CHECK(streamed_graph == graph);
     COMPOSITOR_CHECK(compositor::digest(streamed_graph) ==
                      compositor::digest(graph));
@@ -2078,7 +2106,7 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
     texture_large[0U] = stage(1000U, 8'192U, 8'192U);
     model.reset(root_of(texture_large));
     const compositor::CompositorGraph large_graph =
-        model.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+        model.evaluate(doc::NodeId{1000U});
     COMPOSITOR_CHECK(large_graph.valid());
     COMPOSITOR_CHECK(large_graph.resources.offscreen_texture_bytes ==
                      8192ULL * 8192ULL * 4ULL * 6ULL);
@@ -2095,7 +2123,7 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
                               real(scene::schema::graph_texture_budget_gb, 1.0)});
     model.reset(root_of(texture_tight));
     const compositor::CompositorGraph tight_graph =
-        model.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+        model.evaluate(doc::NodeId{1000U});
     COMPOSITOR_CHECK(!tight_graph.valid());
     COMPOSITOR_CHECK(tight_graph.resources.effect_settings
                          .graph_texture_budget_gb == 1.0F);
@@ -2112,7 +2140,7 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
     texture_over[0U] = stage(1000U, 16'384U, 16'384U);
     model.reset(root_of(texture_over));
     const compositor::CompositorGraph texture_graph =
-        model.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+        model.evaluate(doc::NodeId{1000U});
     COMPOSITOR_CHECK(!texture_graph.valid());
     COMPOSITOR_CHECK(texture_graph.plan.steps.empty());
     COMPOSITOR_CHECK(has_diagnostic(
@@ -2135,7 +2163,7 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
     expensive.push_back(edge(1200U, 50U, 0U, 51U, 0U));
     model.reset(root_of(expensive));
     const compositor::CompositorGraph expensive_graph =
-        model.evaluate(doc::NodeId{2000U}, doc::NodeId{2000U});
+        model.evaluate(doc::NodeId{2000U});
     COMPOSITOR_CHECK(!expensive_graph.valid());
     COMPOSITOR_CHECK(expensive_graph.resources.active_scene_layers == 13U);
     COMPOSITOR_CHECK(expensive_graph.resources.blurred_scene_layers == 13U);
@@ -2330,12 +2358,12 @@ void comment_boxes_are_layout_in_their_scene() {
     without.reset(root_of(plain));
     compositor::CompositorModel with;
     with.reset(root_of(boxed));
-    const auto graph = with.evaluate(doc::NodeId{5U}, doc::NodeId{5U});
+    const auto graph = with.evaluate(doc::NodeId{5U});
     COMPOSITOR_CHECK(graph.comments ==
                      (std::vector<compositor::GraphComment>{
                          {doc::NodeId{40U}, doc::NodeId{5U}, "Plates", 10.0F,
                           -20.0F, 400.0F, 240.0F, 3U}}));
-    const auto bare = without.evaluate(doc::NodeId{5U}, doc::NodeId{5U});
+    const auto bare = without.evaluate(doc::NodeId{5U});
     COMPOSITOR_CHECK(graph.plan == bare.plan);
     COMPOSITOR_CHECK(graph.diagnostics == bare.diagnostics);
     COMPOSITOR_CHECK(graph.nodes == bare.nodes);
@@ -2381,7 +2409,7 @@ void a_paste_copies_nodes_wires_and_boxes() {
     COMPOSITOR_CHECK(snapshot.size() == 8U);
 
     const auto planned = compositor::plan_paste_graph(
-        root, snapshot, doc::NodeId{5U}, doc::NodeId{5U}, 1000.0F, 500.0F,
+        root, snapshot, doc::NodeId{5U}, 1000.0F, 500.0F,
         doc::NodeId{200U});
     COMPOSITOR_CHECK(planned.has_value());
     const compositor::GraphPastePlan& plan = planned.value();
@@ -2418,7 +2446,7 @@ void a_paste_copies_nodes_wires_and_boxes() {
     // comes too, owned by that scene.
     const doc::Root other = root.set(stage(6U, 1920U, 1080U));
     const auto elsewhere = compositor::plan_paste_graph(
-        other, snapshot, doc::NodeId{6U}, doc::NodeId{5U}, 0.0F, 0.0F,
+        other, snapshot, doc::NodeId{6U}, 0.0F, 0.0F,
         doc::NodeId{200U});
     COMPOSITOR_CHECK(elsewhere.has_value());
     COMPOSITOR_CHECK(elsewhere.value().skipped == 1U);
@@ -2456,7 +2484,7 @@ evaluate_nodes(const std::vector<doc::Node>& nodes,
     compositor::CompositorModel local;
     compositor::CompositorModel& used = model != nullptr ? *model : local;
     used.reset(root_of(nodes));
-    return used.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+    return used.evaluate(doc::NodeId{1000U});
 }
 
 void merge_is_typed_bounded_and_digested() {

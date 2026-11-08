@@ -24,6 +24,11 @@ namespace schema = mediaserver::scene::schema;
     for (const auto& [name, value] : properties) {
         node.properties.emplace(std::string{name}, value);
     }
+    // Every scene-scoped node names the demo's one Stage.
+    if (type != schema::stage_type && type != schema::slice_type) {
+        node.properties.emplace(std::string{schema::scene_id},
+                                doc::PropertyValue{static_cast<std::int64_t>(demo_edit_node_base)});
+    }
     return node;
 }
 

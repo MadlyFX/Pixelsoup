@@ -137,19 +137,15 @@ namespace {
 [[nodiscard]] bool valid_target_scene(
     const doc::Root& document,
     scene::SceneId target) {
-    bool any_stage = false;
     bool target_is_stage = false;
     const doc::Delta all = doc::diff(doc::Root{}, document);
     for (const doc::NodeChange& change : all.changes) {
         if (!change.after || change.after->type != scene::schema::stage_type) {
             continue;
         }
-        any_stage = true;
         target_is_stage = target_is_stage || change.id == target;
     }
-    // Documents predating first-class stages use SceneId{} as their implicit
-    // active scene. Once any stage exists, the requested id must name one.
-    return target_is_stage || (!any_stage && target == scene::legacy_scene_id);
+    return target_is_stage;
 }
 
 } // namespace

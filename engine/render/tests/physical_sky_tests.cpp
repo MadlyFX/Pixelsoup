@@ -35,7 +35,8 @@ doc::Root document() {
     scene::write_renderer_settings(settings,renderer);
     auto camera=node(12,schema::camera_type);
     camera.properties={{"eye_x",0.0},{"eye_y",1.5},{"eye_z",4.0},
-        {"target_x",0.0},{"target_y",2.5},{"target_z",0.0},{"exposure_compensation_ev",-4.0}};
+        {"target_x",0.0},{"target_y",2.5},{"target_z",0.0},{"exposure_compensation_ev",-4.0},
+        {"scene_id",std::int64_t{10}}};
     return doc::Root{}.set(stage).set(settings).set(camera);
 }
 void model_contract() {

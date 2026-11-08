@@ -82,15 +82,7 @@ placements_of(const doc::Root& root) {
     scene::SceneModel model;
     model.reset(root);
     std::map<doc::NodeId, scene::ClipPlacement> result;
-    const std::vector<scene::SceneInfo> scenes = model.scenes();
-    if (scenes.empty()) {
-        for (scene::ClipPlacement& clip :
-             model.clips(scene::legacy_scene_id)) {
-            result.emplace(clip.node, std::move(clip));
-        }
-        return result;
-    }
-    for (const scene::SceneInfo& info : scenes) {
+    for (const scene::SceneInfo& info : model.scenes()) {
         for (scene::ClipPlacement& clip : model.clips(info.id)) {
             result.emplace(clip.node, std::move(clip));
         }

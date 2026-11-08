@@ -39,36 +39,15 @@ namespace {
 }
 
 [[nodiscard]] bool belongs_to(
-    const doc::Node& node, scene::SceneId wanted,
-    scene::SceneId default_scene) noexcept {
-    const auto owned = reference(node, scene::schema::scene_id);
-    return owned.value_or(default_scene) == wanted;
+    const doc::Node& node, scene::SceneId wanted) noexcept {
+    return reference(node, scene::schema::scene_id) == wanted;
 }
 
 [[nodiscard]] bool valid_scene(
     const std::map<doc::NodeId, doc::Node>& nodes,
     scene::SceneId scene) noexcept {
-    bool any_stage{};
-    for (const auto& [id, node] : nodes) {
-        if (node.type != scene::schema::stage_type) {
-            continue;
-        }
-        any_stage = true;
-        if (id == scene) {
-            return true;
-        }
-    }
-    return !any_stage && scene == scene::legacy_scene_id;
-}
-
-[[nodiscard]] scene::SceneId default_scene(
-    const std::map<doc::NodeId, doc::Node>& nodes) noexcept {
-    for (const auto& [id, node] : nodes) {
-        if (node.type == scene::schema::stage_type) {
-            return id;
-        }
-    }
-    return scene::legacy_scene_id;
+    const auto found = nodes.find(scene);
+    return found != nodes.end() && found->second.type == scene::schema::stage_type;
 }
 
 void put_integer(doc::Node& node, std::string_view property,
@@ -169,12 +148,11 @@ void put_clip_timing(doc::Node& clip, const scene::ClipTiming& timing) {
 
 [[nodiscard]] std::vector<doc::NodeId> lane_ids(
     const std::map<doc::NodeId, doc::Node>& nodes,
-    scene::SceneId scene_id,
-    scene::SceneId fallback) {
+    scene::SceneId scene_id) {
     std::vector<doc::NodeId> result;
     for (const auto& [id, node] : nodes) {
         if (node.type == scene::schema::timeline_lane_type
-            && belongs_to(node, scene_id, fallback)) {
+            && belongs_to(node, scene_id)) {
             result.push_back(id);
         }
     }
@@ -202,8 +180,7 @@ core::Result<LaneAuthorPlan, LaneAuthorError> plan_lane_authoring(
         if (!valid_scene(nodes, request.scene)) {
             return Result::failure(LaneAuthorError::InvalidScene);
         }
-        const scene::SceneId fallback = default_scene(nodes);
-        auto lanes = lane_ids(nodes, request.scene, fallback);
+        auto lanes = lane_ids(nodes, request.scene);
         LaneAuthorPlan plan{};
         plan.document = document;
 
@@ -263,7 +240,7 @@ core::Result<LaneAuthorPlan, LaneAuthorError> plan_lane_authoring(
         const auto held = nodes.find(request.lane);
         if (held == nodes.end()
             || held->second.type != scene::schema::timeline_lane_type
-            || !belongs_to(held->second, request.scene, fallback)) {
+            || !belongs_to(held->second, request.scene)) {
             return Result::failure(LaneAuthorError::LaneNotFound);
         }
         doc::Node lane = held->second;
@@ -330,8 +307,7 @@ core::Result<LaneAuthorPlan, LaneAuthorError> plan_lane_authoring(
                     != scene::schema::timeline_lane_type) {
                 return Result::failure(LaneAuthorError::DestinationNotFound);
             }
-            if (!belongs_to(destination_node->second, request.scene,
-                            fallback)) {
+            if (!belongs_to(destination_node->second, request.scene)) {
                 return Result::failure(
                     LaneAuthorError::CrossSceneDestination);
             }
@@ -602,7 +578,7 @@ core::Result<LaneAuthorPlan, LaneAuthorError> plan_lane_authoring(
                 return Result::failure(LaneAuthorError::DestinationNotFound);
             }
             if (request.destination == lane.id
-                || !belongs_to(destination->second, request.scene, fallback)) {
+                || !belongs_to(destination->second, request.scene)) {
                 return Result::failure(LaneAuthorError::CrossSceneDestination);
             }
             for (const doc::NodeId clip_id : clips) {

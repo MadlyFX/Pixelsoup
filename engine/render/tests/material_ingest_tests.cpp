@@ -21,6 +21,13 @@ namespace doc = mediaserver::doc;
 namespace render = mediaserver::render;
 namespace scene = mediaserver::scene;
 namespace schema = mediaserver::scene::schema;
+
+// The one Stage every fixture object names.
+doc::Root staged() {
+    doc::Node stage; stage.id = doc::NodeId{41U}; stage.type = std::string{schema::stage_type};
+    return doc::Root{}.set(stage);
+}
+
 void check(bool v, const char* message, int line) { if (!v) throw std::runtime_error{std::to_string(line) + ": " + message}; }
 #define CHECK(...) check(static_cast<bool>((__VA_ARGS__)), #__VA_ARGS__, __LINE__)
 
@@ -35,9 +42,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{key}, doc::PropertyValue{static_cast<double>(expected)});
-        doc::Root root; root = root.set(object);
+        doc::Root root = staged(); root = root.set(object);
         scene::SceneModel model; model.reset(root);
         const auto value = model.evaluate({0U, 60U, 1U});
         CHECK(value.instances.size() == 1U);
@@ -69,9 +76,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{schema::clearcoat_texture}, doc::PropertyValue{std::string{"assets/clearcoat_texture.png"}});
-        doc::Root root; root = root.set(object); scene::SceneModel model; model.reset(root);
+        doc::Root root = staged(); root = root.set(object); scene::SceneModel model; model.reset(root);
         CHECK(model.evaluate({0U, 60U, 1U}).instances[0].material.clearcoat_texture == "assets/clearcoat_texture.png");
     }
     {
@@ -79,9 +86,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{schema::clearcoat_roughness_texture}, doc::PropertyValue{std::string{"assets/clearcoat_roughness_texture.png"}});
-        doc::Root root; root = root.set(object); scene::SceneModel model; model.reset(root);
+        doc::Root root = staged(); root = root.set(object); scene::SceneModel model; model.reset(root);
         CHECK(model.evaluate({0U, 60U, 1U}).instances[0].material.clearcoat_roughness_texture == "assets/clearcoat_roughness_texture.png");
     }
     {
@@ -89,9 +96,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{schema::clearcoat_normal_texture}, doc::PropertyValue{std::string{"assets/clearcoat_normal_texture.png"}});
-        doc::Root root; root = root.set(object); scene::SceneModel model; model.reset(root);
+        doc::Root root = staged(); root = root.set(object); scene::SceneModel model; model.reset(root);
         CHECK(model.evaluate({0U, 60U, 1U}).instances[0].material.clearcoat_normal_texture == "assets/clearcoat_normal_texture.png");
     }
     {
@@ -99,9 +106,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{schema::sheen_color_texture}, doc::PropertyValue{std::string{"assets/sheen_color_texture.png"}});
-        doc::Root root; root = root.set(object); scene::SceneModel model; model.reset(root);
+        doc::Root root = staged(); root = root.set(object); scene::SceneModel model; model.reset(root);
         CHECK(model.evaluate({0U, 60U, 1U}).instances[0].material.sheen_color_texture == "assets/sheen_color_texture.png");
     }
     {
@@ -109,9 +116,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{schema::sheen_roughness_texture}, doc::PropertyValue{std::string{"assets/sheen_roughness_texture.png"}});
-        doc::Root root; root = root.set(object); scene::SceneModel model; model.reset(root);
+        doc::Root root = staged(); root = root.set(object); scene::SceneModel model; model.reset(root);
         CHECK(model.evaluate({0U, 60U, 1U}).instances[0].material.sheen_roughness_texture == "assets/sheen_roughness_texture.png");
     }
     {
@@ -119,9 +126,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{schema::transmission_texture}, doc::PropertyValue{std::string{"assets/transmission_texture.png"}});
-        doc::Root root; root = root.set(object); scene::SceneModel model; model.reset(root);
+        doc::Root root = staged(); root = root.set(object); scene::SceneModel model; model.reset(root);
         CHECK(model.evaluate({0U, 60U, 1U}).instances[0].material.transmission_texture == "assets/transmission_texture.png");
     }
     {
@@ -129,9 +136,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{schema::specular_texture}, doc::PropertyValue{std::string{"assets/specular_texture.png"}});
-        doc::Root root; root = root.set(object); scene::SceneModel model; model.reset(root);
+        doc::Root root = staged(); root = root.set(object); scene::SceneModel model; model.reset(root);
         CHECK(model.evaluate({0U, 60U, 1U}).instances[0].material.specular_texture == "assets/specular_texture.png");
     }
     {
@@ -139,9 +146,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{schema::specular_color_texture}, doc::PropertyValue{std::string{"assets/specular_color_texture.png"}});
-        doc::Root root; root = root.set(object); scene::SceneModel model; model.reset(root);
+        doc::Root root = staged(); root = root.set(object); scene::SceneModel model; model.reset(root);
         CHECK(model.evaluate({0U, 60U, 1U}).instances[0].material.specular_color_texture == "assets/specular_color_texture.png");
     }
     {
@@ -149,9 +156,9 @@ void fields_are_authored_clamped_and_digested() {
         CHECK(scene::digest(changed) != scene::digest(baseline));
         auto update = bridge.value().prepare(changed); CHECK(update);
         CHECK(update.value().visual_digest != initial.value().visual_digest);
-        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type};
+        doc::Node object; object.id = doc::NodeId{42U}; object.type = std::string{schema::object_type}; object.properties.emplace(std::string{schema::scene_id}, std::int64_t{41});
         object.properties.emplace(std::string{schema::anisotropy_texture}, doc::PropertyValue{std::string{"assets/anisotropy_texture.png"}});
-        doc::Root root; root = root.set(object); scene::SceneModel model; model.reset(root);
+        doc::Root root = staged(); root = root.set(object); scene::SceneModel model; model.reset(root);
         CHECK(model.evaluate({0U, 60U, 1U}).instances[0].material.anisotropy_texture == "assets/anisotropy_texture.png");
     }
 }

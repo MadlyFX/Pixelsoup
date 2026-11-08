@@ -88,11 +88,8 @@ core::Result<MarkerAuthorPlan, MarkerAuthorError> plan_marker_authoring(
     core::u64 next_node) {
     using Result = core::Result<MarkerAuthorPlan, MarkerAuthorError>;
     try {
-        // One pass names the scene a document without explicit owners
-        // defaults to, proves the requested scene exists, and counts its
+        // One pass proves the requested scene exists, and a second counts its
         // markers for the bound.
-        scene::SceneId default_scene = scene::legacy_scene_id;
-        bool any_stage{};
         bool scene_found{};
         std::size_t markers{};
         const doc::Delta all = doc::diff(doc::Root{}, document);
@@ -101,15 +98,8 @@ core::Result<MarkerAuthorPlan, MarkerAuthorError> plan_marker_authoring(
                 continue;
             }
             if (change.after->type == scene::schema::stage_type) {
-                if (!any_stage) {
-                    default_scene = change.id;
-                }
-                any_stage = true;
                 scene_found = scene_found || change.id == request.scene;
             }
-        }
-        if (!any_stage && request.scene == scene::legacy_scene_id) {
-            scene_found = true;
         }
         if (!scene_found) {
             return Result::failure(MarkerAuthorError::InvalidScene);
@@ -117,8 +107,7 @@ core::Result<MarkerAuthorPlan, MarkerAuthorError> plan_marker_authoring(
         for (const doc::NodeChange& change : all.changes) {
             if (change.after
                 && change.after->type == scene::schema::timeline_marker_type
-                && owner_of(*change.after).value_or(default_scene)
-                    == request.scene) {
+                && owner_of(*change.after) == request.scene) {
                 ++markers;
             }
         }
@@ -158,7 +147,7 @@ core::Result<MarkerAuthorPlan, MarkerAuthorError> plan_marker_authoring(
             || existing->type != scene::schema::timeline_marker_type) {
             return Result::failure(MarkerAuthorError::MarkerNotFound);
         }
-        if (owner_of(*existing).value_or(default_scene) != request.scene) {
+        if (owner_of(*existing) != request.scene) {
             return Result::failure(MarkerAuthorError::CrossSceneMarker);
         }
         plan.marker = existing->id;

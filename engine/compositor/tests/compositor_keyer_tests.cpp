@@ -103,7 +103,37 @@ constexpr std::int64_t filters_port = 2;
          real(schema::luma_key_mix, mix)});
 }
 
+// A fixture with exactly one Stage owns every graph and scene node that does
+// not name a Stage itself; fixtures with several Stages say which they mean.
+[[nodiscard]] std::vector<doc::Node> owned_by_the_only_stage(std::vector<doc::Node> nodes) {
+    const doc::Node* only{};
+    std::size_t stages{};
+    for (const doc::Node& value : nodes) {
+        if (value.type == "scene.stage") {
+            only = &value;
+            ++stages;
+        }
+    }
+    if (stages != 1U) {
+        return nodes;
+    }
+    const auto owner = static_cast<std::int64_t>(only->id.value());
+    for (doc::Node& value : nodes) {
+        const std::string_view type{value.type};
+        constexpr std::array<std::string_view, 9U> scoped{
+            "scene.camera", "scene.object", "scene.group", "scene.light",
+            "scene.media", "scene.timeline_lane", "scene.timeline_marker",
+            "scene.model", "scene.particle_effect"};
+        if ((type.starts_with("compositor.") && type != "compositor.edge") ||
+            std::find(scoped.begin(), scoped.end(), type) != scoped.end()) {
+            value.properties.emplace("scene_id", doc::PropertyValue{owner});
+        }
+    }
+    return nodes;
+}
+
 [[nodiscard]] doc::Root root_of(std::vector<doc::Node> nodes) {
+    nodes = owned_by_the_only_stage(std::move(nodes));
     doc::Root result;
     for (doc::Node& value : nodes) {
         result = result.set(std::move(value));
@@ -132,7 +162,7 @@ void typed_nodes_plan_exact_zero_bounds_resources_and_order() {
     compositor::CompositorModel model;
     model.reset(root);
     const compositor::CompositorGraph graph =
-        model.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+        model.evaluate(doc::NodeId{100U});
     KEY_GRAPH_CHECK(graph.valid());
 
     const auto* const chroma = graph.node(doc::NodeId{1U});
@@ -199,7 +229,7 @@ void mix_zero_is_canonical_and_plan_resource_inert() {
     compositor::CompositorModel model;
     model.reset(root);
     const compositor::CompositorGraph graph =
-        model.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+        model.evaluate(doc::NodeId{100U});
     KEY_GRAPH_CHECK(graph.valid());
     KEY_GRAPH_CHECK(compositor::effect_node_is_identity(
         *graph.node(doc::NodeId{1U})));
@@ -242,12 +272,13 @@ void active_malformed_parameters_fail_closed() {
 void an_effect_beside_keys_runs_before_them() {
     doc::Root root = key_graph();
     root = root.set(
-        node(5U, schema::brightness_type, {real(schema::amount, 1.5)}));
+        node(5U, schema::brightness_type,
+             {real(schema::amount, 1.5), whole(scene::schema::scene_id, 100)}));
     doc::Root effect = root.set(edge(13U, 5U, 3U, 2, effects_port));
     compositor::CompositorModel model;
     model.reset(effect);
     const compositor::CompositorGraph graph =
-        model.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+        model.evaluate(doc::NodeId{100U});
     KEY_GRAPH_CHECK(graph.valid());
     const compositor::PlanStep* const layer = graph.step(doc::NodeId{3U});
     KEY_GRAPH_CHECK(layer != nullptr && layer->inputs.size() == 3U);
@@ -258,7 +289,7 @@ void an_effect_beside_keys_runs_before_them() {
     compositor::CompositorModel wrong;
     wrong.reset(root.set(edge(13U, 5U, 3U, 2, filters_port)));
     const compositor::CompositorGraph refused =
-        wrong.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+        wrong.evaluate(doc::NodeId{100U});
     KEY_GRAPH_CHECK(!refused.valid());
     KEY_GRAPH_CHECK(std::any_of(
         refused.diagnostics.begin(), refused.diagnostics.end(),
@@ -272,7 +303,7 @@ void every_key_parameter_participates_in_graph_digest() {
     compositor::CompositorModel model;
     model.reset(key_graph());
     const compositor::CompositorGraph baseline =
-        model.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+        model.evaluate(doc::NodeId{100U});
     compositor::CompositorGraph changed = baseline;
     std::get<compositor::ChromaKeyParameters>(
         changed.nodes[0U].parameters).spill_suppression = 0.25F;

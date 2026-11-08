@@ -90,7 +90,12 @@ void cones_conserve_flux() {
 
 doc::Node node(core::u64 id, std::string_view type) {
     doc::Node result;
-    result.id = doc::NodeId{id}; result.type = type; return result;
+    result.id = doc::NodeId{id}; result.type = type;
+    // Lights, objects and cameras name the fixture's Stage 1.
+    if (type == schema::light_type || type == schema::object_type || type == schema::camera_type) {
+        result.properties.emplace(std::string{schema::scene_id}, std::int64_t{1});
+    }
+    return result;
 }
 void authored_fields_survive_save_and_replication() {
     auto lamp = node(2, schema::light_type);

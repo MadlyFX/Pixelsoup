@@ -398,7 +398,13 @@ void ready_proxy_uses_the_exact_fractional_rate_map_without_identity_drift() {
     placement.properties.emplace(
         std::string{scene::schema::source_rate_denominator},
         doc::PropertyValue{std::int64_t{1'001}});
+    placement.properties.emplace(std::string{scene::schema::scene_id},
+                                 doc::PropertyValue{std::int64_t{700}});
+    doc::Node stage{};
+    stage.id = doc::NodeId{700U};
+    stage.type = std::string{scene::schema::stage_type};
     const doc::Root projected = doc::Root{}
+        .set(std::move(stage))
         .set(app::make_project_asset_node(asset.id, assets::Asset{asset}))
         .set(std::move(placement));
     assets::AssetModel asset_model;

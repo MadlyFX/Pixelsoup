@@ -56,13 +56,10 @@ namespace {
         || type == schema::particle_effect_type;
 }
 
-[[nodiscard]] bool belongs_to(
-    const doc::Node& node,
-    SceneId source,
-    SceneId default_scene) noexcept {
+[[nodiscard]] bool belongs_to(const doc::Node& node, SceneId source) noexcept {
     const auto* const value = find(node.properties, schema::scene_id);
     if (value == nullptr) {
-        return source == default_scene;
+        return false;
     }
     const auto* const integer = std::get_if<std::int64_t>(value);
     return integer != nullptr && *integer >= 0
@@ -159,13 +156,12 @@ void write_reference(
     return true;
 }
 
-[[nodiscard]] std::optional<SceneId> authored_scene(
-    const doc::Node& node, SceneId default_scene) noexcept {
+[[nodiscard]] std::optional<SceneId> authored_scene(const doc::Node& node) noexcept {
     std::optional<doc::NodeId> value;
     if (!read_optional_reference(node, schema::scene_id, value)) {
         return std::nullopt;
     }
-    return value.value_or(default_scene);
+    return value;
 }
 
 struct GroupTransform final {
@@ -409,8 +405,6 @@ core::Result<SceneClonePlan, SceneCloneError> plan_clone_scene(
         if (source_info == authored_scenes.end() || source_info->id != source) {
             return Result::failure(SceneCloneError::SourceNotFound);
         }
-        const SceneId default_scene = authored_scenes.front().id;
-
         std::map<doc::NodeId, doc::Node> all;
         for (const auto& change : doc::diff(doc::Root{}, root).changes) {
             if (change.after) {
@@ -424,7 +418,7 @@ core::Result<SceneClonePlan, SceneCloneError> plan_clone_scene(
         std::set<doc::NodeId> selected_direct;
         for (const auto& [id, node] : all) {
             if (!is_direct_scoped_type(node.type)
-                || !belongs_to(node, source, default_scene)) {
+                || !belongs_to(node, source)) {
                 continue;
             }
             selected.insert(id);
@@ -549,11 +543,6 @@ core::Result<SceneDeletePlan, SceneDeleteError> plan_delete_scene(
 
     try {
         const std::map<doc::NodeId, doc::Node> all = document_nodes(root);
-        SceneModel model;
-        model.reset(root);
-        const std::vector<SceneInfo> scenes = model.scenes();
-        const SceneId default_scene = scenes.empty() ? legacy_scene_id
-                                                     : scenes.front().id;
 
         std::set<doc::NodeId> selected{scene};
         for (const auto& [id, node] : all) {
@@ -561,18 +550,6 @@ core::Result<SceneDeletePlan, SceneDeleteError> plan_delete_scene(
             if (owner.has_value() && *owner == scene) {
                 // scene_id is the common ownership field used by scene,
                 // compositor, and replicated editor metadata nodes.
-                selected.insert(id);
-                continue;
-            }
-            if (scene != default_scene || owner.has_value()) {
-                continue;
-            }
-            // Compatibility documents predate explicit ownership. Their
-            // ordinary scene nodes and compositor graph belong to the
-            // lowest-id stage and must not migrate to the next scene when the
-            // default is deleted.
-            if (is_direct_scoped_type(node.type)
-                || std::string_view{node.type}.starts_with("compositor.")) {
                 selected.insert(id);
             }
         }
@@ -676,18 +653,13 @@ core::Result<GroupEditPlan, GroupEditError> plan_group_nodes(
         SceneModel model;
         model.reset(root);
         const std::vector<SceneInfo> authored_scenes = model.scenes();
-        const SceneId default_scene = authored_scenes.empty()
-            ? legacy_scene_id
-            : authored_scenes.front().id;
         const auto authored_scene_entry = std::lower_bound(
             authored_scenes.begin(), authored_scenes.end(), scene,
             [](const SceneInfo& info, SceneId id) noexcept {
                 return info.id < id;
             });
-        const bool valid_scene = authored_scenes.empty()
-            ? scene == legacy_scene_id
-            : authored_scene_entry != authored_scenes.end()
-                && authored_scene_entry->id == scene;
+        const bool valid_scene = authored_scene_entry != authored_scenes.end()
+            && authored_scene_entry->id == scene;
         if (!valid_scene) {
             return Result::failure(GroupEditError::InvalidScene);
         }
@@ -713,7 +685,7 @@ core::Result<GroupEditPlan, GroupEditError> plan_group_nodes(
             }
             const doc::Node& source = found->second;
             if (is_linked_occurrence(source)) return Result::failure(GroupEditError::UnsupportedNode);
-            const auto source_scene = authored_scene(source, default_scene);
+            const auto source_scene = authored_scene(source);
             if (!source_scene.has_value() || *source_scene != scene) {
                 return Result::failure(GroupEditError::CrossSceneSelection);
             }
@@ -810,22 +782,17 @@ core::Result<GroupEditPlan, GroupEditError> plan_ungroup_nodes(
         SceneModel model;
         model.reset(root);
         const std::vector<SceneInfo> authored_scenes = model.scenes();
-        const SceneId default_scene = authored_scenes.empty()
-            ? legacy_scene_id
-            : authored_scenes.front().id;
         const auto authored_scene_entry = std::lower_bound(
             authored_scenes.begin(), authored_scenes.end(), scene,
             [](const SceneInfo& info, SceneId id) noexcept {
                 return info.id < id;
             });
-        const bool valid_scene = authored_scenes.empty()
-            ? scene == legacy_scene_id
-            : authored_scene_entry != authored_scenes.end()
-                && authored_scene_entry->id == scene;
+        const bool valid_scene = authored_scene_entry != authored_scenes.end()
+            && authored_scene_entry->id == scene;
         if (!valid_scene) {
             return Result::failure(GroupEditError::InvalidScene);
         }
-        const auto group_scene = authored_scene(*group_node, default_scene);
+        const auto group_scene = authored_scene(*group_node);
         if (!group_scene.has_value() || *group_scene != scene) {
             return Result::failure(GroupEditError::CrossSceneSelection);
         }
@@ -873,7 +840,7 @@ core::Result<GroupEditPlan, GroupEditError> plan_ungroup_nodes(
             if (!parent.has_value() || *parent != group_id) {
                 continue;
             }
-            const auto child_scene = authored_scene(node, default_scene);
+            const auto child_scene = authored_scene(node);
             if (!child_scene.has_value() || *child_scene != scene) {
                 return Result::failure(GroupEditError::InvalidHierarchy);
             }
@@ -997,25 +964,20 @@ core::Result<GroupEditPlan, GroupEditError> plan_move_into_group(
         SceneModel model;
         model.reset(root);
         const std::vector<SceneInfo> authored_scenes = model.scenes();
-        const SceneId default_scene = authored_scenes.empty()
-            ? legacy_scene_id
-            : authored_scenes.front().id;
         const auto authored_scene_entry = std::lower_bound(
             authored_scenes.begin(), authored_scenes.end(), scene,
             [](const SceneInfo& info, SceneId id) noexcept {
                 return info.id < id;
             });
-        const bool valid_scene = authored_scenes.empty()
-            ? scene == legacy_scene_id
-            : authored_scene_entry != authored_scenes.end()
-                && authored_scene_entry->id == scene;
+        const bool valid_scene = authored_scene_entry != authored_scenes.end()
+            && authored_scene_entry->id == scene;
         if (!valid_scene) {
             return Result::failure(GroupEditError::InvalidScene);
         }
 
         const std::map<doc::NodeId, doc::Node> nodes = document_nodes(root);
         const auto in_scene = [&](const doc::Node& node) {
-            const auto owner = authored_scene(node, default_scene);
+            const auto owner = authored_scene(node);
             return owner.has_value() && *owner == scene;
         };
         const auto parent_of = [&](const doc::Node& node,
@@ -1281,25 +1243,20 @@ core::Result<GroupEditPlan, GroupEditError> plan_create_group(
         SceneModel model;
         model.reset(root);
         const std::vector<SceneInfo> authored_scenes = model.scenes();
-        const SceneId default_scene = authored_scenes.empty()
-            ? legacy_scene_id
-            : authored_scenes.front().id;
         const auto authored_scene_entry = std::lower_bound(
             authored_scenes.begin(), authored_scenes.end(), scene,
             [](const SceneInfo& info, SceneId id) noexcept {
                 return info.id < id;
             });
-        const bool valid_scene = authored_scenes.empty()
-            ? scene == legacy_scene_id
-            : authored_scene_entry != authored_scenes.end()
-                && authored_scene_entry->id == scene;
+        const bool valid_scene = authored_scene_entry != authored_scenes.end()
+            && authored_scene_entry->id == scene;
         if (!valid_scene) {
             return Result::failure(GroupEditError::InvalidScene);
         }
 
         const std::map<doc::NodeId, doc::Node> nodes = document_nodes(root);
         const auto in_scene = [&](const doc::Node& node) {
-            const auto owner = authored_scene(node, default_scene);
+            const auto owner = authored_scene(node);
             return owner.has_value() && *owner == scene;
         };
         if (parent.has_value()) {
@@ -1395,18 +1352,13 @@ core::Result<LayerOrderPlan, LayerOrderError> plan_reorder_layer(
         SceneModel model;
         model.reset(root);
         const std::vector<SceneInfo> authored_scenes = model.scenes();
-        const SceneId default_scene = authored_scenes.empty()
-            ? legacy_scene_id
-            : authored_scenes.front().id;
         const auto authored_scene_entry = std::lower_bound(
             authored_scenes.begin(), authored_scenes.end(), scene,
             [](const SceneInfo& info, SceneId id) noexcept {
                 return info.id < id;
             });
-        const bool valid_scene = authored_scenes.empty()
-            ? scene == legacy_scene_id
-            : authored_scene_entry != authored_scenes.end()
-                && authored_scene_entry->id == scene;
+        const bool valid_scene = authored_scene_entry != authored_scenes.end()
+            && authored_scene_entry->id == scene;
         if (!valid_scene) {
             return Result::failure(LayerOrderError::InvalidScene);
         }
@@ -1433,10 +1385,9 @@ core::Result<LayerOrderPlan, LayerOrderError> plan_reorder_layer(
             || !orderable_sibling(destination_found->second)) {
             return Result::failure(LayerOrderError::UnsupportedNode);
         }
-        const auto source_scene = authored_scene(source_found->second,
-                                                 default_scene);
+        const auto source_scene = authored_scene(source_found->second);
         const auto destination_scene = authored_scene(
-            destination_found->second, default_scene);
+            destination_found->second);
         if (!source_scene.has_value() || !destination_scene.has_value()
             || *source_scene != scene || *destination_scene != scene) {
             return Result::failure(LayerOrderError::CrossScene);
@@ -1521,7 +1472,7 @@ core::Result<LayerOrderPlan, LayerOrderError> plan_reorder_layer(
             if (!orderable_sibling(node)) {
                 continue;
             }
-            const auto node_scene = authored_scene(node, default_scene);
+            const auto node_scene = authored_scene(node);
             if (!node_scene.has_value() || *node_scene != scene) {
                 continue;
             }
