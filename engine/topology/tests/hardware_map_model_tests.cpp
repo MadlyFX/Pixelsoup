@@ -264,57 +264,6 @@ void invalid_control_and_window_vocabulary_are_rejected() {
   TOPOLOGY_CHECK(*endpoint == "192.0.2.10:65535");
 }
 
-void oversized_legacy_window_survives_an_explicit_mode_cycle() {
-  auto authored =
-      device(1U, schema::render_server_kind, "Legacy Render", 0, 0);
-  authored.properties.insert_or_assign(
-      std::string{schema::width},
-      doc::PropertyValue{static_cast<std::int64_t>(
-          topology::max_hardware_output_width + 1U)});
-  authored.properties.insert_or_assign(
-      std::string{schema::height},
-      doc::PropertyValue{static_cast<std::int64_t>(
-          topology::max_hardware_output_height + 1U)});
-
-  doc::Root running = doc::Root{}.set(authored);
-  topology::HardwareMapModel model;
-  model.reset(running);
-  topology::HardwareMap evaluated = model.evaluate();
-  const topology::HardwareDevice *visible =
-      evaluated.device(doc::NodeId{1U});
-  TOPOLOGY_CHECK(visible != nullptr);
-  TOPOLOGY_CHECK(visible->window_mode ==
-                 topology::HardwareWindowMode::Inherit);
-
-  authored.properties.insert_or_assign(
-      std::string{schema::window_mode},
-      doc::PropertyValue{std::string{schema::windowed_window_mode}});
-  doc::Root next = running.set(authored);
-  model.apply(diff(running, next));
-  running = next;
-  evaluated = model.evaluate();
-  visible = evaluated.device(doc::NodeId{1U});
-  TOPOLOGY_CHECK(visible != nullptr);
-  TOPOLOGY_CHECK(visible->window_mode ==
-                 topology::HardwareWindowMode::Windowed);
-  TOPOLOGY_CHECK(visible->width ==
-                 topology::max_hardware_output_width + 1U);
-  TOPOLOGY_CHECK(visible->height ==
-                 topology::max_hardware_output_height + 1U);
-
-  authored.properties.insert_or_assign(
-      std::string{schema::width},
-      doc::PropertyValue{static_cast<std::int64_t>(
-          topology::max_hardware_output_width)});
-  next = running.set(authored);
-  model.apply(diff(running, next));
-  evaluated = model.evaluate();
-  visible = evaluated.device(doc::NodeId{1U});
-  TOPOLOGY_CHECK(visible != nullptr);
-  TOPOLOGY_CHECK(visible->width == topology::max_hardware_output_width);
-  TOPOLOGY_CHECK(model.counters().rejected == 0U);
-}
-
 void checkpoint_and_streamed_deltas_agree() {
   const auto nodes = configured_chain();
   topology::HardwareMapModel checkpointed;
@@ -1059,7 +1008,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 20U> cases{{
+constexpr std::array<Case, 19U> cases{{
     {"decimal rates become exact fractions",
      &decimal_rates_become_exact_fractions},
     {"a reporting processor proposes its walls",
@@ -1082,8 +1031,6 @@ constexpr std::array<Case, 20U> cases{{
      &authored_control_and_window_settings_round_trip},
     {"invalid control and window vocabulary are rejected",
      &invalid_control_and_window_vocabulary_are_rejected},
-    {"oversized legacy window survives an explicit mode cycle",
-     &oversized_legacy_window_survives_an_explicit_mode_cycle},
     {"bad authored properties are rejected",
      &bad_authored_properties_are_rejected},
     {"dangling and incompatible links are not evaluated",

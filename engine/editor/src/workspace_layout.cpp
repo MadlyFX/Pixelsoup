@@ -15,20 +15,10 @@ namespace {
 constexpr std::array<std::byte, 8U> magic{
     std::byte{'M'}, std::byte{'S'}, std::byte{'D'}, std::byte{'O'},
     std::byte{'C'}, std::byte{'K'}, std::byte{'0'}, std::byte{'1'}};
-constexpr std::uint16_t legacy_version = 1U;
-constexpr std::uint16_t window_size_version = 2U;
-constexpr std::uint16_t resolution_version = 3U;
-// Version 4 spends version 3's reserved header word on the interface zoom.
-constexpr std::uint16_t zoom_version = 4U;
-// Version 5 appends the Compositor's Parameters width to the header.
-constexpr std::uint16_t parameter_width_version = 5U;
-// Version 6 appends a word of view flags: bit 0 is the Compositor minimap,
-// bit 1 the night dim, bit 2 the History strip put away.
+// Only the current version is read; an older record is refused and the editor
+// opens its default layout. The header ends in a word of view flags: bit 0 is
+// the Compositor minimap, bit 1 the night dim, bit 2 the History strip put away.
 constexpr std::uint16_t current_version = 6U;
-constexpr std::uint16_t legacy_header_size = 28U;
-constexpr std::uint16_t window_size_header_size = 36U;
-constexpr std::uint16_t resolution_header_size = 40U;
-constexpr std::uint16_t parameter_width_header_size = 44U;
 constexpr std::uint16_t header_size = 48U;
 constexpr std::uint32_t minimap_flag = 1U;
 constexpr std::uint32_t night_flag = 2U;
@@ -254,7 +244,7 @@ decode_workspace_layout(std::span<const std::byte> bytes) noexcept {
     if (bytes.size() > max_workspace_layout_bytes) {
       return decode_failure(WorkspaceLayoutError::SizeLimitExceeded);
     }
-    if (bytes.size() < legacy_header_size ||
+    if (bytes.size() < header_size ||
         !std::equal(magic.begin(), magic.end(), bytes.begin())) {
       return decode_failure(WorkspaceLayoutError::InvalidFormat);
     }
@@ -272,26 +262,17 @@ decode_workspace_layout(std::span<const std::byte> bytes) noexcept {
         !reader.u32(closed_count) || !reader.u32(root)) {
       return decode_failure(WorkspaceLayoutError::InvalidFormat);
     }
-    if (version != legacy_version && version != window_size_version &&
-        version != resolution_version && version != zoom_version &&
-        version != parameter_width_version && version != current_version) {
+    if (version != current_version) {
       return decode_failure(WorkspaceLayoutError::UnsupportedVersion);
     }
-    const std::uint16_t expected_header_size =
-        version == legacy_version        ? legacy_header_size
-        : version == window_size_version ? window_size_header_size
-        : version == parameter_width_version ? parameter_width_header_size
-        : version == current_version         ? header_size
-                                             : resolution_header_size;
-    if (encoded_header_size != expected_header_size ||
-        (version >= window_size_version &&
-         (!reader.u32(window_width) || !reader.u32(window_height))) ||
+    if (encoded_header_size != header_size ||
+        !reader.u32(window_width) || !reader.u32(window_height) ||
         node_count > maximum_entries ||
         floating_count > maximum_entries || closed_count > maximum_entries) {
       return decode_failure(WorkspaceLayoutError::InvalidFormat);
     }
 
-    // Both zero is the legacy/no-size sentinel. A half-present size cannot be
+    // Both zero means no size was recorded. A half-present size cannot be
     // meaningfully restored, and the upper bound keeps corrupt records from
     // asking SDL or the renderers for absurd allocations at startup.
     constexpr std::uint32_t maximum_window_extent = 32'768U;
@@ -302,51 +283,39 @@ decode_workspace_layout(std::span<const std::byte> bytes) noexcept {
     }
 
     WorkspaceLayoutState workspace{};
-    if (version >= resolution_version) {
-      core::u8 stage_resolution{};
-      core::u8 program_resolution{};
-      std::uint16_t zoom{};
-      if (!reader.u8(stage_resolution) || !reader.u8(program_resolution) ||
-          !reader.u16(zoom) ||
-          !valid(static_cast<PreviewResolution>(stage_resolution)) ||
-          !valid(static_cast<PreviewResolution>(program_resolution))) {
-        return decode_failure(WorkspaceLayoutError::InvalidFormat);
-      }
-      if (version == resolution_version) {
-        if (zoom != 0U) {
-          return decode_failure(WorkspaceLayoutError::InvalidFormat);
-        }
-      } else if (zoom < min_ui_zoom_percent || zoom > max_ui_zoom_percent) {
-        return decode_failure(WorkspaceLayoutError::InvalidFormat);
-      } else {
-        workspace.ui_zoom_percent = zoom;
-      }
-      workspace.stage_resolution = static_cast<PreviewResolution>(stage_resolution);
-      workspace.program_resolution = static_cast<PreviewResolution>(program_resolution);
-    }
-    if (version >= parameter_width_version &&
-        (!reader.floating(workspace.compositor_parameter_width) ||
-         !valid_parameter_width(workspace.compositor_parameter_width))) {
+    core::u8 stage_resolution{};
+    core::u8 program_resolution{};
+    std::uint16_t zoom{};
+    if (!reader.u8(stage_resolution) || !reader.u8(program_resolution) ||
+        !reader.u16(zoom) ||
+        !valid(static_cast<PreviewResolution>(stage_resolution)) ||
+        !valid(static_cast<PreviewResolution>(program_resolution)) ||
+        zoom < min_ui_zoom_percent || zoom > max_ui_zoom_percent) {
       return decode_failure(WorkspaceLayoutError::InvalidFormat);
     }
-    if (version >= current_version) {
-      std::uint32_t flags{};
-      // Unknown flags are refused rather than silently dropped on resave.
-      if (!reader.u32(flags) ||
-          (flags & ~(minimap_flag | night_flag | history_hidden_flag |
-                     stage_full_media_flag | program_full_media_flag)) != 0U) {
-        return decode_failure(WorkspaceLayoutError::InvalidFormat);
-      }
-      workspace.compositor_minimap = (flags & minimap_flag) != 0U;
-      workspace.night_dim = (flags & night_flag) != 0U;
-      workspace.history_hidden = (flags & history_hidden_flag) != 0U;
-      workspace.stage_media = (flags & stage_full_media_flag) != 0U
+    workspace.ui_zoom_percent = zoom;
+    workspace.stage_resolution = static_cast<PreviewResolution>(stage_resolution);
+    workspace.program_resolution = static_cast<PreviewResolution>(program_resolution);
+    if (!reader.floating(workspace.compositor_parameter_width) ||
+        !valid_parameter_width(workspace.compositor_parameter_width)) {
+      return decode_failure(WorkspaceLayoutError::InvalidFormat);
+    }
+    std::uint32_t view_flags{};
+    // Unknown flags are refused rather than silently dropped on resave.
+    if (!reader.u32(view_flags) ||
+        (view_flags & ~(minimap_flag | night_flag | history_hidden_flag |
+                   stage_full_media_flag | program_full_media_flag)) != 0U) {
+      return decode_failure(WorkspaceLayoutError::InvalidFormat);
+    }
+    workspace.compositor_minimap = (view_flags & minimap_flag) != 0U;
+    workspace.night_dim = (view_flags & night_flag) != 0U;
+    workspace.history_hidden = (view_flags & history_hidden_flag) != 0U;
+    workspace.stage_media = (view_flags & stage_full_media_flag) != 0U
+                                ? MediaRendition::Full
+                                : MediaRendition::Proxy;
+    workspace.program_media = (view_flags & program_full_media_flag) != 0U
                                   ? MediaRendition::Full
                                   : MediaRendition::Proxy;
-      workspace.program_media = (flags & program_full_media_flag) != 0U
-                                    ? MediaRendition::Full
-                                    : MediaRendition::Proxy;
-    }
     workspace.window_width = window_width;
     workspace.window_height = window_height;
     gui::DockLayout::State &state = workspace.docks;

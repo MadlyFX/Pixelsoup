@@ -31,8 +31,11 @@ share Stage's dock. Select an object on Stage or in Scene to edit it in
 Properties. Import content in Library, then drag it onto Stage or a Timeline
 track; double-click it to look at it in the Asset Viewer first. Additional
 panels are available in the Window menu.
-Saved workspaces retain their dock arrangement. **View > Reset Workspace**
-restores this starting layout when you want to adopt it or undo dock rearrangements.
+Saved workspaces retain their dock arrangement. A workspace saved by an older
+build is not read; the editor opens this starting layout instead. Panels added
+since a workspace was saved start closed - open them from the Window menu.
+**View > Reset Workspace** restores this starting layout when you want to adopt
+it or undo dock rearrangements.
 Panel dragging and other editor input target 60 Hz independently of the show's
 frame rate. At faster show rates, previews can follow every control frame. A
 scene that exceeds the machine's rendering budget can reduce that cadence.
@@ -1708,9 +1711,8 @@ Projects without output-binding nodes use the single-window output model.
 **Setup** (or **Window > Hardware Map** / **Feed Mapping**) opens both setup
 panels together as one large floating window, tabbed, over most of the editor.
 It never blocks the panels around it: Program, the Timeline and the Stage stay
-usable beside it. A setup panel found docked - from an older workspace, or
-dropped into a dock by hand - is lifted back out into the floating window when
-it is opened. Close it with its cross; the next Setup brings it back.
+usable beside it. A setup panel dropped into a dock by hand is lifted back out
+into the floating window when it is opened. Close it with its cross; the next Setup brings it back.
 
 The map is a small isometric stage. Each device stands on a floor tile as a
 pixel-art model - a tower for a Render Server, a desk for an Operator Machine,

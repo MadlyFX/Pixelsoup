@@ -70,7 +70,7 @@ void a_layout_codec_round_trip_is_stable() {
   LAYOUT_CHECK(reencoded.value() == encoded.value());
 }
 
-void truncation_trailing_bytes_and_newer_versions_are_rejected() {
+void truncation_trailing_bytes_and_other_versions_are_rejected() {
   const auto encoded =
       editor::encode_workspace_layout(editor::WorkspaceLayoutState{
           sample_layout().snapshot(), 1400U, 900U});
@@ -91,77 +91,27 @@ void truncation_trailing_bytes_and_newer_versions_are_rejected() {
   LAYOUT_CHECK(!unsupported);
   LAYOUT_CHECK(unsupported.error() ==
                editor::WorkspaceLayoutError::UnsupportedVersion);
+
+  // Only the current version is read: an older record is refused, and the
+  // editor opens its default layout instead.
+  auto older = encoded.value();
+  older[8U] = std::byte{5U};
+  const auto refused = editor::decode_workspace_layout(older);
+  LAYOUT_CHECK(!refused);
+  LAYOUT_CHECK(refused.error() ==
+               editor::WorkspaceLayoutError::UnsupportedVersion);
 }
 
-void version_one_layouts_still_restore_without_a_window_size() {
-  auto legacy = editor::encode_workspace_layout(
-                    editor::WorkspaceLayoutState{sample_layout().snapshot(),
-                                                 1400U, 900U})
-                    .value();
-  // V1 used the same magic and body but ended its header after the dock root.
-  legacy[8U] = std::byte{1U};
-  legacy[9U] = std::byte{0U};
-  legacy[10U] = std::byte{28U};
-  legacy[11U] = std::byte{0U};
-  legacy.erase(legacy.begin() + 28, legacy.begin() + 48);
-
-  const auto decoded = editor::decode_workspace_layout(legacy);
-  LAYOUT_CHECK(decoded);
-  LAYOUT_CHECK(decoded.value().window_width == 0U);
-  LAYOUT_CHECK(decoded.value().window_height == 0U);
-  LAYOUT_CHECK(decoded.value().stage_resolution == editor::PreviewResolution::Full);
-  LAYOUT_CHECK(decoded.value().program_resolution == editor::PreviewResolution::Full);
-  gui::DockLayout restored;
-  restored.register_panel(viewport, "Viewport");
-  restored.register_panel(inspector, "Inspector");
-  restored.register_panel(timeline, "Timeline");
-  LAYOUT_CHECK(restored.restore(decoded.value().docks));
-}
-
-void version_two_layouts_restore_full_resolution_previews() {
-  auto legacy = editor::encode_workspace_layout(editor::WorkspaceLayoutState{
-      sample_layout().snapshot(), 1400U, 900U}).value();
-  legacy[8U] = std::byte{2U};
-  legacy[10U] = std::byte{36U};
-  legacy.erase(legacy.begin() + 36, legacy.begin() + 48);
-  const auto decoded = editor::decode_workspace_layout(legacy);
-  LAYOUT_CHECK(decoded);
-  LAYOUT_CHECK(decoded.value().window_width == 1400U);
-  LAYOUT_CHECK(decoded.value().window_height == 900U);
-  LAYOUT_CHECK(decoded.value().stage_resolution == editor::PreviewResolution::Full);
-  LAYOUT_CHECK(decoded.value().program_resolution == editor::PreviewResolution::Full);
-  gui::DockLayout restored;
-  restored.register_panel(viewport, "Viewport");
-  restored.register_panel(inspector, "Inspector");
-  restored.register_panel(timeline, "Timeline");
-  LAYOUT_CHECK(restored.restore(decoded.value().docks));
-}
-
-void interface_zoom_round_trips_and_older_records_read_as_actual_size() {
+void interface_zoom_round_trips() {
   editor::WorkspaceLayoutState state{sample_layout().snapshot(), 1400U, 900U};
   state.ui_zoom_percent = 150U;
   const auto encoded = editor::encode_workspace_layout(state).value();
   const auto decoded = editor::decode_workspace_layout(encoded);
   LAYOUT_CHECK(decoded);
   LAYOUT_CHECK(decoded.value().ui_zoom_percent == 150U);
-
-  // A version three record held a reserved zero word where the zoom now is,
-  // and ended its header there.
-  auto version_three = encoded;
-  version_three[8U] = std::byte{3U};
-  version_three[10U] = std::byte{40U};
-  version_three.erase(version_three.begin() + 40, version_three.begin() + 48);
-  version_three[38U] = std::byte{0U};
-  version_three[39U] = std::byte{0U};
-  const auto older = editor::decode_workspace_layout(version_three);
-  LAYOUT_CHECK(older);
-  LAYOUT_CHECK(older.value().ui_zoom_percent == 100U);
-  version_three[38U] = std::byte{150U};
-  LAYOUT_CHECK(!editor::decode_workspace_layout(version_three));
 }
 
-// The operator's Parameters width survives a restart; a record from before
-// the field opens the panel at its default, and nonsense is refused.
+// The operator's Parameters width survives a restart, and nonsense is refused.
 void compositor_parameter_width_round_trips() {
   editor::WorkspaceLayoutState state{sample_layout().snapshot(), 1400U, 900U};
   state.compositor_parameter_width = 312.5F;
@@ -169,15 +119,6 @@ void compositor_parameter_width_round_trips() {
   const auto decoded = editor::decode_workspace_layout(encoded);
   LAYOUT_CHECK(decoded);
   LAYOUT_CHECK(decoded.value().compositor_parameter_width == 312.5F);
-
-  auto version_four = encoded;
-  version_four[8U] = std::byte{4U};
-  version_four[10U] = std::byte{40U};
-  version_four.erase(version_four.begin() + 40, version_four.begin() + 48);
-  const auto older = editor::decode_workspace_layout(version_four);
-  LAYOUT_CHECK(older);
-  LAYOUT_CHECK(older.value().compositor_parameter_width == 0.0F);
-  LAYOUT_CHECK(older.value().ui_zoom_percent == 100U);
 
   // NaN's bit pattern, then a negative width, in the width's word.
   auto not_a_number = encoded;
@@ -196,8 +137,8 @@ void compositor_parameter_width_round_trips() {
 }
 
 // Whether the Compositor shows its minimap, and whether the night dim is on,
-// survive a restart; a record from before the field leaves both off, and a
-// flag the editor does not know is refused rather than dropped.
+// survive a restart, and a flag the editor does not know is refused rather
+// than dropped.
 void compositor_minimap_round_trips() {
   editor::WorkspaceLayoutState state{sample_layout().snapshot(), 1400U, 900U};
   state.compositor_parameter_width = 300.0F;
@@ -213,15 +154,6 @@ void compositor_minimap_round_trips() {
   LAYOUT_CHECK(hidden);
   LAYOUT_CHECK(!hidden.value().compositor_minimap);
 
-  auto version_five = encoded;
-  version_five[8U] = std::byte{5U};
-  version_five[10U] = std::byte{44U};
-  version_five.erase(version_five.begin() + 44, version_five.begin() + 48);
-  const auto older = editor::decode_workspace_layout(version_five);
-  LAYOUT_CHECK(older);
-  LAYOUT_CHECK(!older.value().compositor_minimap);
-  LAYOUT_CHECK(older.value().compositor_parameter_width == 300.0F);
-
   // Bit 1 is the night dim, which shares the word.
   state.night_dim = true;
   const auto night = editor::decode_workspace_layout(
@@ -229,9 +161,8 @@ void compositor_minimap_round_trips() {
   LAYOUT_CHECK(night);
   LAYOUT_CHECK(night.value().night_dim);
   LAYOUT_CHECK(!night.value().compositor_minimap);
-  LAYOUT_CHECK(!older.value().night_dim);
 
-  // Bit 2 puts the History strip away; older records show it.
+  // Bit 2 puts the History strip away.
   state.history_hidden = true;
   const auto put_away = editor::decode_workspace_layout(
       editor::encode_workspace_layout(state).value());
@@ -239,12 +170,11 @@ void compositor_minimap_round_trips() {
   LAYOUT_CHECK(put_away.value().history_hidden);
   LAYOUT_CHECK(put_away.value().night_dim);
   LAYOUT_CHECK(!night.value().history_hidden);
-  LAYOUT_CHECK(!older.value().history_hidden);
 
   // Bits 3 and 4 are the Stage and Program media renditions, each on its
-  // own; older records decode proxies.
-  LAYOUT_CHECK(older.value().stage_media == editor::MediaRendition::Proxy);
-  LAYOUT_CHECK(older.value().program_media == editor::MediaRendition::Proxy);
+  // own; clear bits decode proxies.
+  LAYOUT_CHECK(night.value().stage_media == editor::MediaRendition::Proxy);
+  LAYOUT_CHECK(night.value().program_media == editor::MediaRendition::Proxy);
   state.program_media = editor::MediaRendition::Full;
   const auto program_full = editor::decode_workspace_layout(
       editor::encode_workspace_layout(state).value());
@@ -320,20 +250,16 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
-    {"version two layouts restore full resolution previews", &version_two_layouts_restore_full_resolution_previews},
+constexpr std::array<Case, 8U> cases{{
     {"Compositor minimap round-trips", &compositor_minimap_round_trips},
     {"Compositor parameter width round-trips", &compositor_parameter_width_round_trips},
     {"corrupt preview settings are rejected", &corrupt_preview_settings_are_rejected},
-    {"interface zoom round trips; older records read as actual size",
-     &interface_zoom_round_trips_and_older_records_read_as_actual_size},
+    {"interface zoom round trips", &interface_zoom_round_trips},
     {"preview extents scale both axes and remain nonzero", &preview_extents_scale_both_axes_and_remain_nonzero},
     {"a layout codec round trip is stable",
      &a_layout_codec_round_trip_is_stable},
-    {"truncation, trailing bytes, and newer versions are rejected",
-     &truncation_trailing_bytes_and_newer_versions_are_rejected},
-    {"version one layouts restore without a window size",
-     &version_one_layouts_still_restore_without_a_window_size},
+    {"truncation, trailing bytes, and other versions are rejected",
+     &truncation_trailing_bytes_and_other_versions_are_rejected},
     {"oversized records are bounded before allocation",
      &oversized_records_are_bounded_before_allocation},
 }};

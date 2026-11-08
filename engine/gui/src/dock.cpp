@@ -330,21 +330,6 @@ bool DockLayout::restore(const State& state) {
                     closed.fraction, closed.floating, closed.frame});
     }
 
-    // Preserve panels introduced by this build that were open in its default
-    // layout but absent from an older snapshot. Newly registered closed panels
-    // stay closed.
-    std::vector<PanelId> new_default_panels;
-    for (const Node& node : nodes_) {
-        if (!node.used || node.split) {
-            continue;
-        }
-        for (const PanelId panel : node.tabs) {
-            if (!represented_panels.contains(panel)) {
-                new_default_panels.push_back(panel);
-            }
-        }
-    }
-
     DockLayout candidate;
     candidate.titles_ = titles_;
     candidate.nodes_.resize(state.nodes.size());
@@ -377,10 +362,6 @@ bool DockLayout::restore(const State& state) {
         candidate.floating_.push_back(Floating{frame.node, frame.frame});
     }
     candidate.restore_ = std::move(restored_closed);
-
-    for (const PanelId panel : new_default_panels) {
-        static_cast<void>(candidate.add(panel, candidate.title_of(panel)));
-    }
     *this = std::move(candidate);
     return true;
 }

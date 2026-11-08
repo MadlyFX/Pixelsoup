@@ -1058,27 +1058,12 @@ void malformed_snapshots_are_rejected_without_touching_the_layout() {
     UI_CHECK(!dock.is_open(inspector));
 }
 
-void an_older_snapshot_keeps_new_default_panels_visible() {
-    gui::DockLayout old_layout;
-    old_layout.add(viewport, "Viewport");
-    const gui::DockLayout::State saved = old_layout.snapshot();
-
-    gui::DockLayout current;
-    const gui::DockId leaf = current.add(viewport, "Viewport");
-    current.dock(assets, "Assets", leaf, gui::DockSide::Center);
-    UI_CHECK(current.restore(saved));
-
-    UI_CHECK(current.is_open(viewport));
-    UI_CHECK(current.is_open(assets));
-    UI_CHECK(current.leaf_of(viewport) == current.leaf_of(assets));
-}
-
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 46U> cases{{
+constexpr std::array<Case, 45U> cases{{
     {"a panel knows the floating frame it is in",
      &a_panel_knows_the_floating_frame_it_is_in},
     {"the first panel becomes the whole area",
@@ -1165,8 +1150,6 @@ constexpr std::array<Case, 46U> cases{{
      &a_snapshot_restores_the_complete_user_arrangement},
     {"malformed snapshots are rejected transactionally",
      &malformed_snapshots_are_rejected_without_touching_the_layout},
-    {"an older snapshot keeps new default panels visible",
-     &an_older_snapshot_keeps_new_default_panels_visible},
 }};
 
 } // namespace
