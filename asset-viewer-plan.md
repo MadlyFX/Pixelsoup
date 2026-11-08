@@ -156,9 +156,7 @@ the frame at the asset's own rate, with drop-frame shown as `;` the way the
 Library shows it. A toggle switches to zero-based frame numbers. The readout
 gives the marked range in source frames and in the show frames it will
 occupy. When the source and show rates do not divide evenly, it says so,
-because the current integer `source_in` cannot keep the residual phase (see
-the roadmap's [clip editing](next-steps-plan.md#timeline-lanes-and-clip-editing)
-note).
+because the current integer `source_in` cannot keep the residual phase.
 
 **Putting the range on the timeline.**
 

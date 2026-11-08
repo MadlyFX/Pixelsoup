@@ -101,5 +101,6 @@ Write disposable builds, logs, captures, demo projects and exports under
 digest-named `.gltf.*.msmodel` / `.glb.*.msmodel` / `.obj.*.msmodel` caches.
 Preserve source assets, test fixtures, third-party notices, user projects and
 local configuration. Keep current behavior in focused reference docs and
-future requirements in `next-steps-plan.md`; Git history holds completed
-step plans and historical review output.
+an area's future requirements in its plan document (for example
+`asset-viewer-plan.md`); Git history holds completed step plans, the former
+roadmap and historical review output.

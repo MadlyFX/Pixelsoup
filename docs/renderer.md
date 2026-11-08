@@ -537,6 +537,4 @@ is always `Lit` with every part, which changes nothing it draws.
 **Remaining unsupported paths:** a native Vulkan backend, GPU-driven
 indirect/meshlet submission, point/area-light and ray-traced shadows, ray tracing,
 DDGI, ReSTIR, denoising, and temporal upscaling. The integration contracts refuse those
-unsupported Program requests; they do not manufacture render products. The
-remaining work is tracked in
-[roadmap](../next-steps-plan.md).
+unsupported Program requests; they do not manufacture render products.

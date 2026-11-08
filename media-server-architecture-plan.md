@@ -7,8 +7,6 @@ plan. Media Server remains an early engineering prototype; this is an
 implementation-status document, not a compatibility or production-readiness
 commitment.
 
-For prioritized follow-on work, see [next-steps-plan.md](next-steps-plan.md).
-
 ## Product shape
 
 Media Server is a document-driven virtual-production media-server foundation.
@@ -385,6 +383,3 @@ because an early delivery table listed them as future work.
 | Color and tracking | Measured panel/camera calibration, lens agreement and on-stage latency validation |
 | Media | Supported-codec performance/reliability matrix and hardware decode where needed |
 | Operations | Service installation, observability, secure deployment and recovery on real show networks |
-
-The [roadmap](next-steps-plan.md) retains future effect/editor requirements,
-professional interfaces and hardware-control candidates.

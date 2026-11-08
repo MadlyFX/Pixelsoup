@@ -64,7 +64,6 @@ with its address and shared secret. Detailed setup is in the
 | Add or change an effect | [Effect contracts](effect-rendering-requirements.md) |
 | Blender workflow and verification | [Add-on README](integrations/blender/README.md) |
 | Blender protocol and native data contracts | [Scene-link reference](blender%20live%20scene%20link/README.md) |
-| Unfinished work | [Roadmap](next-steps-plan.md) |
 | Particle playback and render integration | [Renderer guide](docs/renderer.md#particle-effects) |
 | Physical genlock / wall color validation | [Renderer runbooks](advanced%20icvfx%20renderer/README.md) |
 
