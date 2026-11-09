@@ -65,8 +65,9 @@ build inputs and notices and must not be treated as disposable cache.
 
 Build from an MSVC developer shell with `VCPKG_ROOT` set. GUI builds use
 the sibling ajfx checkout or the path set by `MEDIASERVER_AJFX_SOURCE_DIR`.
-`scripts/run-editor-demo.ps1` launches the current editor workflow; `-Exe`
-selects a particular build.
+`scripts/run-editor.ps1` launches the editor (Director) workflow and
+`scripts/run-output-node.ps1` a render node on another machine; `-Exe`
+selects a particular build. Both log to `%LOCALAPPDATA%\MediaServer\logs`.
 
 Testing is tiered so a change builds and runs only what it affects:
 

@@ -2,18 +2,20 @@
 
 Run commands below from the repository root. See the [README](../README.md) for building.
 
-## Run the local editor demo
+## Run the editor
 
 From the repository root, after a GUI build:
 
 ```powershell
-.\scripts\run-editor-demo.ps1
+.\scripts\run-editor.ps1
 ```
 
-The script starts a Director editor and a lifecycle-supervised local output
-node. Dragging or editing content in the editor updates the replicated scene
-shown by the node. Both halves read one temporary password file the script
-creates, so Output Monitor controls the node securely without setup.
+The script starts a Director editor. On each output machine,
+`.\scripts\run-output-node.ps1 -DirectorHost <editor address>` starts a
+lifecycle-supervised render node. Dragging or editing content in the editor
+updates the replicated scene shown by the node. Output Monitor controls the
+node with the render node password set in the editor's Preferences; give each
+node the same one with `-Password` (none by default).
 
 Other Windows demonstrations are:
 
@@ -1856,7 +1858,7 @@ join a present barrier, so a physical policy correctly reports
 `SWAP BARRIER INCOMPLETE` on this presentation path. To rehearse the operator
 procedures without a genlock card, pass `-SyncSimulate locked`,
 `reference-lost`, `reference-idle`, or `no-device` to
-`scripts/run-editor-demo.ps1`; simulated samples are marked as such all the
+`scripts/run-output-node.ps1`; simulated samples are marked as such all the
 way to the surface and can satisfy only a DEGRADED policy.
 
 Under HOLD GROUP a render process that cannot produce a complete frame for one

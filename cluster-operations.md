@@ -517,7 +517,7 @@ its frame accounting. The verdicts, in the order the gate checks them:
 ### Rehearsing without a genlock card
 
 The lifecycle agent accepts `--sync-simulate=off|locked|reference-lost|
-reference-idle|no-device`, and `scripts/run-editor-demo.ps1` exposes it as
+reference-idle|no-device`, and `scripts/run-output-node.ps1` exposes it as
 `-SyncSimulate`. Every simulated sample is marked simulated all the way to the
 operator surface and to the diagnostic stream, and can satisfy only a DEGRADED
 policy - never a STRICT one. Simulated evidence is not evidence.

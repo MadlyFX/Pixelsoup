@@ -30,11 +30,12 @@ cmake --preset windows-msvc-release-gui
 cmake --build --preset windows-msvc-release-gui
 ctest --preset windows-msvc-release-gui
 
-.\scripts\run-editor-demo.ps1
+.\scripts\run-editor.ps1
 ```
 
-The demo opens the editor and a supervised local output node. Close the editor
-or press Enter in its console to stop it. Use `-Exe` to select a specific
+This opens the editor as the Director; start a render node on each output
+machine with `.\scripts\run-output-node.ps1 -DirectorHost <editor address>`.
+Close the editor window to stop it. Use `-Exe` to select a specific
 executable. Reconfigure with `--fresh` when intentionally resetting a build.
 
 For day-to-day work, build and test one area at a time

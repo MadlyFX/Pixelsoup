@@ -235,4 +235,4 @@ ctest --test-dir out/build/windows-msvc-debug-gui --output-on-failure `
 ```
 
 Then run the complete Debug suite and rebuild the Release `media-server` target
-used by `scripts/run-editor-demo.ps1`.
+used by `scripts/run-editor.ps1`.

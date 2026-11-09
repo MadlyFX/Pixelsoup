@@ -10,17 +10,17 @@ Double-click media-server.exe and press OPEN EDITOR at the bottom of the
 window. The editor opens as this machine's Director, listening for render
 machines on port 45060.
 
-QUICK START ON ONE MACHINE WITH A DEMO OUTPUT
+QUICK START FROM POWERSHELL
 
 1. Open PowerShell in this folder.
 2. Run:
 
-     powershell -ExecutionPolicy Bypass -File .\scripts\run-editor-demo.ps1
+     powershell -ExecutionPolicy Bypass -File .\scripts\run-editor.ps1
 
-   This opens the operator editor and a lifecycle-supervised output window.
-   Press Enter in the PowerShell window when you want to stop the demo.
+   This opens the operator editor as the Director and prints what each render
+   machine needs to connect. Close the editor window to stop.
 
-You can also launch an editor without the bundled demo node from a prompt:
+You can also launch the editor directly from a prompt:
 
      .\media-server.exe --role=director --playback --edit `
        --director-listen=0.0.0.0:45060 `
