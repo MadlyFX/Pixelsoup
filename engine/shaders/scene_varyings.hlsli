@@ -27,6 +27,15 @@ struct Varyings {
     nointerpolation float4 anisotropy : TEXCOORD15;
     nointerpolation float4 alpha : TEXCOORD16;
     nointerpolation float motion_valid : TEXCOORD17;
+    // Each corner's own surface values, read per vertex with
+    // GetAttributeAtVertex. The Advanced lit stage interpolates these itself
+    // with weights from the canvas pixel's ray, because the hardware evaluates
+    // the interpolated copies above at slice-local screen positions and so
+    // gives each node slightly different last bits for the same canvas pixel.
+    nointerpolation float3 corner_position : TEXCOORD28;
+    nointerpolation float3 corner_normal : TEXCOORD29;
+    nointerpolation float4 corner_tangent : TEXCOORD30;
+    nointerpolation float2 corner_uv : TEXCOORD31;
     float clip_distance : SV_ClipDistance0;
 #if defined(MODEL_MOTION)
     nointerpolation float4 motion_raster0 : TEXCOORD18;

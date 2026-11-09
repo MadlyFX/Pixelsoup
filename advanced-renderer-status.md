@@ -12,6 +12,13 @@ different build.
   the common RHI. Selection and requested capabilities participate in project
   readiness. Scene-linear composition, crop, warp and output transform remain
   part of one document-controlled renderer.
+- Advanced needs pixel-stage barycentrics (Shader Model 6.1
+  `GetAttributeAtVertex`; NVIDIA Turing, AMD RDNA, Intel Gen12 or newer). The
+  lit stage interpolates each surface from the triangle's corners with weights
+  from the canvas pixel's ray, not from the rasterizer, whose interpolation
+  runs at slice-local positions and so differs between nodes in the last bits.
+  An adapter without it reports the `PixelBarycentrics` capability as missing:
+  a required Advanced show holds, an optional one previews on Basic.
 - Director camera tracking, lens parameters, inner/outer frusta, deterministic
   pose prediction and optional filtering feed replicated show-frame poses.
   Nodes hold the supplied poses rather than independently predicting them.

@@ -226,6 +226,10 @@ Varyings evaluate_vertex(uint vertex_id, uint instance_id) {
     result.alpha = instance.alpha;
 
     result.uv = vertex.uv;
+    result.corner_position = result.world_position;
+    result.corner_normal = result.world_normal;
+    result.corner_tangent = result.world_tangent;
+    result.corner_uv = result.uv;
     result.layer_style = float4(instance.layer_style.xyz, layer_mode);
     result.effect_range = instance.effect_range;
     result.object_id = instance.effect_range.w;

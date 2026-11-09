@@ -169,6 +169,11 @@ struct DeviceCapabilities final {
     // establish this: SDL_GPU may expose every attachment format while the
     // native Advanced implementation still exists only on D3D12.
     bool advanced_scene_raster{};
+    // A pixel stage may read each corner of its triangle through
+    // GetAttributeAtVertex (Shader Model 6.1 barycentrics). The Advanced lit
+    // stage interpolates its surface from canvas-space weights with it, so
+    // every node shades a canvas pixel from identical values.
+    bool pixel_barycentrics{};
     bool offscreen{};
     bool rgba16_float{};
     bool rgba32_float{};
@@ -211,8 +216,8 @@ struct DeviceCapabilities final {
     bool operator==(const DeviceCapabilities&) const = default;
 
     [[nodiscard]] bool advanced_raster() const noexcept {
-        return advanced_scene_raster && offscreen && rgba16_float &&
-            sampled_depth && integer_targets;
+        return advanced_scene_raster && pixel_barycentrics && offscreen &&
+            rgba16_float && sampled_depth && integer_targets;
     }
 
     [[nodiscard]] bool advanced_ray_tracing() const noexcept {

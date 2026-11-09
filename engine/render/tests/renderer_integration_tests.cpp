@@ -991,6 +991,7 @@ void advanced_policy_fails_closed_and_optional_preview_falls_back() {
     rhi::DeviceCapabilities capabilities{};
     capabilities.backend = rhi::BackendKind::D3d12;
     capabilities.advanced_scene_raster = true;
+    capabilities.pixel_barycentrics = true;
     capabilities.offscreen = true;
     capabilities.rgba16_float = true;
     capabilities.sampled_depth = true;
@@ -1014,6 +1015,8 @@ void advanced_policy_fails_closed_and_optional_preview_falls_back() {
         BaselineRequirement{&rhi::DeviceCapabilities::advanced_scene_raster,
                             render::RendererCapability::
                                 AdvancedSceneRasterImplementation},
+        BaselineRequirement{&rhi::DeviceCapabilities::pixel_barycentrics,
+                            render::RendererCapability::PixelBarycentrics},
         BaselineRequirement{&rhi::DeviceCapabilities::offscreen,
                             render::RendererCapability::Offscreen},
         BaselineRequirement{&rhi::DeviceCapabilities::rgba16_float,
@@ -1092,6 +1095,26 @@ void advanced_policy_fails_closed_and_optional_preview_falls_back() {
         RENDER_CHECK(available.code == render::RendererReadinessCode::Ready);
         RENDER_CHECK(available.selected == scene::RendererBackend::Advanced);
         RENDER_CHECK(available.missing_capabilities == 0U);
+    }
+
+    // An adapter without pixel barycentrics (older than Turing, RDNA or Gen12)
+    // cannot build the Advanced lit stage. An optional request previews on
+    // Basic and names that one requirement, not a generic shortfall.
+    {
+        auto pre_barycentric = capabilities;
+        pre_barycentric.pixel_barycentrics = false;
+        auto optional = settings;
+        optional.required = false;
+        const auto fallback = render::evaluate_renderer_readiness(
+            optional, pre_barycentric, true);
+        RENDER_CHECK(fallback.satisfied);
+        RENDER_CHECK(fallback.fallback);
+        RENDER_CHECK(fallback.code == render::RendererReadinessCode::BasicFallback);
+        RENDER_CHECK(fallback.selected == scene::RendererBackend::Basic);
+        RENDER_CHECK(fallback.missing_capabilities ==
+                     static_cast<core::u64>(
+                         render::RendererCapability::PixelBarycentrics));
+        RENDER_CHECK(!pre_barycentric.advanced_raster());
     }
 
     capabilities.advanced_scene_raster = false;

@@ -1941,6 +1941,8 @@ core::Result<Device, RhiError> Device::create(const DeviceConfig& config) noexce
     // SDL remains the Basic renderer backend. Attachment format support does
     // not make the native D3D12 Advanced command path callable through it.
     capabilities.advanced_scene_raster = false;
+    // Not exposed through SDL_GPU, and only the Advanced lit stage needs it.
+    capabilities.pixel_barycentrics = false;
     capabilities.offscreen = true;
     capabilities.rgba16_float = format_supports(
         TextureFormat::Rgba16Float,

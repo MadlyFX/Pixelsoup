@@ -58,6 +58,9 @@ enum class RendererCapability : core::u64 {
     Offscreen = 1ULL << 9U,
     SampledDepth = 1ULL << 10U,
     AdvancedSceneRasterImplementation = 1ULL << 11U,
+    // GetAttributeAtVertex in the pixel stage, which the Advanced lit stage
+    // uses to shade every node's slice from canvas-space barycentrics.
+    PixelBarycentrics = 1ULL << 12U,
 };
 
 struct RendererReadiness final {
