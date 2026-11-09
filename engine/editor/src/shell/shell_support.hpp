@@ -231,6 +231,9 @@ struct ProgramOutputExtent final {
 [[nodiscard]] std::string_view
 program_projection_name(const output::OutputMap *map) noexcept;
 
+// The native pickers below block until the operator answers, so they are only
+// ever called as the `show` of EditorShell::Frame::open_file_dialog, on the
+// dialog's own thread and never on the frame thread.
 [[nodiscard]] std::optional<std::string> choose_project_to_open();
 
 [[nodiscard]] std::optional<std::string> choose_projection_mesh();
@@ -238,8 +241,6 @@ program_projection_name(const output::OutputMap *map) noexcept;
 [[nodiscard]] std::optional<std::string> choose_property_file(const FilePickerRequest& request);
 
 [[nodiscard]] std::string projection_mesh_name(std::string_view source);
-
-[[nodiscard]] bool confirm_discard_project_changes(std::string_view action);
 
 [[nodiscard]] std::optional<std::string>
 choose_project_to_save(std::string_view current_path);

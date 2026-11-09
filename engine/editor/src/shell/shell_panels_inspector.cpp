@@ -96,18 +96,33 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
     state.bake_status = bake_activity;
     live_scene_settings = impl.scene_settings_panel.draw(ui,bounds,settings_target,state,keyframes,timeline.show_frame,elements,impl.timeline_panel.auto_key_enabled());
     if (live_scene_settings.file_picker) {
-      const auto& request = *live_scene_settings.file_picker;
-      if (auto path = choose_property_file(request)) {
-        if (request.kind == FilePickerKind::BakeFolder) {
-          impl.scene_settings_panel.set_bake_destination(std::move(*path));
-        } else {
-          auto values = live_scene_settings.project.apply.value_or(
-              ProjectSettingsValues{state.settings, state.renderer, state.environment, state.lens_profile});
-          if (request.kind == FilePickerKind::ShowLut) values.renderer.color.show_lut_source = std::move(*path);
-          if (request.kind == FilePickerKind::EnvironmentMap) values.environment.map_source = std::move(*path);
-          live_scene_settings.project.apply = std::move(values);
-        }
-      }
+      const FilePickerRequest request = *live_scene_settings.file_picker;
+      open_file_dialog(
+          [request] { return choose_property_file(request); },
+          [kind = request.kind](Frame &frame, std::string path) {
+            if (kind == FilePickerKind::BakeFolder) {
+              frame.impl.scene_settings_panel.set_bake_destination(
+                  std::move(path));
+              return;
+            }
+            // Applied to the settings as they are when the operator answers,
+            // as one discrete edit.
+            const ProjectSettingsState &now = frame.project_settings;
+            ProjectSettingsEdit edit{};
+            edit.settings = now.settings;
+            edit.renderer = now.renderer;
+            edit.environment = now.environment;
+            edit.lens_profile = now.lens_profile;
+            edit.stage_node = now.stage_node;
+            edit.node = now.node;
+            edit.camera_node = now.camera_node;
+            if (kind == FilePickerKind::ShowLut)
+              edit.renderer.color.show_lut_source = std::move(path);
+            if (kind == FilePickerKind::EnvironmentMap)
+              edit.environment.map_source = std::move(path);
+            edit.gesture = frame.impl.next_edit_gesture++;
+            frame.result.project_settings = std::move(edit);
+          });
     }
     if (!live_scene_settings.keys.empty()) {
       const auto gesture = impl.begin_gesture();
@@ -163,48 +178,14 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
       ui, bounds, std::span<const ElementInfo>{inspector_elements}, anchor,
       keyframes, timeline.show_frame, effects, tracking_sources);
   if (inspector.file_picker) {
-    const auto& request = *inspector.file_picker;
-    if (auto path = request.clear_texture ? std::optional<std::string>{std::string{}} : choose_property_file(request)) {
-      if (path->size() > 1024U) {
-        impl.ingest_message = "Resource path exceeds 1024 bytes";
-      } else if (request.kind == FilePickerKind::ModelTexture && !request.targets.empty()) {
-        const auto target = request.targets.front();
-        const auto busy = std::any_of(impl.pending_model_ingests.begin(), impl.pending_model_ingests.end(),
-            [&](const auto& pending) { return pending.texture_target == target; });
-        if (busy || impl.pending_model_ingests.size() >= 16U) {
-          impl.ingest_message = "A texture assignment is still preparing; wait for it to finish";
-        } else {
-          auto job = render::ModelIngestJob::start(request.model_source, {}, 1.0F,
-              render::ModelTextureAssignment{request.material_part, request.texture_role, *path});
-          if (job) {
-            Impl::PendingModelIngest pending{};
-            pending.job = std::move(job);
-            pending.display_name = std::filesystem::path{request.model_source}.filename().string();
-            pending.gesture = impl.next_edit_gesture++;
-            pending.project_generation = project.generation;
-            pending.texture_target = target;
-            pending.expected_source = request.model_source;
-            impl.pending_model_ingests.push_back(std::move(pending));
-            impl.ingest_message = "Preparing material texture...";
-          } else impl.ingest_message = "Model worker is busy; retry texture assignment";
-        }
-      } else if (request.kind == FilePickerKind::GeneratorTexture && !request.targets.empty()) {
-        constexpr std::array<std::string_view, 5U> texture_properties{
-            scene::schema::base_color_texture,
-            scene::schema::metallic_roughness_texture,
-            scene::schema::normal_texture,
-            scene::schema::occlusion_texture,
-            scene::schema::emissive_texture};
-        if (request.texture_role < texture_properties.size()) {
-          const auto gesture = impl.begin_gesture();
-          result.generic_edits.push_back(GenericEdit{request.targets.front(),
-              std::string{texture_properties[request.texture_role]}, 0.0, gesture, *path});
-        }
-      } else {
-        const auto gesture = impl.begin_gesture();
-        for (const auto node : inspector.file_picker->targets)
-          result.generic_edits.push_back(GenericEdit{node, std::string{scene::schema::ies_source}, 0.0, gesture, *path});
-      }
+    const FilePickerRequest &request = *inspector.file_picker;
+    if (request.clear_texture) {
+      apply_inspector_file(request, {});
+    } else {
+      open_file_dialog([request] { return choose_property_file(request); },
+                       [request](Frame &frame, std::string path) {
+                         frame.apply_inspector_file(request, std::move(path));
+                       });
     }
   }
   if (inspector.panel_request.has_value()) {
@@ -299,6 +280,52 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
   }
   if (inspector.delete_requested) {
     delete_selection();
+  }
+}
+
+// A picked (or cleared) resource path, applied on the frame that adopts the
+// operator's answer as one discrete edit.
+void EditorShell::Frame::apply_inspector_file(const FilePickerRequest &request,
+                                              std::string path) {
+  if (path.size() > 1024U) {
+    impl.ingest_message = "Resource path exceeds 1024 bytes";
+  } else if (request.kind == FilePickerKind::ModelTexture && !request.targets.empty()) {
+    const auto target = request.targets.front();
+    const auto busy = std::any_of(impl.pending_model_ingests.begin(), impl.pending_model_ingests.end(),
+        [&](const auto& pending) { return pending.texture_target == target; });
+    if (busy || impl.pending_model_ingests.size() >= 16U) {
+      impl.ingest_message = "A texture assignment is still preparing; wait for it to finish";
+    } else {
+      auto job = render::ModelIngestJob::start(request.model_source, {}, 1.0F,
+          render::ModelTextureAssignment{request.material_part, request.texture_role, path});
+      if (job) {
+        Impl::PendingModelIngest pending{};
+        pending.job = std::move(job);
+        pending.display_name = std::filesystem::path{request.model_source}.filename().string();
+        pending.gesture = impl.next_edit_gesture++;
+        pending.project_generation = project.generation;
+        pending.texture_target = target;
+        pending.expected_source = request.model_source;
+        impl.pending_model_ingests.push_back(std::move(pending));
+        impl.ingest_message = "Preparing material texture...";
+      } else impl.ingest_message = "Model worker is busy; retry texture assignment";
+    }
+  } else if (request.kind == FilePickerKind::GeneratorTexture && !request.targets.empty()) {
+    constexpr std::array<std::string_view, 5U> texture_properties{
+        scene::schema::base_color_texture,
+        scene::schema::metallic_roughness_texture,
+        scene::schema::normal_texture,
+        scene::schema::occlusion_texture,
+        scene::schema::emissive_texture};
+    if (request.texture_role < texture_properties.size()) {
+      const auto gesture = impl.next_edit_gesture++;
+      result.generic_edits.push_back(GenericEdit{request.targets.front(),
+          std::string{texture_properties[request.texture_role]}, 0.0, gesture, path});
+    }
+  } else {
+    const auto gesture = impl.next_edit_gesture++;
+    for (const auto node : request.targets)
+      result.generic_edits.push_back(GenericEdit{node, std::string{scene::schema::ies_source}, 0.0, gesture, path});
   }
 }
 

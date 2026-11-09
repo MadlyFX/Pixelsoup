@@ -139,9 +139,10 @@ void EditorShell::Frame::draw_asset_viewer_panel(const gui::Rect &bounds) {
     FilePickerRequest request{};
     request.kind = FilePickerKind::EnvironmentMap;
     request.current = impl.asset_viewer_panel.look().hdri_source;
-    if (auto path = choose_property_file(request)) {
-      impl.asset_viewer_panel.set_hdri(std::move(*path));
-    }
+    open_file_dialog([request] { return choose_property_file(request); },
+                     [](Frame &frame, std::string path) {
+                       frame.impl.asset_viewer_panel.set_hdri(std::move(path));
+                     });
   }
   impl.viewer.width = viewed.surface_width;
   impl.viewer.height = viewed.surface_height;

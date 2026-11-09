@@ -20,3 +20,17 @@
 #elif defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
+
+#include <mutex>
+
+namespace mediaserver::editor {
+
+// tinyfiledialogs answers in static buffers, so only one dialog may be open at
+// a time. The frame thread only ever try-locks this: a picker asked for while
+// another dialog is up is refused instead of stalling the frame.
+[[nodiscard]] inline std::mutex &native_dialog_mutex() noexcept {
+  static std::mutex mutex;
+  return mutex;
+}
+
+} // namespace mediaserver::editor

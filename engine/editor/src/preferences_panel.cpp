@@ -1,7 +1,5 @@
 #include <mediaserver/editor/preferences_panel.hpp>
 
-#include <tinyfiledialogs.h>
-
 #include "workspace_panel_helpers.hpp"
 
 #include <algorithm>
@@ -66,6 +64,12 @@ void PreferencesPanel::open(const EditorPreferences &stored) {
 }
 
 void PreferencesPanel::close() noexcept { open_ = false; }
+
+void PreferencesPanel::set_proxy_cache_directory(std::string directory) {
+  if (open_) {
+    draft_.proxy_cache_directory = std::move(directory);
+  }
+}
 
 PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
                                         const gui::Rect &bounds,
@@ -176,13 +180,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     }
     if (preferences_button(ctx, gui::ui_id(id_, "preferences.proxy.browse"), browse,
                            "BROWSE", custom_folder_enabled)) {
-      const char *const selected = tinyfd_selectFolderDialog(
-          "Select Proxy Cache Folder", draft_.proxy_cache_directory.empty()
-                                           ? ""
-                                           : draft_.proxy_cache_directory.c_str());
-      if (selected != nullptr) {
-        draft_.proxy_cache_directory = selected;
-      }
+      result.browse_proxy_cache = draft_.proxy_cache_directory;
     }
   }
 

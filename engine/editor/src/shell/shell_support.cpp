@@ -374,15 +374,6 @@ program_projection_name(const output::OutputMap *map) noexcept {
   return filename.empty() ? std::string{"UV Mesh"} : filename;
 }
 
-[[nodiscard]] bool confirm_discard_project_changes(std::string_view action) {
-  std::string message{
-      "This project has unsaved changes.\n\nContinuing will discard "};
-  message.append(action);
-  message.append(". Continue?");
-  return tinyfd_messageBox("Unsaved Project", message.c_str(), "yesno",
-                           "warning", 0) != 0;
-}
-
 [[nodiscard]] std::optional<std::string>
 choose_project_to_save(std::string_view current_path) {
   const char *const filters[]{"*.mstage"};
