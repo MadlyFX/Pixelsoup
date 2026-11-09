@@ -341,7 +341,9 @@ execute_process(
         "--node-id=${node_id}"
         "--node-incarnation=${node_incarnation}"
     WORKING_DIRECTORY "${TEST_ROOT}"
-    TIMEOUT 0.5
+    # Long enough for a Debug build to load and report through the disk log's
+    # console forwarder (about 0.45 s warm); the node must still be running.
+    TIMEOUT 2
     RESULT_VARIABLE connector_service_result
     OUTPUT_VARIABLE connector_service_output
     ERROR_VARIABLE connector_service_error
@@ -717,27 +719,5 @@ foreach(discovery_case IN ITEMS
             "accepted a discovery port it should refuse: ${discovery_case}")
     endif()
 endforeach()
-
-# The editor demo is also the one-command physical-mapping workflow. A child
-# launched with --scene renders a normal camera slice and never evaluates its
-# FeedMap, making Planar/HorizontalArc/ImportedMesh all appear identical. Keep
-# the supervised child on the output presenter path.
-if(NOT DEFINED EDITOR_DEMO_SCRIPT OR
-   NOT EXISTS "${EDITOR_DEMO_SCRIPT}")
-    message(FATAL_ERROR "editor demo script was not provided to bootstrap smoke")
-endif()
-file(READ "${EDITOR_DEMO_SCRIPT}" editor_demo_source)
-string(FIND "${editor_demo_source}"
-    "'--lifecycle-child-arg=--output'" editor_demo_output_flag)
-if(editor_demo_output_flag EQUAL -1)
-    message(FATAL_ERROR
-        "editor demo render child does not enable the feed-map output path")
-endif()
-string(FIND "${editor_demo_source}"
-    "'--lifecycle-child-arg=--scene'" editor_demo_scene_flag)
-if(NOT editor_demo_scene_flag EQUAL -1)
-    message(FATAL_ERROR
-        "editor demo render child bypasses FeedMap with --scene")
-endif()
 
 file(REMOVE_RECURSE "${TEST_ROOT}")

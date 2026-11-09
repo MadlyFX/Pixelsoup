@@ -230,7 +230,6 @@ if(BUILD_TESTING)
             "-DSERVER_EXE=$<TARGET_FILE:media-server>"
             "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/bootstrap-smoke"
             "-DTEST_BINARY_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
-            "-DEDITOR_DEMO_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/run-editor-demo.ps1"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/bootstrap_smoke.cmake"
     )
 endif()

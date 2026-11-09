@@ -408,7 +408,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 9U> cases{{
+constexpr std::array<Case, 10U> cases{{
     {"wall cards size a silent processor's viewport",
      &wall_cards_size_a_silent_processors_viewport},
     {"screens take the names of their walls",
