@@ -236,8 +236,13 @@ std::vector<Input> parse_inputs(const JsonValue &data) {
     if (const JsonValue *const edid = source.find("defaultEDID")) {
       std::tie(input.edid_width, input.edid_height) =
           size_at(*edid, "resolution");
+      // A standard EDID names its preferred timing here (3840x2160 at 60)
+      // but offers every rate in supportFrameRate, so only a custom EDID
+      // pins the rate a source has to send.
+      const bool custom = source.bool_at("isEdidCustom", false) ||
+                          edid->bool_at("isCustom", false);
       input.edid_refresh_millihertz =
-          to_millihertz(edid->number_at("refreshRate"));
+          custom ? to_millihertz(edid->number_at("refreshRate")) : 0U;
     }
     input.edid_supported = source.bool_at("isSupportEDID", false);
     // Firmware reports a signal as sourceStatus (or signalStatus); an input
@@ -335,7 +340,9 @@ parse_screens(const JsonValue &data, const std::vector<Input> &inputs) {
     // beside the canvases instead, in screen pixels. The canvases' and the
     // screen's declared sizes can be far larger than the panels (a 2880x1536
     // wall came back over 32768 square), so they only count when no cabinet
-    // is listed.
+    // is listed. Canvas and layer positions are in the controller's layout
+    // space, which VMP places anywhere (a 2880x1536 wall's canvas sat at
+    // 156782,42555), so the screen starts at its top-left canvas.
     const auto far_edge = [](core::u32 a, core::u32 b) noexcept {
       return b > std::numeric_limits<core::u32>::max() - a
                  ? std::numeric_limits<core::u32>::max()
@@ -345,6 +352,20 @@ parse_screens(const JsonValue &data, const std::vector<Input> &inputs) {
     core::u32 mapped_height{};
     core::u32 declared_width{};
     core::u32 declared_height{};
+    core::u32 origin_x{};
+    core::u32 origin_y{};
+    if (const JsonValue *const canvases = entry.find("canvases")) {
+      bool first = true;
+      for (const JsonValue &canvas : canvases->items()) {
+        if (!canvas.is_object()) {
+          continue;
+        }
+        const auto [canvas_x, canvas_y] = place_of(canvas);
+        origin_x = first ? canvas_x : std::min(origin_x, canvas_x);
+        origin_y = first ? canvas_y : std::min(origin_y, canvas_y);
+        first = false;
+      }
+    }
     const auto add_cabinets = [&](const JsonValue *cabinets, core::u32 left,
                                   core::u32 top) {
       if (cabinets == nullptr) {
@@ -380,13 +401,21 @@ parse_screens(const JsonValue &data, const std::vector<Input> &inputs) {
       }
     }
     add_cabinets(entry.find("cabinets"), 0U, 0U);
-    {
-      const auto [width, height] = extent_of(entry, {"resolution", "size"});
-      declared_width = std::max(declared_width, width);
-      declared_height = std::max(declared_height, height);
+    const auto [entry_declared_width, entry_declared_height] =
+        extent_of(entry, {"resolution", "size"});
+    const auto from_origin = [](core::u32 edge, core::u32 origin) noexcept {
+      return edge > origin ? edge - origin : 0U;
+    };
+    if (screen.cabinets != 0U) {
+      screen.width = from_origin(mapped_width, origin_x);
+      screen.height = from_origin(mapped_height, origin_y);
+    } else {
+      // A screen-level declared size has no canvas offset in it.
+      screen.width = std::max(from_origin(declared_width, origin_x),
+                              entry_declared_width);
+      screen.height = std::max(from_origin(declared_height, origin_y),
+                               entry_declared_height);
     }
-    screen.width = screen.cabinets != 0U ? mapped_width : declared_width;
-    screen.height = screen.cabinets != 0U ? mapped_height : declared_height;
 
     // In All-In-One mode layers place inputs on the screen; pick the layer
     // set for the screen's working mode.
@@ -424,7 +453,9 @@ parse_screens(const JsonValue &data, const std::vector<Input> &inputs) {
             static_cast<core::i64>(layer.number_at("source", -1.0)));
         topology::HardwareProcessorLayer placed{};
         placed.input = number_of(input);
-        const auto [x, y] = place_of(layer);
+        const auto [layout_x, layout_y] = place_of(layer);
+        const core::u32 x = from_origin(layout_x, origin_x);
+        const core::u32 y = from_origin(layout_y, origin_y);
         auto [width, height] = extent_of(layer, {"scaler", "size"});
         placed.source = topology::HardwarePixelRect{
             0U, 0U, input != nullptr ? input->width : 0U,

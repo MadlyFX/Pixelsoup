@@ -197,6 +197,36 @@ void layers_that_do_not_fit_are_cut_and_named() {
                                 "screen");
 }
 
+void a_layer_past_its_screen_shows_the_part_on_the_panels() {
+  topology::HardwareMap map = stage();
+  topology::HardwareRuntimeSnapshot runtime{};
+  topology::HardwareProcessorNode node = reported_processor();
+  // HDMI 1 whole and unscaled at the top left of a 2880x1536 screen: the
+  // panels light its top-left 2880x1536 only. HDMI 2 is not shown.
+  node.screens[0].width = 2880U;
+  node.screens[0].height = 1536U;
+  node.screens[0].layers.resize(1U);
+  node.screens[0].layers[0].source = {0U, 0U, 3840U, 2160U};
+  node.screens[0].layers[0].screen = {0U, 0U, 3840U, 2160U};
+  runtime.processors.push_back(node);
+  const output::FeedLayoutPlan plan = output::plan_feed_layout(map, runtime);
+  LAYOUT_CHECK(plan.viewports.size() == 3U);
+  LAYOUT_CHECK(plan.viewports[2].window == 0U &&
+               plan.viewports[2].viewport ==
+                   scene::CanvasRect{0U, 0U, 2880U, 1536U} &&
+               plan.viewports[2].source ==
+                   scene::CanvasRect{3840U, 0U, 2880U, 1536U});
+
+  // Scaled up to 5760x3072 on the same screen, the panels show half of
+  // each axis of the placement: the source's top-left 1920x1080.
+  node.screens[0].layers[0].screen = {0U, 0U, 5760U, 3072U};
+  runtime.processors[0] = node;
+  const output::FeedLayoutPlan scaled = output::plan_feed_layout(map, runtime);
+  LAYOUT_CHECK(scaled.viewports.size() == 3U);
+  LAYOUT_CHECK(scaled.viewports[2].viewport ==
+               scene::CanvasRect{0U, 0U, 1920U, 1080U});
+}
+
 void a_brompton_says_it_reports_no_layout() {
   topology::HardwareMap map = stage();
   map.devices[2].protocol = topology::HardwareProcessorProtocol::BromptonTessera;
@@ -393,6 +423,8 @@ constexpr std::array<Case, 9U> cases{{
      &a_silent_processor_says_how_it_was_laid_out},
     {"layers that do not fit are cut and named",
      &layers_that_do_not_fit_are_cut_and_named},
+    {"a layer past its screen shows the part on the panels",
+     &a_layer_past_its_screen_shows_the_part_on_the_panels},
     {"nothing cabled plans nothing", &nothing_cabled_plans_nothing},
     {"very wide walls wrap onto rows", &very_wide_walls_wrap_onto_rows},
 }};
