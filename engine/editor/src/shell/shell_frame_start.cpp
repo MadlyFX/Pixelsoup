@@ -26,12 +26,20 @@ bool EditorShell::Frame::start() {
   shell.reset_timeline_filmstrip_textures(project.generation);
 
   if (!impl.window.pump(impl.input)) {
-    if (project.dirty &&
-        !confirm_discard_project_changes("those changes and close")) {
+    if (project.dirty) {
+      // Asked off the frame thread; the editor closes on the frame that
+      // adopts the operator's yes.
       impl.window.cancel_close_request();
+      confirm_discard("those changes and close", [](Frame &frame) {
+        frame.result.status = EditorStatus::Closed;
+      });
       return false;
     }
     result.status = EditorStatus::Closed;
+    return false;
+  }
+  adopt_dialog();
+  if (result.status == EditorStatus::Closed) {
     return false;
   }
   if (impl.window.pixel_width() != 0U && impl.window.pixel_height() != 0U) {

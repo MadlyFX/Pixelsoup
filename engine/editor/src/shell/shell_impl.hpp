@@ -6,6 +6,12 @@
 
 #include "shell_chrome.hpp"
 
+#include <mediaserver/editor/async_dialog.hpp>
+
+#include <functional>
+#include <memory>
+#include <mutex>
+
 namespace mediaserver::editor {
 
 struct EditorShell::Impl final {
@@ -60,6 +66,12 @@ struct EditorShell::Impl final {
   StageAssetStatus stage_assets{true, "LOADING STAGE ASSETS...",
                                 "Preparing the first Stage image."};
   std::string ingest_message;
+
+  // Every native dialog - file pickers, folder pickers and yes/no confirms -
+  // runs here, off the frame thread, so the Director's frame loop that draws
+  // this editor keeps sealing frames while the operator answers.
+  AsyncDialog<EditorShell::Frame> dialog;
+
   enum class PendingMediaAction : core::u8 { Add, Import, Revise };
 
   struct PendingMediaProbe final {

@@ -12,13 +12,44 @@
 #include <mediaserver/render/display_lut_cache.hpp>
 #include <mediaserver/render/hybrid_scene_renderer.hpp>
 
+#include <memory>
 #include <optional>
 #include <span>
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace mediaserver::editor {
+
+// A render node's recent log, as its machine-local lifecycle agent last read
+// it from disk. The agent outlives the render process, so this is available
+// while the node is hung, out of lockstep, reconnecting or stopped. Immutable
+// once published: rows share it by pointer rather than copying lines each
+// frame.
+struct OutputNodeLog final {
+  enum class Status : core::u8 {
+    // Nothing has answered yet.
+    Fetching,
+    Available,
+    // The agent keeps no log, or the render process never ran there.
+    Unavailable,
+    Failed,
+  };
+  Status status{Status::Fetching};
+  // Oldest first. The first previous_run_lines came from the run before the
+  // current one - after a crash or restart, how it ended.
+  std::vector<std::string> lines;
+  std::size_t previous_run_lines{};
+  // Bytes the render process dropped rather than wait for its disk.
+  core::u64 dropped_bytes{};
+  bool truncated{};
+  // Where the agent read it, or why it could not.
+  std::string detail;
+  // Local wall-clock time of the answer, "14:03:27".
+  std::string fetched_at;
+};
 
 struct OutputMonitorState final {
   core::u64 frame{};
@@ -140,6 +171,11 @@ struct OutputMonitorState final {
       DuplicateRenderServer,
       PresenterRefused,
     } output{OutputStatus::Unknown};
+
+    // The last log fetched for this node, or null when none was asked for.
+    std::shared_ptr<const OutputNodeLog> log;
+    // A log request is on its way.
+    bool log_fetching{};
 
     [[nodiscard]] bool output_failed() const noexcept {
       return output != OutputStatus::Unknown &&
@@ -273,11 +309,19 @@ output_node_connection_label(const OutputMonitorState::Node &node) noexcept;
 [[nodiscard]] std::string_view
 output_node_deployment_label(const OutputMonitorState::Node &node) noexcept;
 
+// One line on what an open node log shows: when it was read and how much of
+// it is the previous run, or why there is none. Public so tests can check the
+// wording without inspecting glyphs.
+[[nodiscard]] std::string
+output_node_log_summary(const OutputMonitorState::Node &node);
+
 enum class OutputLifecycleAction : core::u8 {
   Status,
   Start,
   Restart,
   Stop,
+  // Read the node's recent log from its lifecycle agent. Changes nothing.
+  FetchLog,
 };
 
 struct OutputLifecycleRequest final {
@@ -318,8 +362,25 @@ public:
   static constexpr float header_height = 22.0F;
   static constexpr float row_height = 32.0F;
   static constexpr float footer_height = 32.0F;
+  // An open log: this many lines of this height are in view at once, and it
+  // asks its agent again this often while it stays open.
+  static constexpr float log_line_height = 16.0F;
+  static constexpr std::size_t log_visible_lines = 14U;
+  static constexpr double log_refresh_seconds = 3.0;
 
 private:
+  // A row whose log is open: its scroll position, the log it last drew (to
+  // follow new lines while the operator is at the bottom), and when it next
+  // asks for fresh lines.
+  struct LogView final {
+    gui::ScrollRegion scroll;
+    std::weak_ptr<const OutputNodeLog> seen;
+    double refresh_at{-1.0};
+  };
+  std::map<doc::NodeId, LogView> log_open_;
+  // Where a log was drawn last frame. The table does not scroll while the
+  // pointer is over it, so the wheel moves the log instead.
+  gui::Rect log_hover_{};
   bool conformance_expanded_{};
   bool timing_expanded_{};
   bool program_expanded_{};

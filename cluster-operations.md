@@ -164,6 +164,47 @@ The log contains no lifecycle secret or asset source path. Copy the WAL,
 release ledger, both diagnostic files, project, and relevant node logs before
 restarting a failed show if post-show analysis is required.
 
+### Process logs
+
+Every media-server process tees what it prints to stdout and stderr - status
+intervals, asset adoption, session and lockstep events, errors - into a
+timestamped, rotating file, so a fullscreen render node with no console still
+leaves a record:
+
+| Process | File |
+| --- | --- |
+| Director / editor | `director.log` |
+| Render node N | `node-N.log` |
+| Lifecycle agent for node N | `agent-N.log` |
+| Render-machine window | `render-machine.log` |
+
+They live in `%LOCALAPPDATA%\MediaServer\logs` (`--log-dir=PATH` moves them;
+a lifecycle agent passes its own folder to its render process). Each start
+moves the previous run to `NAME.1.log`; a file rotates at 8 MiB and three
+older files are kept. If another live process already writes a name, the new
+one logs to `NAME-<pid>.log` instead. The first line of each run records the
+command line, with any `--lifecycle-password` value masked.
+
+The frame and control paths only write to a pipe. A reader thread copies the
+bytes into a bounded 1 MiB queue and one writer thread owns the file; when the
+queue is full the bytes are dropped and counted, and the writer records
+`[log] dropped N bytes` rather than stalling a frame. Console forwarding has
+its own bounded queue, so a console that stops reading no longer stalls the
+process either.
+
+**Reading a node's log from the editor.** Expand a render server's row in
+Output Monitor and press **Show log**. The editor asks that machine's
+lifecycle agent - over the same authenticated control port as Start and Stop -
+for the last 400 lines of `node-N.log`, refreshes it every three seconds while
+it stays open, and stops asking when it is closed. Because the agent reads the
+file from disk, this works while the render process is hung, out of lockstep,
+reconnecting, stopped, or after it crashed: when the current file is a fresh
+run, the previous run's last lines are shown above a **Current run** divider.
+A reply is bounded to 1,000 lines, 400 bytes per line and 96 KiB in all;
+control characters and invalid UTF-8 are replaced before they cross the wire.
+A node started with `run-output-node.ps1 -Direct` has no agent, so its log is
+read on that machine only.
+
 Cumulative incident counters remain in the diagnostic record after recovery;
 the current control health can return to healthy once membership and progress
 recover.

@@ -51,7 +51,71 @@ namespace {
                      static_cast<std::size_t>(std::max(length, 0))};
 }
 
+// Lines worth the operator's eye in a log: failures, faults and lockstep
+// trouble. Colour is never the only signal - the words are right there.
+[[nodiscard]] bool log_line_is_trouble(std::string_view line) noexcept {
+  for (const std::string_view word :
+       {std::string_view{"error"}, std::string_view{"ERROR"},
+        std::string_view{"failed"}, std::string_view{"FAILED"},
+        std::string_view{"fault"}, std::string_view{"FELL BEHIND"},
+        std::string_view{"dropped"}}) {
+    if (line.find(word) != std::string_view::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] std::string byte_count_text(core::u64 bytes) {
+  std::array<char, 32U> output{};
+  const int length =
+      bytes >= 1024U * 1024U
+          ? std::snprintf(output.data(), output.size(), "%.1f MB",
+                          static_cast<double>(bytes) / (1024.0 * 1024.0))
+      : bytes >= 1024U
+          ? std::snprintf(output.data(), output.size(), "%.1f KB",
+                          static_cast<double>(bytes) / 1024.0)
+          : std::snprintf(output.data(), output.size(), "%llu bytes",
+                          static_cast<unsigned long long>(bytes));
+  return std::string{output.data(),
+                     static_cast<std::size_t>(std::max(length, 0))};
+}
+
 } // namespace
+
+std::string output_node_log_summary(const OutputMonitorState::Node &node) {
+  const OutputNodeLog *log = node.log.get();
+  if (log == nullptr || log->status == OutputNodeLog::Status::Fetching) {
+    return node.log_fetching || log != nullptr ? "Reading the log"
+                                               : "Log not read yet";
+  }
+  switch (log->status) {
+  case OutputNodeLog::Status::Fetching:
+    break;
+  case OutputNodeLog::Status::Available: {
+    std::string text = "Read at " + log->fetched_at + " - " +
+                       std::to_string(log->lines.size()) +
+                       (log->lines.size() == 1U ? " line" : " lines");
+    if (log->previous_run_lines > 0U) {
+      text += ", " + std::to_string(log->previous_run_lines) +
+              " from the previous run";
+    }
+    if (log->dropped_bytes > 0U) {
+      text += ", " + byte_count_text(log->dropped_bytes) +
+              " dropped by a slow disk";
+    }
+    return text;
+  }
+  case OutputNodeLog::Status::Unavailable:
+    return log->detail.empty() ? std::string{"No log on this machine"}
+                               : "No log - " + log->detail;
+  case OutputNodeLog::Status::Failed:
+    return log->detail.empty()
+               ? std::string{"Could not read the log"}
+               : "Could not read the log - " + log->detail;
+  }
+  return {};
+}
 
 std::string_view output_node_connection_label(
     const OutputMonitorState::Node &node) noexcept {
@@ -594,13 +658,21 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   };
   constexpr float detail_line = 20.0F;
   const float timing_lines = state.cluster.conformance_active ? 3.0F : 0.0F;
+  // The log toggle line, and the log itself while it is open.
+  const float log_box_height =
+      log_line_height * static_cast<float>(log_visible_lines) + 8.0F;
+  const auto log_height = [&](const OutputMonitorState::Node &node) {
+    return 26.0F +
+           (log_open_.contains(node.device) ? log_box_height + 4.0F : 0.0F);
+  };
   const auto node_height = [&](const OutputMonitorState::Node &node) {
     if (!expanded_.contains(node.device)) {
       return row_height;
     }
     return row_height + 8.0F +
            detail_line * (static_cast<float>(node_details(node).size()) +
-                          timing_lines);
+                          timing_lines) +
+           log_height(node);
   };
   const float program_details_height =
       program_expanded_ && state.cluster.conformance_active
@@ -654,7 +726,11 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     }
   };
 
-  float y = list_bounds.y - scroll_.begin(ctx, list_bounds, row_height * 2.0F);
+  // Over an open log the wheel scrolls the log, not the table.
+  const bool over_log = log_hover_.contains(ctx.pointer_x(), ctx.pointer_y());
+  log_hover_ = gui::Rect{};
+  float y = list_bounds.y - scroll_.begin(ctx, list_bounds,
+                                          over_log ? 0.0F : row_height * 2.0F);
   // The `index`th action button from the right of a row's action column.
   const auto action_bounds = [&](const gui::Rect &line, std::size_t index) {
     gui::Rect slots = gui::cell(actions_column, line);
@@ -1017,6 +1093,121 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                    : theme.warning);
         detail("Adapter", node.conformance.adapter.name.data(),
                theme.text_muted);
+      }
+
+      // The node's own log, read back by its machine's agent: what it said
+      // while it was hung, lagging or reconnecting, and how its last run
+      // ended. Asking never touches the show.
+      const auto open_view = log_open_.find(node.device);
+      const bool log_open = open_view != log_open_.end();
+      gui::Rect strip = details.next(22.0F, 4.0F);
+      if (ctx.button(gui::ui_id(id_, "output.log", node.device.value()),
+                     gui::cut_left(strip, 120.0F),
+                     log_open ? "Hide log" : "Show log")) {
+        if (log_open) {
+          log_open_.erase(open_view);
+        } else {
+          log_open_.emplace(node.device, LogView{});
+        }
+      }
+      // Drawn from the next frame on, once the row has grown to hold it.
+      if (const auto view = log_open_.find(node.device);
+          log_open && view != log_open_.end()) {
+        LogView &log_view = view->second;
+        static_cast<void>(gui::cut_left(strip, 8.0F));
+        const gui::Rect refresh = gui::cut_left(strip, 26.0F);
+        const bool refresh_pressed =
+            icon_button(ctx,
+                        gui::ui_id(id_, "output.log.refresh",
+                                   node.device.value()),
+                        gui::centered(refresh, 26.0F, 22.0F),
+                        gui::Icon::Restart, "Read the log again", false,
+                        !node.log_fetching);
+        static_cast<void>(gui::cut_left(strip, 6.0F));
+        const OutputNodeLog *log = node.log.get();
+        const bool failed =
+            log != nullptr && log->status == OutputNodeLog::Status::Failed;
+        const std::string log_summary = output_node_log_summary(node);
+        ctx.label(strip, log_summary,
+                  failed ? theme.warning
+                  : log != nullptr && log->dropped_bytes > 0U
+                      ? theme.caution
+                      : theme.text_muted);
+        if (log != nullptr && !log->detail.empty()) {
+          ctx.tooltip(strip, log->detail);
+        }
+        // Read on open, then again every few seconds while it stays open.
+        const double now = ctx.time_seconds();
+        if ((refresh_pressed || now >= log_view.refresh_at) &&
+            !node.log_fetching && !frame.lifecycle.has_value()) {
+          frame.lifecycle = OutputLifecycleRequest{
+              node.device, node.node_index, node.endpoint,
+              OutputLifecycleAction::FetchLog};
+          log_view.refresh_at = now + log_refresh_seconds;
+        }
+
+        const gui::Rect box = details.next(log_box_height, 4.0F);
+        ctx.rounded(box, theme.track, theme.radius_small);
+        if (const gui::Rect shown = gui::intersection(box, list_bounds);
+            shown.contains(ctx.pointer_x(), ctx.pointer_y())) {
+          log_hover_ = shown;
+        }
+        // New lines arrive at the bottom; follow them unless the operator
+        // has scrolled up to read something.
+        if (log_view.seen.lock() != node.log) {
+          if (log_view.seen.expired() || log_view.scroll.at_end()) {
+            log_view.scroll.scroll_to_end();
+          }
+          log_view.seen = node.log;
+        }
+        const gui::Rect viewport =
+            gui::intersection(gui::inset(box, 8.0F, 4.0F), list_bounds);
+        const float offset =
+            log_view.scroll.begin(ctx, viewport, log_line_height * 3.0F);
+        const gui::Rect inner = gui::inset(box, 8.0F, 4.0F);
+        float content = 0.0F;
+        if (log != nullptr && log->status == OutputNodeLog::Status::Available) {
+          const std::size_t previous =
+              std::min(log->previous_run_lines, log->lines.size());
+          // A divider where the current run begins, when the previous run's
+          // last lines are shown above it.
+          const std::size_t rows =
+              log->lines.size() + (previous > 0U ? 2U : 0U);
+          content = static_cast<float>(rows) * log_line_height;
+          const auto first = static_cast<std::size_t>(
+              std::max(offset / log_line_height, 0.0F));
+          const std::size_t last = std::min(
+              rows, first + log_visible_lines + 2U);
+          for (std::size_t row_index = first; row_index < last; ++row_index) {
+            const gui::Rect text{
+                inner.x,
+                inner.y - offset +
+                    static_cast<float>(row_index) * log_line_height,
+                inner.width, log_line_height};
+            if (previous > 0U && row_index == 0U) {
+              ctx.label(text, "Previous run", theme.text_muted);
+              continue;
+            }
+            if (previous > 0U && row_index == previous + 1U) {
+              ctx.label(text, "Current run", theme.text_muted);
+              continue;
+            }
+            const std::size_t line_index =
+                previous > 0U
+                    ? row_index - (row_index <= previous ? 1U : 2U)
+                    : row_index;
+            const std::string &log_line = log->lines[line_index];
+            ctx.label(text, log_line,
+                      log_line_is_trouble(log_line) ? theme.warning
+                      : line_index < previous   ? theme.text_muted
+                                                : theme.text);
+          }
+        } else {
+          ctx.label(gui::Rect{inner.x, inner.y, inner.width, log_line_height},
+                    log_summary, theme.text_muted);
+          content = log_line_height;
+        }
+        log_view.scroll.end(ctx, content);
       }
     }
   }

@@ -1549,6 +1549,17 @@ see its acknowledged control frame and the Director's current target. A
 persistent CONNECTING state calls for checking the render machine's saved
 Director address and show ID, plus network reachability.
 
+**A node's own log.** An expanded node row has **Show log**. It reads the last
+lines the render process wrote to its log on that machine, through the
+machine's lifecycle agent, and keeps them fresh every few seconds while open.
+It works whatever the node is doing - hung, out of lockstep, reconnecting or
+stopped - and after a crash or restart the previous run's last lines appear
+above a **Current run** divider. Lines with errors, failures or lockstep
+trouble are shown in red. The line above the log says when it was read and
+whether the node's disk writer dropped anything. The refresh arrow reads it
+again at once. Every process keeps such a log; see "Process logs" in
+`cluster-operations.md` for where the files are.
+
 Startup and replacement output windows initialize to black before showing.
 A disconnected node holds its last complete image while it retries. A node
 ahead of the reopened Director requests an authoritative checkpoint; state is
@@ -2615,6 +2626,14 @@ Project. New Project replaces the open project
 empty 1920x1080
 scene and a full-canvas Feed Map for node 0, the same as a first launch without
 the demo content; Save Project then asks where to put it.
+
+The editor's file, folder and unsaved-changes dialogs never pause the show:
+Program keeps playing and render nodes stay in lockstep while one is open, and
+the answer takes effect on the next frame. Only one such dialog is open at a
+time; asking for another while one is up shows "Another dialog is already
+open" in the status bar instead. If another project is opened while a dialog
+is up, its answer is dropped rather than applied to
+the new project.
 `.mstage` saves are checksummed and atomically replaced. Recovered WAL state
 takes precedence at startup; otherwise the last successfully opened/saved
 project is offered through recent-project recovery. A damaged or inaccessible

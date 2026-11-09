@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <condition_variable>
+#include <ctime>
 #include <deque>
 #include <map>
 #include <limits>
@@ -174,6 +175,8 @@ struct ControllerManifest final {
         return net::ClusterLifecycleCommand::Restart;
     case editor::OutputLifecycleAction::Stop:
         return net::ClusterLifecycleCommand::Stop;
+    case editor::OutputLifecycleAction::FetchLog:
+        break;
     }
     return net::ClusterLifecycleCommand::Status;
 }
@@ -418,6 +421,10 @@ struct ControllerEntry final {
     std::chrono::steady_clock::time_point next_machine_info_poll{};
     std::chrono::steady_clock::time_point next_sync_status_poll{};
     std::chrono::steady_clock::time_point next_asset_readiness_poll{};
+    // The last log fetched, kept across revisions so a reconfigured row
+    // still shows what it said. Never part of any readiness decision.
+    std::shared_ptr<const editor::OutputNodeLog> log;
+    bool log_pending{};
 };
 
 [[nodiscard]] bool output_bindings_observed_and_compatible(
@@ -489,6 +496,27 @@ struct ControllerWork final {
     bool request_sync_status{};
 };
 
+struct ControllerLogWork final {
+    core::u64 device{};
+    asio::ip::tcp::endpoint endpoint;
+    core::u32 node_index{};
+};
+
+[[nodiscard]] std::string wall_clock_text() {
+    const std::time_t now =
+        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm local{};
+#if defined(_WIN32)
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    std::array<char, 16U> text{};
+    const std::size_t length =
+        std::strftime(text.data(), text.size(), "%H:%M:%S", &local);
+    return std::string{text.data(), length};
+}
+
 struct ControllerAssetReadinessWork final {
     core::u64 device{};
     core::u64 revision{};
@@ -505,11 +533,13 @@ public:
         ClusterLifecycleRequestFunction requester,
         ClusterMachineInfoRequestFunction machine_info_requester,
         ClusterAssetReadinessRequestFunction asset_readiness_requester,
-        ClusterSyncStatusRequestFunction sync_status_requester)
+        ClusterSyncStatusRequestFunction sync_status_requester,
+        ClusterNodeLogRequestFunction node_log_requester)
         : config(std::move(configured)), request(std::move(requester)),
           machine_info_request(std::move(machine_info_requester)),
           asset_readiness_request(std::move(asset_readiness_requester)),
-          sync_status_request(std::move(sync_status_requester)) {
+          sync_status_request(std::move(sync_status_requester)),
+          node_log_request(std::move(node_log_requester)) {
         config.worker_count = std::clamp(
             config.worker_count, std::size_t{1U}, std::size_t{8U});
         if (config.poll_interval <= std::chrono::milliseconds::zero()) {
@@ -558,6 +588,16 @@ public:
                         endpoint, node_index, client());
                 };
         }
+        if (!node_log_request) {
+            node_log_request = [this](const asio::ip::tcp::endpoint& endpoint,
+                                      core::u32 node_index,
+                                      std::size_t lines) {
+                return net::request_cluster_node_log(endpoint, node_index,
+                                                     lines, client());
+            };
+        }
+        config.log_lines = std::clamp(config.log_lines, std::size_t{1U},
+                                      net::max_cluster_node_log_lines);
         if (!asset_readiness_request) {
             asset_readiness_request =
                 [this](const asio::ip::tcp::endpoint& endpoint,
@@ -581,6 +621,7 @@ public:
                 asset_readiness_workers.emplace_back(
                     [this] { asset_readiness_worker(); });
             }
+            log_thread = std::thread{[this] { log_worker(); }};
         } catch (...) {
             {
                 const std::lock_guard lock{mutex};
@@ -599,6 +640,10 @@ public:
                     readiness_worker.join();
                 }
             }
+            log_changed.notify_all();
+            if (log_thread.joinable()) {
+                log_thread.join();
+            }
             throw;
         }
     }
@@ -609,10 +654,15 @@ public:
             stopping = true;
             queue.clear();
             asset_readiness_queue.clear();
+            log_queue.clear();
         }
         static_cast<void>(asset_readiness_stop.request_stop());
         changed.notify_all();
         asset_readiness_changed.notify_all();
+        log_changed.notify_all();
+        if (log_thread.joinable()) {
+            log_thread.join();
+        }
         for (std::thread& worker_thread : workers) {
             if (worker_thread.joinable()) {
                 worker_thread.join();
@@ -1204,6 +1254,115 @@ public:
         }
     }
 
+    // Queues one log read for a row unless one is already on its way.
+    void enqueue_log(ControllerEntry& entry) {
+        if (entry.log_pending) {
+            return;
+        }
+        constexpr std::size_t maximum_queue = 64U;
+        if (log_queue.size() >= maximum_queue) {
+            return;
+        }
+        log_queue.push_back(ControllerLogWork{entry.device.value(),
+                                              entry.endpoint,
+                                              entry.node_index});
+        entry.log_pending = true;
+        if (entry.log == nullptr) {
+            entry.log = std::make_shared<const editor::OutputNodeLog>();
+        }
+        log_changed.notify_one();
+    }
+
+    [[nodiscard]] static std::shared_ptr<const editor::OutputNodeLog>
+    node_log_from(const ClusterNodeLogRequestResult& outcome,
+                  core::u32 node_index) {
+        auto log = std::make_shared<editor::OutputNodeLog>();
+        log->fetched_at = wall_clock_text();
+        using LogStatus = editor::OutputNodeLog::Status;
+        if (!outcome) {
+            log->status = LogStatus::Failed;
+            log->detail = error_detail(outcome.error());
+            return log;
+        }
+        const net::ClusterNodeLog& reply = outcome.value();
+        log->detail = reply.detail;
+        switch (reply.availability) {
+        case net::ClusterNodeLogAvailability::Available:
+            if (reply.node_index != node_index) {
+                log->status = LogStatus::Failed;
+                log->detail =
+                    "listener reported a log for a different node index";
+                return log;
+            }
+            log->status = LogStatus::Available;
+            log->lines = reply.lines;
+            log->previous_run_lines = reply.previous_run_lines;
+            log->dropped_bytes = reply.dropped_bytes;
+            log->truncated = reply.truncated;
+            break;
+        case net::ClusterNodeLogAvailability::Unavailable:
+            log->status = LogStatus::Unavailable;
+            break;
+        case net::ClusterNodeLogAvailability::ConfigurationMismatch:
+            log->status = LogStatus::Failed;
+            log->detail = "listener owns a different node index";
+            break;
+        case net::ClusterNodeLogAvailability::Failed:
+            log->status = LogStatus::Failed;
+            break;
+        }
+        return log;
+    }
+
+    void log_worker() noexcept {
+        for (;;) {
+            ControllerLogWork work{};
+            {
+                std::unique_lock lock{mutex};
+                log_changed.wait(lock,
+                                 [&] { return stopping || !log_queue.empty(); });
+                if (stopping) {
+                    return;
+                }
+                work = log_queue.front();
+                log_queue.pop_front();
+                ++active_log;
+            }
+            ClusterNodeLogRequestResult outcome = [&] {
+                try {
+                    return node_log_request(work.endpoint, work.node_index,
+                                            config.log_lines);
+                } catch (...) {
+                    return ClusterNodeLogRequestResult::failure(
+                        {net::ClusterLifecycleClientErrorCode::AllocationFailed,
+                         {}});
+                }
+            }();
+            std::shared_ptr<const editor::OutputNodeLog> log;
+            try {
+                log = node_log_from(outcome, work.node_index);
+            } catch (...) {
+                log.reset();
+            }
+            {
+                const std::lock_guard lock{mutex};
+                --active_log;
+                const auto found = entries.find(work.device);
+                if (found != entries.end()) {
+                    ControllerEntry& entry = found->second;
+                    entry.log_pending = false;
+                    // An answer from an endpoint the row no longer names is
+                    // about another machine.
+                    if (log != nullptr && entry.endpoint == work.endpoint &&
+                        entry.node_index == work.node_index) {
+                        entry.log = std::move(log);
+                    }
+                }
+                idle_changed.notify_all();
+            }
+        }
+    }
+
     void asset_readiness_worker() noexcept {
         for (;;) {
             ControllerAssetReadinessWork work{};
@@ -1248,16 +1407,20 @@ public:
     ClusterMachineInfoRequestFunction machine_info_request;
     ClusterAssetReadinessRequestFunction asset_readiness_request;
     ClusterSyncStatusRequestFunction sync_status_request;
+    ClusterNodeLogRequestFunction node_log_request;
     ControllerManifest manifest = controller_manifest(ProjectAssetManifest{});
     mutable std::mutex mutex;
     std::condition_variable changed;
     std::condition_variable asset_readiness_changed;
+    std::condition_variable log_changed;
     std::condition_variable idle_changed;
     std::map<core::u64, ControllerEntry> entries;
     std::deque<ControllerWork> queue;
     std::deque<ControllerAssetReadinessWork> asset_readiness_queue;
+    std::deque<ControllerLogWork> log_queue;
     std::vector<std::thread> workers;
     std::vector<std::thread> asset_readiness_workers;
+    std::thread log_thread;
     std::stop_source asset_readiness_stop;
     core::u64 next_sequence{1U};
     core::u64 next_revision{1U};
@@ -1267,6 +1430,7 @@ public:
     bool deployment_digest_initialized{};
     std::size_t active{};
     std::size_t active_asset_readiness{};
+    std::size_t active_log{};
     bool stopping{};
 };
 
@@ -1277,12 +1441,13 @@ ClusterLifecycleController::ClusterLifecycleController(
     ClusterLifecycleRequestFunction request,
     ClusterMachineInfoRequestFunction machine_info_request,
     ClusterAssetReadinessRequestFunction asset_readiness_request,
-    ClusterSyncStatusRequestFunction sync_status_request)
+    ClusterSyncStatusRequestFunction sync_status_request,
+    ClusterNodeLogRequestFunction node_log_request)
     : state_(std::make_unique<detail::ClusterLifecycleControllerState>(
           std::move(config), std::move(request),
           std::move(machine_info_request),
           std::move(asset_readiness_request),
-          std::move(sync_status_request))) {}
+          std::move(sync_status_request), std::move(node_log_request))) {}
 
 ClusterLifecycleController::~ClusterLifecycleController() = default;
 
@@ -1790,6 +1955,8 @@ ClusterLifecycleController::snapshot(const net::DirectorFrameBarrier* barrier) c
         row.assets_verification_failed =
             entry.assets_verification_failed;
         row.content_detail = entry.content_detail;
+        row.log = entry.log;
+        row.log_fetching = entry.log_pending;
         if (barrier != nullptr) {
             const auto connection = barrier->node_connection(entry.node_index);
             using State = net::DirectorNodeConnection::State;
@@ -1892,6 +2059,10 @@ void ClusterLifecycleController::submit(
         if (!entry.eligible || entry.parked) {
             return;
         }
+        if (request.action == editor::OutputLifecycleAction::FetchLog) {
+            state_->enqueue_log(entry);
+            return;
+        }
         if ((request.action == editor::OutputLifecycleAction::Start ||
              request.action == editor::OutputLifecycleAction::Restart) &&
             !content_status_ready(entry.content) && !entry.missing_media_only) {
@@ -1914,6 +2085,8 @@ void ClusterLifecycleController::submit(
         case editor::OutputLifecycleAction::Status:
             entry.status = Status::Probing;
             entry.detail = "checking lifecycle listener";
+            break;
+        case editor::OutputLifecycleAction::FetchLog:
             break;
         }
         if (entry.pending > 0U) {
@@ -2036,7 +2209,8 @@ bool ClusterLifecycleController::program_ready(
 bool ClusterLifecycleController::idle() const noexcept {
     const std::lock_guard lock{state_->mutex};
     return state_->queue.empty() && state_->asset_readiness_queue.empty() &&
-           state_->active == 0U && state_->active_asset_readiness == 0U;
+           state_->log_queue.empty() && state_->active == 0U &&
+           state_->active_asset_readiness == 0U && state_->active_log == 0U;
 }
 
 } // namespace mediaserver::app

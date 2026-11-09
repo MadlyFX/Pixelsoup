@@ -55,6 +55,7 @@ add_library(mediaserver_server STATIC
     playback.cpp
     playback_media.cpp
     playback_runtime.cpp
+    process_log.cpp
     project_asset_import.cpp
     project_assets.cpp
     proxy_generation_service.cpp
@@ -177,6 +178,9 @@ if(BUILD_TESTING)
     mediaserver_server_test(output_window_config)
     mediaserver_server_test(plateset_authoring)
     mediaserver_server_test(plateset_motion)
+    # The disk log every process keeps and the agent serves to Output Monitor:
+    # real files in a temporary folder, and this process's own stdout.
+    mediaserver_server_test(process_log)
     mediaserver_server_test(project_asset_import)
     mediaserver_server_test(project_assets)
     mediaserver_server_test(proxy_generation_service)

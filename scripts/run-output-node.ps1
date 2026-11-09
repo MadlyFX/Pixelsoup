@@ -33,6 +33,17 @@
     netsh advfirewall firewall add rule name="Media Server Discovery" `
       dir=in action=allow protocol=UDP localport=47839
 
+  LOGS: the render process writes everything it prints - status intervals,
+  asset adoption, session and lockstep events, errors - to node-<NodeIndex>.log
+  in -LogDir, so a fullscreen node with no visible console still leaves a
+  record. The agent logs to agent-<NodeIndex>.log beside it. Each start moves
+  the previous run to NAME.1.log; files rotate at 8 MiB and three are kept.
+  Output Monitor on the control machine reads node-<NodeIndex>.log through the
+  agent: expand this node's row and press Show log. That works while the node
+  is hung, out of lockstep, reconnecting or stopped, and shows the previous
+  run's last lines after a crash. With -Direct there is no agent, so the log
+  can only be read on this machine.
+
   Press Ctrl+C in this console to stop.
 
 .PARAMETER DirectorHost
@@ -75,6 +86,11 @@
   reference-lost, reference-idle, or no-device. Simulated samples are marked as
   such all the way to the operator surface and satisfy only a DEGRADED policy.
 
+.PARAMETER LogDir
+  Folder for node-<NodeIndex>.log and agent-<NodeIndex>.log. Default
+  %LOCALAPPDATA%\MediaServer\logs. The agent passes it to the render
+  process, and reads the render log back from it for Output Monitor.
+
 .PARAMETER DryRun
   Print the exact command line and exit without starting anything.
 #>
@@ -102,6 +118,7 @@ param(
     [ValidateSet('off', 'locked', 'reference-lost', 'reference-idle', 'no-device')]
     [string]$SyncSimulate = 'off',
     [int]$StatusInterval = 120,
+    [string]$LogDir = '',
     [switch]$DryRun
 )
 
@@ -158,8 +175,16 @@ if ($Fullscreen) {
     $childArgs += '--borderless'
 }
 
+$logFolder = if ([string]::IsNullOrWhiteSpace($LogDir)) {
+    Join-Path $env:LOCALAPPDATA 'MediaServer\logs'
+} else {
+    $LogDir
+}
 if ($Direct) {
     $argv = $childArgs + @("--node-index=$NodeIndex")
+    if (-not [string]::IsNullOrWhiteSpace($LogDir)) {
+        $argv += "--log-dir=$LogDir"
+    }
 } else {
     $argv = @(
         "--lifecycle-listen=${LifecycleListenAddress}:$LifecyclePort"
@@ -171,6 +196,10 @@ if ($Direct) {
     )
     foreach ($childArg in $childArgs) {
         $argv += "--lifecycle-child-arg=$childArg"
+    }
+    # The agent hands its own folder to the render process.
+    if (-not [string]::IsNullOrWhiteSpace($LogDir)) {
+        $argv += "--log-dir=$LogDir"
     }
     if (-not [string]::IsNullOrEmpty($Password)) {
         $argv += "--lifecycle-password=$Password"
@@ -188,6 +217,7 @@ Write-Host "  executable   $Exe"
 Write-Host "  director     ${DirectorHost}:$Port"
 Write-Host "  node index   $NodeIndex"
 Write-Host "  node id      $NodeId"
+Write-Host "  log          $(Join-Path $logFolder "node-$NodeIndex.log")"
 if ($Direct) {
     Write-Host '  mode         direct (no lifecycle agent; Output Monitor cannot control this node)' -ForegroundColor Yellow
 } else {

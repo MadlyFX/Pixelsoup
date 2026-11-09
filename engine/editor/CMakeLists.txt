@@ -266,6 +266,26 @@ if(BUILD_TESTING)
         mediaserver_editor_workspace_layout_tests PROPERTIES FOLDER "tests"
     )
 
+    # Native dialogs answer off the frame thread and apply exactly once.
+    add_executable(mediaserver_editor_async_dialog_tests
+        tests/async_dialog_tests.cpp
+    )
+    target_include_directories(mediaserver_editor_async_dialog_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(mediaserver_editor_async_dialog_tests
+        PRIVATE
+            MediaServer::Core
+    )
+    mediaserver_set_project_options(mediaserver_editor_async_dialog_tests)
+    add_test(
+        NAME mediaserver.editor_async_dialog
+        COMMAND mediaserver_editor_async_dialog_tests
+    )
+    set_tests_properties(mediaserver.editor_async_dialog PROPERTIES TIMEOUT 30)
+    set_target_properties(mediaserver_editor_async_dialog_tests PROPERTIES FOLDER "tests")
+
     add_executable(mediaserver_editor_selection_tests
         tests/selection_tests.cpp
     )

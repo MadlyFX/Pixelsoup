@@ -50,6 +50,12 @@ using ClusterAssetReadinessRequestFunction = std::function<
         const asio::ip::tcp::endpoint&, core::u32,
         std::span<const net::ClusterAssetRequirement>, std::stop_token)>;
 
+using ClusterNodeLogRequestResult =
+    core::Result<net::ClusterNodeLog, net::ClusterLifecycleClientError>;
+using ClusterNodeLogRequestFunction = std::function<
+    ClusterNodeLogRequestResult(const asio::ip::tcp::endpoint&, core::u32,
+                                std::size_t)>;
+
 struct ClusterLifecycleControllerConfig final {
     std::string shared_secret;
     std::chrono::milliseconds poll_interval{2'000};
@@ -59,6 +65,8 @@ struct ClusterLifecycleControllerConfig final {
     // lost reference reaches the operator surface promptly.
     std::chrono::milliseconds sync_status_poll_interval{2'000};
     std::chrono::milliseconds asset_readiness_poll_interval{30'000};
+    // How many recent lines a FetchLog asks a node's agent for.
+    std::size_t log_lines{400U};
     std::size_t worker_count{4U};
     net::ClusterLifecycleClientConfig client{};
 };
@@ -76,7 +84,8 @@ public:
         ClusterLifecycleRequestFunction request = {},
         ClusterMachineInfoRequestFunction machine_info_request = {},
         ClusterAssetReadinessRequestFunction asset_readiness_request = {},
-        ClusterSyncStatusRequestFunction sync_status_request = {});
+        ClusterSyncStatusRequestFunction sync_status_request = {},
+        ClusterNodeLogRequestFunction node_log_request = {});
     ClusterLifecycleController(const ClusterLifecycleController&) = delete;
     ClusterLifecycleController& operator=(const ClusterLifecycleController&) =
         delete;
@@ -115,6 +124,9 @@ public:
     // The Hardware Map name of the Render Server configured for a node index,
     // or empty when none is.
     [[nodiscard]] std::string node_name(core::u32 node_index) const;
+    // FetchLog is answered on its own worker, beside lifecycle commands
+    // rather than behind them: it works whatever state the node is in, and
+    // a request while one is on its way for that node is ignored.
     void submit(const editor::OutputLifecycleRequest& request);
     // Fail-closed promotion guard for the exact manifest last passed to sync.
     // No configured Render Servers and a manifest with no required assets are

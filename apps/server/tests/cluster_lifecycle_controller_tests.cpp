@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <array>
 #include <chrono>
 #include <exception>
@@ -1791,9 +1792,135 @@ void conflicting_revisions_for_one_path_fail_without_a_probe() {
 
 } // namespace
 
+void node_logs_are_fetched_on_request_beside_lifecycle_work() {
+    std::atomic_size_t log_calls{};
+    std::atomic<core::u32> asked_index{};
+    std::atomic_size_t asked_lines{};
+    std::atomic_bool fail_next{};
+    std::mutex gate_mutex;
+    std::condition_variable gate_changed;
+    bool gate_open = true;
+    app::ClusterLifecycleControllerConfig config = controller_config();
+    config.log_lines = 37U;
+    app::ClusterLifecycleController controller{
+        config,
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            net::ClusterLifecycleCommand) {
+            // The process is faulted; the log must still be reachable.
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{
+                    net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Faulted, node_index, 1U,
+                    "process exited"});
+        },
+        &no_inventory,
+        {},
+        {},
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            std::size_t lines) {
+            {
+                std::unique_lock lock{gate_mutex};
+                gate_changed.wait(lock, [&] { return gate_open; });
+            }
+            log_calls.fetch_add(1U);
+            asked_index.store(node_index);
+            asked_lines.store(lines);
+            if (fail_next.exchange(false)) {
+                return app::ClusterNodeLogRequestResult::failure(
+                    {net::ClusterLifecycleClientErrorCode::TimedOut, {}});
+            }
+            net::ClusterNodeLog log{};
+            log.availability = net::ClusterNodeLogAvailability::Available;
+            log.node_index = node_index;
+            log.previous_run_lines = 1U;
+            log.dropped_bytes = 512U;
+            log.lines = {"previous run: NODE 2 FELL BEHIND",
+                         "current run: reconnecting"};
+            log.detail = "node-2.log";
+            return app::ClusterNodeLogRequestResult::success(std::move(log));
+        }};
+
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 2U, "127.0.0.1:47842"));
+    controller.sync(wired(map));
+    CONTROLLER_CHECK(wait_idle(controller));
+    // Nothing reads a log until it is asked for.
+    CONTROLLER_CHECK(log_calls.load() == 0U);
+    auto rows = controller.snapshot();
+    CONTROLLER_CHECK(rows.size() == 1U);
+    CONTROLLER_CHECK(rows[0].log == nullptr);
+    CONTROLLER_CHECK(!rows[0].log_fetching);
+
+    const editor::OutputLifecycleRequest fetch{
+        doc::NodeId{1U}, 2U, "127.0.0.1:47842",
+        editor::OutputLifecycleAction::FetchLog, false};
+    {
+        const std::lock_guard lock{gate_mutex};
+        gate_open = false;
+    }
+    controller.submit(fetch);
+    rows = controller.snapshot();
+    CONTROLLER_CHECK(rows[0].log_fetching);
+    CONTROLLER_CHECK(rows[0].log != nullptr);
+    CONTROLLER_CHECK(rows[0].log->status ==
+                     editor::OutputNodeLog::Status::Fetching);
+    // A second request while one is on its way is the same request.
+    controller.submit(fetch);
+    controller.submit(fetch);
+    // Asking for the log changes nothing about the process.
+    CONTROLLER_CHECK(rows[0].status ==
+                     editor::OutputMonitorState::Node::Status::Faulted);
+    {
+        const std::lock_guard lock{gate_mutex};
+        gate_open = true;
+    }
+    gate_changed.notify_all();
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(log_calls.load() == 1U);
+    CONTROLLER_CHECK(asked_index.load() == 2U);
+    CONTROLLER_CHECK(asked_lines.load() == 37U);
+
+    rows = controller.snapshot();
+    CONTROLLER_CHECK(!rows[0].log_fetching);
+    CONTROLLER_CHECK(rows[0].log != nullptr);
+    const editor::OutputNodeLog& log = *rows[0].log;
+    CONTROLLER_CHECK(log.status == editor::OutputNodeLog::Status::Available);
+    CONTROLLER_CHECK(log.lines.size() == 2U);
+    CONTROLLER_CHECK(log.lines[1] == "current run: reconnecting");
+    CONTROLLER_CHECK(log.previous_run_lines == 1U);
+    CONTROLLER_CHECK(log.dropped_bytes == 512U);
+    CONTROLLER_CHECK(log.fetched_at.size() == 8U);
+    const std::string summary = editor::output_node_log_summary(rows[0]);
+    CONTROLLER_CHECK(summary.find("2 lines") != std::string::npos);
+    CONTROLLER_CHECK(summary.find("1 from the previous run") !=
+                     std::string::npos);
+    CONTROLLER_CHECK(summary.find("512 bytes dropped") != std::string::npos);
+
+    // A failed read replaces the old lines with the reason, rather than
+    // leaving stale lines that read as current.
+    fail_next.store(true);
+    controller.submit(fetch);
+    CONTROLLER_CHECK(wait_idle(controller));
+    rows = controller.snapshot();
+    CONTROLLER_CHECK(rows[0].log->status ==
+                     editor::OutputNodeLog::Status::Failed);
+    CONTROLLER_CHECK(rows[0].log->lines.empty());
+    CONTROLLER_CHECK(editor::output_node_log_summary(rows[0]).starts_with(
+        "Could not read the log"));
+
+    // A request naming another endpoint is not this row's.
+    controller.submit(editor::OutputLifecycleRequest{
+        doc::NodeId{1U}, 2U, "127.0.0.1:9",
+        editor::OutputLifecycleAction::FetchLog, false});
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(log_calls.load() == 2U);
+}
+
 int main() {
     const std::vector<std::pair<const char*, void (*)()>> tests{
         {"sync is nonblocking", &sync_never_waits_for_a_dead_or_slow_listener},
+        {"node logs are fetched on request beside lifecycle work",
+         &node_logs_are_fetched_on_request_beside_lifecycle_work},
         {"sync status merges the machine and runtime halves",
          &sync_status_merges_the_machine_and_runtime_halves},
         {"sync status for another node identity is discarded",

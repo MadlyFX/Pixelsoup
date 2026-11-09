@@ -79,6 +79,23 @@ struct EditorShell::Frame final {
   void navigate_stage_camera(const ViewportFrame &viewport, bool pointer_free,
                              bool left_available);
   void add_simple(AddKind kind);
+  // Shows a native dialog off the frame thread (Impl::dialog); `apply` runs
+  // on the frame that sees the operator's choice, and not at all on cancel.
+  // `show` blocks its own thread until the operator answers.
+  void open_file_dialog(std::function<std::optional<std::string>()> show,
+                        std::function<void(Frame &, std::string)> apply);
+  // A yes/no question, shown the same way; `yes` runs only on yes.
+  void open_confirm_dialog(std::string title, std::string message,
+                           std::function<void(Frame &)> yes);
+  // Runs `then` now for a clean project, and otherwise only once the operator
+  // agrees to discard the unsaved changes for `action`.
+  void confirm_discard(std::string_view action,
+                       std::function<void(Frame &)> then);
+  // Saves to the project's own file, or asks for one when it has none.
+  void save_project();
+  void adopt_dialog();
+  void apply_inspector_file(const FilePickerRequest &request,
+                            std::string path);
   void handle_library_add(LibraryAddAction action);
   void import_files(std::span<const std::string> sources, doc::NodeId folder);
   void import_asset(LibraryImportAction action, doc::NodeId folder);

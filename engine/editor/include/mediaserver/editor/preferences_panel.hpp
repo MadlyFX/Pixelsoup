@@ -73,6 +73,10 @@ struct PreferencesFrame final {
   // Clears the cache currently in use on this machine. This is intentionally
   // independent of Save so an unsaved draft can never redirect a deletion.
   bool clear_proxy_cache{};
+  // The operator pressed Browse for the proxy cache folder; holds the folder
+  // to start in. The caller shows the picker off the frame thread and hands
+  // the answer back through set_proxy_cache_directory().
+  std::optional<std::string> browse_proxy_cache;
 };
 
 // The Preferences dialog: modal, editor-local, and authoring nothing.
@@ -93,6 +97,8 @@ public:
   [[nodiscard]] const EditorPreferences &draft() const noexcept {
     return draft_;
   }
+  // A folder picked for the draft; ignored once the dialog has closed.
+  void set_proxy_cache_directory(std::string directory);
 
   // `bounds` is the whole window. Returns a save request when the operator
   // pressed Save; closing is reported through is_open().

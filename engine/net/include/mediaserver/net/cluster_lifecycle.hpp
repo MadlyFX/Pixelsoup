@@ -371,6 +371,57 @@ public:
     snapshot() noexcept = 0;
 };
 
+// The render process's recent diagnostic log, read from disk by the same
+// machine-local agent as lifecycle control. The agent outlives its render
+// child, so the log stays readable while the node is hung, out of lockstep,
+// reconnecting or stopped, and after a crash it still holds the previous
+// run's last lines. Lines are oldest first; the first previous_run_lines of
+// them belong to the run before the current one.
+inline constexpr std::size_t max_cluster_node_log_message_bytes =
+    128U * 1024U;
+inline constexpr std::size_t max_cluster_node_log_lines = 1'000U;
+// Longer lines are cut on a UTF-8 boundary and the reply marked truncated.
+inline constexpr std::size_t max_cluster_node_log_line_bytes = 400U;
+// The sum of all line bytes; the oldest lines go first when it is exceeded.
+inline constexpr std::size_t max_cluster_node_log_text_bytes = 96U * 1024U;
+inline constexpr std::size_t max_cluster_node_log_detail_bytes = 160U;
+
+enum class ClusterNodeLogAvailability : core::u8 {
+    Available,
+    // The agent has no log provider configured.
+    Unavailable,
+    Failed,
+    ConfigurationMismatch,
+};
+
+struct ClusterNodeLog final {
+    ClusterNodeLogAvailability availability{
+        ClusterNodeLogAvailability::Unavailable};
+    core::u32 node_index{};
+    // How many of the leading lines came from the previous run's file.
+    core::u32 previous_run_lines{};
+    // Bytes the render process could not queue for disk, as its own log last
+    // recorded them. Nonzero means the log on disk has gaps.
+    core::u64 dropped_bytes{};
+    // Lines were cut or the oldest dropped to fit the reply.
+    bool truncated{};
+    std::string detail;
+    std::vector<std::string> lines;
+
+    bool operator==(const ClusterNodeLog&) const = default;
+};
+
+// Calls are serialized by ClusterLifecycleService. tail() may read files but
+// must bound its I/O (the agent reads at most a fixed window from the end of
+// each file). Lines may hold any bytes; the service replaces control
+// characters and invalid UTF-8 before they cross the wire.
+class ClusterNodeLogProvider {
+public:
+    virtual ~ClusterNodeLogProvider() = default;
+    [[nodiscard]] virtual ClusterNodeLog tail(std::size_t max_lines) noexcept
+        = 0;
+};
+
 // Providers cache their expensive platform enumeration and publish immutable
 // samples. snapshot() is therefore a bounded pointer copy. Calls are
 // serialized by ClusterLifecycleService, and the provider must outlive it.
@@ -448,7 +499,8 @@ public:
                             ClusterMachineInfoProvider* machine_info = nullptr,
                             ClusterAssetReadinessProvider* asset_readiness =
                                 nullptr,
-                            ClusterSyncStatusProvider* sync_status = nullptr);
+                            ClusterSyncStatusProvider* sync_status = nullptr,
+                            ClusterNodeLogProvider* node_log = nullptr);
     ClusterLifecycleService(const ClusterLifecycleService&) = delete;
     ClusterLifecycleService& operator=(const ClusterLifecycleService&) = delete;
     ClusterLifecycleService(ClusterLifecycleService&&) = delete;
@@ -553,6 +605,14 @@ request_cluster_machine_info(const asio::ip::tcp::endpoint& endpoint,
 request_cluster_sync_status(const asio::ip::tcp::endpoint& endpoint,
                             core::u32 node_index,
                             const ClusterLifecycleClientConfig& config);
+
+// Fetches up to max_lines (clamped to 1..max_cluster_node_log_lines) of the
+// node's recent log over its own authenticated message kind. Identity is
+// checked before disclosure: a ConfigurationMismatch reply carries no lines.
+[[nodiscard]] core::Result<ClusterNodeLog, ClusterLifecycleClientError>
+request_cluster_node_log(const asio::ip::tcp::endpoint& endpoint,
+                         core::u32 node_index, std::size_t max_lines,
+                         const ClusterLifecycleClientConfig& config);
 
 // Empty requests are valid (the selected state requires no assets). Requests
 // above max_cluster_asset_readiness_entries, duplicate sources, malformed

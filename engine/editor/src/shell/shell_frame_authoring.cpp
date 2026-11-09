@@ -4,6 +4,8 @@
 
 #include "native_dialogs.hpp"
 
+#include <thread>
+
 namespace mediaserver::editor {
 
 void EditorShell::Frame::adopt_model_ingests() {
@@ -661,33 +663,47 @@ void EditorShell::Frame::handle_library_add(LibraryAddAction action) {
     add_simple(AddKind::Camera);
     return;
   case LibraryAddAction::Media: {
-    const char *const filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
-                                "*.avi", "*.mxf", "*.m4v", "*.mpg", "*.mpeg", "*.wmv",
-                                "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga", "*.exr", "*.hdr"};
-    const char *const path = tinyfd_openFileDialog(
-        "Add Media", "", static_cast<int>(std::size(filters)), filters, "Video and images", 0);
-    if (path != nullptr) {
-      const std::string source{path};
-      try {
-        impl.pending_media_probes.push_back(Impl::PendingMediaProbe{
-            Impl::PendingMediaAction::Add, source, {}, false,
-            impl.next_edit_gesture++, authored_stage.id,
-            project.generation});
-      } catch (...) {
-        result.adds.push_back(AddIntent{
-            AddKind::Media, source, 1U, impl.next_edit_gesture++,
-            16.0F / 9.0F, {}, authored_stage.id});
-      }
-    }
+    open_file_dialog(
+        []() -> std::optional<std::string> {
+          const char *const filters[]{
+              "*.mp4", "*.mov", "*.mkv", "*.webm", "*.avi", "*.mxf",
+              "*.m4v", "*.mpg", "*.mpeg", "*.wmv", "*.png", "*.jpg",
+              "*.jpeg", "*.bmp", "*.tga", "*.exr", "*.hdr"};
+          const char *const path = tinyfd_openFileDialog(
+              "Add Media", "", static_cast<int>(std::size(filters)), filters,
+              "Video and images", 0);
+          return path != nullptr ? std::optional<std::string>{path}
+                                 : std::nullopt;
+        },
+        [](Frame &frame, std::string source) {
+          try {
+            frame.impl.pending_media_probes.push_back(Impl::PendingMediaProbe{
+                Impl::PendingMediaAction::Add, source, {}, false,
+                frame.impl.next_edit_gesture++, frame.authored_stage.id,
+                frame.project.generation});
+          } catch (...) {
+            frame.result.adds.push_back(AddIntent{
+                AddKind::Media, source, 1U, frame.impl.next_edit_gesture++,
+                16.0F / 9.0F, {}, frame.authored_stage.id});
+          }
+        });
     return;
   }
   case LibraryAddAction::Model: {
-    const char *const filters[]{"*.gltf", "*.glb", "*.obj", "*.msmodel"};
-    const char *const path = tinyfd_openFileDialog(
-        "Add 3D Model", "", 4, filters, "3D models (glTF, OBJ, model package)", 0);
-    if (path != nullptr) {
-      enqueue_model(std::string{path}, authored_stage.id, {}, {});
-    }
+    open_file_dialog(
+        []() -> std::optional<std::string> {
+          const char *const filters[]{"*.gltf", "*.glb", "*.obj",
+                                      "*.msmodel"};
+          const char *const path = tinyfd_openFileDialog(
+              "Add 3D Model", "", 4, filters,
+              "3D models (glTF, OBJ, model package)", 0);
+          return path != nullptr ? std::optional<std::string>{path}
+                                 : std::nullopt;
+        },
+        [](Frame &frame, std::string source) {
+          frame.enqueue_model(std::move(source), frame.authored_stage.id, {},
+                              {});
+        });
     return;
   }
   }
@@ -745,27 +761,110 @@ void EditorShell::Frame::import_asset(LibraryImportAction action,
                                       doc::NodeId folder) {
   const bool media = action == LibraryImportAction::Media;
   const bool particles = action == LibraryImportAction::ParticleEffect;
-  const char *const media_filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
-                                    "*.avi", "*.mxf", "*.m4v", "*.mpg", "*.mpeg", "*.wmv",
-                                    "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga", "*.exr", "*.hdr"};
-  const char *const model_filters[]{"*.gltf", "*.glb", "*.obj", "*.msmodel"};
-  const char *const particle_filters[]{"*.ajfx"};
-  const char *const path = tinyfd_openFileDialog(
-      media ? "Import Media Asset"
-      : particles ? "Import Particle Effect Asset"
-                  : "Import 3D Model Asset",
-      "",
-      media ? static_cast<int>(std::size(media_filters)) : particles ? 1 : 4,
-      media ? media_filters : particles ? particle_filters : model_filters,
-      media ? "Video and images"
-      : particles ? "ajfx particle effects"
-                  : "3D models (glTF, OBJ)",
-      1);
-  if (path == nullptr) {
+  open_file_dialog(
+      [media, particles]() -> std::optional<std::string> {
+        const char *const media_filters[]{
+            "*.mp4", "*.mov", "*.mkv", "*.webm", "*.avi", "*.mxf",
+            "*.m4v", "*.mpg", "*.mpeg", "*.wmv", "*.png", "*.jpg",
+            "*.jpeg", "*.bmp", "*.tga", "*.exr", "*.hdr"};
+        const char *const model_filters[]{"*.gltf", "*.glb", "*.obj",
+                                          "*.msmodel"};
+        const char *const particle_filters[]{"*.ajfx"};
+        const char *const path = tinyfd_openFileDialog(
+            media       ? "Import Media Asset"
+            : particles ? "Import Particle Effect Asset"
+                        : "Import 3D Model Asset",
+            "",
+            media       ? static_cast<int>(std::size(media_filters))
+            : particles ? 1
+                        : 4,
+            media       ? media_filters
+            : particles ? particle_filters
+                        : model_filters,
+            media       ? "Video and images"
+            : particles ? "ajfx particle effects"
+                        : "3D models (glTF, OBJ)",
+            1);
+        return path != nullptr ? std::optional<std::string>{path}
+                               : std::nullopt;
+      },
+      [folder](Frame &frame, std::string chosen) {
+        const std::vector<std::string> sources =
+            selected_dialog_paths(chosen);
+        frame.import_files(sources, folder);
+      });
+}
+
+void EditorShell::Frame::open_file_dialog(
+    std::function<std::optional<std::string>()> show,
+    std::function<void(Frame &, std::string)> apply) {
+  using Dialog = AsyncDialog<Frame>;
+  const Dialog::Open opened = impl.dialog.open(
+      [show = std::move(show)]() -> std::optional<std::string> {
+        // tinyfiledialogs answers in static buffers; a dialog opened from
+        // anywhere else is never waited for.
+        const std::unique_lock dialog{native_dialog_mutex(), std::try_to_lock};
+        return dialog.owns_lock() ? show() : std::nullopt;
+      },
+      std::move(apply), project.generation);
+  if (opened == Dialog::Open::Busy) {
+    impl.ingest_message = "Another dialog is already open";
+  } else if (opened == Dialog::Open::Failed) {
+    impl.ingest_message = "Could not open the dialog";
+  }
+}
+
+void EditorShell::Frame::open_confirm_dialog(
+    std::string title, std::string message,
+    std::function<void(Frame &)> yes) {
+  open_file_dialog(
+      [title = std::move(title),
+       message = std::move(message)]() -> std::optional<std::string> {
+        return tinyfd_messageBox(title.c_str(), message.c_str(), "yesno",
+                                 "warning", 0) != 0
+                   ? std::optional<std::string>{std::string{}}
+                   : std::nullopt;
+      },
+      [yes = std::move(yes)](Frame &frame, std::string) {
+        if (yes) {
+          yes(frame);
+        }
+      });
+}
+
+void EditorShell::Frame::confirm_discard(std::string_view action,
+                                         std::function<void(Frame &)> then) {
+  if (!project.dirty) {
+    then(*this);
     return;
   }
-  const std::vector<std::string> sources = selected_dialog_paths(path);
-  import_files(sources, folder);
+  std::string message{
+      "This project has unsaved changes.\n\nContinuing will discard "};
+  message.append(action);
+  message.append(". Continue?");
+  open_confirm_dialog("Unsaved Project", std::move(message), std::move(then));
+}
+
+void EditorShell::Frame::save_project() {
+  if (!project.path.empty()) {
+    result.save_project = ProjectFileRequest{std::string{project.path}};
+    return;
+  }
+  open_file_dialog(
+      [current = std::string{project.path}] {
+        return choose_project_to_save(current);
+      },
+      [](Frame &frame, std::string path) {
+        frame.result.save_project = ProjectFileRequest{std::move(path)};
+      });
+}
+
+void EditorShell::Frame::adopt_dialog() {
+  if (impl.dialog.adopt(*this, project.generation) ==
+      AsyncDialog<Frame>::Adopt::Stale) {
+    impl.ingest_message =
+        "Another project opened while the dialog was up; nothing applied";
+  }
 }
 
 void EditorShell::Frame::instantiate_asset(
@@ -779,8 +878,13 @@ void EditorShell::Frame::instantiate_asset(
     return;
   }
   if (const auto *const media = std::get_if<assets::MediaAsset>(found)) {
-    float aspect = render::probe_media_aspect(media->source);
-    if (media->dimensions.has_value()) {
+    // The import probe already measured the frame on a worker. Opening the
+    // source here would read it on the frame thread, which for a large file
+    // on a network share stalls the Director long enough to drop render nodes
+    // from lockstep, so an unprobed asset is placed 16:9 instead.
+    float aspect = 16.0F / 9.0F;
+    if (media->dimensions.has_value() && media->dimensions->width != 0U &&
+        media->dimensions->height != 0U) {
       aspect = static_cast<float>(media->dimensions->width) /
                static_cast<float>(media->dimensions->height);
     }

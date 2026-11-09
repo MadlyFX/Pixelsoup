@@ -232,11 +232,13 @@ struct RunningService final {
         mediaserver::core::u32 node_index = 7U,
         net::ClusterMachineInfoProvider* machine_info = nullptr,
         net::ClusterAssetReadinessProvider* asset_readiness = nullptr,
-        net::ClusterSyncStatusProvider* sync_status = nullptr)
+        net::ClusterSyncStatusProvider* sync_status = nullptr,
+        net::ClusterNodeLogProvider* node_log = nullptr)
         : service(net::ClusterLifecycleServiceConfig{
                       {asio::ip::address_v4::loopback(), 0U}, node_index,
                       std::string{shared_secret}, 500ms, 500ms},
-                  host, machine_info, asset_readiness, sync_status) {
+                  host, machine_info, asset_readiness, sync_status,
+                  node_log) {
         auto started = service.start();
         LIFECYCLE_CHECK(started);
         endpoint = started.value();
@@ -1034,6 +1036,174 @@ void a_simulated_sync_sample_stays_marked_across_the_wire() {
                     net::ClusterSyncDeviceAvailability::Present);
 }
 
+class FakeNodeLogProvider final : public net::ClusterNodeLogProvider {
+public:
+    explicit FakeNodeLogProvider(net::ClusterNodeLog value)
+        : value_(std::move(value)) {}
+
+    [[nodiscard]] net::ClusterNodeLog tail(
+        std::size_t max_lines) noexcept override {
+        calls.fetch_add(1U, std::memory_order_relaxed);
+        last_max_lines.store(max_lines, std::memory_order_relaxed);
+        return value_;
+    }
+
+    std::atomic_size_t calls{};
+    std::atomic_size_t last_max_lines{};
+
+private:
+    net::ClusterNodeLog value_;
+};
+
+[[nodiscard]] net::ClusterNodeLog representative_node_log() {
+    net::ClusterNodeLog value{};
+    value.availability = net::ClusterNodeLogAvailability::Available;
+    value.node_index = 999U;
+    value.previous_run_lines = 2U;
+    value.dropped_bytes = 4'096U;
+    value.detail = "C:/Users/op/AppData/Local/MediaServer/logs/node-3.log";
+    value.lines = {"2026-11-08 12:00:00.000 === run started; pid 41",
+                   "2026-11-08 12:00:09.250 NODE 3 FELL BEHIND",
+                   "2026-11-08 12:00:10.001 === run started; pid 77",
+                   "2026-11-08 12:00:10.120 adopted 1 asset (2.7 GB)"};
+    return value;
+}
+
+void authenticated_node_log_round_trips() {
+    auto expected = representative_node_log();
+    FakeNodeLogProvider provider{expected};
+    RunningService fixture{3U, nullptr, nullptr, nullptr, &provider};
+
+    auto result =
+        net::request_cluster_node_log(fixture.endpoint, 3U, 250U,
+                                      client_config());
+    LIFECYCLE_CHECK(result);
+    expected.node_index = 3U;
+    LIFECYCLE_CHECK(result.value() == expected);
+    LIFECYCLE_CHECK(provider.calls.load() == 1U);
+    LIFECYCLE_CHECK(provider.last_max_lines.load() == 250U);
+
+    // Out-of-range line counts are clamped by the client, never sent.
+    auto clamped = net::request_cluster_node_log(fixture.endpoint, 3U, 0U,
+                                                 client_config());
+    LIFECYCLE_CHECK(clamped);
+    LIFECYCLE_CHECK(provider.last_max_lines.load() == 1U);
+    LIFECYCLE_CHECK(clamped.value().lines.size() == 1U);
+    LIFECYCLE_CHECK(clamped.value().lines.front() == expected.lines.back());
+    LIFECYCLE_CHECK(clamped.value().previous_run_lines == 0U);
+    LIFECYCLE_CHECK(clamped.value().truncated);
+    auto large = net::request_cluster_node_log(fixture.endpoint, 3U, 1'000'000U,
+                                               client_config());
+    LIFECYCLE_CHECK(large);
+    LIFECYCLE_CHECK(provider.last_max_lines.load() ==
+                    net::max_cluster_node_log_lines);
+
+    // The lifecycle commands still work beside it.
+    auto status = net::request_cluster_lifecycle(
+        fixture.endpoint, 3U, net::ClusterLifecycleCommand::Status,
+        client_config());
+    LIFECYCLE_CHECK(status);
+}
+
+void node_log_auth_and_identity_precede_disclosure() {
+    FakeNodeLogProvider provider{representative_node_log()};
+    RunningService fixture{12U, nullptr, nullptr, nullptr, &provider};
+
+    auto wrong_secret = net::request_cluster_node_log(
+        fixture.endpoint, 12U, 100U,
+        client_config("a different 32-byte shared secret value"));
+    LIFECYCLE_CHECK(!wrong_secret);
+    LIFECYCLE_CHECK(wrong_secret.error().code ==
+                    net::ClusterLifecycleClientErrorCode::AuthenticationFailed);
+
+    auto wrong_node = net::request_cluster_node_log(fixture.endpoint, 11U,
+                                                    100U, client_config());
+    LIFECYCLE_CHECK(wrong_node);
+    LIFECYCLE_CHECK(wrong_node.value().availability ==
+                    net::ClusterNodeLogAvailability::ConfigurationMismatch);
+    LIFECYCLE_CHECK(wrong_node.value().node_index == 12U);
+    LIFECYCLE_CHECK(wrong_node.value().lines.empty());
+    LIFECYCLE_CHECK(wrong_node.value().dropped_bytes == 0U);
+    LIFECYCLE_CHECK(provider.calls.load() == 0U);
+
+    RunningService without{5U};
+    auto none = net::request_cluster_node_log(without.endpoint, 5U, 100U,
+                                              client_config());
+    LIFECYCLE_CHECK(none);
+    LIFECYCLE_CHECK(none.value().availability ==
+                    net::ClusterNodeLogAvailability::Unavailable);
+    LIFECYCLE_CHECK(none.value().lines.empty());
+}
+
+void node_log_text_is_sanitized_and_bounded() {
+    net::ClusterNodeLog raw{};
+    raw.availability = net::ClusterNodeLogAvailability::Available;
+    raw.previous_run_lines = 3U;
+    raw.lines.push_back("tab\there\x1b[31mred\x7f");
+    raw.lines.push_back(std::string{"bad utf8 \xff\xfe end"});
+    raw.lines.push_back("caf\xc3\xa9 ok");
+    raw.lines.push_back(std::string(net::max_cluster_node_log_line_bytes + 50U,
+                                    'L'));
+    FakeNodeLogProvider provider{raw};
+    RunningService fixture{4U, nullptr, nullptr, nullptr, &provider};
+    auto result = net::request_cluster_node_log(fixture.endpoint, 4U, 100U,
+                                                client_config());
+    LIFECYCLE_CHECK(result);
+    const auto& log = result.value();
+    LIFECYCLE_CHECK(log.lines.size() == 4U);
+    LIFECYCLE_CHECK(log.lines[0] == "tab here?[31mred?");
+    LIFECYCLE_CHECK(log.lines[1] == "bad utf8 ?? end");
+    LIFECYCLE_CHECK(log.lines[2] == "caf\xc3\xa9 ok");
+    LIFECYCLE_CHECK(log.lines[3].size() ==
+                    net::max_cluster_node_log_line_bytes);
+    LIFECYCLE_CHECK(log.truncated);
+    LIFECYCLE_CHECK(log.previous_run_lines == 3U);
+
+    // A reply over the byte budget loses its oldest lines first, and the
+    // previous-run count follows them out.
+    net::ClusterNodeLog many{};
+    many.availability = net::ClusterNodeLogAvailability::Available;
+    const std::size_t count = net::max_cluster_node_log_lines;
+    many.previous_run_lines = static_cast<core::u32>(count - 100U);
+    for (std::size_t index = 0U; index < count; ++index) {
+        std::string line = std::to_string(index) + " ";
+        line.resize(net::max_cluster_node_log_line_bytes, 'm');
+        many.lines.push_back(std::move(line));
+    }
+    FakeNodeLogProvider many_provider{many};
+    RunningService many_fixture{6U, nullptr, nullptr, nullptr,
+                                &many_provider};
+    auto bounded = net::request_cluster_node_log(
+        many_fixture.endpoint, 6U, count, client_config());
+    LIFECYCLE_CHECK(bounded);
+    const std::size_t fit = net::max_cluster_node_log_text_bytes /
+                            net::max_cluster_node_log_line_bytes;
+    LIFECYCLE_CHECK(bounded.value().lines.size() == fit);
+    LIFECYCLE_CHECK(bounded.value().truncated);
+    LIFECYCLE_CHECK(bounded.value().lines.back().starts_with(
+        std::to_string(count - 1U) + " "));
+    LIFECYCLE_CHECK(bounded.value().lines.front().starts_with(
+        std::to_string(count - fit) + " "));
+    LIFECYCLE_CHECK(bounded.value().previous_run_lines ==
+                    fit - 100U);
+
+    // A non-available reply discloses nothing, whatever the provider said.
+    auto failing = representative_node_log();
+    failing.availability = net::ClusterNodeLogAvailability::Failed;
+    failing.detail = "disk\nunreadable";
+    FakeNodeLogProvider failing_provider{failing};
+    RunningService failing_fixture{7U, nullptr, nullptr, nullptr,
+                                   &failing_provider};
+    auto failed = net::request_cluster_node_log(failing_fixture.endpoint, 7U,
+                                                100U, client_config());
+    LIFECYCLE_CHECK(failed);
+    LIFECYCLE_CHECK(failed.value().availability ==
+                    net::ClusterNodeLogAvailability::Failed);
+    LIFECYCLE_CHECK(failed.value().lines.empty());
+    LIFECYCLE_CHECK(failed.value().dropped_bytes == 0U);
+    LIFECYCLE_CHECK(failed.value().detail == "disk?unreadable");
+}
+
 void service_start_stop_state_is_bounded_and_truthful() {
     FakeProcessHost host;
     net::ClusterLifecycleService invalid{
@@ -1121,6 +1291,12 @@ int main() {
          &sync_status_is_bounded_and_invalid_fields_fail_closed},
         {"a simulated sync sample stays marked across the wire",
          &a_simulated_sync_sample_stays_marked_across_the_wire},
+        {"authenticated node log round trip",
+         &authenticated_node_log_round_trips},
+        {"node log auth and identity precede disclosure",
+         &node_log_auth_and_identity_precede_disclosure},
+        {"node log text is sanitized and bounded",
+         &node_log_text_is_sanitized_and_bounded},
         {"bounded service lifecycle",
          &service_start_stop_state_is_bounded_and_truthful},
         {"response window covers process transition",

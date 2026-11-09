@@ -18,12 +18,15 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace mediaserver::rhi::detail {
 namespace {
@@ -469,6 +472,16 @@ struct D3d12Device final {
     // Default-heap textures and geometry buffers still held. Worker threads
     // create and release resources too, so this is an atomic tally.
     std::atomic<core::u64> committed_bytes{};
+    // Device Removed Extended Data was switched on before this device was
+    // made, and whether its report has already been written.
+    bool breadcrumbs{};
+    mutable std::atomic<bool> breadcrumbs_reported{};
+    // Textures released while a recording or unfinished GPU work still uses
+    // them. Destroying one then would free memory and descriptors the GPU is
+    // about to read - a device hang - so they wait here until their fence
+    // completes. Worker threads release textures too, hence the lock.
+    std::mutex retired_mutex;
+    std::vector<D3d12Texture*> retired_textures;
 };
 
 struct D3d12Swapchain final {
@@ -618,8 +631,26 @@ void finish_texture_states(CommandContext& commands, bool commit) noexcept {
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
             | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
             | D3D12_RESOURCE_STATE_COPY_SOURCE;
-        return target != D3D12_RESOURCE_STATE_COMMON
-            && (target & ~readable) == 0;
+        if (target == D3D12_RESOURCE_STATE_COMMON
+            || (target & ~readable) != 0) {
+            return false;
+        }
+        // No barrier, but the read is still recorded against this list, so
+        // the view's lifetime follows the submission like any other texture:
+        // safe_to_release and deferred release depend on it.
+        if (texture.recording_owner != nullptr &&
+            texture.recording_owner != &commands) {
+            return false;
+        }
+        if (texture.recording_owner == nullptr) {
+            if (commands.texture_state_count >= texture_state_capacity) {
+                return false;
+            }
+            commands.texture_states[commands.texture_state_count++] =
+                TextureStateMutation{&texture, texture.state};
+            texture.recording_owner = &commands;
+        }
+        return true;
     }
     if (texture.recording_owner != nullptr &&
         texture.recording_owner != &commands) {
@@ -1234,16 +1265,52 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
         config.frames_in_flight > max_command_contexts) {
         return Result::failure(RhiError::InvalidConfiguration);
     }
-    if (config.debug) {
+    bool debug_layer = config.debug;
+    {
+        // Diagnosis override for a shipping build: MEDIASERVER_GPU_DEBUG=1
+        // turns the runtime's validation on so lifetime and state errors are
+        // reported to an attached debugger.
+        char flag[8]{};
+        if (GetEnvironmentVariableA("MEDIASERVER_GPU_DEBUG", flag,
+                                    static_cast<DWORD>(sizeof(flag))) > 0U &&
+            flag[0] == '1') {
+            debug_layer = true;
+        }
+    }
+    if (debug_layer) {
         ComPtr<ID3D12Debug> debug;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
             debug->EnableDebugLayer();
+        }
+    }
+    // Opt-in GPU hang diagnosis. With MEDIASERVER_GPU_BREADCRUMBS=1 the
+    // runtime records which command lists and operations reached the GPU,
+    // so a device lost to a hang or fault names the work that caused it.
+    bool breadcrumbs = false;
+    {
+        char flag[8]{};
+        if (GetEnvironmentVariableA("MEDIASERVER_GPU_BREADCRUMBS", flag,
+                                    static_cast<DWORD>(sizeof(flag))) > 0U &&
+            flag[0] == '1') {
+            ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
+                dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                // Keeps the pass-name markers' strings with the breadcrumbs.
+                ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> named;
+                if (SUCCEEDED(dred.As(&named))) {
+                    named->SetBreadcrumbContextEnablement(
+                        D3D12_DRED_ENABLEMENT_FORCED_ON);
+                }
+                breadcrumbs = true;
+            }
         }
     }
     auto* state = new (std::nothrow) D3d12Device{};
     if (state == nullptr) {
         return Result::failure(RhiError::AllocationFailed);
     }
+    state->breadcrumbs = breadcrumbs;
     const UINT factory_flags = config.debug ? DXGI_CREATE_FACTORY_DEBUG : 0U;
     if (FAILED(CreateDXGIFactory2(factory_flags, IID_PPV_ARGS(&state->factory)))) {
         if (factory_flags == 0U ||
@@ -1437,12 +1504,15 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
         state, state->device.Get(), capabilities});
 }
 
+void d3d12_sweep_retired_textures(D3d12Device* state, bool wait) noexcept;
+
 void destroy_d3d12_device(void* value) noexcept {
     auto* state = as_device(value);
     if (state == nullptr) {
         return;
     }
     d3d12_wait_idle(state);
+    d3d12_sweep_retired_textures(state, true);
     if (state->timestamp_readback && state->timestamp_mapped != nullptr) {
         state->timestamp_readback->Unmap(0U, nullptr);
         state->timestamp_mapped = nullptr;
@@ -1495,10 +1565,163 @@ core::u64 d3d12_committed_bytes(void* value) noexcept {
         : state->committed_bytes.load(std::memory_order_relaxed);
 }
 
+namespace {
+
+[[nodiscard]] const char* breadcrumb_op_name(D3D12_AUTO_BREADCRUMB_OP op) noexcept {
+    switch (op) {
+    case D3D12_AUTO_BREADCRUMB_OP_SETMARKER: return "SetMarker";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT: return "BeginEvent";
+    case D3D12_AUTO_BREADCRUMB_OP_ENDEVENT: return "EndEvent";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED: return "DrawInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED: return "DrawIndexedInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT: return "ExecuteIndirect";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCH: return "Dispatch";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION: return "CopyBufferRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION: return "CopyTextureRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYRESOURCE: return "CopyResource";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYTILES: return "CopyTiles";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE: return "ResolveSubresource";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW: return "ClearRenderTargetView";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW: return "ClearUnorderedAccessView";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW: return "ClearDepthStencilView";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER: return "ResourceBarrier";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEBUNDLE: return "ExecuteBundle";
+    case D3D12_AUTO_BREADCRUMB_OP_PRESENT: return "Present";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOLVEQUERYDATA: return "ResolveQueryData";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGINSUBMISSION: return "BeginSubmission";
+    case D3D12_AUTO_BREADCRUMB_OP_ENDSUBMISSION: return "EndSubmission";
+    default: return "Other";
+    }
+}
+
+// Writes the DRED report for a lost device once. The whole report is built
+// first and written in one go - to stderr, which the process log keeps, and
+// to logs/gpu-breadcrumbs.txt - so a thread failing on the lost device while
+// this runs cannot cut it short. Only ever called after loss.
+void report_breadcrumbs(const D3d12Device& state) noexcept {
+    if (!state.breadcrumbs ||
+        state.breadcrumbs_reported.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    try {
+        std::string report;
+        const auto line = [&report](const char* format, auto... values) {
+            char text[256]{};
+            std::snprintf(text, sizeof(text), format, values...);
+            report.append("gpu-breadcrumbs: ");
+            report.append(text);
+            report.push_back('\n');
+        };
+        ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs{};
+        if (FAILED(state.device.As(&dred)) ||
+            FAILED(dred->GetAutoBreadcrumbsOutput1(&crumbs))) {
+            line("unavailable on this device (HRESULT 0x%08lx)",
+                 static_cast<unsigned long>(state.device->GetDeviceRemovedReason()));
+        } else {
+            int lists = 0;
+            for (const D3D12_AUTO_BREADCRUMB_NODE1* node = crumbs.pHeadAutoBreadcrumbNode;
+                 node != nullptr && lists < 64; node = node->pNext, ++lists) {
+                const UINT done = node->pLastBreadcrumbValue != nullptr
+                    ? *node->pLastBreadcrumbValue : 0U;
+                if (done >= node->BreadcrumbCount) {
+                    continue;  // this list finished on the GPU
+                }
+                // The pass a marker names runs until the next marker.
+                const auto pass_at = [node](UINT op, char (&out)[48]) {
+                    out[0] = 0;
+                    UINT best = 0U;
+                    bool found = false;
+                    for (UINT c = 0U; c < node->BreadcrumbContextsCount; ++c) {
+                        const auto& entry = node->pBreadcrumbContexts[c];
+                        if (entry.BreadcrumbIndex <= op &&
+                            (!found || entry.BreadcrumbIndex >= best) &&
+                            entry.pContextString != nullptr) {
+                            best = entry.BreadcrumbIndex;
+                            found = true;
+                            std::size_t i = 0U;
+                            for (; i + 1U < sizeof(out) && entry.pContextString[i] != 0; ++i) {
+                                out[i] = static_cast<char>(entry.pContextString[i]);
+                            }
+                            out[i] = 0;
+                        }
+                    }
+                };
+                char hung_pass[48]{};
+                pass_at(done, hung_pass);
+                if (hung_pass[0] == 0) {
+                    // Decode the nearest run of markers before `done`.
+                    UINT end = std::min(done, node->BreadcrumbCount);
+                    while (end > 0U && node->pCommandHistory[end - 1U] !=
+                                           D3D12_AUTO_BREADCRUMB_OP_SETMARKER) {
+                        --end;
+                    }
+                    UINT begin = end;
+                    while (begin > 0U && node->pCommandHistory[begin - 1U] ==
+                                             D3D12_AUTO_BREADCRUMB_OP_SETMARKER) {
+                        --begin;
+                    }
+                    const UINT run = end - begin;
+                    if (run > 0U && run <= core::render_pass_count) {
+                        const std::string_view name = core::render_pass_names[run - 1U];
+                        const std::size_t n = std::min(name.size(), sizeof(hung_pass) - 1U);
+                        std::memcpy(hung_pass, name.data(), n);
+                        hung_pass[n] = 0;
+                    }
+                }
+                line("unfinished command list: %u of %u operations completed; "
+                     "stopped in pass '%s'",
+                     done, node->BreadcrumbCount,
+                     hung_pass[0] != 0 ? hung_pass : "(before any named pass)");
+                const UINT first = done > 12U ? done - 12U : 0U;
+                const UINT last = std::min(node->BreadcrumbCount, done + 6U);
+                for (UINT index = first; index < last; ++index) {
+                    char pass[48]{};
+                    pass_at(index, pass);
+                    line("  %s[%u] %s  (%s)", index == done ? ">>" : "  ", index,
+                         breadcrumb_op_name(node->pCommandHistory[index]), pass);
+                }
+            }
+        }
+        ComPtr<ID3D12DeviceRemovedExtendedData> faults;
+        D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
+        if (SUCCEEDED(state.device.As(&faults)) &&
+            SUCCEEDED(faults->GetPageFaultAllocationOutput(&fault))) {
+            line("page fault GPU VA 0x%llx (0 = none reported)",
+                 static_cast<unsigned long long>(fault.PageFaultVA));
+            int listed = 0;
+            for (const D3D12_DRED_ALLOCATION_NODE* node =
+                     fault.pHeadRecentFreedAllocationNode;
+                 node != nullptr && listed < 16; node = node->pNext, ++listed) {
+                line("  recently freed allocation type %d '%s'",
+                     static_cast<int>(node->AllocationType),
+                     node->ObjectNameA ? node->ObjectNameA : "?");
+            }
+        }
+        std::fwrite(report.data(), 1U, report.size(), stderr);
+        std::fflush(stderr);
+        char root[MAX_PATH]{};
+        if (GetEnvironmentVariableA("LOCALAPPDATA", root, MAX_PATH) > 0U) {
+            const std::string path =
+                std::string{root} + "\\MediaServer\\logs\\gpu-breadcrumbs.txt";
+            std::FILE* file = nullptr;
+            if (fopen_s(&file, path.c_str(), "ab") == 0 && file != nullptr) {
+                std::fwrite(report.data(), 1U, report.size(), file);
+                std::fclose(file);
+            }
+        }
+    } catch (...) {
+    }
+}
+} // namespace
+
 std::string_view d3d12_lost_reason(void* value) noexcept {
     const auto* state = as_device(value);
     if (state == nullptr || !state->device) {
         return {};
+    }
+    if (state->device->GetDeviceRemovedReason() != S_OK) {
+        report_breadcrumbs(*state);
     }
     switch (state->device->GetDeviceRemovedReason()) {
     case S_OK: return {};
@@ -1962,9 +2185,9 @@ bool d3d12_texture_safe_to_release(void* device_value, void* value) noexcept {
          (state->fence && state->fence->GetCompletedValue() >= texture->last_submission));
 }
 
-void d3d12_release_texture(void* device_value, void* value) noexcept {
-    auto* state = as_device(device_value);
-    auto* texture = as_texture(value);
+namespace {
+
+void destroy_texture_now(D3d12Device* state, D3d12Texture* texture) noexcept {
     if (state != nullptr && texture != nullptr) {
         state->rtvs.release(texture->rtv);
         state->dsvs.release(texture->dsv);
@@ -1974,6 +2197,58 @@ void d3d12_release_texture(void* device_value, void* value) noexcept {
                                          std::memory_order_relaxed);
     }
     delete texture;
+}
+
+} // namespace
+
+// Frees every retired texture whose last use has finished on the GPU. Cheap
+// when nothing is retired; called after each submission and at teardown.
+void d3d12_sweep_retired_textures(D3d12Device* state, bool wait) noexcept {
+    if (state == nullptr) {
+        return;
+    }
+    std::vector<D3d12Texture*> done;
+    {
+        const std::lock_guard lock{state->retired_mutex};
+        if (state->retired_textures.empty()) {
+            return;
+        }
+        auto keep = state->retired_textures.begin();
+        for (D3d12Texture* texture : state->retired_textures) {
+            if (wait || d3d12_texture_safe_to_release(state, texture)) {
+                try {
+                    done.push_back(texture);
+                    continue;
+                } catch (...) {
+                }
+            }
+            *keep++ = texture;
+        }
+        state->retired_textures.erase(keep, state->retired_textures.end());
+    }
+    for (D3d12Texture* texture : done) {
+        destroy_texture_now(state, texture);
+    }
+}
+
+void d3d12_release_texture(void* device_value, void* value) noexcept {
+    auto* state = as_device(device_value);
+    auto* texture = as_texture(value);
+    if (state != nullptr && texture != nullptr &&
+        !d3d12_texture_safe_to_release(state, texture)) {
+        // Still referenced by a recording or by work the GPU has not
+        // finished: destroy it once that work retires instead of now.
+        try {
+            const std::lock_guard lock{state->retired_mutex};
+            state->retired_textures.push_back(texture);
+            return;
+        } catch (...) {
+            // No room to defer: wait for the GPU rather than free memory it
+            // may still read.
+            d3d12_wait_idle(state);
+        }
+    }
+    destroy_texture_now(state, texture);
 }
 
 core::Result<D3d12CreatedResource, RhiError> d3d12_create_storage_buffer(
@@ -2251,7 +2526,14 @@ core::Result<void*, RhiError> d3d12_create_pipeline(
         parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         parameter.Descriptor.ShaderRegister = index;
         parameter.Descriptor.RegisterSpace = 0U;
-        parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC;
+        // Storage buffers (vertices, indices, instances, effect tables) are
+        // rewritten by uploads between submissions while an earlier frame can
+        // still be executing. DATA_STATIC promised the driver they never change
+        // until every list using them retires, which the debug layer reports
+        // (#1002) and which let the GPU read torn scene data when clips were
+        // added or removed. Static only while the reading draws execute is the
+        // promise this renderer actually keeps.
+        parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
         parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     }
     if (vertex.uniform_buffer_count > 0U) {
@@ -2300,7 +2582,7 @@ core::Result<void*, RhiError> d3d12_create_pipeline(
         parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         parameter.Descriptor.ShaderRegister = texture_count + index;
         parameter.Descriptor.RegisterSpace = 2U;
-        parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC;
+        parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
         parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     }
     if (fragment.uniform_buffer_count > 0U) {
@@ -2460,7 +2742,7 @@ core::Result<void*, RhiError> d3d12_create_compute_pipeline(
         parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         parameter.Descriptor.ShaderRegister = compute.sampler_count + index;
         parameter.Descriptor.RegisterSpace = 0U;
-        parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC;
+        parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
         parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
     if (compute.uniform_buffer_count > 0U) {
@@ -3834,8 +4116,13 @@ core::Result<void*, RhiError> d3d12_submit(
         commands->present_ns = static_cast<core::u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - present_begin).count());
     }
-    if (FAILED(state->graphics_queue->Signal(
-            state->fence.Get(), commands->fence_value))) {
+    const bool signalled = SUCCEEDED(state->graphics_queue->Signal(
+        state->fence.Get(), commands->fence_value));
+    if ((present_failed || !signalled) &&
+        state->device->GetDeviceRemovedReason() != S_OK) {
+        report_breadcrumbs(*state);
+    }
+    if (!signalled) {
         commands->recording = false;
         commands->quarantined = true;
         commands->pending_swapchain = nullptr;
@@ -3855,6 +4142,9 @@ core::Result<void*, RhiError> d3d12_submit(
         return Result::failure(RhiError::BackendFailure);
     }
     commands->ticket_owned = true;
+    // This submission stamped its textures; any retired one whose work has
+    // now finished can go.
+    d3d12_sweep_retired_textures(state, false);
     return Result::success(commands);
 }
 
@@ -3910,6 +4200,23 @@ core::u64 d3d12_work_gpu_nanoseconds(void* value, void* work) noexcept {
 core::u32 d3d12_begin_gpu_pass(void* value, core::RenderPass pass) noexcept {
     auto* commands = as_commands(value);
     if (!commands || !commands->recording || pass >= core::RenderPass::Count) return 0U;
+    if (commands->owner->breadcrumbs) {
+        // A named breadcrumb, so a GPU hang report says which pass hung.
+        // PIX's unicode marker encoding (metadata 0) is what DRED keeps.
+        const std::string_view name =
+            core::render_pass_names[static_cast<std::size_t>(pass)];
+        std::array<wchar_t, 48U> wide{};
+        const std::size_t count = std::min(name.size(), wide.size() - 1U);
+        for (std::size_t index = 0U; index < count; ++index) {
+            wide[index] = static_cast<wchar_t>(name[index]);
+        }
+        // Not every runtime keeps marker strings, so the pass is also
+        // encoded as a run of (index + 1) markers the report can count.
+        for (std::size_t run = 0U; run <= static_cast<std::size_t>(pass); ++run) {
+            commands->list->SetMarker(0U, wide.data(),
+                static_cast<UINT>((count + 1U) * sizeof(wchar_t)));
+        }
+    }
     if (commands->timed_passes == max_timed_passes) { ++commands->query_overflows; return 0U; }
     const core::u32 token = ++commands->timed_passes;
     commands->pass_categories[token - 1U] = pass;

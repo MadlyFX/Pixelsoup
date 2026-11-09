@@ -50,12 +50,7 @@ void EditorShell::Frame::finish() {
   }
   if (global_edit_shortcut_allowed && !result.save_project.has_value() &&
       ui.key_pressed(gui::Key::Save)) {
-    if (!project.path.empty()) {
-      result.save_project = ProjectFileRequest{std::string{project.path}};
-    } else if (auto path = choose_project_to_save(project.path);
-               path.has_value()) {
-      result.save_project = ProjectFileRequest{std::move(*path)};
-    }
+    save_project();
   }
   if (global_edit_shortcut_allowed && !delete_consumed &&
       ui.key_pressed(gui::Key::Delete)) {
@@ -235,6 +230,20 @@ void EditorShell::Frame::finish() {
     result.save_preferences = preferences_frame.save;
     result.render_node_password = preferences_frame.render_node_password;
     result.clear_proxy_cache = preferences_frame.clear_proxy_cache;
+    if (preferences_frame.browse_proxy_cache.has_value()) {
+      open_file_dialog(
+          [start = *preferences_frame.browse_proxy_cache]()
+              -> std::optional<std::string> {
+            const char *const selected = tinyfd_selectFolderDialog(
+                "Select Proxy Cache Folder", start.c_str());
+            return selected != nullptr ? std::optional<std::string>{selected}
+                                       : std::nullopt;
+          },
+          [](Frame &frame, std::string folder) {
+            frame.impl.preferences_panel.set_proxy_cache_directory(
+                std::move(folder));
+          });
+    }
     if (!impl.preferences_panel.is_open()) {
       // A focused field must not keep the keyboard once the card is gone.
       ui.clear_focus();

@@ -27,6 +27,10 @@
     netsh advfirewall firewall add rule name="Media Server Discovery" `
       dir=in action=allow protocol=UDP localport=47839
 
+  The Director's console lines (status intervals, session and lockstep
+  events, errors) are also written to director.log in -LogDir, so they
+  survive this console. Each start moves the previous run to director.1.log.
+
   Close the editor window to stop, or press Ctrl+C in this console.
 
 .PARAMETER Build
@@ -52,6 +56,10 @@
   Director write-ahead log. Default is a per-user file, not a temp file, so
   recovery survives a reboot.
 
+.PARAMETER LogDir
+  Folder for the Director's rotating log. Default
+  %LOCALAPPDATA%\MediaServer\logs, the executable's own default.
+
 .PARAMETER DryRun
   Print the exact command line and exit without starting anything.
 #>
@@ -68,6 +76,7 @@ param(
     [string]$ShowId = '0000000000000001000000000000000B',
     [string]$Epoch = '0000000000000003000000000000000C',
     [int]$StatusInterval = 120,
+    [string]$LogDir = '',
     [switch]$DryRun
 )
 
@@ -105,12 +114,18 @@ $argv = @(
 if (-not [string]::IsNullOrEmpty($Password)) {
     $argv += "--lifecycle-password=$Password"
 }
+if ([string]::IsNullOrWhiteSpace($LogDir)) {
+    $LogDir = Join-Path $env:LOCALAPPDATA 'MediaServer\logs'
+} else {
+    $argv += "--log-dir=$LogDir"
+}
 
 Write-Host ''
 Write-Host 'Media Server - Director + editor' -ForegroundColor Cyan
 Write-Host "  executable   $Exe"
 Write-Host "  listening    ${ListenAddress}:$Port"
 Write-Host "  wal          $Wal"
+Write-Host "  log          $(Join-Path $LogDir 'director.log')"
 if ([string]::IsNullOrEmpty($Password)) {
     Write-Host '  password     from Preferences (Render nodes)'
 } else {

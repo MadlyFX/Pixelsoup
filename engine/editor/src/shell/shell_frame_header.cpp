@@ -58,15 +58,22 @@ void EditorShell::Frame::run_header() {
       || menu_result.action != ApplicationMenuAction::None;
   if (application_menu_blocks_pointer) ui.push_pointer_block();
   switch (menu_result.action) {
-  case ApplicationMenuAction::ImportLinkedScene: {
-    const char* filters[] = {"*.mslink"};
-    const char* path = tinyfd_openFileDialog("Import Linked Scene Manifest", "", 1, filters, "Linked scene manifest", 0);
-    if (path) {
-      result.import_linked_scene = ProjectFileRequest{path};
-      result.linked_scene_import_gesture = impl.next_edit_gesture++;
-    }
+  case ApplicationMenuAction::ImportLinkedScene:
+    open_file_dialog(
+        []() -> std::optional<std::string> {
+          const char *const filters[] = {"*.mslink"};
+          const char *const path = tinyfd_openFileDialog(
+              "Import Linked Scene Manifest", "", 1, filters,
+              "Linked scene manifest", 0);
+          return path != nullptr ? std::optional<std::string>{path}
+                                 : std::nullopt;
+        },
+        [](Frame &frame, std::string path) {
+          frame.result.import_linked_scene = ProjectFileRequest{std::move(path)};
+          frame.result.linked_scene_import_gesture =
+              frame.impl.next_edit_gesture++;
+        });
     break;
-  }
   case ApplicationMenuAction::CancelLinkedSceneImport:
     result.cancel_linked_scene_import = true;
     break;
@@ -83,39 +90,41 @@ void EditorShell::Frame::run_header() {
     break;
   }
   case ApplicationMenuAction::NewProject:
-    if (!project.dirty || confirm_discard_project_changes(
-                              "those changes and start a new project")) {
-      result.new_project = true;
-    }
+    confirm_discard("those changes and start a new project",
+                    [](Frame &frame) { frame.result.new_project = true; });
     break;
   case ApplicationMenuAction::OpenProject:
-    if (auto path = choose_project_to_open(); path.has_value()) {
-      if (!project.dirty || confirm_discard_project_changes(
-                                "those changes and open another project")) {
-        result.load_project = ProjectFileRequest{std::move(*path)};
-      }
-    }
+    // Choose first, then confirm: the question is asked about the project as
+    // it is once a file has been picked.
+    open_file_dialog([] { return choose_project_to_open(); },
+                     [](Frame &frame, std::string path) {
+                       frame.confirm_discard(
+                           "those changes and open another project",
+                           [path = std::move(path)](Frame &next) {
+                             next.result.load_project =
+                                 ProjectFileRequest{path};
+                           });
+                     });
     break;
   case ApplicationMenuAction::RecentProjects:
     break;
   case ApplicationMenuAction::OpenRecentProject:
-    if (!project.dirty || confirm_discard_project_changes(
-                              "those changes and open another project")) {
-      result.load_project = ProjectFileRequest{menu_result.project_path};
-    }
+    confirm_discard("those changes and open another project",
+                    [path = menu_result.project_path](Frame &frame) {
+                      frame.result.load_project = ProjectFileRequest{path};
+                    });
     break;
   case ApplicationMenuAction::SaveProject:
-    if (!project.path.empty()) {
-      result.save_project = ProjectFileRequest{std::string{project.path}};
-    } else if (auto path = choose_project_to_save(project.path);
-               path.has_value()) {
-      result.save_project = ProjectFileRequest{std::move(*path)};
-    }
+    save_project();
     break;
   case ApplicationMenuAction::SaveProjectAs:
-    if (auto path = choose_project_to_save(project.path); path.has_value()) {
-      result.save_project = ProjectFileRequest{std::move(*path)};
-    }
+    open_file_dialog(
+        [current = std::string{project.path}] {
+          return choose_project_to_save(current);
+        },
+        [](Frame &frame, std::string path) {
+          frame.result.save_project = ProjectFileRequest{std::move(path)};
+        });
     break;
   case ApplicationMenuAction::OpenPreferences:
     // Seeded from the stored values every time, so cancelling really discards.

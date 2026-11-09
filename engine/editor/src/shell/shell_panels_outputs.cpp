@@ -332,8 +332,17 @@ void EditorShell::Frame::draw_feed_mapping_panel(const gui::Rect &bounds) {
   if (mapping.surface_add.has_value()) {
     auto request = std::move(*mapping.surface_add);
     if (request.shape == output::ProjectionSurfaceShape::ImportedMesh) {
-      auto chosen = request.mesh_source.empty() ? choose_projection_mesh() : std::optional<std::string>{request.mesh_source};
-      if (chosen) enqueue_model(*chosen, {}, std::move(request), {});
+      if (!request.mesh_source.empty()) {
+        std::string source = request.mesh_source;
+        enqueue_model(std::move(source), {}, std::move(request), {});
+      } else {
+        open_file_dialog([] { return choose_projection_mesh(); },
+                         [request = std::move(request)](Frame &frame,
+                                                        std::string source) {
+                           frame.enqueue_model(std::move(source), {}, request,
+                                               {});
+                         });
+      }
     } else {
       request.gesture = impl.next_edit_gesture++;
       result.feed_surface_adds.push_back(std::move(request));
@@ -348,8 +357,11 @@ void EditorShell::Frame::draw_feed_mapping_panel(const gui::Rect &bounds) {
   }
   if (mapping.mesh_browse.has_value()) {
     auto request = std::move(*mapping.mesh_browse);
-    const auto chosen = choose_projection_mesh();
-    if (chosen) enqueue_model(*chosen, {}, {}, std::move(request));
+    open_file_dialog([] { return choose_projection_mesh(); },
+                     [request = std::move(request)](Frame &frame,
+                                                    std::string source) {
+                       frame.enqueue_model(std::move(source), {}, {}, request);
+                     });
   }
   if (mapping.surface_remove.has_value()) {
     if (impl.stage_surface_selection == mapping.surface_remove->node) {
