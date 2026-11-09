@@ -1446,6 +1446,13 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     // format checks below remain independent so an unusual adapter still
     // fails renderer readiness deterministically before resource creation.
     capabilities.advanced_scene_raster = true;
+    // An optional Shader Model 6.1 feature: Turing, RDNA and Gen12 adapters
+    // and newer report it. The Advanced lit pipeline cannot be created
+    // without it, so readiness refuses it by name instead.
+    D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3{};
+    capabilities.pixel_barycentrics = SUCCEEDED(state->device->CheckFeatureSupport(
+        D3D12_FEATURE_D3D12_OPTIONS3, &options3, sizeof(options3)))
+        && options3.BarycentricsSupported;
     capabilities.offscreen = true;
     capabilities.rgba16_float =
         d3d12_supports_texture(state, TextureFormat::Rgba16Float);

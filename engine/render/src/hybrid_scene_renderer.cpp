@@ -49,6 +49,9 @@ constexpr const char* fog_refusal_targets =
         missing |= bit(
             RendererCapability::AdvancedSceneRasterImplementation);
     }
+    if (!capabilities.pixel_barycentrics) {
+        missing |= bit(RendererCapability::PixelBarycentrics);
+    }
     if (settings.ray_tracing || settings.ddgi || settings.restir) {
         if (!capabilities.acceleration_structures) {
             missing |= bit(RendererCapability::AccelerationStructures);

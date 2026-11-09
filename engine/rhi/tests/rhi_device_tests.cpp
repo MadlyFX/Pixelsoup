@@ -204,6 +204,7 @@ void capabilities_and_native_handles_are_typed_and_immutable() {
     const rhi::DeviceCapabilities capabilities = device.capabilities();
     RHI_CHECK(capabilities.backend == rhi::BackendKind::SdlGpu);
     RHI_CHECK(!capabilities.advanced_scene_raster);
+    RHI_CHECK(!capabilities.pixel_barycentrics);
     RHI_CHECK(capabilities.offscreen);
     RHI_CHECK(!capabilities.advanced_raster());
     RHI_CHECK(!capabilities.advanced_ray_tracing());

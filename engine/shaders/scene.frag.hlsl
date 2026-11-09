@@ -662,7 +662,91 @@ float4 surface_fill(uint4 range, float2 uv) {
 
 #include "area_lighting.hlsli"
 
+// The absolute canvas pixel this fragment shades, as normalised device
+// coordinates of the projection every slice shares. Formed from integers and
+// canvas-wide constants only: a slice's own target position enters solely as
+// the whole pixel it names.
+float2 canvas_ndc(float2 target_position) {
+    const float2 canvas_pixel = target_position * float2(grain_extent.xy)
+        / max(float2(grain_extent.zw), 1.0) + lighting_canvas.zw;
+    return canvas_pixel / lighting_canvas.xy * float2(2.0, -2.0) + float2(-1.0, 1.0);
+}
+
+#if MEDIASERVER_SCENE_LINEAR
+// Replaces the hardware-interpolated surface with one interpolated here.
+//
+// The rasterizer evaluates attribute planes at target-relative positions, and
+// a slice's target is the canvas translated by its padded origin. The same
+// canvas pixel therefore gets the same barycentrics in exact arithmetic but
+// not in the last bits, on normals, tangents, UVs and SV_Position.z alike, and
+// a glossy highlight turns that into a visible step where two nodes meet.
+// Here the weights come from intersecting the canvas pixel's ray, built from
+// the shared projection, with the triangle's three exact corners: every input
+// is the same on every node, so the surface is too.
+//
+// Fragments of a triangle seen edge-on can produce unbounded weights. Those
+// are clamped onto the triangle, which is still a function of canvas values
+// alone; ordinary fragments (and the helper lanes just outside an edge that
+// fine derivatives read) keep their unclamped, extrapolated weights.
+struct TriangleCorners {
+    float3 position[3];
+    float3 normal[3];
+    float4 tangent[3];
+    float2 uv[3];
+};
+
+void apply_canvas_surface(inout Varyings input, TriangleCorners corners) {
+    const float2 ndc = canvas_ndc(input.position.xy);
+    // Reversed depth: one is the near plane. Two points on the pixel's ray,
+    // which serves perspective and orthographic projections alike.
+    const float4 near_point = mul(lighting_inverse_view_projection, float4(ndc, 1.0, 1.0));
+    const float4 far_point = mul(lighting_inverse_view_projection, float4(ndc, 0.0, 1.0));
+    const float3 origin = near_point.xyz / near_point.w;
+    const float3 direction = far_point.xyz / far_point.w - origin;
+    const float3 p0 = corners.position[0];
+    const float3 p1 = corners.position[1];
+    const float3 p2 = corners.position[2];
+    const float3 edge1 = p1 - p0;
+    const float3 edge2 = p2 - p0;
+    const float3 p_vector = cross(direction, edge2);
+    const float determinant = dot(edge1, p_vector);
+    const float3 t_vector = origin - p0;
+    const float3 q_vector = cross(t_vector, edge1);
+    float3 weights = float3(0.0, dot(t_vector, p_vector), dot(direction, q_vector)) / determinant;
+    weights.x = 1.0 - weights.y - weights.z;
+    const bool bounded = all(isfinite(weights))
+        && all(weights >= -1.0) && all(weights <= 2.0);
+    if (!bounded) {
+        weights = all(isfinite(weights)) ? saturate(weights) : float3(1.0, 0.0, 0.0);
+        const float total = weights.x + weights.y + weights.z;
+        weights = total > 0.0 ? weights / total : float3(1.0, 0.0, 0.0);
+    }
+    input.world_position = weights.x * p0 + weights.y * p1 + weights.z * p2;
+    input.world_normal = weights.x * corners.normal[0]
+        + weights.y * corners.normal[1] + weights.z * corners.normal[2];
+    input.world_tangent = float4(weights.x * corners.tangent[0].xyz
+        + weights.y * corners.tangent[1].xyz
+        + weights.z * corners.tangent[2].xyz, corners.tangent[0].w);
+    input.uv = weights.x * corners.uv[0] + weights.y * corners.uv[1]
+        + weights.z * corners.uv[2];
+}
+#endif
+
 float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
+    // Read before anything else touches the stage input. Once the per-vertex
+    // corners below are in use, DXC's SPIR-V path mistypes a later read of
+    // this flat uint4 (1.9.2607: "OpCompositeExtract %v4uint").
+    const uint4 effect_range = input.effect_range;
+#if MEDIASERVER_SCENE_LINEAR
+    TriangleCorners corners;
+    [unroll] for (uint corner = 0u; corner < 3u; ++corner) {
+        corners.position[corner] = GetAttributeAtVertex(input.corner_position, corner);
+        corners.normal[corner] = GetAttributeAtVertex(input.corner_normal, corner);
+        corners.tangent[corner] = GetAttributeAtVertex(input.corner_tangent, corner);
+        corners.uv[corner] = GetAttributeAtVertex(input.corner_uv, corner);
+    }
+    apply_canvas_surface(input, corners);
+#endif
     // A depth-only instance belongs to a different compositor layer and is
     // drawn here only so that this layer is occluded by it. Depth is still
     // written - there is no discard - but nothing reaches the colour target,
@@ -703,7 +787,7 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         occlusion_texture.SampleBias(occlusion_sampler, input.uv, texture_sampling.x).r;
     // Lights only: a neutral grey surface, so only the light on it shows.
     const bool lights_only = view_mode.x > 1.5 && view_mode.x < 2.5;
-    const float4 fill = surface_fill(input.effect_range, input.uv);
+    const float4 fill = surface_fill(effect_range, input.uv);
     const float3 base_albedo = input.base_color_roughness.rgb *
         decode_srgb(sampled_base.rgb) * fill.rgb;
     const float3 albedo = lights_only ? float3(0.5, 0.5, 0.5) : base_albedo;
@@ -776,15 +860,18 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         || m.transmission > 0.0 || m.anisotropy > 0.0 || m.specular_weight != 1.0
         || input.anisotropy.z != 1.5 || any(input.specular.rgb != 1.0)
         || any(sampled_specular_color != 1.0);
+#if MEDIASERVER_SCENE_LINEAR
+    // Already on the canvas pixel's ray: see apply_canvas_surface.
+    const float3 world_position = input.world_position;
+#else
     // The hardware may interpolate world attributes with different last bits
     // after translating a viewport. Reconstruct lighting at the absolute canvas
-    // pixel instead, using the projection all slices share. This also keeps the
-    // opaque background consumed by transmission on the same lighting grid.
-    const float2 canvas_pixel = input.position.xy * float2(grain_extent.xy)
-        / max(float2(grain_extent.zw), 1.0) + lighting_canvas.zw;
-    const float2 ndc = canvas_pixel / lighting_canvas.xy * float2(2.0, -2.0) + float2(-1.0, 1.0);
-    const float4 reconstructed = mul(lighting_inverse_view_projection, float4(ndc, input.position.z, 1.0));
+    // pixel instead, using the projection all slices share. The depth is
+    // still the rasterizer's; Advanced replaces it with canvas barycentrics.
+    const float4 reconstructed = mul(lighting_inverse_view_projection,
+        float4(canvas_ndc(input.position.xy), input.position.z, 1.0));
     const float3 world_position = reconstructed.xyz / reconstructed.w;
+#endif
     // w = 0: an orthographic view, whose view vector is the same everywhere.
     const float3 view = eye_position.w > 0.5
         ? normalize(eye_position.xyz - world_position)
@@ -1033,11 +1120,11 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         ? encode_srgb(tonemap(max(exposed, 0.0)))
         : encode_srgb(tonemap(max(
               apply_inline_effects(
-                  exposed, input.effect_range, input.position.xy), 0.0)));
+                  exposed, effect_range, input.position.xy), 0.0)));
     if (display_gain) {
         display = saturate(
             apply_inline_effects(
-                display, input.effect_range, input.position.xy));
+                display, effect_range, input.position.xy));
     }
     // A surface aid is shown as it is, with no tone curve or grade.
     if (aid) {
@@ -1050,10 +1137,10 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     // the display transform itself remains an output-stage responsibility.
     float3 linear_output = display_gain
         ? decode_srgb(saturate(apply_inline_effects(
-              encode_srgb(max(exposed, 0.0)), input.effect_range,
+              encode_srgb(max(exposed, 0.0)), effect_range,
               input.position.xy)))
         : max(apply_inline_effects(
-              exposed, input.effect_range, input.position.xy), 0.0);
+              exposed, effect_range, input.position.xy), 0.0);
     if (aid) {
         linear_output = exposed;
     }
