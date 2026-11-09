@@ -206,9 +206,13 @@ editor_playback_registry(const assets::AssetRegistry &authored) {
         const bool full_resolution_output_proxy =
             media->requested_proxy_profile ==
             assets::DerivativeProfileId::ProxySourceCfrHevcMain10;
-        if ((source_policy || full_resolution_output_proxy) &&
-            (media->dimensions->width > 1'920U ||
-             media->dimensions->height > 1'080U)) {
+        // Stills have nothing to transcode; a video larger than the 720p
+        // proxy gets one as soon as it is in the project.
+        const bool still =
+            media->frame_count.has_value() && *media->frame_count <= 1U;
+        if ((source_policy || full_resolution_output_proxy) && !still &&
+            (media->dimensions->width > 1'280U ||
+             media->dimensions->height > 720U)) {
             media->requested_proxy_profile =
                 assets::DerivativeProfileId::Proxy720pCfrH264;
             media->proxy_playback_policy =

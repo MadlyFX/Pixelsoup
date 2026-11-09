@@ -1034,7 +1034,7 @@ The Library has two views, switched from the icons at the left of its footer:
   to open it. Each tile names its duration and resolution, or its vertex
   count and texture size.
 
-A UHD clip's Status says how its editor proxy is coming along: **Editor
+A video clip's Status says how its editor proxy is coming along: **Editor
 proxy queued**, **Editor proxy 40%** with a cyan bar filling under
 the row, **Editor proxy ready**, or **Editor proxy failed** in amber. Until
 it is ready, Stage, Program and the Asset Viewer play that clip's source,
@@ -1274,7 +1274,7 @@ path.
 project and found on this machine. **SOURCE - NOT CHECKED** is the asset's own
 file when nothing in the project uses it: presence is only asked of required
 content, so a missing file shows the grey placeholder rather than a warning.
-**PROXY** is a UHD asset's 720p editor proxy, or the proxy its Prefer or
+**PROXY** is a video asset's 720p editor proxy, or the proxy its Prefer or
 Require Proxy policy asks for. **PROXY REQUIRED - NOT READY** draws nothing,
 as the wall would, and **OFFLINE** is a missing file. The **Proxy / Full res**
 menu in the header chooses which file the viewer decodes; Full res shows the
@@ -2395,7 +2395,7 @@ From the left:
 | Box resting on a line | Surface snapping |
 | Grid, frame corners, three axes, corner brackets | Show the floor grid, guides, gizmo and every element's bounds |
 | Screen with Full / Half / Quarter | The resolution Stage renders at |
-| Framed square with Proxy / Full res | Which file Stage decodes for UHD video - see [Editor proxies](media-playback.md#editor-proxies). On Stage a bar along its foot fills as the project's editor proxies are made; on Program it fills while some clips still play their source waiting for theirs |
+| Framed square with Proxy / Full res | Which file Stage decodes for video above 720p - see [Editor proxies](media-playback.md#editor-proxies). On Stage a bar along its foot fills as the project's editor proxies are made; on Program it fills while some clips still play their source waiting for theirs |
 
 The rate at the right end is how fast Stage is drawing. Program Output's bar
 carries the same media and resolution menus, chosen separately from Stage's. Over the image's

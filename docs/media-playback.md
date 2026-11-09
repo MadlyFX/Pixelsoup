@@ -219,7 +219,7 @@ does.
 ## Editor proxies
 
 The editor decodes a 720p H.264 proxy for every video asset larger than
-1920 x 1080 instead of its source. The Director makes these proxies itself,
+1280 x 720 instead of its source. The Director makes these proxies itself,
 in the background, as soon as such an asset is in the project; output nodes
 never make or play them, and they are not saved with the project. Until an
 asset's proxy is ready its clips show the source, so nothing waits.
