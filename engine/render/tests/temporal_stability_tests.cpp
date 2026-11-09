@@ -166,12 +166,6 @@ scene::Scene fixture() {
     value.renderer_settings.icvfx.inner_frustum = true;
     value.environment.ambient = 1.0F;
     value.environment.sky_color = {0.02F, 0.03F, 0.04F};
-    // Pinned to the fill this fixture was written against. Without it (the
-    // default once a scene has a light) the glossy odd-split check differs by
-    // one half-float step at x=32 - a seam the fill's ambient used to round
-    // away - which is tracked separately rather than hidden here for good.
-    value.environment.fill_sky_color = value.environment.sky_color;
-    value.environment.fill_with_lights = true;
     scene::MeshInstance box{};
     box.source = doc::NodeId{3U}; box.mesh = {scene::Primitive::Box, 1U};
     box.world = scene::rotation(0.05F, 0.0F, 0.0F);
