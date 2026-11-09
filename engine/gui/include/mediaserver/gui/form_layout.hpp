@@ -117,12 +117,18 @@ public:
     [[nodiscard]] Rect thumb(const Rect& track, float min_height = 0.0F) const noexcept;
     // Back to the top, forgetting what was measured: a dialog reopening.
     void reset() noexcept { *this = ScrollRegion{}; }
+    // To the bottom from the next begin() on: a log following its newest
+    // line. The offset settles on max_offset() once the content is measured.
+    void scroll_to_end() noexcept;
+    // Whether the offset is at the bottom (or the content fits).
+    [[nodiscard]] bool at_end() const noexcept;
 
 private:
     float offset_{};
     float viewport_height_{};
     float content_height_{};
     bool measured_{};
+    bool follow_end_{};
 };
 
 } // namespace mediaserver::gui

@@ -1,5 +1,7 @@
 #include "render_machine.hpp"
 
+#include "process_log.hpp"
+
 #include <mediaserver/net/cluster_discovery.hpp>
 #include <mediaserver/net/cluster_lifecycle.hpp>
 
@@ -311,6 +313,7 @@ render_machine_agent_config(const RenderMachineConfig& config,
     agent.child_arguments = render_machine_child_arguments(config);
     agent.autostart = true;
     agent.discovery_port = net::cluster_discovery_port;
+    agent.log_directory = default_log_directory();
     return agent;
 }
 

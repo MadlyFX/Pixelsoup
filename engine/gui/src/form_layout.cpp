@@ -104,10 +104,25 @@ float ScrollRegion::begin(UiContext& ctx, const Rect& viewport, float step) {
     return offset_;
 }
 
+void ScrollRegion::scroll_to_end() noexcept {
+    // The best guess now, from what was measured last; end() settles it on
+    // this frame's content, which may have grown.
+    offset_ = measured_ ? max_offset() : 0.0F;
+    follow_end_ = true;
+}
+
+bool ScrollRegion::at_end() const noexcept {
+    return offset_ >= max_offset() - 0.5F;
+}
+
 void ScrollRegion::end(UiContext& ctx, float content_height) {
     ctx.pop_clip();
     content_height_ = std::max(content_height, 0.0F);
     measured_ = true;
+    if (follow_end_) {
+        offset_ = max_offset();
+        follow_end_ = false;
+    }
     offset_ = std::clamp(offset_, 0.0F, max_offset());
 }
 

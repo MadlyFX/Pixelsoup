@@ -3533,6 +3533,112 @@ void output_monitor_stop_all_asks_before_stopping() {
   UI_CHECK(!press().lifecycle.has_value());
 }
 
+// An expanded render-server row offers its log whatever the process is
+// doing. Opening it asks the agent at once, never twice while a read is on
+// its way, again on a timer while it stays open, and not at all once closed.
+void output_monitor_opens_a_node_log_and_refreshes_it() {
+  gui::InputState input;
+  gui::UiDrawList list;
+  gui::FontAtlas font{gui::FontAtlas::empty()};
+  gui::UiContext ctx{input, list, font};
+  editor::OutputMonitorPanel panel{gui::ui_id("monitor.log.test")};
+  const gui::Rect bounds{0.0F, 0.0F, 640.0F, 600.0F};
+  editor::OutputMonitorState::Node node{
+      doc::NodeId{70U},
+      "Render A",
+      "127.0.0.1:47840",
+      2U,
+      1920U,
+      1080U,
+      editor::OutputMonitorState::Node::Status::Faulted,
+      4U,
+      {}};
+  editor::OutputMonitorState state{240U,  3840U, 1080U,
+                                   60.0F, true,  std::span{&node, 1U}};
+  double now = 10.0;
+  const auto frame = [&](float x, float y, bool down) {
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(gui::MouseButton::Left, down);
+    ctx.new_frame(now);
+    return panel.draw(ctx, bounds, state);
+  };
+  const auto click = [&](float x, float y) {
+    static_cast<void>(frame(x, y, false));
+    static_cast<void>(frame(x, y, true));
+    return frame(x, y, false);
+  };
+  // The row (y 84..116) opens its details; a faulted row has two lines of
+  // them (endpoint, status), so the log toggle sits at 118 + 40 = 158..180.
+  UI_CHECK(!click(120.0F, 100.0F).lifecycle.has_value());
+  constexpr float toggle_x = 80.0F;
+  constexpr float toggle_y = 169.0F;
+  const auto opened = click(toggle_x, toggle_y);
+  UI_CHECK(!opened.lifecycle.has_value());
+  // The next frame draws the log and asks for it.
+  const auto asked = frame(500.0F, 590.0F, false);
+  UI_CHECK(asked.lifecycle.has_value());
+  UI_CHECK(asked.lifecycle->action ==
+           editor::OutputLifecycleAction::FetchLog);
+  UI_CHECK(asked.lifecycle->device == doc::NodeId{70U});
+  UI_CHECK(asked.lifecycle->node_index == 2U);
+  UI_CHECK(asked.lifecycle->endpoint == "127.0.0.1:47840");
+
+  // While the read is on its way, nothing more is asked, even later.
+  node.log_fetching = true;
+  now += 10.0;
+  UI_CHECK(!frame(500.0F, 590.0F, false).lifecycle.has_value());
+  UI_CHECK(editor::output_node_log_summary(node) == "Reading the log");
+
+  auto log = std::make_shared<editor::OutputNodeLog>();
+  log->status = editor::OutputNodeLog::Status::Available;
+  log->fetched_at = "12:00:10";
+  log->previous_run_lines = 1U;
+  for (int index = 0; index < 40; ++index) {
+    log->lines.push_back("line " + std::to_string(index));
+  }
+  log->lines.front() = "NODE 2 FELL BEHIND";
+  node.log = log;
+  node.log_fetching = false;
+  UI_CHECK(editor::output_node_log_summary(node) ==
+           "Read at 12:00:10 - 40 lines, 1 from the previous run");
+  const std::size_t before = list.vertices().size();
+  static_cast<void>(frame(500.0F, 590.0F, false));
+  // Lines are drawn (the empty test atlas still emits quads for glyph runs,
+  // so a drawn log adds geometry).
+  UI_CHECK(list.vertices().size() >= before);
+
+  // Still open: a few seconds on, it asks again.
+  now += editor::OutputMonitorPanel::log_refresh_seconds + 0.1;
+  const auto refreshed = frame(500.0F, 590.0F, false);
+  UI_CHECK(refreshed.lifecycle.has_value());
+  UI_CHECK(refreshed.lifecycle->action ==
+           editor::OutputLifecycleAction::FetchLog);
+
+  // Closed, it never asks again.
+  const auto closed = click(toggle_x, toggle_y);
+  UI_CHECK(!closed.lifecycle.has_value() ||
+           closed.lifecycle->action !=
+               editor::OutputLifecycleAction::FetchLog);
+  now += 60.0;
+  UI_CHECK(!frame(500.0F, 590.0F, false).lifecycle.has_value());
+
+  // The wording of the other outcomes.
+  auto failed = std::make_shared<editor::OutputNodeLog>();
+  failed->status = editor::OutputNodeLog::Status::Failed;
+  failed->detail = "lifecycle listener did not answer in time";
+  node.log = failed;
+  UI_CHECK(editor::output_node_log_summary(node) ==
+           "Could not read the log - lifecycle listener did not answer in "
+           "time");
+  auto none = std::make_shared<editor::OutputNodeLog>();
+  none->status = editor::OutputNodeLog::Status::Unavailable;
+  node.log = none;
+  UI_CHECK(editor::output_node_log_summary(node) == "No log on this machine");
+  node.log.reset();
+  UI_CHECK(editor::output_node_log_summary(node) == "Log not read yet");
+}
+
 void output_monitor_cluster_health_keeps_node_controls_reachable() {
   gui::InputState input;
   gui::UiDrawList list;
@@ -4430,7 +4536,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 136U> cases{{
+constexpr std::array<Case, 137U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -4636,6 +4742,8 @@ constexpr std::array<Case, 136U> cases{{
      &output_monitor_emits_explicit_cluster_relaunch},
     {"output monitor stop all asks before stopping",
      &output_monitor_stop_all_asks_before_stopping},
+    {"output monitor opens a node log and refreshes it",
+     &output_monitor_opens_a_node_log_and_refreshes_it},
     {"output monitor cluster health keeps node controls reachable",
      &output_monitor_cluster_health_keeps_node_controls_reachable},
     {"project settings apply reports the edited values",

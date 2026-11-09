@@ -57,6 +57,8 @@ constexpr std::uint8_t asset_readiness_request_kind = 6U;
 constexpr std::uint8_t asset_readiness_response_kind = 7U;
 constexpr std::uint8_t sync_status_request_kind = 8U;
 constexpr std::uint8_t sync_status_response_kind = 9U;
+constexpr std::uint8_t node_log_request_kind = 10U;
+constexpr std::uint8_t node_log_response_kind = 11U;
 constexpr std::string_view request_domain{"media-server lifecycle request v1"};
 constexpr std::string_view response_domain{"media-server lifecycle response v1"};
 constexpr std::string_view machine_info_request_domain{
@@ -71,6 +73,10 @@ constexpr std::string_view sync_status_request_domain{
     "media-server sync status request v1"};
 constexpr std::string_view sync_status_response_domain{
     "media-server sync status response v1"};
+constexpr std::string_view node_log_request_domain{
+    "media-server node log request v1"};
+constexpr std::string_view node_log_response_domain{
+    "media-server node log response v1"};
 // Backoff after an accept error, not a polling period for the idle case.
 constexpr auto accept_poll_interval = std::chrono::milliseconds{2};
 
@@ -168,6 +174,31 @@ void truncate_utf8(std::string& value, std::size_t maximum,
     }
     value.resize(cut);
     truncated = true;
+}
+
+// Log text is arbitrary process output. Rather than failing a whole reply
+// over one stray byte, each character that valid_operator_text would reject
+// is replaced: a tab with a space, anything else with '?'.
+[[nodiscard]] std::string sanitized_operator_text(std::string_view value) {
+    std::string output;
+    output.reserve(value.size());
+    std::size_t offset{};
+    while (offset < value.size()) {
+        const auto first = static_cast<unsigned char>(value[offset]);
+        const std::size_t length = first <= 0x7FU ? 1U
+            : first >= 0xF0U                      ? 4U
+            : first >= 0xE0U                      ? 3U
+                                                  : 2U;
+        if (offset + length <= value.size() &&
+            valid_operator_text(value.substr(offset, length))) {
+            output.append(value.substr(offset, length));
+            offset += length;
+            continue;
+        }
+        output.push_back(first == '\t' ? ' ' : '?');
+        ++offset;
+    }
+    return output;
 }
 
 void put_u16(std::vector<std::byte>& output, std::uint16_t value) {
@@ -403,6 +434,32 @@ hmac(std::string_view secret, std::span<const std::byte> message) noexcept {
     input.reserve(sync_status_response_domain.size() + nonce.size() +
                   response_without_tag.size());
     put_text(input, sync_status_response_domain);
+    put_bytes(input, nonce);
+    put_bytes(input, response_without_tag);
+    return input;
+}
+
+[[nodiscard]] std::vector<std::byte> node_log_request_mac_input(
+    core::u32 node_index, std::uint16_t max_lines, core::u64 request_id,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    std::vector<std::byte> input;
+    input.reserve(node_log_request_domain.size() + 2U + 4U + 8U +
+                  nonce.size());
+    put_text(input, node_log_request_domain);
+    put_u16(input, max_lines);
+    put_u32(input, node_index);
+    put_u64(input, request_id);
+    put_bytes(input, nonce);
+    return input;
+}
+
+[[nodiscard]] std::vector<std::byte> node_log_response_mac_input(
+    std::span<const std::byte> response_without_tag,
+    std::span<const std::byte, nonce_bytes> nonce) {
+    std::vector<std::byte> input;
+    input.reserve(node_log_response_domain.size() + nonce.size() +
+                  response_without_tag.size());
+    put_text(input, node_log_response_domain);
     put_bytes(input, nonce);
     put_bytes(input, response_without_tag);
     return input;
@@ -1628,6 +1685,226 @@ constexpr std::size_t sync_status_output_bytes = 36U;
     return ResponseParse::Ok;
 }
 
+[[nodiscard]] std::vector<std::byte> node_log_request_packet(
+    std::string_view secret, core::u32 node_index, std::uint16_t max_lines,
+    core::u64 request_id, std::span<const std::byte, nonce_bytes> nonce) {
+    std::vector<std::byte> body;
+    body.reserve(84U);
+    put_bytes(body, protocol_magic);
+    body.push_back(static_cast<std::byte>(protocol_version));
+    body.push_back(static_cast<std::byte>(node_log_request_kind));
+    put_u16(body, max_lines);
+    put_u32(body, node_index);
+    put_u64(body, request_id);
+    put_bytes(body, nonce);
+    put_bytes(body, hmac(secret, node_log_request_mac_input(
+                                     node_index, max_lines, request_id,
+                                     nonce)));
+    return framed(std::move(body));
+}
+
+struct ParsedNodeLogRequest final {
+    core::u32 node_index{};
+    std::uint16_t max_lines{};
+    core::u64 request_id{};
+    std::array<std::byte, digest_bytes> tag{};
+};
+
+[[nodiscard]] bool parse_node_log_request(
+    std::span<const std::byte> packet,
+    std::span<const std::byte, nonce_bytes> expected_nonce,
+    ParsedNodeLogRequest& output) noexcept {
+    if (packet.size() != prefix_bytes + 84U) {
+        return false;
+    }
+    const auto body = packet.subspan(prefix_bytes);
+    if (!header_is(body, node_log_request_kind)) {
+        return false;
+    }
+    const auto nonce = body.subspan(20U, nonce_bytes);
+    if (!constant_time_equal(nonce, expected_nonce)) {
+        return false;
+    }
+    output.max_lines = get_u16(body, 6U);
+    output.node_index = get_u32(body, 8U);
+    output.request_id = get_u64(body, 12U);
+    std::copy(body.begin() + 52, body.end(), output.tag.begin());
+    return output.max_lines != 0U &&
+           output.max_lines <= max_cluster_node_log_lines;
+}
+
+[[nodiscard]] ClusterNodeLog failed_node_log(core::u32 node_index,
+                                             std::string detail) {
+    ClusterNodeLog log{};
+    log.availability = ClusterNodeLogAvailability::Failed;
+    log.node_index = node_index;
+    log.detail = std::move(detail);
+    return log;
+}
+
+// Clamps everything a provider could get wrong before it reaches the wire:
+// text is sanitized rather than rejected, each line is cut to its byte limit,
+// and the oldest lines go first when the reply would exceed its budget.
+void normalize_node_log(ClusterNodeLog& log, core::u32 node_index,
+                        std::size_t max_lines) {
+    log.node_index = node_index;
+    if (static_cast<std::uint8_t>(log.availability) >
+        static_cast<std::uint8_t>(
+            ClusterNodeLogAvailability::ConfigurationMismatch)) {
+        log = failed_node_log(node_index, "invalid node log state");
+    }
+    log.detail = sanitized_operator_text(log.detail);
+    truncate_utf8(log.detail, max_cluster_node_log_detail_bytes,
+                  log.truncated);
+    if (log.availability != ClusterNodeLogAvailability::Available) {
+        log.lines.clear();
+        log.previous_run_lines = 0U;
+        log.dropped_bytes = 0U;
+        return;
+    }
+    max_lines = std::clamp(max_lines, std::size_t{1U},
+                           max_cluster_node_log_lines);
+    log.previous_run_lines = static_cast<core::u32>(
+        std::min<std::size_t>(log.previous_run_lines, log.lines.size()));
+    const std::size_t first = log.lines.size() > max_lines
+        ? log.lines.size() - max_lines
+        : 0U;
+    std::size_t total{};
+    std::size_t kept_from = log.lines.size();
+    for (std::size_t index = log.lines.size(); index > first; --index) {
+        std::string& line = log.lines[index - 1U];
+        line = sanitized_operator_text(line);
+        truncate_utf8(line, max_cluster_node_log_line_bytes, log.truncated);
+        if (total + line.size() > max_cluster_node_log_text_bytes) {
+            break;
+        }
+        total += line.size();
+        kept_from = index - 1U;
+    }
+    if (kept_from > 0U) {
+        log.truncated = true;
+        log.lines.erase(log.lines.begin(),
+                        log.lines.begin() +
+                            static_cast<std::ptrdiff_t>(kept_from));
+        log.previous_run_lines = static_cast<core::u32>(
+            log.previous_run_lines > kept_from
+                ? log.previous_run_lines - kept_from
+                : 0U);
+    }
+}
+
+constexpr std::size_t node_log_fixed_body_bytes = 36U;
+
+[[nodiscard]] std::vector<std::byte> node_log_response_packet(
+    std::string_view secret, ClusterNodeLog log, std::size_t max_lines,
+    core::u64 request_id, std::span<const std::byte, nonce_bytes> nonce) {
+    normalize_node_log(log, log.node_index, max_lines);
+    std::size_t text_bytes{};
+    for (const std::string& line : log.lines) {
+        text_bytes += 2U + line.size();
+    }
+    std::vector<std::byte> body;
+    body.reserve(node_log_fixed_body_bytes + log.detail.size() + text_bytes +
+                 digest_bytes);
+    put_bytes(body, protocol_magic);
+    body.push_back(static_cast<std::byte>(protocol_version));
+    body.push_back(static_cast<std::byte>(node_log_response_kind));
+    body.push_back(static_cast<std::byte>(log.availability));
+    body.push_back(static_cast<std::byte>(log.truncated ? 1U : 0U));
+    put_u32(body, log.node_index);
+    put_u64(body, request_id);
+    put_u64(body, log.dropped_bytes);
+    put_u32(body, log.previous_run_lines);
+    put_u16(body, static_cast<std::uint16_t>(log.lines.size()));
+    body.push_back(static_cast<std::byte>(log.detail.size()));
+    body.push_back(std::byte{0});
+    put_text(body, log.detail);
+    for (const std::string& line : log.lines) {
+        put_u16(body, static_cast<std::uint16_t>(line.size()));
+        put_text(body, line);
+    }
+    put_bytes(body, hmac(secret, node_log_response_mac_input(body, nonce)));
+    return framed(std::move(body));
+}
+
+[[nodiscard]] ResponseParse parse_node_log_response(
+    std::span<const std::byte> packet, std::string_view secret,
+    core::u64 expected_request_id,
+    std::span<const std::byte, nonce_bytes> nonce, ClusterNodeLog& output) {
+    if (packet.size() <
+            prefix_bytes + node_log_fixed_body_bytes + digest_bytes ||
+        packet.size() > max_cluster_node_log_message_bytes) {
+        return ResponseParse::Protocol;
+    }
+    const auto body = packet.subspan(prefix_bytes);
+    if (!header_is(body, node_log_response_kind) ||
+        get_u64(body, 12U) != expected_request_id) {
+        return ResponseParse::Protocol;
+    }
+    const auto availability = std::to_integer<std::uint8_t>(body[6U]);
+    const auto flags = std::to_integer<std::uint8_t>(body[7U]);
+    const std::size_t line_count = get_u16(body, 32U);
+    const std::size_t detail_length = std::to_integer<std::uint8_t>(body[34U]);
+    if (availability >
+            static_cast<std::uint8_t>(
+                ClusterNodeLogAvailability::ConfigurationMismatch) ||
+        (flags & ~1U) != 0U || line_count > max_cluster_node_log_lines ||
+        detail_length > max_cluster_node_log_detail_bytes ||
+        std::to_integer<std::uint8_t>(body[35U]) != 0U) {
+        return ResponseParse::Protocol;
+    }
+    const std::size_t tag_offset = body.size() - digest_bytes;
+    const auto without_tag = body.first(tag_offset);
+    const auto received_tag = body.last(digest_bytes);
+    const auto expected_tag =
+        hmac(secret, node_log_response_mac_input(without_tag, nonce));
+    if (!constant_time_equal(received_tag, expected_tag)) {
+        return ResponseParse::Authentication;
+    }
+
+    ClusterNodeLog decoded{};
+    decoded.availability =
+        static_cast<ClusterNodeLogAvailability>(availability);
+    decoded.truncated = (flags & 1U) != 0U;
+    decoded.node_index = get_u32(body, 8U);
+    decoded.dropped_bytes = get_u64(body, 20U);
+    decoded.previous_run_lines = get_u32(body, 28U);
+    std::size_t cursor = node_log_fixed_body_bytes;
+    if (!parse_bounded_text(body, tag_offset, cursor, detail_length,
+                            max_cluster_node_log_detail_bytes,
+                            decoded.detail)) {
+        return ResponseParse::Protocol;
+    }
+    decoded.lines.reserve(line_count);
+    std::size_t text_bytes{};
+    for (std::size_t index = 0U; index < line_count; ++index) {
+        if (cursor + 2U > tag_offset) {
+            return ResponseParse::Protocol;
+        }
+        const std::size_t length = get_u16(body, cursor);
+        cursor += 2U;
+        std::string line;
+        if (!parse_bounded_text(body, tag_offset, cursor, length,
+                                max_cluster_node_log_line_bytes, line)) {
+            return ResponseParse::Protocol;
+        }
+        text_bytes += line.size();
+        decoded.lines.push_back(std::move(line));
+    }
+    if (cursor != tag_offset ||
+        text_bytes > max_cluster_node_log_text_bytes ||
+        decoded.previous_run_lines > decoded.lines.size()) {
+        return ResponseParse::Protocol;
+    }
+    if (decoded.availability != ClusterNodeLogAvailability::Available &&
+        (!decoded.lines.empty() || decoded.dropped_bytes != 0U)) {
+        // A non-available reply must disclose nothing from the log.
+        return ResponseParse::Protocol;
+    }
+    output = std::move(decoded);
+    return ResponseParse::Ok;
+}
+
 [[nodiscard]] bool random_nonce(
     std::array<std::byte, nonce_bytes>& output) noexcept {
 #if defined(_WIN32)
@@ -1806,11 +2083,12 @@ public:
                                  ClusterMachineInfoProvider* inventory_provider,
                                  ClusterAssetReadinessProvider*
                                      readiness_provider,
-                                 ClusterSyncStatusProvider* sync_provider)
+                                 ClusterSyncStatusProvider* sync_provider,
+                                 ClusterNodeLogProvider* log_provider)
         : config(std::move(configured)), host(&process_host),
           machine_info(inventory_provider),
           asset_readiness(readiness_provider), sync_status(sync_provider),
-          acceptor(context) {
+          node_log(log_provider), acceptor(context) {
     }
 
     void handle(asio::ip::tcp::socket socket) noexcept {
@@ -1826,9 +2104,14 @@ public:
     }
 
     void handle_impl(asio::ip::tcp::socket socket) {
+        // One limit covers both directions, so it must admit the largest
+        // reply this listener sends: a node log. Requests stay small (fixed
+        // sizes are checked exactly), and the bounded worker pool caps how
+        // many such buffers exist at once.
         TcpFramedStream stream{
             std::move(socket),
-            FramedStreamLimits{max_cluster_machine_info_message_bytes,
+            FramedStreamLimits{std::max(max_cluster_machine_info_message_bytes,
+                                        max_cluster_node_log_message_bytes),
                                config.handshake_timeout,
                                config.handshake_timeout,
                                config.write_timeout}};
@@ -1994,6 +2277,59 @@ public:
             static_cast<void>(stream.send(sync_status_response_packet(
                 config.shared_secret, std::move(reply), request.request_id,
                 nonce)));
+            return;
+        }
+
+        if (header_is(body, node_log_request_kind)) {
+            ParsedNodeLogRequest request{};
+            if (!parse_node_log_request(packet, nonce, request)) {
+                counters.malformed_requests.fetch_add(
+                    1U, std::memory_order_relaxed);
+                return;
+            }
+            const auto mac_input = node_log_request_mac_input(
+                request.node_index, request.max_lines, request.request_id,
+                nonce);
+            const auto expected_tag = hmac(config.shared_secret, mac_input);
+            if (!constant_time_equal(request.tag, expected_tag)) {
+                counters.authentication_failures.fetch_add(
+                    1U, std::memory_order_relaxed);
+                static_cast<void>(stream.send(node_log_response_packet(
+                    config.shared_secret,
+                    failed_node_log(request.node_index,
+                                    "authentication failed"),
+                    request.max_lines, request.request_id, nonce)));
+                return;
+            }
+            counters.authenticated_requests.fetch_add(
+                1U, std::memory_order_relaxed);
+            ClusterNodeLog reply{};
+            if (request.node_index != config.node_index) {
+                counters.config_mismatches.fetch_add(
+                    1U, std::memory_order_relaxed);
+                reply.availability =
+                    ClusterNodeLogAvailability::ConfigurationMismatch;
+                reply.detail = "listener owns a different node index";
+            } else if (node_log == nullptr) {
+                reply.availability = ClusterNodeLogAvailability::Unavailable;
+                reply.detail = "this agent keeps no render process log";
+                counters.completed_requests.fetch_add(
+                    1U, std::memory_order_relaxed);
+            } else {
+                // One reader at a time; a second request fails fast rather
+                // than holding a worker the lifecycle commands need.
+                std::unique_lock log_lock{node_log_mutex, std::try_to_lock};
+                reply = log_lock.owns_lock()
+                    ? node_log->tail(request.max_lines)
+                    : failed_node_log(config.node_index,
+                                      "another log request is in progress");
+                counters.completed_requests.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
+            reply.node_index = config.node_index;
+            static_cast<void>(stream.send(node_log_response_packet(
+                config.shared_secret, std::move(reply), request.max_lines,
+                request.request_id, nonce)));
             return;
         }
 
@@ -2170,6 +2506,7 @@ public:
     ClusterMachineInfoProvider* machine_info{};
     ClusterAssetReadinessProvider* asset_readiness{};
     ClusterSyncStatusProvider* sync_status{};
+    ClusterNodeLogProvider* node_log{};
     asio::io_context context;
     asio::ip::tcp::acceptor acceptor;
     std::thread accept_thread;
@@ -2180,6 +2517,7 @@ public:
     std::mutex host_mutex;
     std::mutex machine_info_mutex;
     std::mutex sync_status_mutex;
+    std::mutex node_log_mutex;
     std::mutex asset_readiness_mutex;
     std::stop_source asset_readiness_stop;
     std::atomic_bool stop_requested{};
@@ -2195,10 +2533,10 @@ ClusterLifecycleService::ClusterLifecycleService(
     ClusterLifecycleServiceConfig config, ClusterProcessHost& host,
     ClusterMachineInfoProvider* machine_info,
     ClusterAssetReadinessProvider* asset_readiness,
-    ClusterSyncStatusProvider* sync_status)
+    ClusterSyncStatusProvider* sync_status, ClusterNodeLogProvider* node_log)
     : state_(std::make_unique<detail::ClusterLifecycleServiceState>(
           std::move(config), host, machine_info, asset_readiness,
-          sync_status)) {
+          sync_status, node_log)) {
 }
 
 ClusterLifecycleService::~ClusterLifecycleService() {
@@ -2627,6 +2965,68 @@ request_cluster_sync_status(const asio::ip::tcp::endpoint& endpoint,
     }
     return Result::failure(
         {ClusterLifecycleClientErrorCode::Protocol, {}});
+}
+
+core::Result<ClusterNodeLog, ClusterLifecycleClientError>
+request_cluster_node_log(const asio::ip::tcp::endpoint& endpoint,
+                         core::u32 node_index, std::size_t max_lines,
+                         const ClusterLifecycleClientConfig& config) {
+    using Result = core::Result<ClusterNodeLog, ClusterLifecycleClientError>;
+    const auto zero = std::chrono::milliseconds::zero();
+    if (!valid_lifecycle_target(endpoint) ||
+        !valid_secret(config.shared_secret) || config.connect_timeout <= zero ||
+        config.handshake_timeout <= zero || config.write_timeout <= zero) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::InvalidConfiguration, {}});
+    }
+    const auto lines = static_cast<std::uint16_t>(std::clamp(
+        max_lines, std::size_t{1U}, max_cluster_node_log_lines));
+
+    asio::io_context context;
+    auto connected =
+        connect_with_timeout(endpoint, config.connect_timeout, context);
+    if (!connected) {
+        return Result::failure(connected.error());
+    }
+    TcpFramedStream stream{
+        std::move(connected).value(),
+        FramedStreamLimits{max_cluster_node_log_message_bytes,
+                           config.handshake_timeout,
+                           config.handshake_timeout, config.write_timeout}};
+    auto challenge = stream.receive();
+    if (!challenge) {
+        return Result::failure(transport_error(challenge.error()));
+    }
+    std::array<std::byte, nonce_bytes> nonce{};
+    if (!parse_challenge(challenge.value(), nonce)) {
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Protocol, {}});
+    }
+    static std::atomic_uint64_t request_sequence{1U};
+    const core::u64 request_id =
+        request_sequence.fetch_add(1U, std::memory_order_relaxed);
+    auto sent = stream.send(node_log_request_packet(
+        config.shared_secret, node_index, lines, request_id, nonce));
+    if (!sent) {
+        return Result::failure(transport_error(sent.error()));
+    }
+    auto response = stream.receive();
+    if (!response) {
+        return Result::failure(transport_error(response.error()));
+    }
+    ClusterNodeLog log{};
+    switch (parse_node_log_response(response.value(), config.shared_secret,
+                                    request_id, nonce, log)) {
+    case ResponseParse::Ok:
+        return Result::success(std::move(log));
+    case ResponseParse::Authentication:
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::AuthenticationFailed, {}});
+    case ResponseParse::Protocol:
+        return Result::failure(
+            {ClusterLifecycleClientErrorCode::Protocol, {}});
+    }
+    return Result::failure({ClusterLifecycleClientErrorCode::Protocol, {}});
 }
 
 core::Result<ClusterAssetReadinessReply, ClusterLifecycleClientError>

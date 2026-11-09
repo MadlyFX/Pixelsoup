@@ -10,6 +10,7 @@
 
 #include "lifecycle_agent.hpp"
 #include "playback.hpp"
+#include "process_log.hpp"
 #include "render_machine.hpp"
 #include "render_machine_system.hpp"
 #include "render_machine_window.hpp"
@@ -97,6 +98,58 @@ extern "C" void request_stop(int) { stop_requested = 1; }
     }
     return std::filesystem::path{std::move(encoded)};
 }
+
+// This process's disk log: its stdout and stderr, teed to a rotating file.
+// Declared so the capture is undone before the log drains and closes.
+struct DiskLog final {
+    std::unique_ptr<mediaserver::app::ProcessLog> log;
+    std::unique_ptr<mediaserver::app::StandardStreamCapture> capture;
+
+    ~DiskLog() {
+        capture.reset();
+        log.reset();
+    }
+
+    // A process without a disk log still runs; it says why once.
+    void start(const std::filesystem::path &directory, std::string name,
+               int argc, char **argv) {
+        if (directory.empty()) {
+            std::cerr << "media-server log: off (no per-user folder; pass "
+                         "--log-dir=PATH)\n";
+            return;
+        }
+        std::string header = "media-server " + name;
+        constexpr std::string_view password_prefix = "--lifecycle-password=";
+        for (int index = 1; index < argc; ++index) {
+            const std::string_view argument{argv[index]};
+            header += ' ';
+            // A password typed on the command line never reaches the disk.
+            header += argument.starts_with(password_prefix)
+                          ? std::string{password_prefix} + "***"
+                          : std::string{argument};
+        }
+        mediaserver::app::ProcessLogConfig config{};
+        config.directory = directory;
+        config.name = std::move(name);
+        config.header = std::move(header);
+        auto opened = mediaserver::app::ProcessLog::open(std::move(config));
+        if (!opened) {
+            std::cerr << "media-server log: off (" << opened.error() << ")\n";
+            return;
+        }
+        log = std::move(opened).value();
+        capture = mediaserver::app::StandardStreamCapture::start(*log);
+        if (!capture) {
+            log->write("stdout and stderr could not be captured; only this "
+                       "line is logged\n");
+            std::cerr << "media-server log: console output could not be "
+                         "captured\n";
+            return;
+        }
+        std::cout << "media-server log " << path_argument(log->file())
+                  << '\n';
+    }
+};
 
 #if defined(_WIN32)
 [[nodiscard]] std::optional<std::string>
@@ -587,6 +640,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     mediaserver::app::SyncSimulationMode lifecycle_sync_simulation =
         mediaserver::app::SyncSimulationMode::Disabled;
     bool normal_service_option_was_explicit = false;
+    std::filesystem::path log_directory;
     bool render_machine = false;
     int render_machine_other_options = 0;
     mediaserver::app::PlaybackOptions playback{};
@@ -608,6 +662,17 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             argument.starts_with("--lifecycle-child=") ||
             argument.starts_with("--lifecycle-child-arg=") ||
             argument.starts_with("--sync-simulate=");
+        // Every mode keeps a log, so choosing its folder is no mode's option.
+        constexpr std::string_view log_dir_prefix = "--log-dir=";
+        if (argument.starts_with(log_dir_prefix)) {
+            const auto value = argument.substr(log_dir_prefix.size());
+            if (value.empty()) {
+                std::cerr << "log folder path cannot be empty\n";
+                return 2;
+            }
+            log_directory = path_from_utf8(value);
+            continue;
+        }
         if (argument != "--help" && argument != "--validate-startup" &&
             !lifecycle_agent_option) {
             normal_service_option_was_explicit = true;
@@ -638,7 +703,8 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                    "[--run-frames=N] [--status-interval=N] "
                    "[--node-index=N] [--surface=WIDTHxHEIGHT] "
                    "[--window [--gpu] [--scene] [--output] [--window-at=X,Y] "
-                   "[--fullscreen] [--borderless]] [--edit]]\n"
+                   "[--fullscreen] [--borderless]] [--edit]] "
+                   "[--log-dir=PATH]\n"
                 << "       --render-machine, or no arguments at all, runs this "
                    "machine as a render machine from its stored settings: a "
                    "window opens, discovers the control machine, asks for the "
@@ -714,6 +780,15 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                    "genlock card. Every simulated sample is marked as such all "
                    "the way to the operator surface and can satisfy only a "
                    "DEGRADED sync policy, never a STRICT one\n"
+                << "       every process tees its stdout and stderr to a "
+                   "rotating log: director.log, node-N.log or agent-N.log "
+                   "(render-machine.log for the window) in --log-dir, by "
+                   "default %LOCALAPPDATA%\\MediaServer\\logs. Each start "
+                   "moves the previous run to NAME.1.log; files rotate at 8 "
+                   "MiB and three are kept. A lifecycle agent passes its "
+                   "folder to its render process and serves that log to "
+                   "Output Monitor, including after a crash. "
+                   "--validate-startup and --help write no log\n"
                 << "       assets are referenced by absolute path and are "
                    "never copied. Every machine in a show must see the same "
                    "path for the same file; each node reports which of them it "
@@ -1074,6 +1149,36 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         return 2;
     }
 
+    if (log_directory.empty()) {
+        log_directory = mediaserver::app::default_log_directory();
+    } else {
+        std::error_code absolute_error;
+        auto absolute = std::filesystem::absolute(log_directory, absolute_error);
+        if (!absolute_error) {
+            log_directory = std::move(absolute);
+        }
+    }
+    // Started before any mode runs, so its first lines - and whatever makes
+    // it exit - are on disk. Validation is a dry run and leaves no file.
+    DiskLog disk_log;
+    if (!validate_startup) {
+        std::string log_name;
+        if (render_machine || argc <= 1) {
+            log_name = "render-machine";
+        } else if (lifecycle_listen) {
+            log_name = mediaserver::app::agent_process_log_name(
+                lifecycle_node_index.value_or(0U));
+        } else if (has_role(roles, Role::Director)) {
+            log_name = "director";
+        } else if (automatic_node_index) {
+            log_name = "node-auto";
+        } else {
+            log_name =
+                mediaserver::app::node_process_log_name(playback.node_index);
+        }
+        disk_log.start(log_directory, std::move(log_name), argc, argv);
+    }
+
     // Nothing on the command line is a double-click or a shortcut: a person
     // at a render machine, not a script, so it gets the render-machine window
     // rather than a process idling in a console.
@@ -1211,6 +1316,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         agent_config.sync_simulation = lifecycle_sync_simulation;
         agent_config.discovery_port = lifecycle_discovery_port.value_or(
             mediaserver::net::cluster_discovery_port);
+        agent_config.log_directory = log_directory;
         if (!mediaserver::app::LifecycleAgent::valid_configuration(
                 agent_config)) {
             std::cerr << "invalid lifecycle agent configuration\n";

@@ -39,6 +39,11 @@ struct LifecycleAgentConfig final {
     std::uint16_t discovery_port{net::cluster_discovery_port};
     // See ManagedRenderProcessConfig::no_console_window.
     bool no_console_window{};
+    // Where the render process writes its log (the agent passes it as
+    // --log-dir) and where Output Monitor's log requests read it back from.
+    // Empty: the child picks its own default and log requests report
+    // Unavailable.
+    std::filesystem::path log_directory;
 };
 
 enum class LifecycleAgentFailure : core::u8 {

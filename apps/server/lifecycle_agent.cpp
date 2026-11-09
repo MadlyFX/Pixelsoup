@@ -2,6 +2,7 @@
 
 #include "asset_readiness_provider.hpp"
 #include "managed_process.hpp"
+#include "process_log.hpp"
 #include "system_hardware_probe.hpp"
 
 #include <asio/ip/address_v4.hpp>
@@ -18,6 +19,13 @@ namespace {
 process_config(const LifecycleAgentConfig& config) {
     std::vector<std::string> arguments = config.child_arguments;
     arguments.push_back("--node-index=" + std::to_string(config.node_index));
+    if (!config.log_directory.empty()) {
+        const std::u8string directory = config.log_directory.u8string();
+        arguments.push_back(
+            "--log-dir=" +
+            std::string{reinterpret_cast<const char*>(directory.data()),
+                        directory.size()});
+    }
     std::filesystem::path working_directory;
 #if defined(_WIN32)
     working_directory = config.child.parent_path();
@@ -47,8 +55,11 @@ struct LifecycleAgentState final {
         : config(std::move(agent_config)), process(process_config(config)),
           sync_probe(SyncDeviceProbeConfig{.simulation =
                                                config.sync_simulation}),
+          node_log(config.log_directory,
+                   node_process_log_name(config.node_index)),
           service(service_config(config), process, &hardware_probe,
-                  &asset_readiness, &sync_probe),
+                  &asset_readiness, &sync_probe,
+                  config.log_directory.empty() ? nullptr : &node_log),
           unsecured(net::lifecycle_key_is_unsecured(config.secret)) {}
 
     LifecycleAgentConfig config;
@@ -56,6 +67,7 @@ struct LifecycleAgentState final {
     SystemHardwareProbe hardware_probe{};
     PathAssetReadinessProvider asset_readiness{};
     SyncDeviceProbe sync_probe;
+    ProcessLogTailProvider node_log;
     net::ClusterLifecycleService service;
     std::optional<net::ClusterDiscoveryResponder> discovery;
     std::string discovery_text{"off"};
