@@ -964,6 +964,18 @@ schedule_project_settings(cmd::DirectorScheduler &scheduler,
                 doc::PropertyValue{
                     static_cast<double>(edit.environment.map_rotation)});
             stage.properties.insert_or_assign(
+                std::string{scene::schema::sky_r},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.sky_color.x)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::sky_g},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.sky_color.y)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::sky_b},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.sky_color.z)});
+            stage.properties.insert_or_assign(
                 std::string{scene::schema::environment_fog_density},
                 doc::PropertyValue{
                     static_cast<double>(edit.environment.fog_density)});

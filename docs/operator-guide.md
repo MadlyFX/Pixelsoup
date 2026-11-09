@@ -60,9 +60,15 @@ applies that path; Cancel leaves the document unchanged. Typed IES paths use
 sets the export destination, and **Bake lighting** starts the bake. Content's
 Source row shows the file name with its full path on hover.
 
-The Environment page's sky, atmosphere, baked lighting and reflections draw
-only on the Advanced renderer, so a project set to Basic shows a note and
-**Use Advanced renderer** there instead. Their values are kept and return with
+**Sky colour** on the Environment page is the background behind the scene
+wherever no environment map or physical sky is drawn; it is black by default
+and lights nothing. A scene with no lights gets a dim default fill so objects
+are visible; it switches off as soon as the scene has any light, so it never
+changes authored lighting.
+
+The Environment page's map, physical sky, atmosphere, baked lighting and
+reflections draw only on the Advanced renderer, so a project set to Basic shows
+only Sky colour, a note and **Use Advanced renderer** there instead. Their values are kept and return with
 Advanced. A physical sky left on stops Basic drawing the frame, so the page also
 offers **Turn off physical sky** while one is on.
 

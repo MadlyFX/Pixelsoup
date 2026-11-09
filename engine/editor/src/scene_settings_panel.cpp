@@ -33,7 +33,7 @@ std::string_view environment_status_text(
     EnvironmentStatus status) noexcept {
   switch (status) {
   case EnvironmentStatus::NotAuthored:
-    return "Empty: the two-colour hemisphere lights the scene.";
+    return "Empty: the sky colour shows behind the scene.";
   case EnvironmentStatus::Loading:
     return "Reading the map.";
   case EnvironmentStatus::Failed:
@@ -49,7 +49,7 @@ std::string_view environment_status_text(
   case EnvironmentStatus::Ready:
     return "Lighting the scene and drawing as the sky.";
   }
-  return "Empty: the two-colour hemisphere lights the scene.";
+  return "Empty: the sky colour shows behind the scene.";
 }
 
 std::string_view color_status_text(ColorStatus status) noexcept {
@@ -246,6 +246,25 @@ SceneSettingsFrame SceneSettingsPanel::draw(
         value = *fallback;
         changed = true;
       }
+    }
+  };
+  // A colour well beside its label, with the reset arrow while the colour
+  // is not the default.
+  const auto colour = [&](std::string_view label, scene::Vec3 &value,
+                          scene::Vec3 fallback) {
+    const gui::Rect field = well(label);
+    gui::UiColor picked{value.x, value.y, value.z, 1.0F};
+    if (ctx.color_well(id(label), field, picked)) {
+      value = scene::Vec3{picked.r, picked.g, picked.b};
+      changed = true;
+    }
+    if (!(value == fallback) && field.x - label_width >= bounds.x &&
+        reset_button(ctx, id(label) ^ 0x5E5E7ULL,
+                     gui::Rect{field.x - reset_button_width - 2.0F, field.y,
+                               reset_button_width, field.height},
+                     "Reset to default (black)")) {
+      value = fallback;
+      changed = true;
     }
   };
   const auto file = [&](std::string_view label, std::string &value, FilePickerKind kind) {
@@ -456,14 +475,16 @@ SceneSettingsFrame SceneSettingsPanel::draw(
              scene::max_graph_texture_budget_gb, 0.1, "GB", 1);
     }
   } else if (renderer.backend == scene::RendererBackend::Basic) {
-    // Everything on this page needs the scene-linear Advanced renderer: Basic
-    // ignores the map and fog, refuses baked light and reflections, and fails
-    // the frame outright for a physical sky. So the fields are hidden rather
-    // than offered to edit nothing; their authored values are kept and come
-    // back with Advanced.
+    // Apart from the plain sky colour, everything on this page needs the
+    // scene-linear Advanced renderer: Basic ignores the map and fog, refuses
+    // baked light and reflections, and fails the frame outright for a
+    // physical sky. So those fields are hidden rather than offered to edit
+    // nothing; their authored values are kept and come back with Advanced.
     form.space(section_space);
-    paragraph("Sky, atmosphere, baked lighting and reflections need the "
-              "Advanced renderer.",
+    colour("Sky colour", environment.sky_color, fresh.environment.sky_color);
+    form.space(section_space);
+    paragraph("An environment map, physical sky, atmosphere, baked lighting "
+              "and reflections need the Advanced renderer.",
               ctx.theme().text_muted);
     form.space(section_space);
     if (ctx.button(id("use advanced"), form.control(), "Use Advanced renderer")) {
@@ -501,6 +522,10 @@ SceneSettingsFrame SceneSettingsPanel::draw(
         number("Ground albedo", environment.physical_sky.ground_albedo, 0, 1);
       } else {
         file("Environment map", environment.map_source, FilePickerKind::EnvironmentMap);
+        // The plain colour shows only where no map is drawn over it.
+        if (environment.map_source.empty())
+          colour("Sky colour", environment.sky_color,
+                 fresh.environment.sky_color);
         if (!environment.map_source.empty()) {
           environment_number("Intensity",
                              scene::PropertyChannel::EnvironmentIntensity, 0,

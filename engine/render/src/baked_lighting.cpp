@@ -379,10 +379,14 @@ struct World {
       return (sample(ix,iy)*(1-fx)+sample(ix+1,iy)*fx)*(1-fy)
           +(sample(ix,iy+1)*(1-fx)+sample(ix+1,iy+1)*fx)*fy;
     }
-    if (!environment.valid())
-      return (e.ground_color * (0.5F - 0.5F * d.y) +
-              e.sky_color * (0.5F + 0.5F * d.y)) *
-             e.ambient;
+    if (!environment.valid()) {
+      // The same default fill the renderer uses: none once the scene has
+      // a light, and never the background colour.
+      const scene::AmbientFill fill = scene::ambient_fill(*source);
+      return (fill.ground * (0.5F - 0.5F * d.y) +
+              fill.sky * (0.5F + 0.5F * d.y)) *
+             fill.strength;
+    }
     // Match ibl_equirect_uv and the runtime's linear clamp sampler. Opposite
     // rotation signs move the key light to the other side after baking.
     float u = std::atan2(d.z, d.x) / (2 * pi) + 0.5F + e.map_rotation;
@@ -755,9 +759,13 @@ core::u64 bake_input_digest(const scene::Scene &source) {
   // forming a publication manifest must not invalidate its lighting.
   input.asset_refresh_generation = source.asset_refresh_generation;
   input.renderer_settings.photometric_scale = source.renderer_settings.photometric_scale;
-  input.environment.sky_color = source.environment.sky_color;
-  input.environment.ground_color = source.environment.ground_color;
-  input.environment.ambient = source.environment.ambient;
+  // The fill as the bake sees it, resolved here because whether it is on
+  // depends on every light, not only the baked ones copied below.
+  const scene::AmbientFill fill = scene::ambient_fill(source);
+  input.environment.fill_sky_color = fill.sky;
+  input.environment.ground_color = fill.ground;
+  input.environment.ambient = fill.strength;
+  input.environment.fill_with_lights = true;
   input.environment.map_source = source.environment.map_source;
   input.environment.map_rotation = source.environment.map_rotation;
   input.environment.map_intensity = source.environment.map_intensity;

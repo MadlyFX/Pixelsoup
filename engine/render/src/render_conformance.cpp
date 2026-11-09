@@ -49,6 +49,10 @@ scene::Scene fixture() {
     settings.motion_blur = true; settings.motion_blur_radius = 12U;
     settings.texture_streaming = false; settings.texture_anisotropy = 8U;
     value.environment.ambient = 0.2F;
+    // The fixture predates the fill switching off under lights and the black
+    // default background; both are pinned so its references stay exact.
+    value.environment.fill_with_lights = true;
+    value.environment.sky_color = {0.05F, 0.07F, 0.10F};
     value.environment.map_intensity = 0.65F;
     value.environment.fog_density = 0.045F;
     scene::MeshInstance box{};

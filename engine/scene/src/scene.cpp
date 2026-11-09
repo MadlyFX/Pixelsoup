@@ -801,6 +801,17 @@ const CanvasRect* Scene::slice_for(core::u32 node_index) const noexcept {
     return nullptr;
 }
 
+AmbientFill ambient_fill(const Scene& scene) noexcept {
+    const auto& environment = scene.environment;
+    const bool lit =
+        !scene.directional_lights.empty() || !scene.point_lights.empty();
+    if (lit && !environment.fill_with_lights) {
+        return {};
+    }
+    return {environment.fill_sky_color, environment.ground_color,
+            environment.ambient};
+}
+
 core::u64 digest(const Scene& scene) noexcept {
     auto state = core::fnv1a_offset;
     if (!scene.wall_colors.empty()) mix(state, asset_set_digest(scene));
@@ -895,8 +906,10 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, scene.asset_commit.show_frame);
     }
     mix(state, scene.environment.sky_color);
+    mix(state, scene.environment.fill_sky_color);
     mix(state, scene.environment.ground_color);
     mix(state, scene.environment.ambient);
+    mix(state, static_cast<core::u64>(scene.environment.fill_with_lights));
     mix(state, scene.environment.map_source);
     mix(state, scene.environment.map_intensity);
     mix(state, scene.environment.map_rotation);

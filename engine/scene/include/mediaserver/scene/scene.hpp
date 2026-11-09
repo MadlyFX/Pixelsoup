@@ -2165,9 +2165,21 @@ struct PhysicalSky final {
 [[nodiscard]] DirectionalLight physical_sun(const PhysicalSky& sky, doc::NodeId source) noexcept;
 
 struct Environment final {
-    Vec3 sky_color{0.05F, 0.07F, 0.10F};
+    // The background: what shows behind the scene where no map or physical
+    // sky is drawn. Scene-linear, black by default so an LED wall shows
+    // nothing it was not asked to. It lights nothing.
+    Vec3 sky_color{};
+    // The default fill: a dim two-colour hemisphere, sky half above and ground
+    // half below, scaled by `ambient`. It stands in for lighting only while
+    // the scene has none - the first light added switches it off (see
+    // `ambient_fill`), so authored lights are never tinted by it.
+    Vec3 fill_sky_color{0.05F, 0.07F, 0.10F};
     Vec3 ground_color{0.02F, 0.02F, 0.02F};
     float ambient{1.0F};
+    // Keeps the fill under authored lights. Not authored by a project: for
+    // look-dev rigs such as the Asset Viewer's Studio that design the two to
+    // work together.
+    bool fill_with_lights{};
     // Optional equirectangular image identity. It is resolved by the explicit
     // asset-loading path, never by scene evaluation or the frame loop.
     std::string map_source;
@@ -2598,6 +2610,17 @@ struct Scene final {
     // canvas: an unmapped output should be black and obviously unmapped.
     [[nodiscard]] const CanvasRect* slice_for(core::u32 node_index) const noexcept;
 };
+
+// The hemisphere fill a scene is lit by: the environment's default fill while
+// the scene has no directional or local light (or keeps it on purpose), and
+// none at all once it has one. A physical sky's sun counts as a light.
+struct AmbientFill final {
+    Vec3 sky{};
+    Vec3 ground{};
+    float strength{};
+    bool operator==(const AmbientFill&) const = default;
+};
+[[nodiscard]] AmbientFill ambient_fill(const Scene& scene) noexcept;
 
 // FNV-1a over every value in the scene, in declaration order, reading floats
 // as their bit patterns rather than their decimal forms.

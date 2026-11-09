@@ -936,6 +936,43 @@ void a_background_fill_is_read_clamped_and_blends_when_translucent() {
                      .has_value());
 }
 
+// The background colour reaches the scene from the document and lights
+// nothing; the default fill lights a scene only until its first light.
+void the_default_fill_goes_out_with_the_first_light() {
+    MODEL_CHECK(scene::Environment{}.sky_color == scene::Vec3{});
+    doc::Root root;
+    root = root.set(node(1U, schema::stage_type,
+                         {real(schema::sky_r, 0.3), real(schema::sky_g, 0.2),
+                          real(schema::sky_b, 0.1)}));
+    root = root.set(node(2U, schema::object_type,
+                         {text(schema::primitive, "box")}));
+    scene::SceneModel model;
+    model.reset(scoped(root));
+    const scene::Scene unlit = model.evaluate(at_start);
+    MODEL_CHECK(unlit.environment.sky_color == (scene::Vec3{0.3F, 0.2F, 0.1F}));
+    const scene::AmbientFill fill = scene::ambient_fill(unlit);
+    // The fill is its own colours, not the background's.
+    MODEL_CHECK(fill.sky == (scene::Vec3{0.05F, 0.07F, 0.10F}));
+    MODEL_CHECK(fill.ground == (scene::Vec3{0.02F, 0.02F, 0.02F}));
+    MODEL_CHECK(fill.strength == 1.0F);
+
+    for (const auto kind : {schema::point_kind, schema::directional_kind}) {
+        doc::Root lit = root.set(node(3U, schema::light_type,
+                                      {text(schema::light_kind, kind)}));
+        scene::SceneModel with_light;
+        with_light.reset(scoped(lit));
+        scene::Scene built = with_light.evaluate(at_start);
+        MODEL_CHECK(built.point_lights.size() + built.directional_lights.size() == 1U);
+        MODEL_CHECK(scene::ambient_fill(built) == scene::AmbientFill{});
+        MODEL_CHECK(built.environment.sky_color == unlit.environment.sky_color);
+        built.environment.fill_with_lights = true;
+        MODEL_CHECK(scene::ambient_fill(built) == fill);
+    }
+    scene::Scene recoloured = unlit;
+    recoloured.environment.sky_color.z = 0.4F;
+    MODEL_CHECK(scene::digest(recoloured) != scene::digest(unlit));
+}
+
 void physical_renderer_inputs_are_replicated_without_resolving_assets() {
     doc::Root root;
     root = root.set(node(
@@ -5370,7 +5407,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 89U> cases{{
+constexpr std::array<Case, 90U> cases{{
     {"a solo draws only what it shows",
      &a_solo_draws_only_what_it_shows},
     {"a timing override evaluates a placement as proposed",
@@ -5413,6 +5450,8 @@ constexpr std::array<Case, 89U> cases{{
      &a_document_past_capacity_truncates_the_same_way_everywhere},
     {"a point light is carried through as one",
      &a_point_light_is_carried_through_as_one},
+    {"the default fill goes out with the first light",
+     &the_default_fill_goes_out_with_the_first_light},
     {"physical renderer inputs are replicated without resolving assets",
      &physical_renderer_inputs_are_replicated_without_resolving_assets},
     {"a Background fill is read clamped and blends when translucent",

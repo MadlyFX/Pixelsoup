@@ -4354,24 +4354,63 @@ void basic_renderer_hides_the_environment_fields() {
   // Where Advanced has the physical sky switch, Basic has nothing to toggle.
   UI_CHECK(!h.click(90.0).project.apply && !h.state.environment.physical_sky.enabled);
   h.state.environment.physical_sky.enabled=true;
-  bool switched=false,turned_off=false;
+  // Basic draws the plain sky colour, so that control stays: its reset arrow
+  // is somewhere on the page.
+  h.state.environment.sky_color={0.5F,0.25F,0.125F};
+  bool switched=false,turned_off=false,reset=false;
   for(float y=44.0F;y<700.0F;y+=6.0F) {
-    const auto frame=h.click(y);
-    UI_CHECK(!frame.file_picker && frame.keys.empty());
-    if(!frame.project.apply) continue;
-    if(h.state.renderer.backend==scene::RendererBackend::Advanced) {
-      switched=true;h.state.renderer.backend=scene::RendererBackend::Basic;
-    } else {
-      UI_CHECK(!h.state.environment.physical_sky.enabled);turned_off=true;
+    for(const float x:{30.0F,126.0F,134.0F,142.0F,150.0F,158.0F,200.0F}) {
+      const auto frame=h.click(y,x);
+      UI_CHECK(!frame.file_picker && frame.keys.empty());
+      static_cast<void>(h.key(gui::Key::Escape));
+      if(!frame.project.apply) continue;
+      if(h.state.renderer.backend==scene::RendererBackend::Advanced) {
+        switched=true;h.state.renderer.backend=scene::RendererBackend::Basic;
+      } else if(!h.state.environment.physical_sky.enabled) {
+        turned_off=true;
+      } else if(h.state.environment.sky_color==scene::Vec3{}) {
+        reset=true;
+      }
+      // The hidden values are kept for when Advanced returns.
+      UI_CHECK(h.state.environment.map_source=="studio.hdr" && h.state.environment.fog_density==0.25F);
     }
-    // The hidden values are kept for when Advanced returns.
-    UI_CHECK(h.state.environment.map_source=="studio.hdr" && h.state.environment.fog_density==0.25F);
   }
-  UI_CHECK(switched && turned_off);
+  UI_CHECK(switched && turned_off && reset);
   // On Advanced the same page offers the sky switch again.
   h.state.renderer.backend=scene::RendererBackend::Advanced;
   static_cast<void>(h.click(90.0));
   UI_CHECK(h.state.environment.physical_sky.enabled);
+}
+
+// The plain sky colour is a colour well under an empty map path, applied
+// live from its picker, with a reset arrow back to black.
+void the_sky_colour_is_picked_and_resets_to_black() {
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  h.state.renderer.backend=scene::RendererBackend::Advanced;
+  UI_CHECK(h.state.environment.sky_color==scene::Vec3{});
+  static_cast<void>(h.click(186.0,280));
+  // The picker's field hangs under the well; near its top is bright.
+  static_cast<void>(h.frame(215,238,true));
+  const auto picked=h.frame(215,238,true);
+  static_cast<void>(h.frame(215,238,false));
+  static_cast<void>(h.key(gui::Key::Enter));
+  UI_CHECK(picked.project.apply);
+  const auto colour=h.state.environment.sky_color;
+  UI_CHECK(std::max({colour.x,colour.y,colour.z})>0.5F);
+  // Only the background changed; the fill is not this colour.
+  UI_CHECK(h.state.environment.fill_sky_color==scene::Environment{}.fill_sky_color);
+  // A map hides the plain colour: the row under the path is Intensity.
+  h.state.environment.map_source="studio.hdr";
+  static_cast<void>(h.enter(186.0,"2.5"));
+  UI_CHECK(h.state.environment.map_intensity==2.5F && h.state.environment.sky_color==colour);
+  h.state.environment.map_source.clear();
+  bool reset=false;
+  for(float x=60.0F;x<200.0F && !reset;x+=4.0F) {
+    static_cast<void>(h.click(186.0,x));
+    static_cast<void>(h.key(gui::Key::Escape));
+    reset=h.state.environment.sky_color==scene::Vec3{};
+  }
+  UI_CHECK(reset);
 }
 
 // Physical sky values use the same property key controls as fog and maps.
@@ -4568,7 +4607,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 138U> cases{{
+constexpr std::array<Case, 139U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -4795,6 +4834,8 @@ constexpr std::array<Case, 138U> cases{{
     {"geometry controls emit replicated settings", &geometry_controls_emit_replicated_settings},
     {"basic renderer hides the environment fields",
      &basic_renderer_hides_the_environment_fields},
+    {"the sky colour is picked and resets to black",
+     &the_sky_colour_is_picked_and_resets_to_black},
     {"shadow cascades and bounce are authored beside the backend",
      &shadow_cascades_and_bounce_are_authored_beside_the_backend},
     {"antialiasing is one authored choice",
