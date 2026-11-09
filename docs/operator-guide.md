@@ -370,6 +370,15 @@ New projects start with a five-minute timeline: 7,200 frames at the default
 24 fps, from frame 0 through frame 7,199 inclusive. Saved projects retain their
 authored range; `--show-range=FIRST:LAST` overrides the startup range.
 
+Adding a video whose frame rate differs from the timeline's, from the Library
+or the Asset Viewer onto the Timeline or Stage, opens a small menu at the
+pointer: **Change the timeline to** the clip's rate, or **Keep the timeline
+at** its current rate. The clip goes in after the answer; when the timeline
+changes, the clip waits until the new rate is in force so its length is
+measured at that rate. Clicking away keeps the timeline's rate and still adds
+the clip. Only rates the timeline offers (23.976, 24, 25, 29.97, 30, 50,
+59.94 and 60 fps) ask; stills, image sequences and other rates go straight in.
+
 A media element is a *placement* of a source, not a copy of it. The document
 carries where the clip starts on the show timeline, how many show frames it
 occupies, which source frame its first show frame shows, and how long its head

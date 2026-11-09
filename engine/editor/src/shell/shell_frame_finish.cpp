@@ -3,10 +3,121 @@
 #include "shell_frame.hpp"
 
 #include "native_dialogs.hpp"
+#include "../timeline/timeline_internal.hpp"
 
 namespace mediaserver::editor {
 
+namespace {
+
+// The timeline rate a video's own rate maps to, when that is one the show can
+// run at. Other source rates never prompt: the Director would refuse them.
+[[nodiscard]] std::optional<ShowRateRequest>
+matching_common_rate(const assets::MediaFrameRate &source) noexcept {
+  if (source.numerator == 0U || source.denominator == 0U) {
+    return std::nullopt;
+  }
+  for (const timeline::RateChoice &choice : timeline::common_rates) {
+    if (static_cast<core::u64>(choice.rate.numerator) * source.denominator ==
+        static_cast<core::u64>(source.numerator) * choice.rate.denominator) {
+      return choice.rate;
+    }
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::string_view rate_name(ShowRateRequest rate) noexcept {
+  for (const timeline::RateChoice &choice : timeline::common_rates) {
+    if (choice.rate == rate) {
+      return choice.label;
+    }
+  }
+  return "this rate";
+}
+
+} // namespace
+
 void EditorShell::Frame::finish() {
+  // A video whose frame rate differs from the timeline's is held while the
+  // operator chooses whether the timeline should take the clip's rate.
+  const gui::UiId rate_menu = gui::ui_id("timeline.match_clip_rate");
+  const ShowRateRequest timeline_rate{timeline.rate_numerator,
+                                      timeline.rate_denominator};
+  if (!impl.pending_rate_match.has_value()) {
+    std::optional<ShowRateRequest> wanted;
+    std::vector<AddIntent> held;
+    for (auto added = result.adds.begin(); added != result.adds.end();) {
+      std::optional<ShowRateRequest> rate;
+      if (added->kind == AddKind::Media && added->count > 1U &&
+          added->frame_rate.has_value()) {
+        rate = matching_common_rate(*added->frame_rate);
+      }
+      if (rate.has_value() && *rate != timeline_rate &&
+          (!wanted.has_value() || *wanted == *rate)) {
+        wanted = rate;
+        held.push_back(std::move(*added));
+        added = result.adds.erase(added);
+      } else {
+        ++added;
+      }
+    }
+    if (wanted.has_value()) {
+      impl.pending_rate_match = EditorShell::Impl::PendingRateMatch{
+          std::move(held), *wanted, timeline_rate, false, 0U};
+      ui.open_context_menu(rate_menu, ui.pointer_x(), ui.pointer_y());
+    }
+  }
+  if (impl.pending_rate_match.has_value()) {
+    auto &pending = *impl.pending_rate_match;
+    bool release = false;
+    if (!pending.changing) {
+      const std::string change =
+          "Change the timeline to " + std::string{rate_name(pending.rate)};
+      const std::string keep =
+          "Keep the timeline at " + std::string{rate_name(pending.previous)};
+      const std::array<std::string_view, 2U> choices{change, keep};
+      if (const auto chosen = ui.context_menu(rate_menu, choices)) {
+        if (*chosen == 0U) {
+          if (!result.show_rate.has_value()) {
+            result.show_rate = pending.rate;
+          }
+          pending.changing = true;
+        } else {
+          release = true;
+        }
+      } else if (!ui.menu_open(rate_menu)) {
+        // Dismissed: the clips still go in, at the timeline's own rate.
+        release = true;
+      }
+    } else {
+      ++pending.frames_waited;
+      release = timeline_rate == pending.rate || pending.frames_waited > 120U;
+      if (release && timeline_rate == pending.rate) {
+        // Lengths were measured against the old rate; remeasure them.
+        for (AddIntent &add : pending.adds) {
+          if (add.timing.has_value()) {
+            const core::i64 numerator =
+                add.timing->duration *
+                static_cast<core::i64>(pending.rate.numerator) *
+                static_cast<core::i64>(pending.previous.denominator);
+            const core::i64 denominator =
+                static_cast<core::i64>(pending.rate.denominator) *
+                static_cast<core::i64>(pending.previous.numerator);
+            add.timing->duration = std::max<core::i64>(
+                (numerator + denominator - 1) / denominator, 1);
+          }
+        }
+      }
+    }
+    if (release) {
+      for (AddIntent &add : pending.adds) {
+        result.adds.push_back(std::move(add));
+      }
+      impl.history_context = HistoryContext::Scene;
+      impl.semantic_boundary = true;
+      impl.pending_rate_match.reset();
+    }
+  }
+
   const bool global_edit_shortcut_allowed =
       !impl.scene_link_details_open && !impl.blender_connection_open &&
       !impl.preferences_panel.is_open() &&

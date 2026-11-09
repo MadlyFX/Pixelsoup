@@ -396,6 +396,19 @@ struct EditorShell::Impl final {
   core::u64 next_edit_gesture{1U};
   // A plateset placement waiting on the operator's answer about the rig.
   std::optional<PlatesetPlaceIntent> pending_plateset_place;
+  // Videos added while their frame rate differs from the timeline's, held
+  // back until the operator says whether the timeline should follow them.
+  // `changing` is set once the rate change was requested; the clips are then
+  // released only after the timeline reports the new rate, so their lengths
+  // are measured against it.
+  struct PendingRateMatch final {
+    std::vector<AddIntent> adds;
+    ShowRateRequest rate;
+    ShowRateRequest previous;
+    bool changing{};
+    core::u32 frames_waited{};
+  };
+  std::optional<PendingRateMatch> pending_rate_match;
   // The Library is carrying assets right now (as of its last draw), so the
   // plateset page can light its slots as drop targets.
   bool library_dragging{};
