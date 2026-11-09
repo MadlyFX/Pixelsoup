@@ -76,7 +76,7 @@ renders four slices rather than four full frames cropped afterward.
 
 **`SceneRenderer`: one scene, one target.** Given a `Scene` and a slice, it
 resolves every mesh key through an in-process cache - procedural primitives
-generate on a miss, imported glTF/OBJ geometry loads and uploads once per
+generate on a miss, imported glTF/OBJ/FBX geometry loads and uploads once per
 source file - then writes one GPU instance record per drawable. Opaque
 instances stay batched by mesh for one instanced draw each; anything that needs
 destination pixels (non-Normal blend modes, or any media clip, since a decoded
@@ -262,7 +262,8 @@ mid-draw. Large media transfers span bounded command recordings; partial images
 are never published, and cancellation retries only unaccepted rows. Shared
 upload pressure holds the last complete frame until the next transfer finishes.
 See [media playback and codec limits](media-playback.md) for supported containers,
-qualification and performance boundaries. `model_loader` reads glTF/GLB and OBJ into the same vertex/index
+qualification and performance boundaries. `model_loader` reads glTF/GLB, OBJ and FBX (through the vendored ufbx
+reader, converted to Y-up metres) into the same vertex/index
 arenas `SceneRenderer` already uses, preserving per-primitive material
 boundaries and PBR textures so an imported asset shades through the identical
 pipeline as a procedural one.

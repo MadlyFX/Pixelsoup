@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "model_animation_import.hpp"
+#include "model_loader_detail.hpp"
 
 namespace mediaserver::render {
 namespace {
@@ -1192,11 +1193,17 @@ void mikk_tangent(const SMikkTSpaceContext* context, const float tangent[3],
 
 } // namespace
 
+bool detail::generate_model_tangents(ModelAsset& asset, core::u32 first_index,
+                                     core::u32 index_count) noexcept {
+    return generate_mikk_tangents(asset, first_index, index_count);
+}
+
 namespace {
 bool load_level(const std::string& source, ModelAsset& into) {
     if (ends_with(source, ".msmodel")) return load_model_package(source, into);
     if (ends_with(source, ".gltf") || ends_with(source, ".glb")) return load_gltf(source, into);
     if (ends_with(source, ".obj")) return load_obj(source, into);
+    if (ends_with(source, ".fbx")) return detail::load_fbx(source, into);
     return false;
 }
 

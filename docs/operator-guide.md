@@ -1891,7 +1891,14 @@ PTP/genlock/frame-lock integration boundary.
 
 ## Authoring and project files
 
-Use Library to import media or models, then drag them into Stage. The Inspector
+Use Library to import media or models, then drag them into Stage. Models can
+be glTF/GLB, OBJ or FBX (binary or ASCII). An FBX file is converted from its
+own axes and units to the stage's Y-up metres, with node pivots and mirroring
+applied, and imports as static geometry: its animation, skinning and blend
+shapes are not used. Its texture paths are tried as written and then by file
+name beside the model, so a copied asset folder still resolves; a texture that
+cannot be found or decoded (PNG, JPEG, TGA or BMP) refuses the import and names
+the file. The Inspector
 and Timeline author ordinary document commands, so their changes participate in
 replication and undo/redo. The conventional **Edit** menu carries Undo, Redo,
 Copy, and Paste, with **Ctrl+Z** for undo and **Ctrl+Shift+Z** or **Ctrl+Y** for redo; **Ctrl+S** saves the project. A
@@ -2509,7 +2516,9 @@ see [Hardware Map and LED processors](#hardware-map-and-led-processors).
 Feed mappings support flat,
 horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,
 split the calibrated LED geometry externally, retain a shared model origin, and
-import each feed mesh with `+ IMPORT UV MESH`. Its persistent projection asset
+import each feed mesh with `+ IMPORT UV MESH` as glTF/GLB, OBJ or FBX. FBX
+geometry is converted to Y-up metres first, so pieces exported from the same
+file keep their shared origin. Its persistent projection asset
 is referenced by absolute path and reported for readiness exactly like media
 and models. UV0 represents the full connector image; it is not material UV
 space.

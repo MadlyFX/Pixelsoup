@@ -345,7 +345,7 @@ start_frame(const assets::MediaAsset &media) {
                      ? std::string_view{"media video image"}
                      : kind == assets::AssetKind::ParticleEffect
                      ? std::string_view{"particle effect ajfx fx"}
-                     : std::string_view{"model 3d gltf obj"},
+                     : std::string_view{"model 3d gltf obj fbx"},
                  query);
 }
 
@@ -842,8 +842,8 @@ std::optional<LibraryImportAction> library_import_kind(std::string_view path) {
   constexpr std::array<std::string_view, 17U> media{
       {"mp4", "mov", "mkv", "webm", "avi", "mxf", "m4v", "mpg", "mpeg", "wmv",
        "png", "jpg", "jpeg", "bmp", "tga", "exr", "hdr"}};
-  constexpr std::array<std::string_view, 4U> models{
-      {"gltf", "glb", "obj", "msmodel"}};
+  constexpr std::array<std::string_view, 5U> models{
+      {"gltf", "glb", "obj", "fbx", "msmodel"}};
   if (std::find(media.begin(), media.end(), extension) != media.end()) {
     return LibraryImportAction::Media;
   }

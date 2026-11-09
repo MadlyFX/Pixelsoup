@@ -488,6 +488,8 @@ void files_import_by_extension() {
            editor::LibraryImportAction::Media);
   UI_CHECK(editor::library_import_kind("C:/models/car.glb") ==
            editor::LibraryImportAction::Model);
+  UI_CHECK(editor::library_import_kind("C:/models/Truss.FBX") ==
+           editor::LibraryImportAction::Model);
   UI_CHECK(editor::library_import_kind("C:/fx/Embers.AJFX") ==
            editor::LibraryImportAction::ParticleEffect);
   UI_CHECK(!editor::library_import_kind("C:/notes.txt").has_value());

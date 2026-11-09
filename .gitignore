@@ -30,6 +30,7 @@ compile_commands.json
 *.gltf.*.msmodel
 *.glb.*.msmodel
 *.obj.*.msmodel
+*.fbx.*.msmodel
 /scripts/lighting.*.msgi
 
 # Python caches are disposable regardless of which working directory runs them.

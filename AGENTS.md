@@ -99,7 +99,8 @@ tests that merely duplicate those edits.
 
 Write disposable builds, logs, captures, demo projects and exports under
 `out/`. Never commit Python bytecode, `.mslink-cache-v1` directories or
-digest-named `.gltf.*.msmodel` / `.glb.*.msmodel` / `.obj.*.msmodel` caches.
+digest-named `.gltf.*.msmodel` / `.glb.*.msmodel` / `.obj.*.msmodel` /
+`.fbx.*.msmodel` caches.
 Preserve source assets, test fixtures, third-party notices, user projects and
 local configuration. Keep current behavior in focused reference docs and
 an area's future requirements in its plan document (for example

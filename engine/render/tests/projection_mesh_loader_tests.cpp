@@ -187,12 +187,70 @@ void invalid_scale_and_capacity_are_rejected() {
                render::ProjectionMeshLoadError::CapacityExceeded);
 }
 
+void an_fbx_patch_in_metres_stays_indexed_and_calibrated() {
+    // A Y-up, metre-unit FBX quad (UnitScaleFactor 100 cm). Shared corners
+    // stay shared, so a dense exported wall fits the same vertex budget as
+    // its indexed glTF equivalent.
+    Fixture files;
+    const std::string path = files.write("patch.fbx",
+        "; FBX 7.4.0 project file\n"
+        "FBXHeaderExtension:  {\n FBXVersion: 7400\n}\n"
+        "GlobalSettings:  {\n Properties70:  {\n"
+        "  P: \"UpAxis\", \"int\", \"Integer\", \"\",1\n"
+        "  P: \"UpAxisSign\", \"int\", \"Integer\", \"\",1\n"
+        "  P: \"FrontAxis\", \"int\", \"Integer\", \"\",2\n"
+        "  P: \"FrontAxisSign\", \"int\", \"Integer\", \"\",1\n"
+        "  P: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n"
+        "  P: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n"
+        "  P: \"UnitScaleFactor\", \"double\", \"Number\", \"\",100\n"
+        " }\n}\n"
+        "Objects:  {\n"
+        " Geometry: 1, \"Geometry::Patch\", \"Mesh\" {\n"
+        "  Vertices: *12 {\n   a: -1,-1,0, 1,-1,0, 1,1,0, -1,1,0\n  }\n"
+        "  PolygonVertexIndex: *4 {\n   a: 0,1,2,-4\n  }\n"
+        "  LayerElementNormal: 0 {\n   Version: 101\n"
+        "   MappingInformationType: \"ByVertice\"\n"
+        "   ReferenceInformationType: \"Direct\"\n"
+        "   Normals: *12 {\n    a: 0,0,1, 0,0,1, 0,0,1, 0,0,1\n   }\n  }\n"
+        "  LayerElementUV: 0 {\n   Version: 101\n   Name: \"map1\"\n"
+        "   MappingInformationType: \"ByPolygonVertex\"\n"
+        "   ReferenceInformationType: \"IndexToDirect\"\n"
+        "   UV: *8 {\n    a: 0,0, 1,0, 1,1, 0,1\n   }\n"
+        "   UVIndex: *4 {\n    a: 0,1,2,3\n   }\n  }\n"
+        "  Layer: 0 {\n   Version: 100\n"
+        "   LayerElement:  {\n    Type: \"LayerElementNormal\"\n    TypedIndex: 0\n   }\n"
+        "   LayerElement:  {\n    Type: \"LayerElementUV\"\n    TypedIndex: 0\n   }\n"
+        "  }\n }\n"
+        " Model: 2, \"Model::Patch\", \"Mesh\" {\n  Version: 232\n }\n"
+        "}\n"
+        "Connections:  {\n C: \"OO\",2,0\n C: \"OO\",1,2\n}\n");
+
+    const auto loaded = render::load_projection_mesh(path, calibration(), 2.0F);
+    MESH_CHECK(loaded.has_value());
+    MESH_CHECK(loaded.value().vertices.size() == 4U);
+    MESH_CHECK(loaded.value().indices.size() == 6U);
+    bool found = false;
+    for (const auto& vertex : loaded.value().vertices) {
+        // File corner (-1,-1,0) with UV (0,0): centre (10,2,-5) + 2 * local,
+        // and the bottom-up FBX UV becomes the connector's bottom row.
+        if (vertex.position.x == 8.0F && vertex.position.y == 0.0F) {
+            found = true;
+            MESH_CHECK(vertex.position.z == -5.0F);
+            MESH_CHECK(vertex.destination_u == 0.0F);
+            MESH_CHECK(vertex.destination_v == 1.0F);
+        }
+    }
+    MESH_CHECK(found);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 7U> cases{{
+    {"an FBX patch in metres stays indexed and calibrated",
+     &an_fbx_patch_in_metres_stays_indexed_and_calibrated},
     {"an external patch retains authored coordinates and UV0",
      &an_external_patch_retains_authored_coordinates_and_uv0},
     {"split patches keep the same external origin",

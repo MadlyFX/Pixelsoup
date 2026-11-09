@@ -12,8 +12,9 @@
 // Loads an imported 3D model file into the renderer's mesh format.
 //
 // Behind the same idea as the media decode seam: the scene carries only a path,
-// and this turns it into geometry the renderer uploads and caches. glTF and OBJ
-// are supported, chosen by extension. Geometry includes positions,
+// and this turns it into geometry the renderer uploads and caches. glTF, OBJ
+// and FBX are supported, chosen by extension. FBX is converted to glTF's
+// right-handed, +Y-up, metre space and imported as static geometry. Geometry includes positions,
 // normals (generated flat per primitive if absent), UVs, material factors,
 // material textures, bounds, and bounded glTF node/skin animation. Pure with respect to the file, so two nodes
 // with the same file build the same asset.
@@ -209,7 +210,7 @@ struct ModelAsset final {
 // An optional source + ".lod" companion contains MSLOD 1 followed by descending
 // pixel thresholds and quoted relative model paths, one per line. All levels
 // decode on the cache worker; malformed chains refuse the complete generation.
-// Fills `into` (cleared first) from glTF/GLB or OBJ. Returns false on any
+// Fills `into` (cleared first) from glTF/GLB, OBJ or FBX. Returns false on any
 // failure (unreadable file, unknown extension, malformed or empty geometry),
 // which the caller draws as nothing rather than failing the whole frame.
 [[nodiscard]] bool load_model_base(const std::string& source, ModelAsset& into);
