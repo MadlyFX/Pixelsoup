@@ -1042,7 +1042,20 @@ bool CommandList::upload_texture_rows(
     const std::size_t row_bytes = required / (compressed
         ? static_cast<std::size_t>((row_count + 3U) / 4U)
         : static_cast<std::size_t>(row_count));
-    const std::size_t pitch = compressed || row_alignment % texel_bytes != 0U
+    // SDL's D3D12 driver describes the copy footprint with the region's own
+    // width and height, and D3D12 refuses a block-compressed footprint that
+    // is not whole blocks (a 6x6 or 3x3 mip fails the command list's Close).
+    // There the region is padded to whole blocks, which D3D12 measures
+    // against the subresource's block-aligned size, and the rows are staged
+    // at the aligned pitch so SDL never realigns them. Vulkan instead wants a
+    // copy that ends exactly at the mip edge, so other drivers keep the
+    // logical size.
+    const auto* const driver = SDL_GetGPUDeviceDriver(device);
+    const bool block_padded = compressed && driver != nullptr &&
+        std::string_view{driver} == "direct3d12";
+    const std::size_t pitch = block_padded
+        ? (row_bytes + row_alignment - 1U) / row_alignment * row_alignment
+        : compressed || row_alignment % texel_bytes != 0U
         ? row_bytes
         : (row_bytes + row_alignment - 1U) / row_alignment * row_alignment;
     const std::size_t staged = pitch * (required / row_bytes);
@@ -1096,7 +1109,9 @@ bool CommandList::upload_texture_rows(
     }
     SDL_GPUTextureTransferInfo source{};
     source.transfer_buffer = staging;
-    source.pixels_per_row = compressed
+    source.pixels_per_row = block_padded
+        ? static_cast<Uint32>(pitch / texel_bytes * 4U)
+        : compressed
         ? (width + 3U) / 4U * 4U
         : static_cast<Uint32>(pitch / texel_bytes);
     source.rows_per_layer = compressed ? (row_count + 3U) / 4U * 4U : row_count;
@@ -1105,8 +1120,8 @@ bool CommandList::upload_texture_rows(
     region.mip_level = mip;
     region.layer = layer;
     region.y = first_row;
-    region.w = width;
-    region.h = row_count;
+    region.w = block_padded ? (width + 3U) / 4U * 4U : width;
+    region.h = block_padded ? source.rows_per_layer : row_count;
     region.d = 1U;
     SDL_UploadToGPUTexture(pass, &source, &region, false);
     SDL_EndGPUCopyPass(pass);
