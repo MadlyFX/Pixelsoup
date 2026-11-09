@@ -4,7 +4,8 @@ project(
     MediaServer
     VERSION 0.1.0
     DESCRIPTION "Cross-platform virtual production media server"
-    LANGUAGES CXX
+    # C only for the vendored ufbx FBX reader.
+    LANGUAGES C CXX
 )
 
 include(CTest)

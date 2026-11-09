@@ -29,7 +29,7 @@ different build.
 - Image-based lighting, OpenEXR/HDR environments, offline diffuse GI and local
   reflection probes, one planar reflector, physical sky/sun, photometric
   point/spot/area lights and IES profiles have authored and cached paths.
-- glTF/GLB/OBJ import, native material properties, compressed texture packages,
+- glTF/GLB/OBJ/FBX import (FBX as static geometry), native material properties, compressed texture packages,
   authored samplers, mip residency, node/skin animation and show-frame wind
   are supported. Large geometry uses indexed submission, caster culling,
   retained shadow maps, combined auxiliary products and a shared per-device

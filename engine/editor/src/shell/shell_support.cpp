@@ -321,9 +321,10 @@ program_projection_name(const output::OutputMap *map) noexcept {
 }
 
 [[nodiscard]] std::optional<std::string> choose_projection_mesh() {
-  const char* const filters[]{"*.gltf", "*.glb", "*.obj", "*.msmodel"};
-  const char* const path = tinyfd_openFileDialog("Choose UV Projection Mesh", "", 4,
-      filters, "UV projection meshes (glTF, GLB, OBJ, model package)", 0);
+  const char* const filters[]{"*.gltf", "*.glb", "*.obj", "*.fbx", "*.msmodel"};
+  const char* const path = tinyfd_openFileDialog("Choose UV Projection Mesh", "",
+      static_cast<int>(std::size(filters)), filters,
+      "UV projection meshes (glTF, GLB, OBJ, FBX, model package)", 0);
   return path ? std::optional<std::string>{path} : std::nullopt;
 }
 

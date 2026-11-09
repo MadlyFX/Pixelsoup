@@ -217,7 +217,7 @@ projection surfaces. It supports:
 - a direct slice of the logical scene canvas;
 - a planar physical surface with a generalized perspective view;
 - a generated horizontal arc, rendered through a projective mesh warp; and
-- an imported OBJ/glTF/GLB UV0 projection mesh, also rendered through a
+- an imported OBJ/glTF/GLB/FBX UV0 projection mesh, also rendered through a
   projective warp.
 
 For an imported mesh, UV0 is destination/connector space and the mesh path is
@@ -237,7 +237,7 @@ connectors is intentionally not complete.
 The current graphics stack has an SDL GPU Basic backend and native D3D12
 Advanced backend behind `engine/rhi`, with HLSL compiled to both SPIR-V and
 DXIL. `engine/render` draws primitives,
-imported glTF/GLB/OBJ geometry, material textures, media quads, lighting, and
+imported glTF/GLB/OBJ/FBX geometry, material textures, media quads, lighting, and
 the supported compositor/output passes to a GPU target. Lit geometry and media
 shaders both execute identity-exact Saturation about Rec.709 luminance in the
 project's selected response domain. `engine/ui` presents that target in an SDL

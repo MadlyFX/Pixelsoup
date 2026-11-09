@@ -10,6 +10,12 @@ add_library(mediaserver_bc7enc STATIC ../../third_party/bc7enc/bc7enc.cpp)
 target_include_directories(mediaserver_bc7enc SYSTEM PUBLIC ../../third_party/bc7enc)
 set_target_properties(mediaserver_bc7enc PROPERTIES FOLDER "third_party")
 
+# Autodesk FBX reader for model import. Compiled as C, without this project's
+# warnings, and private to the render library.
+add_library(mediaserver_ufbx STATIC ../../third_party/ufbx/ufbx.c)
+target_include_directories(mediaserver_ufbx SYSTEM PUBLIC ../../third_party/ufbx)
+set_target_properties(mediaserver_ufbx PROPERTIES FOLDER "third_party")
+
 add_library(mediaserver_render STATIC
     src/render_conformance.cpp
     src/bake_texture_decode.cpp
@@ -61,6 +67,7 @@ add_library(mediaserver_render STATIC
     src/texture_streaming.cpp
     src/model_cache.cpp
     src/model_loader.cpp
+    src/model_loader_fbx.cpp
     src/model_report.cpp
     src/model_animation.cpp
     src/projection_mesh_loader.cpp
@@ -141,6 +148,7 @@ target_link_libraries(mediaserver_render
         Threads::Threads
         mikktspace::mikktspace
         mediaserver_bc7enc
+        mediaserver_ufbx
         OpenEXR::OpenEXR
         OpenColorIO::OpenColorIO
 )

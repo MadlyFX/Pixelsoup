@@ -1,5 +1,6 @@
 #include <mediaserver/render/model_loader.hpp>
 #include <mediaserver/render/model_package.hpp>
+#include <mediaserver/scene/math.hpp>
 
 #include <array>
 #include <bit>
@@ -576,7 +577,205 @@ void manual_texture_assignment_preserves_other_parts_and_embeds_images() {
     MODEL_CHECK(reloaded.diagnostic.find("UV map") != std::string::npos);
 }
 
-constexpr std::array<Case, 8U> cases{{
+struct FbxQuad final {
+    std::string up_axis{"2"};       // Z up, as in 3ds Max
+    std::string unit_scale{"1"};    // centimetres per file unit
+    std::string scaling{"1,1,1"};   // node Lcl Scaling
+    bool normals{true};
+    bool material{true};
+    std::string texture;            // file name of a diffuse map, if any
+};
+
+// A 100 x 100 unit quad on the file's X/up plane, written as FBX 7.4 ASCII.
+[[nodiscard]] std::string fbx_quad(const FbxQuad& quad) {
+    const bool z_up = quad.up_axis == "2";
+    // Corners 0,1,2,3 wind counter-clockwise seen from the front: -Y in the
+    // Z-up file, +Z in the Y-up file and after conversion.
+    const std::string vertices = z_up
+        ? "0,0,0, 100,0,0, 100,0,100, 0,0,100"
+        : "0,0,0, 100,0,0, 100,100,0, 0,100,0";
+    const std::string normal = z_up ? "0,-1,0" : "0,0,1";
+    std::string body = "; FBX 7.4.0 project file\n"
+        "FBXHeaderExtension:  {\n FBXHeaderVersion: 1003\n FBXVersion: 7400\n}\n"
+        "GlobalSettings:  {\n Version: 1000\n Properties70:  {\n"
+        "  P: \"UpAxis\", \"int\", \"Integer\", \"\"," + quad.up_axis + "\n"
+        "  P: \"UpAxisSign\", \"int\", \"Integer\", \"\",1\n"
+        "  P: \"FrontAxis\", \"int\", \"Integer\", \"\"," + std::string{z_up ? "1" : "2"} + "\n"
+        "  P: \"FrontAxisSign\", \"int\", \"Integer\", \"\"," + std::string{z_up ? "-1" : "1"} + "\n"
+        "  P: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n"
+        "  P: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n"
+        "  P: \"UnitScaleFactor\", \"double\", \"Number\", \"\"," + quad.unit_scale + "\n"
+        " }\n}\n"
+        "Objects:  {\n"
+        " Geometry: 1000, \"Geometry::Quad\", \"Mesh\" {\n"
+        "  Vertices: *12 {\n   a: " + vertices + "\n  }\n"
+        "  PolygonVertexIndex: *4 {\n   a: 0,1,2,-4\n  }\n";
+    if (quad.normals) {
+        body += "  LayerElementNormal: 0 {\n   Version: 101\n   Name: \"\"\n"
+            "   MappingInformationType: \"ByPolygonVertex\"\n"
+            "   ReferenceInformationType: \"Direct\"\n"
+            "   Normals: *12 {\n    a: " + normal + "," + normal + "," + normal + "," + normal + "\n   }\n  }\n";
+    }
+    body += "  LayerElementUV: 0 {\n   Version: 101\n   Name: \"map1\"\n"
+        "   MappingInformationType: \"ByPolygonVertex\"\n"
+        "   ReferenceInformationType: \"IndexToDirect\"\n"
+        "   UV: *8 {\n    a: 0,0, 1,0, 1,1, 0,1\n   }\n"
+        "   UVIndex: *4 {\n    a: 0,1,2,3\n   }\n  }\n"
+        "  Layer: 0 {\n   Version: 100\n";
+    if (quad.normals) {
+        body += "   LayerElement:  {\n    Type: \"LayerElementNormal\"\n    TypedIndex: 0\n   }\n";
+    }
+    body += "   LayerElement:  {\n    Type: \"LayerElementUV\"\n    TypedIndex: 0\n   }\n  }\n }\n"
+        " Model: 2000, \"Model::Quad\", \"Mesh\" {\n  Version: 232\n  Properties70:  {\n"
+        "   P: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\"," + quad.scaling + "\n  }\n }\n";
+    if (quad.material) {
+        body += " Material: 3000, \"Material::Red\", \"\" {\n  Version: 102\n"
+            "  ShadingModel: \"phong\"\n  Properties70:  {\n"
+            "   P: \"DiffuseColor\", \"Color\", \"\", \"A\",0.8,0.2,0.1\n"
+            "   P: \"DiffuseFactor\", \"Number\", \"\", \"A\",0.5\n"
+            "   P: \"EmissiveColor\", \"Color\", \"\", \"A\",0,0.25,0\n"
+            "  }\n }\n";
+    }
+    if (!quad.texture.empty()) {
+        body += " Texture: 4000, \"Texture::Base\", \"\" {\n  Type: \"TextureVideoClip\"\n"
+            "  Version: 202\n  TextureName: \"Texture::Base\"\n"
+            "  FileName: \"Z:/artist/elsewhere/" + quad.texture + "\"\n"
+            "  RelativeFilename: \"missing/" + quad.texture + "\"\n }\n";
+    }
+    body += "}\nConnections:  {\n C: \"OO\",2000,0\n C: \"OO\",1000,2000\n";
+    if (quad.material) {
+        body += " C: \"OO\",3000,2000\n";
+    }
+    if (!quad.texture.empty()) {
+        body += " C: \"OP\",4000,3000, \"DiffuseColor\"\n";
+    }
+    return body + "}\n";
+}
+
+// Every triangle's winding must agree with its vertex normals, or front-face
+// culling and lighting disagree.
+[[nodiscard]] bool winding_matches_normals(const render::ModelAsset& asset) {
+    for (std::size_t i = 0U; i + 2U < asset.mesh.indices.size(); i += 3U) {
+        const auto& a = asset.mesh.vertices[asset.mesh.indices[i]];
+        const auto& b = asset.mesh.vertices[asset.mesh.indices[i + 1U]];
+        const auto& c = asset.mesh.vertices[asset.mesh.indices[i + 2U]];
+        const auto face = scene::cross(b.position - a.position, c.position - a.position);
+        if (!(scene::dot(face, a.normal) > 0.0F)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void an_fbx_quad_converts_to_y_up_metres_with_indexed_vertices() {
+    const auto path = write_temp("z-up-centimetres.fbx", fbx_quad({}));
+    render::ModelAsset asset;
+    MODEL_CHECK(render::load_model(path, asset));
+    // Four authored corners stay four vertices across the two triangles.
+    MODEL_CHECK(asset.mesh.vertices.size() == 4U);
+    MODEL_CHECK(asset.mesh.indices.size() == 6U);
+    MODEL_CHECK(asset.vertex_metadata.size() == 4U);
+    MODEL_CHECK(asset.parts.size() == 1U);
+    // 100 cm along file X and Z-up become 1 m along X and Y.
+    MODEL_CHECK(near(asset.bounds.minimum.x, 0.0F, 1.0e-4F));
+    MODEL_CHECK(near(asset.bounds.minimum.y, 0.0F, 1.0e-4F));
+    MODEL_CHECK(near(asset.bounds.maximum.x, 1.0F, 1.0e-4F));
+    MODEL_CHECK(near(asset.bounds.maximum.y, 1.0F, 1.0e-4F));
+    MODEL_CHECK(near(asset.bounds.minimum.z, 0.0F, 1.0e-4F));
+    MODEL_CHECK(near(asset.bounds.maximum.z, 0.0F, 1.0e-4F));
+    bool found_top_right = false;
+    for (std::size_t i = 0U; i < asset.mesh.vertices.size(); ++i) {
+        const auto& vertex = asset.mesh.vertices[i];
+        MODEL_CHECK(asset.vertex_metadata[i].has_uv0);
+        MODEL_CHECK(near(vertex.normal.z, 1.0F, 1.0e-4F));
+        if (near(vertex.position.x, 1.0F, 1.0e-4F) && near(vertex.position.y, 1.0F, 1.0e-4F)) {
+            found_top_right = true;
+            // FBX UV (1,1) is the top-right texel in the top-left convention.
+            MODEL_CHECK(near(vertex.u, 1.0F) && near(vertex.v, 0.0F));
+        }
+    }
+    MODEL_CHECK(found_top_right);
+    MODEL_CHECK(winding_matches_normals(asset));
+
+    // The legacy Phong swatch arrives as PBR factors: colour times factor.
+    const auto& part = asset.parts[0];
+    MODEL_CHECK(part.has_material);
+    MODEL_CHECK(near(part.material.base_color.x, 0.4F, 1.0e-4F));
+    MODEL_CHECK(near(part.material.base_color.y, 0.1F, 1.0e-4F));
+    MODEL_CHECK(near(part.material.base_color.z, 0.05F, 1.0e-4F));
+    MODEL_CHECK(near(part.material.emissive.y, 0.25F, 1.0e-4F));
+    MODEL_CHECK(!part.base_color_texture.has_value());
+
+    // A Y-up file in metres (100 cm per unit) needs no axis change, only
+    // scale: 100 units become 100 m.
+    const auto metres = write_temp("y-up-metres.fbx",
+        fbx_quad({.up_axis = "1", .unit_scale = "100"}));
+    MODEL_CHECK(render::load_model(metres, asset));
+    MODEL_CHECK(near(asset.bounds.maximum.x, 100.0F, 1.0e-3F));
+    MODEL_CHECK(near(asset.bounds.maximum.y, 100.0F, 1.0e-3F));
+    MODEL_CHECK(near(asset.bounds.maximum.z, 0.0F, 1.0e-3F));
+}
+
+void fbx_mirrored_and_normal_free_meshes_keep_front_faces() {
+    render::ModelAsset asset;
+    MODEL_CHECK(render::load_model(
+        write_temp("mirrored.fbx", fbx_quad({.scaling = "-1,1,1"})), asset));
+    MODEL_CHECK(near(asset.bounds.minimum.x, -1.0F, 1.0e-4F));
+    MODEL_CHECK(near(asset.bounds.maximum.x, 0.0F, 1.0e-4F));
+    MODEL_CHECK(winding_matches_normals(asset));
+    for (const auto& vertex : asset.mesh.vertices) {
+        MODEL_CHECK(near(vertex.normal.z, 1.0F, 1.0e-4F));
+    }
+
+    // Without authored normals each triangle gets its geometric normal and
+    // its own corners; with no material the instance material applies.
+    MODEL_CHECK(render::load_model(
+        write_temp("no-normals.fbx", fbx_quad({.normals = false, .material = false})), asset));
+    MODEL_CHECK(asset.mesh.vertices.size() == 6U);
+    MODEL_CHECK(asset.parts.size() == 1U && !asset.parts[0].has_material);
+    MODEL_CHECK(winding_matches_normals(asset));
+    for (const auto& vertex : asset.mesh.vertices) {
+        MODEL_CHECK(near(vertex.normal.z, 1.0F, 1.0e-4F));
+    }
+}
+
+void fbx_textures_resolve_beside_the_model_or_refuse_by_name() {
+    const auto texture = std::string{"fbx-base-colour.tga"};
+    std::filesystem::remove(temp_path(texture));
+    const auto path = write_temp("textured.fbx", fbx_quad({.texture = texture}));
+    render::ModelAsset asset;
+    MODEL_CHECK(!render::load_model(path, asset));
+    MODEL_CHECK(asset.mesh.vertices.empty());
+    MODEL_CHECK(asset.diagnostic.find(texture) != std::string::npos);
+
+    // Neither the relative nor the absolute path exists; the bare file name
+    // beside the model does, as after copying an asset folder.
+    write_temp_tga(texture, {{10U, 200U, 30U, 255U}});
+    MODEL_CHECK(render::load_model(path, asset));
+    MODEL_CHECK(asset.parts.size() == 1U);
+    const auto& part = asset.parts[0];
+    MODEL_CHECK(part.base_color_texture.has_value());
+    const auto& image = asset.textures.at(*part.base_color_texture);
+    MODEL_CHECK(image.width == 1U && image.height == 1U);
+    MODEL_CHECK(image.rgba == (std::vector<core::u8>{10U, 200U, 30U, 255U}));
+    // The map replaces the swatch colour; DiffuseFactor still scales it.
+    MODEL_CHECK(near(part.material.base_color.x, 0.5F, 1.0e-4F));
+    MODEL_CHECK(near(part.material.base_color.y, 0.5F, 1.0e-4F));
+    MODEL_CHECK(near(part.material.base_color.z, 0.5F, 1.0e-4F));
+}
+
+void malformed_fbx_is_refused_with_a_reason() {
+    render::ModelAsset asset;
+    MODEL_CHECK(!render::load_model(write_temp("broken.fbx", "not an fbx file\n"), asset));
+    MODEL_CHECK(asset.mesh.vertices.empty());
+    MODEL_CHECK(!asset.diagnostic.empty());
+}
+
+constexpr std::array<Case, 12U> cases{{
+    {"an FBX quad converts to Y-up metres with indexed vertices", &an_fbx_quad_converts_to_y_up_metres_with_indexed_vertices},
+    {"FBX mirrored and normal-free meshes keep front faces", &fbx_mirrored_and_normal_free_meshes_keep_front_faces},
+    {"FBX textures resolve beside the model or refuse by name", &fbx_textures_resolve_beside_the_model_or_refuse_by_name},
+    {"malformed FBX is refused with a reason", &malformed_fbx_is_refused_with_a_reason},
     {"manual texture assignments embed images and preserve other parts", &manual_texture_assignment_preserves_other_parts_and_embeds_images},
     {"glTF extensions preserve authored factors and maps", &gltf_extensions_preserve_factors_maps_and_refuse_unknowns},
     {"authored LOD chains are atomic", &authored_lod_chain_is_atomic_and_uses_shared_ranges},
