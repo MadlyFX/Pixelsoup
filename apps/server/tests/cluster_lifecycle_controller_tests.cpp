@@ -323,13 +323,29 @@ void sync_status_for_another_node_identity_is_discarded() {
 }
 
 void sync_never_waits_for_a_dead_or_slow_listener() {
+    // The listener answers only once the test releases it, so sync()
+    // returning while it is still held proves sync() never waited on it. A
+    // wall-clock bound cannot: a loaded machine delays a nonblocking call too.
     std::atomic_size_t calls{};
+    std::mutex release_mutex;
+    std::condition_variable release_changed;
+    bool released{};
+    std::atomic_bool answered{};
+    const auto release = [&] {
+        { std::lock_guard lock{release_mutex}; released = true; }
+        release_changed.notify_all();
+    };
     app::ClusterLifecycleController controller{
         controller_config(),
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
             net::ClusterLifecycleCommand) {
             ++calls;
-            std::this_thread::sleep_for(150ms);
+            {
+                // Bounded so a sync() that did block fails instead of hanging.
+                std::unique_lock lock{release_mutex};
+                release_changed.wait_for(lock, 10s, [&] { return released; });
+            }
+            answered = true;
             return app::ClusterLifecycleRequestResult::success(
                 net::ClusterLifecycleReply{
                     net::ClusterLifecycleOutcome::NoChange,
@@ -339,11 +355,11 @@ void sync_never_waits_for_a_dead_or_slow_listener() {
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
 
-    const auto begin = std::chrono::steady_clock::now();
     controller.sync(wired(map));
-    const auto elapsed = std::chrono::steady_clock::now() - begin;
-    CONTROLLER_CHECK(elapsed < 50ms);
+    const bool returned_first = !answered;
     const auto pending = controller.snapshot();
+    release();
+    CONTROLLER_CHECK(returned_first);
     CONTROLLER_CHECK(pending.size() == 1U);
     CONTROLLER_CHECK(
         pending[0U].status ==

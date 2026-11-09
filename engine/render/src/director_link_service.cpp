@@ -266,7 +266,13 @@ struct DirectorLinkService::Impl {
         sweep_stale_staging(store);
         const auto pairing = epoch.substr(0, 16);
         const auto partial = store / (pairing + ".partial"), staged_manifest = store / (pairing + ".mslink");
-        const auto check_disk_budget = [&] {
+        // The store is walked once per pairing and again only after an ingest
+        // packaged new content; between walks this pairing's own additions are
+        // counted as it makes them. A full walk per resource stalled pairing on
+        // a large store or a network share (thousands of entries per announce).
+        // Ingest measures the store itself before it writes packages, so
+        // another pairing's concurrent additions are still bounded there.
+        const auto measure_store = [&] {
             std::uintmax_t bytes{};
             std::error_code error;
             for (fs::recursive_directory_iterator it{store, error}, end; !error && it != end; it.increment(error)) {
@@ -278,8 +284,13 @@ struct DirectorLinkService::Impl {
                 require(bytes <= store_byte_limit, "resource_cache_full: shared_scene_link_store_exceeds_64_GiB");
             }
             require(!error, "resource_cache_unreadable");
+            return bytes;
         };
-        check_disk_budget();
+        std::uintmax_t store_bytes = measure_store();
+        const auto check_disk_budget = [&](std::uintmax_t incoming) {
+            require(incoming <= store_byte_limit && store_bytes <= store_byte_limit - incoming,
+                "resource_cache_full: shared_scene_link_store_exceeds_64_GiB");
+        };
         // No client controls directory names, filenames, or cache retention.
         Rows accepted_rows;
         std::string accepted_source, accepted_revision;
@@ -441,7 +452,7 @@ struct DirectorLinkService::Impl {
                             if (resources.contains(m.resource)) { response(m, K::Ack, "resource_present"); continue; }
                             require(resources.size() < link_resource_limit && m.length <= session_byte_limit-resource_bytes, "resource_capacity");
                             if (adopt(m.resource, m.length)) { response(m, K::Ack, "resource_present"); continue; }
-                            check_disk_budget();
+                            check_disk_budget(m.length);
                             transfer_hash = m.resource; transfer_size = m.length; transferred = 0; hasher = {};
                             if (transfer_started == Clock::time_point{}) transfer_started = Clock::now();
                             ++status.metrics.transfers;
@@ -480,6 +491,7 @@ struct DirectorLinkService::Impl {
                                 std::error_code renamed;
                                 fs::rename(partial, target, renamed);
                                 require(!renamed || stored_resource(target, transfer_hash, transfer_size, stop), "resource_store_failed");
+                                if (!renamed) store_bytes += transfer_size;
                             }
                             std::error_code ignored; fs::remove(partial, ignored);
                             resources.insert(transfer_hash); resource_bytes += transfer_size; transfer_hash.clear();
@@ -518,7 +530,7 @@ struct DirectorLinkService::Impl {
                             for (const auto& h : needed) require(resources.contains(h) || adopt(h, 0), "resource_not_complete");
                         }
                         const auto text = manifest_text(m, rows);
-                        check_disk_budget();
+                        check_disk_budget(text.size());
                         { std::ofstream out{staged_manifest, std::ios::binary | std::ios::trunc}; out << text; require(out.good(), "manifest_write_failed"); }
                         status.pending = true; status.failed = false;
                         status.message = "Validating updated content"; publish(status);
@@ -526,6 +538,7 @@ struct DirectorLinkService::Impl {
                             LinkedIngestCache{true, store_package_limit, store_byte_limit});
                         { std::error_code ignored; fs::remove(staged_manifest, ignored); }
                         require(ingested.diagnostic.empty(), ingested.diagnostic.c_str());
+                        if (ingested.manifest.ingested != 0U) store_bytes = measure_store();
                         require(!stop.stop_requested(), "pairing_stopped");
                         auto staged = std::make_shared<DirectorLinkCandidate>();
                         staged->manifest = std::move(ingested.manifest); staged->manifest.collection_name = source_name; staged->base = *current;

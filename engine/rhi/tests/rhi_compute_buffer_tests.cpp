@@ -75,15 +75,20 @@ void submit_and_wait(rhi::Device& device, rhi::CommandList commands) {
 }
 
 void capabilities_are_honest_about_backends() {
-    rhi::DeviceConfig config{};
-    config.backend = rhi::BackendKind::SdlGpu;
-    auto sdl = rhi::Device::create(config);
-    if (sdl) {
-        RHI_CHECK(!sdl.value().capabilities().writable_buffers);
-        RHI_CHECK(!sdl.value().capabilities().indirect_dispatch);
-        RHI_CHECK(!sdl.value().capabilities().indirect_draw);
-        auto refused = sdl.value().create_writable_buffer(64U);
-        RHI_CHECK(!refused && refused.error() == rhi::RhiError::OperationUnsupported);
+    // The SDL device is gone before the D3D12 one opens: SDL GPU sits on a
+    // D3D12 device without the debug layer, and the runtime refuses to create
+    // a debug-layer device while a non-debug one is alive in the process.
+    {
+        rhi::DeviceConfig config{};
+        config.backend = rhi::BackendKind::SdlGpu;
+        auto sdl = rhi::Device::create(config);
+        if (sdl) {
+            RHI_CHECK(!sdl.value().capabilities().writable_buffers);
+            RHI_CHECK(!sdl.value().capabilities().indirect_dispatch);
+            RHI_CHECK(!sdl.value().capabilities().indirect_draw);
+            auto refused = sdl.value().create_writable_buffer(64U);
+            RHI_CHECK(!refused && refused.error() == rhi::RhiError::OperationUnsupported);
+        }
     }
     if (rhi::Device::available(rhi::BackendKind::D3d12)) {
         auto device = open_d3d12();
