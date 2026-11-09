@@ -109,7 +109,6 @@ $packagedScripts = @(
     'cluster-common.ps1',
     'run-editor.ps1',
     'run-output-node.ps1',
-    'run-editor-demo.ps1',
     'run-scene-demo.ps1',
     'run-wall-demo.ps1'
 )
