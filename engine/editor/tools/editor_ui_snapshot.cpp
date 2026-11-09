@@ -69,6 +69,8 @@
 //   in for a render), asset-viewer-proxy the same while the plate's
 //   editor proxy is 40% made, and asset-viewer-empty draws it with nothing
 //   open;
+//   environment draws the Environment page on Advanced, environment-basic
+//   the page Basic shows instead, with a physical sky left on;
 //   asset-viewer-model renders a real model (MEDIASERVER_SNAPSHOT_MODEL, or
 //   Models/DamagedHelmet) in the viewer's look-dev scene through the
 //   renderer, Advanced unless MEDIASERVER_SNAPSHOT_BACKEND=basic, with its
@@ -872,6 +874,12 @@ int main(int argc, char **argv) {
   editor::ProjectSettingsState settings;
   settings.stage_node = doc::NodeId{1U};
   settings.environment.map_source = "T:/Production/Lighting/stage_environment.exr";
+  // The environment page's fields exist only for Advanced;
+  // `environment-basic` shows the page Basic draws, with a sky left on.
+  if (properties == "environment")
+    settings.renderer.backend = scene::RendererBackend::Advanced;
+  if (properties == "environment-basic")
+    settings.environment.physical_sky.enabled = true;
   editor::EditorTimeline timeline{};
   timeline.show_frame = 140U;
   timeline.program_frame = 140U;
@@ -1462,7 +1470,7 @@ int main(int argc, char **argv) {
       static_cast<void>(feed_panel.draw(ctx, window, wall_canvas, feed_map, 0U,
                                         &feed_hardware));
     } else if (!properties.empty()) {
-      if (properties == "renderer" || properties == "environment")
+      if (properties == "renderer" || properties.starts_with("environment"))
         static_cast<void>(settings_panel.draw(ctx, window,
             properties == "renderer" ? editor::SceneSettingsTarget::Renderer : editor::SceneSettingsTarget::Environment,
             settings, {}, 0U));

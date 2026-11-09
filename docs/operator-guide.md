@@ -60,6 +60,12 @@ applies that path; Cancel leaves the document unchanged. Typed IES paths use
 sets the export destination, and **Bake lighting** starts the bake. Content's
 Source row shows the file name with its full path on hover.
 
+The Environment page's sky, atmosphere, baked lighting and reflections draw
+only on the Advanced renderer, so a project set to Basic shows a note and
+**Use Advanced renderer** there instead. Their values are kept and return with
+Advanced. A physical sky left on stops Basic drawing the frame, so the page also
+offers **Turn off physical sky** while one is on.
+
 Object and effect icons use a neutral palette; shape and labels identify their
 types. Colour is kept for state, one meaning per hue: green is on air,
 healthy and playing; cyan marks Preview, selection, focus and the active tool;

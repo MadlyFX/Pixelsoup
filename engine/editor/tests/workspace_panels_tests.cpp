@@ -4097,6 +4097,7 @@ struct LiveSettingsHarness {
   }
   void environment_section(std::size_t section) {
     target=editor::SceneSettingsTarget::Environment;
+    state.renderer.backend=scene::RendererBackend::Advanced;
     static_cast<void>(click(58,30));
     static_cast<void>(click(58.0F+40.0F*static_cast<float>(section),30));
   }
@@ -4114,6 +4115,7 @@ void project_settings_apply_reports_the_edited_values() {
 void scene_file_fields_request_the_matching_picker_without_editing() {
   LiveSettingsHarness environment;
   environment.target = editor::SceneSettingsTarget::Environment;
+  environment.state.renderer.backend = scene::RendererBackend::Advanced;
   environment.state.environment.map_source = "C:/lighting/stage.exr";
   const auto map = environment.click(154, 285);
   UI_CHECK(map.file_picker && map.file_picker->kind == editor::FilePickerKind::EnvironmentMap);
@@ -4141,6 +4143,7 @@ void baked_lighting_page_starts_cancels_and_preserves_the_authored_field() {
   LiveSettingsHarness h;h.state.environment.baked.enabled=true;h.state.environment.baked.source="lighting.msgi";
   h.state.environment.baked.content="1234567890abcdef";h.state.environment.baked.count_x=3;
   h.environment_section(2);
+  h.state.renderer.backend=scene::RendererBackend::Basic;
   UI_CHECK(!h.click(650.0).project.bake);
   h.state.renderer.backend=scene::RendererBackend::Advanced;
   auto bake=h.click(650.0);
@@ -4335,16 +4338,45 @@ struct Case final {
 
 // Map edits are immediate and preserve the other scene environment values.
 void the_environment_category_authors_the_lighting_map() {
-  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;h.state.renderer.backend=scene::RendererBackend::Advanced;
   static_cast<void>(h.click(154.0));h.input.new_frame();h.input.add_text("studio.hdr");h.ctx.new_frame();auto result=h.draw();
   UI_CHECK(result.project.apply && h.state.environment.map_source=="studio.hdr");
   static_cast<void>(h.key(gui::Key::Enter));static_cast<void>(h.enter(186.0,"2.5"));static_cast<void>(h.enter(218.0,"0.25"));
   UI_CHECK(h.state.environment.map_intensity==2.5F && h.state.environment.map_rotation==0.25F);
 }
 
+// Basic draws none of the environment page, so it shows why and a way out
+// instead of fields; a physical sky left on stays reachable to turn off.
+void basic_renderer_hides_the_environment_fields() {
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  h.state.environment.map_source="studio.hdr";
+  h.state.environment.fog_density=0.25F;
+  // Where Advanced has the physical sky switch, Basic has nothing to toggle.
+  UI_CHECK(!h.click(90.0).project.apply && !h.state.environment.physical_sky.enabled);
+  h.state.environment.physical_sky.enabled=true;
+  bool switched=false,turned_off=false;
+  for(float y=44.0F;y<700.0F;y+=6.0F) {
+    const auto frame=h.click(y);
+    UI_CHECK(!frame.file_picker && frame.keys.empty());
+    if(!frame.project.apply) continue;
+    if(h.state.renderer.backend==scene::RendererBackend::Advanced) {
+      switched=true;h.state.renderer.backend=scene::RendererBackend::Basic;
+    } else {
+      UI_CHECK(!h.state.environment.physical_sky.enabled);turned_off=true;
+    }
+    // The hidden values are kept for when Advanced returns.
+    UI_CHECK(h.state.environment.map_source=="studio.hdr" && h.state.environment.fog_density==0.25F);
+  }
+  UI_CHECK(switched && turned_off);
+  // On Advanced the same page offers the sky switch again.
+  h.state.renderer.backend=scene::RendererBackend::Advanced;
+  static_cast<void>(h.click(90.0));
+  UI_CHECK(h.state.environment.physical_sky.enabled);
+}
+
 // Physical sky values use the same property key controls as fog and maps.
 void physical_sky_controls_apply_and_author_a_time_key() {
-  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;h.state.renderer.backend=scene::RendererBackend::Advanced;
   static_cast<void>(h.click(90.0));UI_CHECK(h.state.environment.physical_sky.enabled);
   static_cast<void>(h.enter(122.0,"16.5"));
   auto result=h.click(122.0,306);UI_CHECK(result.keys.size()==1 && result.keys[0].channel==scene::PropertyChannel::SkyTimeOfDay && result.keys[0].value==16.5);
@@ -4536,7 +4568,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 137U> cases{{
+constexpr std::array<Case, 138U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -4761,6 +4793,8 @@ constexpr std::array<Case, 137U> cases{{
     {"texture sampling controls apply and cancel", &texture_sampling_controls_apply_and_cancel},
     {"texture streaming controls emit authored policy", &texture_streaming_controls_emit_authored_policy},
     {"geometry controls emit replicated settings", &geometry_controls_emit_replicated_settings},
+    {"basic renderer hides the environment fields",
+     &basic_renderer_hides_the_environment_fields},
     {"shadow cascades and bounce are authored beside the backend",
      &shadow_cascades_and_bounce_are_authored_beside_the_backend},
     {"antialiasing is one authored choice",
