@@ -39,8 +39,11 @@ class Controller:
                 'isSupportEDID': kind != 9,
                 'actualResolution': {'width': width, 'height': height},
                 'actualRefreshRate': signal_rate,
+                # A custom EDID: it offers only this mode. (A standard one,
+                # isEdidCustom false, offers every listed rate.)
+                'isEdidCustom': True,
                 'defaultEDID': {'resolution': {'width': width, 'height': height},
-                                'refreshRate': edid_rate},
+                                'refreshRate': edid_rate, 'isCustom': True},
             })
         self.screen_width = 6912
         self.screen_height = 1536
@@ -114,9 +117,10 @@ class Controller:
                 if source['id'] == input_id:
                     if not source['isSupportEDID']:
                         return 'NotSupport'
+                    source['isEdidCustom'] = True
                     source['defaultEDID'] = {
                         'resolution': {'width': width, 'height': height},
-                        'refreshRate': rate}
+                        'refreshRate': rate, 'isCustom': True}
                     # A source re-reads the EDID and follows it.
                     if source['sourceStatus']:
                         source['actualResolution'] = {'width': width,
@@ -181,7 +185,7 @@ def main() -> None:
     parser.add_argument('--port', type=int, default=8001)
     parser.add_argument('--name', default='MX40 Pro_000001')
     parser.add_argument('--edid-rate', type=float, default=60.0,
-                        help='refresh the inputs EDIDs offer (Hz)')
+                        help='refresh of the custom EDID each input offers (Hz)')
     parser.add_argument('--signal-rate', type=float, default=60.0,
                         help='refresh the live inputs report receiving (Hz)')
     parser.add_argument('--width', type=int, default=3840)

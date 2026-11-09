@@ -56,13 +56,15 @@ constexpr std::string_view sources_answer = R"({
     {"id": 1, "type": 3, "name": "HDMI 2.0-1", "groupId": 10,
      "actualResolution": {"width": 3840, "height": 2160},
      "actualRefreshRate": 59.94, "sourceStatus": 1, "isSupportEDID": true,
+     "isEdidCustom": true,
      "defaultEDID": {"resolution": {"width": 3840, "height": 2160},
-                     "refreshRate": 59.94}},
+                     "refreshRate": 59.94, "isCustom": true}},
     {"id": 2, "type": 3, "name": "HDMI 2.0-2", "groupId": 11,
      "actualResolution": {"width": 3840, "height": 2160},
      "actualRefreshRate": 60, "sourceStatus": 0, "isSupportEDID": true,
+     "isEdidCustom": true,
      "defaultEDID": {"resolution": {"width": 3840, "height": 2160},
-                     "refreshRate": 60.0}},
+                     "refreshRate": 60.0, "isCustom": true}},
     {"id": 5, "type": 5, "name": "", "groupId": 12,
      "actualResolution": {"width": 1920, "height": 1080},
      "actualRefreshRate": 50.0, "sourceStatus": 1, "isSupportEDID": false},
@@ -184,6 +186,23 @@ void coex_answers_become_a_processor_card() {
   DEVICES_CHECK(!inputs[1].signal && inputs[1].width == 0U);
   DEVICES_CHECK(inputs[1].edid_refresh_millihertz == 60'000U);
 
+  // A standard EDID names 60 Hz as its preferred timing but offers every
+  // listed rate, so it pins no rate: a 23.976 source is not a mismatch.
+  const auto standard = devices::parse_json(R"([
+    {"id": 768, "type": 5, "name": "DP1.2", "groupId": 40,
+     "actualResolution": {"width": 3840, "height": 2160},
+     "actualRefreshRate": 23.97, "sourceStatus": 1, "isSupportEDID": true,
+     "isEdidCustom": false,
+     "supportFrameRate": "23.98|24.00|25.00|59.94|60.00",
+     "defaultEDID": {"resolution": {"width": 3840, "height": 2160},
+                     "refreshRate": 60, "isCustom": false}}])");
+  DEVICES_CHECK(standard.has_value());
+  const std::vector<coex::Input> standard_inputs =
+      coex::parse_inputs(*standard);
+  DEVICES_CHECK(standard_inputs.size() == 1U &&
+                standard_inputs[0].edid_width == 3840U &&
+                standard_inputs[0].edid_refresh_millihertz == 0U);
+
   const auto mapped = coex::map_inputs(inputs);
   DEVICES_CHECK(mapped.size() == 3U);
   DEVICES_CHECK(mapped[0].number == 1U && mapped[0].vendor_id == 1 &&
@@ -270,6 +289,28 @@ void coex_answers_become_a_processor_card() {
   DEVICES_CHECK(panels.size() == 1U);
   DEVICES_CHECK(panels[0].width == 2880U && panels[0].height == 1536U &&
                 panels[0].cabinets == 2U);
+
+  // VMP places a canvas, and the layers on it, anywhere in its layout space;
+  // the screen starts at its canvas, so a far-off canvas is still a
+  // 2880x1536 wall showing the input's top left.
+  const auto placed = devices::parse_json(R"({"screens":[{
+      "screenID":"{79}","workingMode":1,"position":{"x":0,"y":0},
+      "canvases":[{"canvasID":2048,"position":{"x":156782,"y":42555},
+        "size":{"width":2880,"height":1536},
+        "cabinets":[
+          {"cabinetID":1,"position":{"x":0,"y":0},"size":{"width":192,"height":192}},
+          {"cabinetID":2,"position":{"x":2688,"y":1344},"size":{"width":192,"height":192}}]}],
+      "layersInWorkingMode":[{"workingMode":1,"layers":[
+        {"id":65537,"source":10,"position":{"x":156782,"y":42555},
+         "scaler":{"width":3840,"height":2160},
+         "cut":{"enable":false,"rect":{"x":0,"y":0,"width":960,"height":720}}}]}]}]})");
+  DEVICES_CHECK(placed.has_value());
+  const auto offset = coex::parse_screens(*placed, inputs);
+  DEVICES_CHECK(offset.size() == 1U);
+  DEVICES_CHECK(offset[0].width == 2880U && offset[0].height == 1536U);
+  DEVICES_CHECK(offset[0].layers.size() == 1U &&
+                offset[0].layers[0].screen ==
+                    topology::HardwarePixelRect{0U, 0U, 3840U, 2160U});
 
   const auto monitor = devices::parse_json(monitor_answer);
   const coex::Identity identity =

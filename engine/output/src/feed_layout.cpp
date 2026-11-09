@@ -244,11 +244,8 @@ FeedLayoutPlan plan_feed_layout(const topology::HardwareMap &map,
           shown[static_cast<std::size_t>(feed - group->feeds.data())] = true;
           const scene::CanvasRect crop{layer.source.x, layer.source.y,
                                        layer.source.width, layer.source.height};
-          const scene::CanvasRect in_tile =
+          scene::CanvasRect in_tile =
               clamp_to(crop, feed->width, feed->height);
-          const scene::CanvasRect in_window{feed->x + in_tile.x,
-                                            feed->y + in_tile.y, in_tile.width,
-                                            in_tile.height};
           if (!(in_tile == crop)) {
             plan.notes.push_back(input_label(observed, layer.input) +
                                  " takes more than its " +
@@ -256,10 +253,38 @@ FeedLayoutPlan plan_feed_layout(const topology::HardwareMap &map,
                                  std::to_string(feed->height) +
                                  " signal; the viewport is cut to fit");
           }
-          const scene::CanvasRect on_screen = clamp_to(
-              scene::CanvasRect{layer.screen.x, layer.screen.y,
-                                layer.screen.width, layer.screen.height},
-              origin.width, origin.height);
+          const scene::CanvasRect placed{layer.screen.x, layer.screen.y,
+                                         layer.screen.width,
+                                         layer.screen.height};
+          const scene::CanvasRect on_screen =
+              clamp_to(placed, origin.width, origin.height);
+          // A layer reaching past its screen shows only the part on the
+          // panels - a 3840x2160 input on a 2880x1536 wall lights its top
+          // left 2880x1536 - so the window viewport is that part of the
+          // source, scaled as the layer scales it.
+          if (!(on_screen == placed) && on_screen.width != 0U &&
+              on_screen.height != 0U) {
+            const auto part = [](core::u32 source, core::u32 offset,
+                                 core::u32 shown, core::u32 whole) {
+              const auto scaled = [&](core::u32 value) {
+                return static_cast<core::u32>(
+                    (static_cast<core::u64>(value) * source + whole / 2U) /
+                    whole);
+              };
+              return std::pair{scaled(offset), scaled(shown)};
+            };
+            const auto [dx, width] =
+                part(in_tile.width, on_screen.x - placed.x, on_screen.width,
+                     placed.width);
+            const auto [dy, height] =
+                part(in_tile.height, on_screen.y - placed.y, on_screen.height,
+                     placed.height);
+            in_tile = scene::CanvasRect{in_tile.x + dx, in_tile.y + dy, width,
+                                        height};
+          }
+          const scene::CanvasRect in_window{feed->x + in_tile.x,
+                                            feed->y + in_tile.y, in_tile.width,
+                                            in_tile.height};
           const scene::CanvasRect target{origin.x + on_screen.x,
                                          origin.y + on_screen.y,
                                          on_screen.width, on_screen.height};
