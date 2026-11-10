@@ -4119,11 +4119,14 @@ core::Result<void*, RhiError> d3d12_submit(
         const auto present_begin = std::chrono::steady_clock::now();
         auto& swapchain = *commands->pending_swapchain;
         const UINT interval = swapchain.mode == PresentMode::Vsync ? 1U : 0U;
-        UINT flags = DXGI_PRESENT_DO_NOT_WAIT;
-        if (interval == 0U &&
-            (swapchain.flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0U) {
-            flags |= DXGI_PRESENT_ALLOW_TEARING;
-        }
+        const UINT tearing =
+            (swapchain.flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0U
+            ? DXGI_PRESENT_ALLOW_TEARING : 0U;
+        const UINT flags =
+            DXGI_PRESENT_DO_NOT_WAIT | (interval == 0U ? tearing : 0U);
+        // The barrier presents unpaced by DXGI regardless of the configured
+        // mode; its flip is aligned by the hardware reference instead.
+        const UINT barrier_flags = DXGI_PRESENT_DO_NOT_WAIT | tearing;
         PresentBarrierPresentResult barrier_present =
             PresentBarrierPresentResult::PassThrough;
         const PresentBarrierBackendHandle backend =
@@ -4139,7 +4142,7 @@ core::Result<void*, RhiError> d3d12_submit(
                 native_swapchain_handle(swapchain),
                 native_image_handle(swapchain.buffers[
                     commands->pending_swapchain_index]),
-                0U, flags);
+                0U, barrier_flags);
         }
         if (barrier_present == PresentBarrierPresentResult::PassThrough) {
             const HRESULT presented =

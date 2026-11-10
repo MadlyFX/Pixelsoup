@@ -517,7 +517,15 @@ bool SdlPresenter::build_gpu_resources(
         platform.device.emplace(std::move(created).value());
         const auto format = config.output_bit_depth == 10U ? rhi::TextureFormat::Rgb10A2Unorm
             : config.output_bit_depth == 16U ? rhi::TextureFormat::Rgba16Float : rhi::TextureFormat::Rgba8Unorm;
-        auto claimed = platform.device->claim_window(platform.window, rhi::PresentMode::Immediate, format);
+        // Flip on the display's refresh so a frame never changes mid-scanout.
+        // Native D3D12 presents never wait: admission comes from the
+        // frame-latency object and a busy queue skips the present. SDL GPU
+        // blocks while acquiring under vsync, so it takes mailbox instead and
+        // falls back to immediate only where the platform offers nothing else.
+        // A joined present barrier still flips on house sync, not vsync.
+        const auto mode = backend == rhi::BackendKind::D3d12 ? rhi::PresentMode::Vsync
+                                                             : rhi::PresentMode::Mailbox;
+        auto claimed = platform.device->claim_window(platform.window, mode, format);
         if (!claimed) {
             platform.device.reset();
             return false;

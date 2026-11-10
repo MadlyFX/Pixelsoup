@@ -165,9 +165,10 @@ struct PresenterTiming final {
     // Complete output frames intentionally retained because at least one
     // visible media plate for the next frame was still pending.
     core::u64 media_deferred_frames{};
-    // True when the swapchain is blocking on the display refresh. An output
-    // node should never be: the frame boundary owns timing. Reported because
-    // a vsync-limited path looks exactly like a slow one from the outside.
+    // True when flips wait for the display refresh. Outputs do, so a frame
+    // never tears, but the show thread never blocks on it: a refresh that is
+    // not ready yet counts as a skipped present. Reported because a display
+    // slower than the show rate looks like a slow node from the outside.
     bool vsync_limited{};
 
     bool operator==(const PresenterTiming&) const = default;
