@@ -450,6 +450,28 @@ core::Result<SceneClonePlan, SceneCloneError> plan_clone_scene(
                 selected.insert(id);
             }
         }
+        // A mask belongs to the drawable or group it cuts, and a Bezier
+        // mask's points belong to the mask.
+        std::set<doc::NodeId> selected_masks;
+        for (const auto& [id, node] : all) {
+            if (node.type != schema::mask_type) {
+                continue;
+            }
+            const auto target = referenced_id(node, schema::mask_target);
+            if (target.has_value() && selected_direct.contains(*target)) {
+                selected.insert(id);
+                selected_masks.insert(id);
+            }
+        }
+        for (const auto& [id, node] : all) {
+            if (node.type != schema::mask_point_type) {
+                continue;
+            }
+            const auto mask = referenced_id(node, schema::mask_id);
+            if (mask.has_value() && selected_masks.contains(*mask)) {
+                selected.insert(id);
+            }
+        }
 
         SceneClonePlan plan{};
         plan.source = source;
@@ -524,6 +546,20 @@ core::Result<SceneClonePlan, SceneCloneError> plan_clone_scene(
                 write_reference(
                     node.properties, schema::channel_target,
                     *plan.cloned_id(*target));
+            } else if (node.type == schema::mask_type) {
+                const auto target = referenced_id(node, schema::mask_target);
+                write_reference(
+                    node.properties, schema::mask_target,
+                    *plan.cloned_id(*target));
+                write_reference(node.properties, schema::scene_id,
+                                plan.destination);
+            } else if (node.type == schema::mask_point_type) {
+                const auto mask = referenced_id(node, schema::mask_id);
+                write_reference(
+                    node.properties, schema::mask_id,
+                    *plan.cloned_id(*mask));
+                write_reference(node.properties, schema::scene_id,
+                                plan.destination);
             }
             plan.puts.push_back(std::move(node));
         }

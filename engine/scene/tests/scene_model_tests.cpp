@@ -3079,6 +3079,108 @@ void clone_planning_is_deterministic_and_rewrites_scene_references() {
     MODEL_CHECK(clone_100->world.at(0U, 3U) == 99.0F);
 }
 
+// A Preview rehearsal is a clone, so a drawable's masks and a Bezier mask's
+// points must come with it, owned by the clone and cutting the cloned layer.
+void clone_planning_carries_masks_and_their_points() {
+    doc::Root root;
+    root = root.set(node(10U, schema::stage_type,
+                         {text(schema::scene_name, "Source")}));
+    root = root.set(node(20U, schema::stage_type,
+                         {text(schema::scene_name, "Other")}));
+    root = root.set(node(100U, schema::object_type,
+                         {whole(schema::scene_id, 10),
+                          text(schema::primitive, "plane")}));
+    root = root.set(node(300U, schema::object_type,
+                         {whole(schema::scene_id, 20),
+                          text(schema::primitive, "plane")}));
+    root = root.set(node(
+        200U, schema::mask_type,
+        {whole(schema::scene_id, 10), whole(schema::mask_target, 100),
+         text(schema::mask_kind, schema::mask_ellipse_kind),
+         text(schema::mask_combine, schema::mask_add),
+         whole(schema::mask_order, 1), flag(schema::mask_enabled, true),
+         real(schema::mask_feather_px, 12.5), real(schema::mask_left, 0.125),
+         real(schema::mask_top, 0.25), real(schema::mask_right, 0.75),
+         real(schema::mask_bottom, 0.875)}));
+    root = root.set(node(
+        210U, schema::mask_type,
+        {whole(schema::scene_id, 10), whole(schema::mask_target, 100),
+         text(schema::mask_kind, schema::mask_bezier_kind),
+         text(schema::mask_combine, schema::mask_subtract),
+         whole(schema::mask_order, 2), flag(schema::mask_enabled, true)}));
+    const std::array<std::array<double, 2>, 3> corners{
+        {{0.375, 0.125}, {0.625, 0.5}, {0.25, 0.625}}};
+    for (std::size_t i = 0; i < corners.size(); ++i) {
+        root = root.set(node(
+            211U + i, schema::mask_point_type,
+            {whole(schema::scene_id, 10), whole(schema::mask_id, 210),
+             whole(schema::mask_point_order, static_cast<std::int64_t>(i)),
+             real(schema::mask_point_x, corners[i][0]),
+             real(schema::mask_point_y, corners[i][1]),
+             real(schema::mask_point_in_x, corners[i][0]),
+             real(schema::mask_point_in_y, corners[i][1]),
+             real(schema::mask_point_out_x, corners[i][0]),
+             real(schema::mask_point_out_y, corners[i][1])}));
+    }
+    // Another scene's mask stays where it is.
+    root = root.set(node(
+        310U, schema::mask_type,
+        {whole(schema::scene_id, 20), whole(schema::mask_target, 300),
+         text(schema::mask_kind, schema::mask_rectangle_kind),
+         text(schema::mask_combine, schema::mask_add),
+         whole(schema::mask_order, 0), flag(schema::mask_enabled, true)}));
+
+    const auto planned = scene::plan_clone_scene(
+        root, doc::NodeId{10U}, doc::NodeId{1'000U});
+    MODEL_CHECK(planned.has_value());
+    const auto& plan = planned.value();
+    const std::vector<std::pair<doc::NodeId, doc::NodeId>> expected{
+        {doc::NodeId{10U}, doc::NodeId{1'000U}},
+        {doc::NodeId{100U}, doc::NodeId{1'001U}},
+        {doc::NodeId{200U}, doc::NodeId{1'002U}},
+        {doc::NodeId{210U}, doc::NodeId{1'003U}},
+        {doc::NodeId{211U}, doc::NodeId{1'004U}},
+        {doc::NodeId{212U}, doc::NodeId{1'005U}},
+        {doc::NodeId{213U}, doc::NodeId{1'006U}},
+    };
+    MODEL_CHECK(plan.remap == expected);
+    MODEL_CHECK(!plan.cloned_id(doc::NodeId{310U}).has_value());
+
+    doc::Root with_clone = root;
+    for (const auto& put : plan.puts) {
+        with_clone = with_clone.set(put);
+    }
+    scene::SceneModel model;
+    model.reset(with_clone);
+    const auto source = model.masks(scene::SceneId{10U});
+    const auto clone = model.masks(plan.destination);
+    MODEL_CHECK(source.size() == 2U);
+    MODEL_CHECK(clone.size() == 2U);
+    MODEL_CHECK(model.masks(scene::SceneId{20U}).size() == 1U);
+    for (std::size_t i = 0; i < clone.size(); ++i) {
+        MODEL_CHECK(clone[i].scene == plan.destination);
+        MODEL_CHECK(clone[i].target == doc::NodeId{1'001U});
+        MODEL_CHECK(clone[i].source == *plan.cloned_id(source[i].source));
+        // Apart from the ids, the clone is the same mask.
+        scene::MaskInstance renamed = source[i];
+        renamed.source = clone[i].source;
+        renamed.scene = clone[i].scene;
+        renamed.target = clone[i].target;
+        for (scene::MaskPoint& point : renamed.points) {
+            point.source = *plan.cloned_id(point.source);
+            point.scene = clone[i].scene;
+            point.mask = clone[i].source;
+        }
+        MODEL_CHECK(renamed == clone[i]);
+    }
+    MODEL_CHECK(clone[0].kind == scene::MaskKind::Ellipse);
+    MODEL_CHECK(clone[0].feather_canvas_px == 12.5F);
+    MODEL_CHECK(clone[1].kind == scene::MaskKind::Bezier);
+    MODEL_CHECK(clone[1].combine == scene::MaskCombine::Subtract);
+    MODEL_CHECK(clone[1].points.size() == 3U);
+    MODEL_CHECK(model.mask_diagnostics(plan.destination).empty());
+}
+
 void clone_planning_reports_source_and_id_errors() {
     doc::Root root = doc::Root{}.set(node(10U, schema::stage_type, {}));
     const auto absent = scene::plan_clone_scene(
@@ -6043,7 +6145,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 96U> cases{{
+constexpr std::array<Case, 97U> cases{{
     {"an updated model is the model a rebuild would be",
      &an_updated_model_is_the_model_a_rebuild_would_be},
     {"a solo draws only what it shows",
@@ -6214,6 +6316,8 @@ constexpr std::array<Case, 96U> cases{{
      &multi_scene_reset_and_streamed_deltas_agree},
     {"clone planning is deterministic and rewrites scene references",
      &clone_planning_is_deterministic_and_rewrites_scene_references},
+    {"clone planning carries masks and their points",
+     &clone_planning_carries_masks_and_their_points},
     {"clone planning reports source and id errors",
      &clone_planning_reports_source_and_id_errors},
     {"scene delete planning cascades owned content and dependencies",
