@@ -4773,12 +4773,47 @@ void a_vehicle_track_reads_as_one_track_and_lists_its_screens_on_request() {
   UI_CHECK(!track_row_y(h, left_screen_node).has_value());
 }
 
+// A track selected somewhere else - a wall picked on the Stage, a tile on the
+// Inspector's rig - is the selected track here too: its header is drawn
+// selected without ever having been clicked in the Timeline.
+void a_track_selected_elsewhere_is_the_selected_row() {
+  const auto selection_vertices = [](bool selected) {
+    Harness h;
+    h.elements[1U].timeline_lane = lane_node;
+    h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
+                                          "Foreground", false, false,
+                                          scene::BlendMode::Normal, false});
+    h.lanes.push_back(scene::TimelineLane{
+        destination_lane_node, scene::SceneId{100U}, 20, "Background", false,
+        false, scene::BlendMode::Normal, false});
+    if (selected) {
+      h.selection = {lane_node};
+      h.primary = lane_node;
+    }
+    // The pointer stays outside the panel throughout.
+    static_cast<void>(h.frame(-50.0F, -50.0F, false));
+    static_cast<void>(h.frame(-50.0F, -50.0F, false));
+    const gui::UiColor fill = h.ctx.theme().selection;
+    std::size_t found = 0U;
+    for (const gui::UiVertex &vertex : h.list.vertices()) {
+      found += vertex.r == fill.r && vertex.g == fill.g &&
+                       vertex.b == fill.b && vertex.a == fill.a
+                   ? 1U
+                   : 0U;
+    }
+    return found;
+  };
+  UI_CHECK(selection_vertices(true) > selection_vertices(false));
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 134U> cases{{
+constexpr std::array<Case, 135U> cases{{
+    {"a track selected elsewhere is the selected row",
+     &a_track_selected_elsewhere_is_the_selected_row},
     {"soloing a group shows what is inside it",
      &soloing_a_group_shows_what_is_inside_it},
     {"a track is listed once, by its header",

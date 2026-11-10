@@ -228,6 +228,10 @@ class InspectorPanel final {
         // A particle effect's seed and start frame: whole numbers that decide
         // which particles every node draws.
         Particles,
+        // A vehicle track's rig: where the car stands and how its walls and
+        // ceiling are laid out. Its own domain because the values live on
+        // the LED Car Process the track's screens feed, not on the track.
+        Rig,
     };
 
     // Semantic identity of one numeric field. Named properties need a domain

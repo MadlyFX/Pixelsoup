@@ -430,6 +430,14 @@ void EditorShell::Frame::handle_viewport(const ViewportFrame &viewport,
       } else {
         impl.scene_selection.set_primary(picked);
       }
+      // A car's wall has no Timeline row until its screens are listed, so
+      // picking one here lists it: the same screen is then the selected row
+      // there, as selecting the row selects it here.
+      if (const ElementInfo *const wall = find_element(elements, picked);
+          wall != nullptr && wall->kind == ElementKind::Track &&
+          wall->vehicle_track != doc::NodeId{} && impl.is_selected(picked)) {
+        impl.timeline_panel.reveal(picked, ui.time_seconds());
+      }
       if (impl.is_selected(picked)) {
         capture_group(authored_view, display_view);
       } else {

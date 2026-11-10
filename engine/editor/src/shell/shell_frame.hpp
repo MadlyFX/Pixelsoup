@@ -167,6 +167,9 @@ struct EditorShell::Frame final {
   scene::Scene stage_scene{};
   std::optional<scene::Scene> stage_view_scene{};
   scene::Scene stage_interaction_scene{};
+  // Program's scene as its compositor graph places it; unset while that is
+  // the scene itself.
+  std::optional<scene::Scene> program_interaction_scene{};
   const output::OutputMap *program_output{};
   ProgramOutputExtent program_extent{};
   std::size_t stage_view_count{};

@@ -437,8 +437,11 @@ void EditorShell::Frame::draw_program_panel(const gui::Rect &bounds) {
   } else if (program_preview_ok) {
     const gui::Rect *const interaction_block =
         color_sample_active ? &content : nullptr;
+    const scene::Scene &program_interaction =
+        program_interaction_scene.has_value() ? *program_interaction_scene
+                                              : scene;
     const ViewportFrame program_viewport = impl.program_panel.draw(
-        ui, content, *program_texture, scene,
+        ui, content, *program_texture, program_interaction,
         impl.scene_selection.members(), impl.anchor(), nullptr,
         interaction_block,
         static_cast<float>(timeline.rate_numerator) /
@@ -447,7 +450,7 @@ void EditorShell::Frame::draw_program_panel(const gui::Rect &bounds) {
         elements);
     program_viewport_image = program_viewport.image;
     if (!color_sample_active && !switcher.rehearsal_locked) {
-      handle_viewport(program_viewport, scene, scene);
+      handle_viewport(program_viewport, scene, program_interaction);
     }
   } else {
     const std::string_view fault =

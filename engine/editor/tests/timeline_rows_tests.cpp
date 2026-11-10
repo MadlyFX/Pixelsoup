@@ -454,6 +454,50 @@ void a_vehicle_track_lists_as_one_track_with_its_take() {
   ROWS_CHECK(span != nullptr && span->first == 100 && span->end == 150);
 }
 
+// A row never offers keys the show would not play. A vehicle track owns no
+// plane and a clip on a track plays on that track's screen, so neither lists
+// a transform; both still fade. A wall and a loose layer keep theirs.
+void rows_offer_no_transform_where_one_moves_nothing() {
+  Fixture f;
+  place_car(f);
+  auto vehicle = element(car, editor::ElementKind::Track, "", std::nullopt);
+  vehicle.vehicle = true;
+  f.elements.push_back(vehicle);
+  f.state.listed_screens = {car};
+  f.state.open_screens = {front_screen};
+  for (const doc::NodeId open :
+       {car, take_one, front_screen, shot_one, loner}) {
+    f.state.expanded_layers.insert(open.value());
+  }
+  const RowList list = f.build();
+  const auto count = [&](doc::NodeId node, Row::Kind kind) {
+    std::size_t found = 0U;
+    for (const Row &row : list.rows) {
+      found += row.node == node && row.kind == kind ? 1U : 0U;
+    }
+    return found;
+  };
+  const auto fades = [&](doc::NodeId node) {
+    for (const Row &row : list.rows) {
+      if (row.node == node && row.kind == Row::Kind::Property &&
+          row.property == scene::PropertyChannel::Opacity) {
+        return true;
+      }
+    }
+    return false;
+  };
+  // The car and its take: no Position, Rotation or Scale, and an Opacity.
+  ROWS_CHECK(count(car, Row::Kind::PropertiesHeader) == 1U);
+  ROWS_CHECK(count(car, Row::Kind::Group) == 0U && fades(car));
+  ROWS_CHECK(count(take_one, Row::Kind::Group) == 0U && fades(take_one));
+  // An ordinary clip on an ordinary track is in the same position.
+  ROWS_CHECK(count(shot_one, Row::Kind::Group) == 0U && fades(shot_one));
+  // A wall is a screen with a place of its own, and a loose layer is
+  // placed by its own transform.
+  ROWS_CHECK(count(front_screen, Row::Kind::Group) == 3U);
+  ROWS_CHECK(count(loner, Row::Kind::Group) == 3U);
+}
+
 void a_vehicle_tracks_screens_are_listed_under_it_on_request() {
   Fixture f;
   place_car(f);
@@ -509,11 +553,13 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+constexpr std::array<Case, 11U> cases{{
     {"a particle effect lists its keyed parameters by name",
      &a_particle_effect_lists_its_keyed_parameters_by_name},
     {"a vehicle track lists as one track with its take",
      &a_vehicle_track_lists_as_one_track_with_its_take},
+    {"rows offer no transform where one moves nothing",
+     &rows_offer_no_transform_where_one_moves_nothing},
     {"a vehicle track's screens are listed under it on request",
      &a_vehicle_tracks_screens_are_listed_under_it_on_request},
     {"clip rows take their own height or every clip row's",

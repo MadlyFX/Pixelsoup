@@ -10,6 +10,8 @@
 #include <mediaserver/assets/derivative.hpp>
 #include <mediaserver/assets/library_edit.hpp>
 #include <mediaserver/assets/proxy_policy.hpp>
+#include <mediaserver/compositor/compositor_graph.hpp>
+#include <mediaserver/compositor/compositor_schema.hpp>
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/doc/node.hpp>
 #include <mediaserver/output/feed_map_schema.hpp>
@@ -316,7 +318,40 @@ map_transport(editor::TransportRequest request) noexcept {
         return static_cast<bool>(scheduler.schedule_document_replace(planned.value(),
             cmd::UndoContextId{2U}, cmd::TransactionId{edit.gesture}, apply_at));
     }
-    if (edit.property == scene::schema::animation_start_frame && edit.text.has_value()) {
+    if (existing->type == compositor::schema::led_car_process_type) {
+        // A vehicle track's layout, edited on the track but held by the rig
+        // its screens feed. Only the rig's own numbers, in the ranges the
+        // graph reads them with: anything else would make the node unreadable
+        // and take the whole car off the wall.
+        namespace names = compositor::schema;
+        constexpr double extent =
+            static_cast<double>(compositor::max_spatial_extent);
+        double low = -extent;
+        double high = extent;
+        if (edit.property == names::plate_scale ||
+            edit.property == names::array_scale ||
+            edit.property == names::reflection_scale) {
+            low = 0.0;
+        } else if (edit.property == names::horizontal_blend) {
+            low = 0.0;
+            high = static_cast<double>(
+                compositor::max_led_car_horizontal_blend);
+        } else if (edit.property != names::position_x &&
+                   edit.property != names::position_y &&
+                   edit.property != names::position_z &&
+                   edit.property != names::rotation_yaw_turns &&
+                   edit.property != names::rotation_pitch_turns &&
+                   edit.property != names::rotation_roll_turns &&
+                   edit.property != names::reflection_height) {
+            return true;
+        }
+        if (edit.text.has_value() || !std::isfinite(edit.value)) {
+            return true;
+        }
+        updated.properties.insert_or_assign(
+            edit.property,
+            doc::PropertyValue{std::clamp(edit.value, low, high)});
+    } else if (edit.property == scene::schema::animation_start_frame && edit.text.has_value()) {
         if (existing->type != scene::schema::model_type) return true;
         std::int64_t value{};
         const auto& text=*edit.text;

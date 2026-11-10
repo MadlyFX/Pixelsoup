@@ -143,7 +143,14 @@ RowList build_rows(RowsState &state, const RowsInput &input,
       }
       return;
     }
-    for (core::u8 group = 0U; group < 3U; ++group) {
+    // A row never offers keys the show would not play. A vehicle track owns
+    // no plane - its car is placed by its rig, its walls by their screens -
+    // and a clip on a track plays on that track's screen, so neither has a
+    // transform that moves anything; both still fade and take effects.
+    const bool placed =
+        !(element.kind == ElementKind::Track && element.vehicle) &&
+        !element.on_screen();
+    for (core::u8 group = 0U; placed && group < 3U; ++group) {
       append_group(group);
     }
     if (element.kind != ElementKind::Group) {

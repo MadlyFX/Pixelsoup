@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mediaserver/compositor/compositor_graph.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
@@ -234,6 +235,13 @@ struct ElementInfo final {
     std::array<doc::NodeId, scene::vehicle_slot_count> slot_screens{};
     // A take's: the slots it has a plate for.
     std::array<bool, scene::vehicle_slot_count> plates{};
+    // A vehicle track's: the LED Car Process its screens feed, and how that
+    // rig is laid out - where the car stands, how far out and how large its
+    // walls are, its ceiling. Zero when the screens feed none, and then there
+    // is no layout to show. Supplied by the shell from the Stage scene's
+    // compositor graph.
+    doc::NodeId vehicle_rig{};
+    compositor::LedCarProcessParameters rig{};
 
     // Camera-only lens and exposure. A camera stands at `position` and is
     // turned by `rotation` like every other element.

@@ -7,6 +7,7 @@
 #include <mediaserver/assets/asset_schema.hpp>
 #include <mediaserver/assets/library_edit.hpp>
 #include <mediaserver/assets/plateset.hpp>
+#include <mediaserver/compositor/compositor_model.hpp>
 #include <mediaserver/compositor/compositor_schema.hpp>
 #include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
@@ -17,7 +18,9 @@
 #include <exception>
 #include <initializer_list>
 #include <tuple>
+#include <variant>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -800,12 +803,80 @@ void a_slot_screens_time_offset_is_authored_in_whole_frames() {
                  2U);
 }
 
+// The Inspector's layout fields on a vehicle track are authored on the rig
+// its screens feed: that rig's own numbers, held to the ranges the graph
+// reads them with, and nothing else.
+void a_rigs_layout_is_authored_within_the_ranges_the_graph_reads() {
+  const app::PlatesetPlacementPlan plan = place(base_show());
+  PLATESET_CHECK(plan.rig != doc::NodeId{});
+  mediaserver::cmd::DirectorScheduler scheduler{plan.document};
+  core::u64 frame = 0U;
+  const auto author = [&](std::string_view property, double value) {
+    ++frame;
+    editor::GenericEdit edit{};
+    edit.node = plan.rig;
+    edit.property = std::string{property};
+    edit.value = value;
+    edit.gesture = 950U + frame;
+    PLATESET_CHECK(app::schedule_generic_edit(
+        scheduler, edit, mediaserver::cmd::FrameNumber{frame}));
+    PLATESET_CHECK(scheduler.seal_frame(mediaserver::cmd::FrameNumber{frame}));
+  };
+  const auto held = [&](std::string_view property) {
+    const doc::Node &rig = *scheduler.sealed_document().get(plan.rig);
+    const auto found = rig.properties.find(property);
+    const double *const value = found != rig.properties.end()
+                                    ? std::get_if<double>(&found->second)
+                                    : nullptr;
+    return value != nullptr ? std::optional<double>{*value}
+                            : std::optional<double>{};
+  };
+  namespace names = compositor::schema;
+  author(names::position_x, -2.5);
+  author(names::rotation_yaw_turns, 0.375);
+  author(names::array_scale, 6.25);
+  author(names::reflection_height, 3.5);
+  PLATESET_CHECK(held(names::position_x) == -2.5);
+  PLATESET_CHECK(held(names::rotation_yaw_turns) == 0.375);
+  PLATESET_CHECK(held(names::array_scale) == 6.25);
+  PLATESET_CHECK(held(names::reflection_height) == 3.5);
+  // A size is never negative and a blend takes at most half a wall.
+  author(names::plate_scale, -3.0);
+  author(names::horizontal_blend, 0.9);
+  PLATESET_CHECK(held(names::plate_scale) == 0.0);
+  PLATESET_CHECK(held(names::horizontal_blend) ==
+                 static_cast<double>(compositor::max_led_car_horizontal_blend));
+  // Not a number, or not one of the rig's: nothing is written.
+  author(names::position_y, 1.25);
+  author(names::position_y, std::numeric_limits<double>::quiet_NaN());
+  author(scene::schema::lane_time_offset, 4.0);
+  PLATESET_CHECK(held(names::position_y) == 1.25);
+  PLATESET_CHECK(!scheduler.sealed_document()
+                      .get(plan.rig)
+                      ->properties.contains(scene::schema::lane_time_offset));
+  // The graph still reads the rig, with the layout it was given.
+  compositor::CompositorModel model;
+  model.reset(scheduler.sealed_document());
+  const compositor::CompositorGraph graph =
+      model.evaluate(doc::NodeId{stage_id.value()});
+  PLATESET_CHECK(graph.valid());
+  const compositor::GraphNode *const node = graph.node(plan.rig);
+  PLATESET_CHECK(node != nullptr);
+  const auto &layout =
+      std::get<compositor::LedCarProcessParameters>(node->parameters);
+  PLATESET_CHECK(layout.position.x == -2.5F && layout.yaw == 0.375F &&
+                 layout.array_scale == 6.25F && layout.plate_scale == 0.0F &&
+                 layout.horizontal_blend == 0.5F);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 12U> cases{{
+constexpr std::array<Case, 13U> cases{{
+    {"a rig's layout is authored within the ranges the graph reads",
+     &a_rigs_layout_is_authored_within_the_ranges_the_graph_reads},
     {"a slot screen's time offset is authored in whole frames",
      &a_slot_screens_time_offset_is_authored_in_whole_frames},
     {"the Library and the scene call the slots the same",

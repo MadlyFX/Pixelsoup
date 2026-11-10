@@ -142,6 +142,38 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
     if (const ElementInfo *const element = find_element(elements, selected);
         element != nullptr) {
       inspector_elements.push_back(*element);
+      if (element->kind == ElementKind::Track && element->vehicle) {
+        // The car's layout is its LED Car Process's: the one its screens'
+        // Scene Layers are wired into, the lowest id where they feed two.
+        const compositor::GraphNode *rig = nullptr;
+        for (const compositor::GraphEdge &edge : compositor_graph.edges) {
+          const compositor::GraphNode *const from =
+              compositor_graph.node(edge.from.node);
+          const compositor::GraphNode *const to =
+              compositor_graph.node(edge.to.node);
+          if (from == nullptr || to == nullptr ||
+              to->kind != compositor::NodeKind::LedCarProcess ||
+              (rig != nullptr && rig->node < to->node)) {
+            continue;
+          }
+          const auto *const layer =
+              std::get_if<compositor::SceneLayerParameters>(&from->parameters);
+          if (layer != nullptr && layer->scene_node != doc::NodeId{} &&
+              std::find(element->slot_screens.begin(),
+                        element->slot_screens.end(),
+                        layer->scene_node) != element->slot_screens.end()) {
+            rig = to;
+          }
+        }
+        if (rig != nullptr) {
+          if (const auto *const layout =
+                  std::get_if<compositor::LedCarProcessParameters>(
+                      &rig->parameters)) {
+            inspector_elements.back().vehicle_rig = rig->node;
+            inspector_elements.back().rig = *layout;
+          }
+        }
+      }
       if (element->kind == ElementKind::ParticleEffect) {
         // Read on the cache's worker; the section fills in when it lands.
         const render::ParticlePackageObservation observed =

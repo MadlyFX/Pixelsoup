@@ -1538,6 +1538,12 @@ screens in one undo step. A project made before takes were one clip shows
 each of its old plates as an ordinary clip on an ordinary track; place the
 plateset again to get a take.
 
+Its **Properties** on the Timeline list **Opacity** and its effects, which
+fade and grade the whole car, and no Position, Rotation or Scale: the track
+has no screen of its own to move. A take lists the same, as every clip on a
+track does - a clip plays on its track's screen, so its own transform moves
+nothing there.
+
 **Editing a take.** A take is one clip, so every clip tool edits it as it
 edits any clip: drag it to move it, drag an end to trim it, pull a fade knob,
 cut it with the **Razor (`C`)**, and Ripple, Roll, Slip and Slide it against
@@ -1571,14 +1577,23 @@ right-click the vehicle track and choose **List Screens** to list them under
 it, front first and round the car to the ceiling, and **Fold Screens** to put
 them away. Each is named by its slot - or its tag (**L**, **TOP**) when the
 list is too narrow - has no track number, and starts closed; twirl one open
-for its Properties and keys. Clicking a plate on the Stage selects its slot
-screen, ready to be moved or scaled to land a reflection; selecting a take
-outlines every wall it is playing on.
+for its Properties and keys. Clicking a plate on the Stage or in Program
+Output selects its slot screen, where the plate is drawn, ready to be moved
+or scaled to land a reflection, and lists and selects its row on the
+Timeline; selecting the row selects the plate. Selecting a take outlines
+every wall it is playing on.
 
 **The Inspector.** With the vehicle track selected the Inspector shows the
 car from above, front up, with a tile per wall. A wall the car has a screen
 for is a button: click it to select that slot screen, which also lists it on
-the Timeline. With a take selected the same view is lit where the take has a
+the Timeline. Under the car is its layout, the values of the LED Car Process
+its screens feed: **Position** and **Rotation** place and turn the whole car,
+**Wall distance** is how far each wall stands from its middle, **Wall size**
+sizes the eight walls together, **Edge blend** fades each wall's left and
+right edges into its neighbours, and **Ceiling height** and **Ceiling size**
+set the ceiling plate. They are the same values as that node's Parameters in
+the Compositor, and are not keyed. A car whose screens feed no LED Car
+Process shows no layout. With a take selected the same view is lit where the take has a
 plate; a screen the take leaves empty reads dim, and a plate with no screen
 to play on is outlined as a warning. **Open plateset** shows the take's set
 in the Asset Viewer, where its plates, sync offsets and moments are. A slot
@@ -1600,8 +1615,11 @@ when negative.
   take is swapped. Use the time offset to move one wall against the car; use
   **SYNC** when the footage itself came in out of step.
 - *The whole car* - opacity and effects on the vehicle track apply to every
-  wall after that wall's own, and the LED Car Process node in the Compositor
-  places and sizes the rig and takes the setup's effects and filters.
+  wall after that wall's own. Where the car stands, how it is turned, how
+  far out and how large its walls are, their edge blend and the ceiling are
+  the layout on the vehicle track's Inspector; the LED Car Process node in
+  the Compositor holds the same values and takes the setup's effects and
+  filters.
 - *One take* - effects on the take's clip apply to every wall while that
   take is up, before each wall's own.
 

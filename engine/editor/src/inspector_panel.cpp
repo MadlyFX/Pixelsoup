@@ -4,6 +4,8 @@
 
 #include <mediaserver/assets/plateset.hpp>
 
+#include <mediaserver/compositor/compositor_schema.hpp>
+
 #include <mediaserver/gui/color_picker.hpp>
 
 #include <mediaserver/scene/scene_schema.hpp>
@@ -207,6 +209,26 @@ constexpr std::array<std::string_view, 3U> rgb{{"R", "G", "B"}};
 constexpr std::array<std::string_view, 3U> tracker_protocol_choices{
     {"FreeD", "OpenTrackIO", "NatNet"}};
 
+// One value of a vehicle's rig, by the compositor's name for it; nothing for
+// a name the rig does not have.
+[[nodiscard]] std::optional<float> rig_value(
+    const compositor::LedCarProcessParameters& rig,
+    std::string_view property) noexcept {
+    namespace names = compositor::schema;
+    if (property == names::position_x) return rig.position.x;
+    if (property == names::position_y) return rig.position.y;
+    if (property == names::position_z) return rig.position.z;
+    if (property == names::rotation_yaw_turns) return rig.yaw;
+    if (property == names::rotation_pitch_turns) return rig.pitch;
+    if (property == names::rotation_roll_turns) return rig.roll;
+    if (property == names::plate_scale) return rig.plate_scale;
+    if (property == names::array_scale) return rig.array_scale;
+    if (property == names::horizontal_blend) return rig.horizontal_blend;
+    if (property == names::reflection_height) return rig.reflection_height;
+    if (property == names::reflection_scale) return rig.reflection_scale;
+    return std::nullopt;
+}
+
 // The element as a new one of its kind starts: what it is - its identity,
 // its kind, its place in the show and its links - kept, and every value an
 // operator authors put back to ElementInfo's own defaults, which mirror the
@@ -248,6 +270,7 @@ constexpr std::array<std::string_view, 3U> tracker_protocol_choices{
     pristine.raster_width = fresh.raster_width;
     pristine.raster_height = fresh.raster_height;
     pristine.time_offset = fresh.time_offset;
+    pristine.rig = fresh.rig;
     pristine.field_of_view = fresh.field_of_view;
     pristine.shutter_seconds = fresh.shutter_seconds;
     pristine.aperture_f_number = fresh.aperture_f_number;
@@ -575,6 +598,20 @@ InspectorPanel::editable_value(const ElementInfo& element,
             return EditableValue{
                 element.node, element.node,
                 static_cast<double>(element.particle_start_frame)};
+        }
+        return std::nullopt;
+    case FieldDomain::Rig:
+        // The value is the rig's and so is the node the edit is addressed
+        // to; the element is still the vehicle track, which is what makes a
+        // locked car's layout read-only.
+        if (element.kind != ElementKind::Track || !element.vehicle ||
+            element.vehicle_rig == doc::NodeId{}) {
+            return std::nullopt;
+        }
+        if (const std::optional<float> value =
+                rig_value(element.rig, binding.property)) {
+            return EditableValue{element.node, element.vehicle_rig,
+                                 static_cast<double>(*value)};
         }
         return std::nullopt;
     case FieldDomain::Plate:
@@ -1054,6 +1091,23 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
                           binding.property == scene::schema::particle_seed
                               ? 4294967295.0
                               : 9007199254740992.0);
+      case FieldDomain::Rig: {
+        // The ranges the compositor reads a rig with: a size or a distance
+        // is never negative, and a blend takes at most half a wall.
+        constexpr double extent =
+            static_cast<double>(compositor::max_spatial_extent);
+        if (binding.property == compositor::schema::horizontal_blend) {
+          return std::clamp(
+              value, 0.0,
+              static_cast<double>(compositor::max_led_car_horizontal_blend));
+        }
+        if (binding.property == compositor::schema::plate_scale ||
+            binding.property == compositor::schema::array_scale ||
+            binding.property == compositor::schema::reflection_scale) {
+          return std::clamp(value, 0.0, extent);
+        }
+        return std::clamp(value, -extent, extent);
+      }
       case FieldDomain::Plate:
         // Every one of these is whole pixels or a whole ordinal. Rounding here
         // rather than at the document boundary means the field itself never
@@ -1220,6 +1274,7 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
             NamedEdit{target.author, std::string{binding.property}, value});
         break;
       case FieldDomain::Plate:
+      case FieldDomain::Rig:
         frame.named_edits.push_back(
             NamedEdit{target.author, std::string{binding.property}, value});
         break;
@@ -2040,6 +2095,59 @@ void InspectorPanel::draw_vehicle(gui::UiContext& ctx, Cursor& cursor,
             tip += ": the car has no screen here.";
         }
         ctx.tooltip(tile, tip);
+    }
+    // The car's layout: every wall moves with these, so they are the car's
+    // and shown on its track. A wall's own fields stay a correction on top.
+    if (car && element.vehicle_rig != doc::NodeId{}) {
+        namespace names = compositor::schema;
+        const compositor::LedCarProcessParameters& layout = element.rig;
+        const std::array<float, 3U> position{layout.position.x, layout.position.y,
+                                             layout.position.z};
+        const std::array<FieldBinding, 3U> position_bindings{{
+            {FieldDomain::Rig, {}, names::position_x},
+            {FieldDomain::Rig, {}, names::position_y},
+            {FieldDomain::Rig, {}, names::position_z}}};
+        vector_row(ctx, cursor, "Position", xyz, position, 0.01F,
+                   position_bindings, frame);
+        ctx.tooltip(cursor.last(),
+                    "Where the car stands. Every wall and the ceiling move "
+                    "with it.");
+        const std::array<float, 3U> rotation{layout.yaw, layout.pitch, layout.roll};
+        const std::array<FieldBinding, 3U> rotation_bindings{{
+            {FieldDomain::Rig, {}, names::rotation_yaw_turns},
+            {FieldDomain::Rig, {}, names::rotation_pitch_turns},
+            {FieldDomain::Rig, {}, names::rotation_roll_turns}}};
+        vector_row(ctx, cursor, "Rotation (turns)", ypr, rotation, 0.002F,
+                   rotation_bindings, frame, nullptr, false, false, 0U, 3);
+        ctx.tooltip(cursor.last(),
+                    "Turns the whole car, walls and ceiling together.");
+        constexpr std::array<std::string_view, 1U> none{{""}};
+        const auto scalar = [&](std::string_view label,
+                                std::string_view property, float value,
+                                float speed, int precision,
+                                std::string_view tip) {
+            const std::array<float, 1U> values{value};
+            const std::array<FieldBinding, 1U> bindings{{
+                {FieldDomain::Rig, {}, property}}};
+            vector_row(ctx, cursor, label, none, values, speed, bindings,
+                       frame, nullptr, false, false, 0U, precision);
+            ctx.tooltip(cursor.last(), tip);
+        };
+        scalar("Wall distance", names::array_scale, layout.array_scale, 0.05F, 2,
+               "How far each wall stands from the middle of the car.");
+        scalar("Wall size", names::plate_scale, layout.plate_scale, 0.05F, 2,
+               "Sizes all eight walls together. A wall's own scale multiplies "
+               "this.");
+        scalar("Edge blend", names::horizontal_blend, layout.horizontal_blend,
+               0.005F, 3,
+               "How much of each wall's width fades out at its left and right "
+               "edges, so neighbouring walls overlap softly. The ceiling is "
+               "not blended.");
+        scalar("Ceiling height", names::reflection_height,
+               layout.reflection_height, 0.05F, 2,
+               "How high the ceiling plate hangs over the car.");
+        scalar("Ceiling size", names::reflection_scale, layout.reflection_scale,
+               0.05F, 2, "Sizes the ceiling plate on its own.");
     }
     if (take && element.plateset != doc::NodeId{}) {
         const gui::Rect row = take_row(cursor, row_height);

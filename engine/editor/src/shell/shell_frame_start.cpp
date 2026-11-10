@@ -398,6 +398,25 @@ void EditorShell::Frame::prepare_views() {
     }
   }
 
+  // Program's pixels include its own graph's spatial nodes too - a car's
+  // walls stand round its rig, not stacked where their tracks were made - so
+  // its picking and gizmo read the scene that graph places, as the Stage's
+  // do. Edits still start from `scene`, keeping a wall's own transform a
+  // correction on its rig socket.
+  {
+    const compositor::CompositorGraph &program_graph =
+        switcher.program_graph != nullptr ? *switcher.program_graph
+                                          : compositor_graph;
+    if (program_graph.valid() && !program_graph.plan.steps.empty()) {
+      auto planned_program =
+          render::plan_compositor_scene(program_graph, scene);
+      if (planned_program) {
+        program_interaction_scene =
+            std::move(planned_program.value().adjusted_scene);
+      }
+    }
+  }
+
   // Both scene targets are rendered before the UI pass. They belong to the
   // same device as UiWindow, so the panels sample them directly with no copy.
   program_output = selected_program_output(feed_map, impl.program_output_map_node);

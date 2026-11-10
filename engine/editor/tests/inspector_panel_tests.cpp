@@ -1,3 +1,4 @@
+#include <mediaserver/compositor/compositor_schema.hpp>
 #include <mediaserver/editor/inspector_panel.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/text.hpp>
@@ -1558,6 +1559,88 @@ void a_slot_screen_sets_its_plates_time_offset() {
     }
 }
 
+// A vehicle track whose screens feed a rig shows that rig's layout: where the
+// car stands, how it is turned, how far out and how large its walls are, how
+// they blend, and its ceiling. Each field edits the rig, not the track.
+void a_vehicle_track_edits_its_rigs_layout() {
+    const doc::NodeId rig{640U};
+    editor::ElementInfo car = make_track();
+    car.display_name = "Vehicle";
+    car.vehicle = true;
+    car.slot_screens[0U] = front_wall;
+    car.vehicle_rig = rig;
+    car.rig.position = scene::Vec3{1.5F, 0.25F, -2.0F};
+    car.rig.yaw = 0.125F;
+    car.rig.array_scale = 6.0F;
+    car.rig.plate_scale = 1.75F;
+    car.rig.horizontal_blend = 0.1F;
+    car.rig.reflection_height = 3.0F;
+    car.rig.reflection_scale = 2.5F;
+
+    // Scrub the first field of every row down the panel a tenth of a pixel
+    // short of nothing: what each row edits, and from what value.
+    std::map<std::string, double> starts;
+    for (float y = 30.0F; y < 520.0F; y += 5.0F) {
+        Harness h;
+        h.element = car;
+        static_cast<void>(h.frame(field_x0, y, false));
+        static_cast<void>(h.frame(field_x0, y, true));
+        const editor::InspectorFrame dragged =
+            h.frame(field_x0 + 100.0F, y, true);
+        // The car still fades as one; nothing else of it is a transform.
+        for (const editor::ComponentEdit& edit : dragged.component_edits) {
+            UI_CHECK(edit.component == scene::PropertyChannel::Opacity);
+        }
+        for (const editor::NamedEdit& edit : dragged.named_edits) {
+            UI_CHECK(edit.node == rig);
+            starts.try_emplace(edit.property, edit.value);
+        }
+    }
+    namespace names = mediaserver::compositor::schema;
+    // A hundred pixels of scrub at each row's own speed.
+    UI_CHECK(starts.size() == 7U);
+    UI_CHECK(near(starts.at(std::string{names::position_x}), 1.5 + 1.0));
+    UI_CHECK(near(starts.at(std::string{names::rotation_yaw_turns}),
+                  0.125 + 0.2));
+    UI_CHECK(near(starts.at(std::string{names::array_scale}), 6.0 + 5.0));
+    UI_CHECK(near(starts.at(std::string{names::plate_scale}), 1.75 + 5.0));
+    // A blend stops at half a wall.
+    UI_CHECK(near(starts.at(std::string{names::horizontal_blend}), 0.5));
+    UI_CHECK(near(starts.at(std::string{names::reflection_height}),
+                  3.0 + 5.0));
+    UI_CHECK(near(starts.at(std::string{names::reflection_scale}),
+                  2.5 + 5.0));
+
+    // Scrubbed the other way a size stops at nothing rather than going
+    // inside out.
+    bool sized = false;
+    for (float y = 30.0F; y < 520.0F; y += 5.0F) {
+        Harness h;
+        h.element = car;
+        static_cast<void>(h.frame(field_x0, y, false));
+        static_cast<void>(h.frame(field_x0, y, true));
+        const editor::InspectorFrame dragged =
+            h.frame(field_x0 - 100.0F, y, true);
+        for (const editor::NamedEdit& edit : dragged.named_edits) {
+            if (edit.property == names::plate_scale) {
+                UI_CHECK(near(edit.value, 0.0));
+                sized = true;
+            }
+        }
+    }
+    UI_CHECK(sized);
+
+    // A locked car's layout is read-only, like the rest of it.
+    car.locked = true;
+    for (float y = 30.0F; y < 520.0F; y += 5.0F) {
+        Harness h;
+        h.element = car;
+        static_cast<void>(h.frame(field_x0, y, false));
+        static_cast<void>(h.frame(field_x0, y, true));
+        UI_CHECK(h.frame(field_x0 + 100.0F, y, true).named_edits.empty());
+    }
+}
+
 // A take shows the car it is on: a wall with a screen selects that screen
 // whether or not this take has a plate for it, a plate with no screen is
 // shown but selects nothing, and one button opens the take's plateset.
@@ -2299,7 +2382,7 @@ void an_imported_surface_without_its_mesh_authors_nothing() {
     UI_CHECK(!dragged.surface_edit.has_value());
 }
 
-constexpr std::array<Case, 63U> cases{{
+constexpr std::array<Case, 64U> cases{{
     {"a changed value resets to its default", &a_changed_value_resets_to_its_default},
     {"a video clip chooses the size it is held at", &a_video_clip_chooses_the_size_it_is_held_at},
     {"a surface diamond keys its position at the playhead",
@@ -2349,6 +2432,8 @@ constexpr std::array<Case, 63U> cases{{
      &a_clip_on_a_screen_offers_no_transform_of_its_own},
     {"a vehicle track shows its car and selects a wall",
      &a_vehicle_track_shows_its_car_and_selects_a_wall},
+    {"a vehicle track edits its rig's layout",
+     &a_vehicle_track_edits_its_rigs_layout},
     {"a slot screen sets its plate's time offset",
      &a_slot_screen_sets_its_plates_time_offset},
     {"a take shows its car and opens its plateset",

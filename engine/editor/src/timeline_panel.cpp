@@ -475,6 +475,11 @@ bool TimelinePanel::open_pass(Pass &p) {
   if (!selected(anchor, selection)) {
     anchor = selection.empty() ? doc::NodeId{} : selection.front();
   }
+  // A track chosen anywhere is the selected track here: a wall picked on the
+  // Stage or on the Inspector's rig lights the same row a click on it would.
+  if (anchor != selected_lane_ && lane_exists(anchor)) {
+    selected_lane_ = anchor;
+  }
   const ElementInfo *const anchor_info = find_element(elements, anchor);
 
   // Canonical advanced-edit context. Controls only light up when the current
