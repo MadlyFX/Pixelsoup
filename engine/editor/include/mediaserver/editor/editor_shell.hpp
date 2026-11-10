@@ -186,8 +186,8 @@ struct AddIntent final {
   // (see stage_placement.hpp). A click-to-add leaves this empty and uses the
   // document defaults.
   std::optional<scene::Vec3> position;
-  // Exact native cadence for video. Absence deliberately means legacy/image
-  // sequence 1:1 mapping, so old aggregate initializers remain compatible.
+  // Exact native cadence for video. An image sequence has none and maps one
+  // file to each show frame.
   std::optional<assets::MediaFrameRate> frame_rate;
   // A Library asset dropped on a Compositor port: the Scene Layer node to
   // create for the new element, with its wires, in the same undo step. Its
@@ -634,6 +634,13 @@ struct EditorProjectState final {
   // Library assets whose files changed since they were recorded, as of the
   // last RESCAN.
   std::span<const doc::NodeId> changed_assets;
+  // Unsaved work from a run that ended without saving it, found at start-up
+  // and not answered for yet. `recovery_project` is the file it belongs to,
+  // empty for a project that was never saved; `recovery_saved_at` is when the
+  // copy was written, in local time.
+  bool recovery_available{};
+  std::string_view recovery_project;
+  std::string_view recovery_saved_at;
 };
 
 struct ProjectFileRequest final {
@@ -1007,6 +1014,10 @@ struct EditorFrame final {
   std::optional<ProjectFileRequest> load_project;
   // File > New Project: replace the project with an untitled, empty one.
   bool new_project{};
+  // The operator's answer to an offered recovery: open the recovered work,
+  // or carry on with the project as it was saved.
+  bool recover_project{};
+  bool dismiss_recovery{};
   std::optional<ProjectFileRequest> import_linked_scene;
   bool cancel_linked_scene_import{};
   bool start_scene_link{}, stop_scene_link{};

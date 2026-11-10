@@ -3,6 +3,8 @@
 #include <mediaserver/core/types.hpp>
 
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 
 namespace mediaserver::show {
 
@@ -16,7 +18,8 @@ namespace mediaserver::show {
 // so a wake lands just after the boundary without burning a core between
 // frames. Elsewhere it falls back to std::this_thread::sleep_until.
 //
-// The waiter owns an OS handle and is used by one thread.
+// The waiter owns OS handles and waits on one thread. notify() is the only
+// member another thread may call.
 class FrameWaiter final {
 public:
     using Clock = std::chrono::steady_clock;
@@ -35,6 +38,19 @@ public:
     // A deadline already past returns after one yield.
     void wait_until(TimePoint deadline, Clock::duration ceiling) noexcept;
 
+    // wait_until() that also ends as soon as another thread calls notify().
+    // Returns whether a notification ended it; like wait_until() it may
+    // return short of the deadline, for the caller to call again. A
+    // notification sent while nothing waits is kept for the next call, so one
+    // sent between a loop's last look at shared state and its wait is never
+    // missed; several sent before a wait count as one.
+    [[nodiscard]] bool wait_until_notified(TimePoint deadline,
+                                           Clock::duration ceiling) noexcept;
+
+    // Ends the current wait_until_notified(), or the next one. Safe from any
+    // thread, and never blocks.
+    void notify() noexcept;
+
     // Sleeps for about `duration` with the same timer and no spin: for a
     // fixed-rate poll that is not waiting on a boundary.
     void sleep_for(Clock::duration duration) noexcept;
@@ -46,8 +62,17 @@ public:
     }
 
 private:
+    // Takes a notification if one is waiting.
+    [[nodiscard]] bool take_notification() noexcept;
+
     void* timer_ = nullptr;
     bool high_resolution_ = false;
+    // Windows: an auto-reset event the timer wait also watches.
+    void* wake_ = nullptr;
+    // Elsewhere, and on Windows without that event.
+    std::mutex wake_mutex_;
+    std::condition_variable wake_changed_;
+    bool wake_pending_ = false;
 };
 
 // How late a frame loop observes the boundaries it waited for.

@@ -35,8 +35,10 @@ int main(int argc,char** argv) {
         root=root.set({doc::NodeId{100001},std::string{ss::stage_type},{{"scene_name",std::string{"Forest Preview"}},
             {"canvas_width",core::i64{640}},{"canvas_height",core::i64{360}},{"ambient",0.65}}});
         root=root.set({doc::NodeId{100002},std::string{ss::stage_type},{{"scene_name",std::string{"Program"}}}});
+        scene::Camera aim{}; aim.eye=scene::Vec3{0.0F,18.0F,20.0F}; aim.target=scene::Vec3{0.0F,0.0F,-12.0F};
+        const scene::Vec3 turns=scene::camera_rotation(aim);
         root=root.set({doc::NodeId{100003},std::string{ss::camera_type},{{"scene_id",core::i64{100001}},
-            {"eye_y",18.0},{"eye_z",20.0},{"target_z",-12.0},{"fov_turns",0.17},{"far_plane",300.0}}});
+            {"position_x",0.0},{"position_y",18.0},{"position_z",20.0},{"rotation_yaw",(static_cast<double>(turns.x)+0.0)},{"rotation_pitch",(static_cast<double>(turns.y)+0.0)},{"rotation_roll",(static_cast<double>(turns.z)+0.0)},{"fov_turns",0.17},{"far_plane",300.0}}});
         root=root.set({doc::NodeId{100004},std::string{ss::settings_type},{{"renderer_backend",std::string{"advanced"}},
             {"shadow_cascades",core::i64{4}}}});
         root=root.set({doc::NodeId{100005},std::string{ss::light_type},{{"scene_id",core::i64{100001}},

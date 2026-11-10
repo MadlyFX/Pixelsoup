@@ -31,13 +31,20 @@ void DirectorShowLoop::print_status(DirectorTick &tick) {
         cluster.diagnostics_recording = cluster_diagnostics.available();
         const std::string node_tracking_text =
             summarize_node_tracking(director_node_tracking);
-        static_cast<void>(cluster_diagnostics.append(cluster));
+        {
+            // A file write and a flush, so not inside the gate.
+            const AuthorityGate::Away filing{authority_gate};
+            static_cast<void>(cluster_diagnostics.append(cluster));
+        }
         std::cout << "director show-frame=" << input.show_frame.value()
                   << " control-frame=" << control_frame.value()
                   << " transport=" << transport_label(transport.state())
                   << " sealed=" << sealed << " anchors=" << anchors
                   << " pacer-lag=" << cluster.pacer_lag_frames
                   << boundary_wake_text(boundary_lateness.take())
+                  // What sealing waited for this thread at the gate, and the
+                  // longest this thread stayed inside it.
+                  << authority_gate_text(authority_gate.take())
                   << " tracked=" << tracked.size()
                   // Poses replaced in a session's mailbox before that
                   // session drained them. Nonzero means some node's plate
@@ -118,6 +125,7 @@ void DirectorShowLoop::print_status(DirectorTick &tick) {
 // A full backlog seals nothing, so nothing the operator does is applied. Say
 // so where the operator is looking - the console for a headless Director, the
 // status bar for an editor - and name what the oldest frame is waiting for.
+// Called by the sealing thread: the status bar's text goes through its notes.
 void DirectorShowLoop::report_backlog(ControlBacklogEvent event) {
     if (event == ControlBacklogEvent::None) {
         return;
@@ -125,7 +133,7 @@ void DirectorShowLoop::report_backlog(ControlBacklogEvent event) {
     if (event == ControlBacklogEvent::Recovered) {
         std::cerr << "Director resumed sealing control frames; operator "
                      "edits apply again\n";
-        project_message = "EDITS RESUMED";
+        sealer_notes.project_message = "EDITS RESUMED";
         return;
     }
     std::cerr << "Director stalled: " << tracked.size()
@@ -147,7 +155,7 @@ void DirectorShowLoop::report_backlog(ControlBacklogEvent event) {
         }
     }
     std::cerr << '\n' << std::flush;
-    project_message =
+    sealer_notes.project_message =
         waiting_on_nodes
             ? "EDITS PAUSED - a render node stopped acknowledging frames; "
               "see Output Monitor"
@@ -172,9 +180,9 @@ void DirectorShowLoop::report_lockstep_demotions() {
               << " frames behind. The other outputs continue; it rejoins "
                  "once it catches up. lockstep-demotions="
               << diagnostics.lockstep_demotions << '\n';
-    project_message = "NODE " + std::to_string(diagnostics.last_demoted_node) +
-                      " FELL BEHIND - outputs no longer wait for it until it "
-                      "catches up";
+    sealer_notes.project_message =
+        "NODE " + std::to_string(diagnostics.last_demoted_node) +
+        " FELL BEHIND - outputs no longer wait for it until it catches up";
 }
 
 void DirectorShowLoop::report_stopping() {
@@ -199,6 +207,10 @@ void DirectorShowLoop::report_stopping() {
               << barrier.released_through().through_frame.value();
     if (options.edit) {
         std::cout << " editor-frame-calls=" << editor_frame_calls;
+    }
+    // Only when it happened: a run that refused nothing reads as it did.
+    if (refused_operator_requests != 0U) {
+        std::cout << " refused-requests=" << refused_operator_requests;
     }
     std::cout << '\n' << std::flush;
 }

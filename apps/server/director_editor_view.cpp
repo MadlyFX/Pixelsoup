@@ -929,17 +929,26 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
                                     stage_view_proxies.waiting_total_frames,
                                     all_proxies.made_frames,
                                     all_proxies.total_frames});
-        auto editor_frame = editor->frame(
-            scene_frame, timeline, keyframes, elements, effects,
-            hardware_map, feed_map, switcher_view, asset_registry,
-            thumbnail_observations, compositor_graph, project_view,
-            output_monitor, hardware_runtime, director_sync.policy,
-            preferences_view, project_settings_view, library_proxy_runtime,
-            stage_lanes, clip_clipboard.span_duration(),
-            selection_set_summaries, key_scale_preview,
-            filmstrip_observations, live_data_view,
-            authored_tracking_sources, stage_markers, inputs.asset_viewer,
-            history_state);
+        // Drawing the panels and rendering Program and Stage is the slow part
+        // of an editor wake, and it borrows only this iteration's projection
+        // and Director-local views - nothing the sealing thread writes. So it
+        // runs outside the gate, and a slow frame here no longer holds back
+        // the control frames every node is waiting for.
+        const auto draw_editor = [&] {
+            const AuthorityGate::Away drawing{authority_gate};
+            return editor->frame(
+                scene_frame, timeline, keyframes, elements, effects,
+                hardware_map, feed_map, switcher_view, asset_registry,
+                thumbnail_observations, compositor_graph, project_view,
+                output_monitor, hardware_runtime, director_sync.policy,
+                preferences_view, project_settings_view,
+                library_proxy_runtime, stage_lanes,
+                clip_clipboard.span_duration(), selection_set_summaries,
+                key_scale_preview, filmstrip_observations, live_data_view,
+                authored_tracking_sources, stage_markers, inputs.asset_viewer,
+                history_state);
+        };
+        auto editor_frame = draw_editor();
         ++editor_frame_calls;
         // Shown again next frame only while the panel keeps asking.
         asset_viewer_request = editor_frame.asset_viewer;
@@ -986,11 +995,17 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
         if (const PhaseExit exit = request_library_thumbnails(editor_frame)) {
             return exit;
         }
-        if (const PhaseExit exit = apply_preferences_request(editor_frame)) {
-            return exit;
-        }
-        if (const PhaseExit exit = apply_proxy_cache_clear(editor_frame)) {
-            return exit;
+        {
+            // Settings files and the proxy cache on disk: neither refers to
+            // the authority.
+            const AuthorityGate::Away filing{authority_gate};
+            if (const PhaseExit exit =
+                    apply_preferences_request(editor_frame)) {
+                return exit;
+            }
+            if (const PhaseExit exit = apply_proxy_cache_clear(editor_frame)) {
+                return exit;
+            }
         }
         if (editor_frame.output_lifecycle.has_value() &&
             lifecycle_controller) {
@@ -1276,6 +1291,13 @@ void DirectorShowLoop::project_switcher_and_links(DirectorTick &tick,
         preview_link && preview_link->connected, blender_scene_states, blender_bound_names,
         publication_default_storage,recent_project_paths,
         changed_library_assets};
+    // Offered once the start-up project is in place, so the answer applies
+    // to the project the operator is looking at.
+    if (project_recovery.has_value() && !project_load_pending()) {
+        project_view.recovery_available = true;
+        project_view.recovery_project = project_recovery->project_path;
+        project_view.recovery_saved_at = project_recovery->saved_at;
+    }
 }
 
 PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
@@ -1283,7 +1305,7 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
     const auto &control_frame = tick.control_frame;
     auto &scene_frame = tick.scene_frame;
     auto &hardware_map = tick.hardware_map;
-    auto &asset_manifest = tick.asset_manifest;
+    const ProjectAssetManifest &asset_manifest = editor_asset_manifest;
     auto &timeline = inputs.timeline;
     auto &switcher_view = inputs.switcher_view;
     auto &output_nodes = inputs.output_nodes;
@@ -1369,7 +1391,9 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
     // render nodes is an external concern in this build, so a node that
     // cannot yet prove it holds every file is a warning on the Output
     // Monitor rather than a hold on the switcher.
-    bool assets_adopted = director_asset_availability.render_ready();
+    // Only an answer counts: while the check for this manifest is still
+    // out, what the Director holds is an assumption.
+    bool assets_adopted = asset_check.render_ready();
     if (assets_adopted && lifecycle_controller) {
         assets_adopted = lifecycle_controller->program_ready(
             asset_manifest, hardware_map, project_generation, barrier);
@@ -2039,7 +2063,7 @@ void DirectorShowLoop::project_asset_viewer(EditorViewInputs &inputs) {
 PhaseExit DirectorShowLoop::project_output_media(DirectorTick &tick) {
     const auto &now = tick.now;
     auto &hardware_map = tick.hardware_map;
-    auto &asset_manifest = tick.asset_manifest;
+    const ProjectAssetManifest &asset_manifest = editor_asset_manifest;
     assets::AssetRegistry &asset_registry = director_asset_registry;
     if (now >= next_output_media_projection) {
         try {
@@ -2111,9 +2135,11 @@ PhaseExit DirectorShowLoop::apply_editor_services(
     }
     if (editor_frame.save_workspace_layout.has_value() &&
         workspace_layout_file.has_value()) {
-        const auto saved_layout = persist::save_workspace_layout(
-            *workspace_layout_file,
-            *editor_frame.save_workspace_layout);
+        const auto saved_layout = [&] {
+            const AuthorityGate::Away filing{authority_gate};
+            return persist::save_workspace_layout(
+                *workspace_layout_file, *editor_frame.save_workspace_layout);
+        }();
         if (!saved_layout) {
             std::cerr
                 << "could not save workspace layout (code "

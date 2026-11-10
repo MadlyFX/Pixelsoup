@@ -71,6 +71,8 @@ struct EditorShell::Impl final {
   // runs here, off the frame thread, so the Director's frame loop that draws
   // this editor keeps sealing frames while the operator answers.
   AsyncDialog<EditorShell::Frame> dialog;
+  // Whether the recovery on offer has been put to the operator.
+  bool recovery_asked{};
 
   enum class PendingMediaAction : core::u8 { Add, Import, Revise };
 

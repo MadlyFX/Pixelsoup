@@ -624,12 +624,10 @@ void armed_state_round_trips_and_settling_with_cues_allocates_nothing() {
     SHOW_CHECK(decoded.has_value());
     SHOW_CHECK(!decoded->cues_armed);
 
-    // A transport written before cues existed reads as armed; a mistyped
-    // flag is a damaged node.
-    auto legacy = show::make_transport_node(anchor);
-    legacy.properties.erase(std::string{show::transport_property::cues_armed});
-    const auto upgraded = show::read_transport(root.set(legacy));
-    SHOW_CHECK(upgraded.has_value() && upgraded->cues_armed);
+    // The flag is required, and a mistyped one is a damaged node.
+    auto missing = show::make_transport_node(anchor);
+    missing.properties.erase(std::string{show::transport_property::cues_armed});
+    SHOW_CHECK(!show::read_transport(root.set(missing)));
     auto mistyped = show::make_transport_node(anchor);
     mistyped.properties.insert_or_assign(
         std::string{show::transport_property::cues_armed},

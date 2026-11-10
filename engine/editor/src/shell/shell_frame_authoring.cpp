@@ -845,6 +845,48 @@ void EditorShell::Frame::confirm_discard(std::string_view action,
   open_confirm_dialog("Unsaved Project", std::move(message), std::move(then));
 }
 
+void EditorShell::Frame::offer_recovery() {
+  if (!project.recovery_available) {
+    impl.recovery_asked = false;
+    return;
+  }
+  if (impl.recovery_asked || impl.dialog.pending()) {
+    return;
+  }
+  impl.recovery_asked = true;
+  std::string message{"Media Server stopped before the changes to "};
+  if (project.recovery_project.empty()) {
+    message.append("an untitled project");
+  } else {
+    message.append(project.recovery_project);
+  }
+  message.append(" were saved. A copy from ");
+  message.append(project.recovery_saved_at);
+  message.append(
+      " was kept.\n\nOpen the recovered changes? They stay unsaved until "
+      "you save the project. Choose No to carry on without them.");
+  // Both answers come back, so the Director knows a No from a dialog that
+  // never opened: a No stops the offer, an unopened dialog asks again.
+  open_file_dialog(
+      [message = std::move(message)]() -> std::optional<std::string> {
+        return std::string{tinyfd_messageBox("Recover Unsaved Changes",
+                                             message.c_str(), "yesno",
+                                             "question", 1) != 0
+                               ? "yes"
+                               : "no"};
+      },
+      [](Frame &frame, std::string answer) {
+        if (answer == "yes") {
+          frame.result.recover_project = true;
+        } else {
+          frame.result.dismiss_recovery = true;
+        }
+      });
+  if (!impl.dialog.pending()) {
+    impl.recovery_asked = false;
+  }
+}
+
 void EditorShell::Frame::save_project() {
   if (!project.path.empty()) {
     result.save_project = ProjectFileRequest{std::string{project.path}};

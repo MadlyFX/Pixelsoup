@@ -47,6 +47,9 @@ namespace mediaserver::app {
 
 void DirectorShowLoop::begin_frame(DirectorTick &tick) {
     auto &sealed_this_iteration = tick.sealed_this_iteration;
+    // What the sealing thread sealed since this thread last looked.
+    sealed_this_iteration = sealed - evaluated_sealed;
+    evaluated_sealed = sealed;
     auto &control_frame = tick.control_frame;
     auto &input = tick.input;
     auto &stage_show_frame = tick.stage_show_frame;
@@ -109,19 +112,24 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
     if (needs_scene) {
         const auto &document = scheduler.sealed_document();
         if (!scene_loaded || document.version().value() != scene_version) {
-            scene_model.reset(document);
+            // Only what the edit changed is parsed again; see
+            // SceneModel::update for why that is safe to rely on.
+            scene_model.update(document);
             scene_version = document.version().value();
             scene_loaded = true;
         }
         if (!compositor_loaded ||
             document.version().value() != compositor_version) {
-            compositor_model.reset(document);
+            // The scene model above is already at this document, so the
+            // graph's canvas and effect settings are read from it.
+            compositor_model.update(document, scene_model);
             compositor_version = document.version().value();
             compositor_loaded = true;
         }
         if (!assets_loaded || document.version().value() != asset_version) {
             asset_model.reset(document);
             asset_registry = asset_model.evaluate();
+            editor_asset_manifest_stale = true;
             director_playback_asset_registry =
                 options.edit ? editor_playback_registry(asset_registry)
                              : asset_registry;
@@ -152,23 +160,31 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             // The Director is one more machine that has to be able to
             // open these paths, and it answers the question the same way
             // a render node does.
-            if (!assets_loaded ||
-                manifest.digest != asset_manifest_digest) {
+            // It asks from the scanner's thread and never from this one,
+            // which seals every frame the cluster shows. Until the answer
+            // arrives what was known stands and anything new is taken to be
+            // there. A RESCAN still waiting for its answer keeps its depth,
+            // so a manifest that changes meanwhile cannot lose it.
+            const bool new_manifest =
+                asset_check.require(manifest, asset_registry);
+            // A project saved or loaded elsewhere resets assets_loaded to
+            // have the same paths looked at again; that is asked for too.
+            if (!new_manifest && !assets_loaded) {
+                static_cast<void>(asset_check.recheck());
+            }
+            if (new_manifest || !assets_loaded) {
                 asset_manifest_digest = manifest.digest;
-                director_asset_availability = scan_project_assets(manifest);
+                director_asset_availability = asset_check.availability();
             }
             asset_version = document.version().value();
             assets_loaded = true;
-        } else if (pending_asset_rescan) {
-            // The operator asked. This is the only path that reads a
-            // source's bytes, and the only one that can report a content
-            // mismatch: a show is rebuilt constantly and nothing on the
-            // frame path is allowed to wait on a disk read.
-            asset_model.reset(document);
-            asset_registry = asset_model.evaluate();
-            director_playback_asset_registry =
-                options.edit ? editor_playback_registry(asset_registry)
-                             : asset_registry;
+        }
+        if (asset_check_requested) {
+            // The operator asked. This is the only check that compares a
+            // source with the revision it recorded, and the only one that
+            // can report a mismatch. It is made on the scanner's thread like
+            // the routine one, and its verdict is shown when it arrives.
+            asset_check_requested = false;
             if (director_proxy_generator != nullptr) {
                 for (const assets::Asset &entry :
                      director_playback_asset_registry.assets) {
@@ -181,17 +197,26 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                     }
                 }
             }
-            director_asset_availability = check_project_assets(
-                collect_project_asset_manifest(document, asset_registry));
-            // Every Library file, used or not, that is no longer the
-            // revision it recorded; the Library offers to accept it.
-            changed_library_sources =
-                find_changed_library_sources(asset_registry);
-            project_message = director_asset_availability.ready()
-                                  ? "ASSETS VERIFIED"
-                                  : "ASSETS INCOMPLETE - SEE LIBRARY";
+            project_message =
+                asset_check.recheck(ProjectAssetScanDepth::Fingerprints,
+                                    asset_registry)
+                    ? "CHECKING ASSETS..."
+                    : "ASSET CHECK COULD NOT START";
         }
-        pending_asset_rescan = false;
+        // The scanner's answer, on whichever wake finds it. One for a
+        // question since replaced is dropped.
+        if (auto answer = asset_check.poll()) {
+            director_asset_availability = asset_check.availability();
+            if (answer->depth == ProjectAssetScanDepth::Fingerprints) {
+                // Every Library file, used or not, that is no longer the
+                // revision it recorded; the Library offers to accept it.
+                changed_library_sources =
+                    std::move(answer->changed_library_sources);
+                project_message = director_asset_availability.ready()
+                                      ? "ASSETS VERIFIED"
+                                      : "ASSETS INCOMPLETE - SEE LIBRARY";
+            }
+        }
         const scene::SceneTime time{input.show_frame.value(),
                                     input.rate.numerator,
                                     input.rate.denominator};
@@ -334,112 +359,15 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                 stage_scene_frame.asset_cohort_required;
         }
 
-        // Camera tracking, at the frame boundary and not in the UI loop.
-        //
-        // This is the Director's one sample per frame per camera: each
-        // authored feed's socket is reconfigured (idempotent while it is
-        // unchanged), its pose slot is read without ever waiting on the
-        // receive thread, and the result is stamped with the exact control
-        // frame it applies to plus the authored latency compensation.
-        //
-        // Sampling here rather than beside the editor matters twice over.
-        // A headless Director tracks, so the stage does not depend on an
-        // operator window being open. And the frame a pose is stamped for
-        // is the frame it was sampled on, which is what makes the authored
-        // compensation a fixed offset rather than an approximate one.
-        //
-        // Sampled and replicated *before* the poses are injected below,
-        // and it has to be that way round: injecting first would draw and
-        // digest last frame's stack while the nodes drew this frame's.
-        const auto tracking_sources = scene_model.tracking_sources();
-        tracker_listeners.configure(tracking_sources);
-        director_pose_predictors.set_cadence(input.rate.numerator, input.rate.denominator);
-        director_pose_predictors.retain(scene_frame.tracked_cameras);
-        std::array<std::optional<track::PoseSample>, scene::max_tracking_sources> source_samples{};
-        for (std::size_t index = 0; index < tracking_sources.size() && index < source_samples.size(); ++index)
-            source_samples[index] = tracker_listeners.sample(tracking_sources[index].node);
-        {
-            const core::u32 latency_frames =
-                scene::clamped(scene_frame.renderer_settings.icvfx)
-                    .latency_frames;
-            net::TrackedCameraFrame replicated{};
-            // The frame these poses are *for*, which is the sampled frame
-            // plus the authored compensation. Sending the raw frame here
-            // instead - which this did - meant every node applied the pose
-            // on arrival and the compensation described nothing: the wire
-            // field's own comment says "after latency compensation", and
-            // only the Director's local channel ever saw the compensated
-            // value. A node cannot recompute it, because the compensation
-            // is show state it is not required to have evaluated yet.
-            const core::u64 compensated =
-                input.control_frame.value()
-                <= std::numeric_limits<core::u64>::max() - latency_frames
-                ? input.control_frame.value() + latency_frames
-                : input.control_frame.value();
-            // Never backwards. Lowering the compensation mid-show would
-            // otherwise stamp the next pose for an earlier frame than the
-            // last one, which every node's channel refuses as stale - and
-            // a node that refuses every pose holds the one it has, so the
-            // plate freezes exactly when an operator is adjusting the
-            // thing meant to fix it. Clamping costs a few frames of extra
-            // latency while the raw frame catches up, and then it is
-            // exact again.
-            //
-            // Keep the last stamp during the clamp. Several editor loops
-            // can share a control frame; none may invent a new stamp.
-            // Pausing the show still advances control time and tracking.
-            replicated.control_frame =
-                std::max(compensated, last_replicated_pose_frame);
-            for (const scene::TrackedCameraView &view :
-                 scene_frame.tracked_cameras) {
-                auto* predictor = director_pose_predictors.find(view.camera);
-                const auto source = std::find_if(tracking_sources.begin(), tracking_sources.end(),
-                    [&](const auto& candidate) { return candidate.node == view.source; });
-                if (!predictor || source == tracking_sources.end()) continue;
-                predictor->configure(view.source, source->settings,
-                                     scene_frame.renderer_settings.icvfx);
-                const auto& sampled = source_samples[static_cast<std::size_t>(
-                    source - tracking_sources.begin())];
-                const auto stamped = predictor->sample(
-                    sampled, view.camera, input.control_frame.value(),
-                    replicated.control_frame,
-                    scene::tracked_field_of_view(source->settings,
-                        sampled ? sampled->pose.focal_length_mm : 0.0F),
-                    source->settings.sensor_aspect_ratio);
-                if (!stamped.has_value()) {
-                    continue;
-                }
-                auto &entry = director_pose_channels.open(view.camera);
-                entry.lens = server::tracked_camera_lens(stamped->sample);
-                // Prediction already used this final wire stamp as its
-                // horizon. The Director and nodes accept the same answer.
-                if (entry.channel.accept(server::stamped_pose(
-                        stamped->sample, replicated.control_frame))
-                    == track::PoseChannelOutcome::Accepted) {
-                    ++entry.accepted;
-                    ++director_poses_sent;
-                    replicated.samples.push_back(stamped->sample);
-                }
-            }
-            if (!replicated.samples.empty()) {
-                last_replicated_pose_frame = replicated.control_frame;
-                // Ascending camera order, which is what the wire contract
-                // asks for: a node then applies the stack without sorting
-                // it, and a duplicated camera is refused rather than
-                // silently overriding its own earlier pose.
-                std::sort(replicated.samples.begin(),
-                          replicated.samples.end(),
-                          [](const net::TrackedCameraSample &left,
-                             const net::TrackedCameraSample &right) {
-                              return left.camera_node < right.camera_node;
-                          });
-                // Fanned out to every live session here, so every node is
-                // given identical bits. This is the one place poses leave
-                // the Director, and they leave once.
-                static_cast<void>(
-                    barrier.publish_tracked_pose(replicated));
-            }
-        }
+        // Camera tracking. The feeds' sockets follow the authored sources
+        // here (idempotent while they are unchanged), and the sealing thread
+        // is told which cameras follow which feed. It samples them at every
+        // boundary - sample_tracked_cameras - so a pose is stamped for the
+        // frame it was sampled on however long this thread spends drawing.
+        tracking_plan.sources = scene_model.tracking_sources();
+        tracker_listeners.configure(tracking_plan.sources);
+        tracking_plan.cameras = scene_frame.tracked_cameras;
+        tracking_plan.icvfx = scene_frame.renderer_settings.icvfx;
 
         // What the cohort is drawing this frame.
         //
@@ -447,6 +375,8 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
         // digest is the cross-node agreement check, and a Director that
         // digested a scene without the poses it just replicated would
         // disagree with every node that received them.
+        // The sealing thread sampled and replicated this frame's poses when
+        // it sealed the frame, which is before this thread could evaluate it.
         // Resolve the accepted stream at this control frame. This retires
         // due samples and counts holds once, even when the editor redraws.
         inject_tracked_poses(scene_frame, director_pose_channels,
@@ -641,7 +571,6 @@ void DirectorShowLoop::evaluate_feed_and_sync(DirectorTick &tick) {
     auto &scene_frame = tick.scene_frame;
     auto &feed_map = tick.feed_map;
     auto &hardware_map = tick.hardware_map;
-    auto &asset_manifest = tick.asset_manifest;
     assets::AssetRegistry &asset_registry = director_asset_registry;
     if (options.edit) {
         const auto &document = scheduler.sealed_document();
@@ -660,8 +589,16 @@ void DirectorShowLoop::evaluate_feed_and_sync(DirectorTick &tick) {
             hardware_loaded = true;
         }
         hardware_map = hardware_model.evaluate();
-        asset_manifest =
-            collect_project_asset_manifest(document, asset_registry);
+        // The manifest is a walk of the whole document. It is the same until
+        // the document or the registry it is read against changes, so it is
+        // collected then and not on every wake.
+        if (editor_asset_manifest_stale ||
+            document.version().value() != editor_asset_manifest_version) {
+            editor_asset_manifest =
+                collect_project_asset_manifest(document, asset_registry);
+            editor_asset_manifest_version = document.version().value();
+            editor_asset_manifest_stale = false;
+        }
     }
 
     // The synchronization policy and the groups derived from the authored
@@ -672,7 +609,7 @@ void DirectorShowLoop::evaluate_feed_and_sync(DirectorTick &tick) {
         const doc::Root &sync_document = scheduler.sealed_document();
         if (!scene_loaded ||
             sync_document.version().value() != scene_version) {
-            scene_model.reset(sync_document);
+            scene_model.update(sync_document);
             scene_version = sync_document.version().value();
             scene_loaded = true;
         }
@@ -787,6 +724,10 @@ PhaseExit DirectorShowLoop::present_output(DirectorTick &tick) {
     auto &status = tick.status;
     auto &handled = tick.handled;
     if (!handled) {
+        // Rendering and presenting take as long as the GPU and the display
+        // make them, so the sealing thread is let through meanwhile. Only
+        // this iteration's own scenes and graphs are handed over.
+        const AuthorityGate::Away presenting{authority_gate};
         if (render_scene &&
             (switcher_progress.active || loop_blend.has_value())) {
             status = presenter->present(

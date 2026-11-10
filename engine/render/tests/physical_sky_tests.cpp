@@ -34,8 +34,11 @@ doc::Root document() {
     scene::RendererSettings renderer; renderer.backend=scene::RendererBackend::Advanced;
     scene::write_renderer_settings(settings,renderer);
     auto camera=node(12,schema::camera_type);
-    camera.properties={{"eye_x",0.0},{"eye_y",1.5},{"eye_z",4.0},
-        {"target_x",0.0},{"target_y",2.5},{"target_z",0.0},{"exposure_compensation_ev",-4.0},
+    scene::Camera aim{}; aim.eye=scene::Vec3{0.0F,1.5F,4.0F}; aim.target=scene::Vec3{0.0F,2.5F,0.0F};
+    const scene::Vec3 turns=scene::camera_rotation(aim);
+    camera.properties={{"position_x",0.0},{"position_y",1.5},{"position_z",4.0},
+        {"rotation_yaw",(static_cast<double>(turns.x)+0.0)},{"rotation_pitch",(static_cast<double>(turns.y)+0.0)},
+        {"rotation_roll",(static_cast<double>(turns.z)+0.0)},{"exposure_compensation_ev",-4.0},
         {"scene_id",std::int64_t{10}}};
     return doc::Root{}.set(stage).set(settings).set(camera);
 }

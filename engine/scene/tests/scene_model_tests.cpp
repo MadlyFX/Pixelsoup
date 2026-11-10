@@ -1,3 +1,4 @@
+#include <mediaserver/scene/instance_batch.hpp>
 #include <mediaserver/scene/manipulate.hpp>
 #include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/scene/scene_project.hpp>
@@ -563,30 +564,22 @@ void a_camera_is_placed_by_position_and_rotation() {
     MODEL_CHECK(close_to(forward(roll), scene::Vec3{0.0F, 0.0F, -1.0F}));
     MODEL_CHECK(close_to(roll.up, scene::Vec3{1.0F, 0.0F, 0.0F}));
 
-    // A camera authored with an eye and a target reads as the rotation that
-    // gives the same view, component by component: an edit that writes one
-    // rotation component keeps the others.
-    doc::Root aimed = root.set(node(2U, schema::camera_type,
-                                    {real(schema::eye_x, 0.0),
-                                     real(schema::eye_y, 2.5),
-                                     real(schema::eye_z, 7.0),
-                                     real(schema::target_x, 3.0),
-                                     real(schema::target_y, 1.0),
-                                     real(schema::target_z, 0.0)}));
-    model.reset(scoped(aimed));
-    const auto legacy = model.evaluate(at_start).camera;
-    MODEL_CHECK(legacy.eye == (scene::Vec3{0.0F, 2.5F, 7.0F}));
-    const scene::Vec3 legacy_forward = scene::normalize(
-        scene::Vec3{3.0F, -1.5F, -7.0F});
-    MODEL_CHECK(close_to(forward(legacy), legacy_forward));
-    const scene::Vec3 legacy_turns = model.cameras(placed.id).front().rotation;
-    doc::Node partly = *aimed.get(doc::NodeId{2U});
+    // A camera with no placement is where the default camera is, looking
+    // the way it looks; an edit that writes one rotation component keeps the
+    // others at the default's.
+    const scene::Camera defaults{};
+    doc::Root unplaced = root.set(node(2U, schema::camera_type,
+                                       {real(schema::fov_turns, 0.1)}));
+    model.reset(scoped(unplaced));
+    const auto resting = model.evaluate(at_start).camera;
+    MODEL_CHECK(resting.eye == defaults.eye);
+    MODEL_CHECK(close_to(forward(resting), forward(defaults)));
+    const scene::Vec3 resting_turns = model.cameras(placed.id).front().rotation;
+    doc::Node partly = *unplaced.get(doc::NodeId{2U});
     partly.properties.insert_or_assign(std::string{schema::rotation_roll},
                                        doc::PropertyValue{0.0});
-    model.reset(scoped(aimed.set(partly)));
-    MODEL_CHECK(close_to(forward(model.evaluate(at_start).camera),
-                         legacy_forward));
-    MODEL_CHECK(close_to(model.cameras(placed.id).front().rotation, legacy_turns));
+    model.reset(scoped(unplaced.set(partly)));
+    MODEL_CHECK(close_to(model.cameras(placed.id).front().rotation, resting_turns));
 
     // Rotation channels key it like any element.
     doc::Root keyed = root.set(channel_node(
@@ -704,6 +697,120 @@ void a_property_of_the_wrong_type_rejects_its_node() {
     sparse.reset(scoped(doc::Root{}.set(node(1U, schema::object_type, {}))));
     MODEL_CHECK(sparse.counters().rejected == 0U);
     MODEL_CHECK(sparse.evaluate(at_start).instances.size() == 1U);
+}
+
+// update() is what a frame loop calls on every committed edit, on every
+// machine, and its whole contract is that nobody can tell: the model it leaves
+// is the one a machine handed that document cold would build. So every kind
+// of edit is made to every node of the demo scene in turn - moved, given a
+// value of the wrong type, retyped, erased, put back - and after each one the
+// updated model is compared with a model rebuilt from that same document.
+void an_updated_model_is_the_model_a_rebuild_would_be() {
+    const auto same = [](const scene::SceneModel& updated,
+                         const scene::SceneModel& rebuilt) {
+        MODEL_CHECK(updated.size() == rebuilt.size());
+        MODEL_CHECK(updated.scenes() == rebuilt.scenes());
+        // Everything but the running count of refusals, which is a history
+        // of this model rather than a property of the document.
+        auto left = updated.counters();
+        auto right = rebuilt.counters();
+        left.rejected = 0U;
+        right.rejected = 0U;
+        MODEL_CHECK(left == right);
+        MODEL_CHECK(updated.channel_keyframes().size() ==
+                    rebuilt.channel_keyframes().size());
+        for (const scene::SceneInfo& info : rebuilt.scenes()) {
+            for (const auto frame :
+                 {core::u64{0U}, core::u64{97U}, core::u64{5'000U}}) {
+                const scene::SceneTime moment{frame, 60'000U, 1'001U};
+                MODEL_CHECK(scene::digest(updated.evaluate(info.id, moment)) ==
+                            scene::digest(rebuilt.evaluate(info.id, moment)));
+            }
+        }
+    };
+
+    const doc::Root full = scoped(root_of(demo_nodes()));
+    scene::SceneModel updated;
+    std::size_t steps = 0U;
+    const auto step = [&](const doc::Root& document) {
+        updated.update(document);
+        scene::SceneModel rebuilt;
+        rebuilt.reset(document);
+        same(updated, rebuilt);
+        ++steps;
+    };
+
+    // Built up one node at a time, as a show is authored.
+    doc::Root running;
+    for (const auto& one : demo_nodes()) {
+        running = running.set(one);
+        step(scoped(running));
+    }
+    step(full);
+
+    const doc::Delta all = doc::diff(doc::Root{}, full);
+    MODEL_CHECK(all.changes.size() >= 4U);
+    for (const doc::NodeChange& change : all.changes) {
+        doc::Node moved = *change.after;
+        moved.properties.insert_or_assign(std::string{schema::position_x},
+                                          doc::PropertyValue{7.625});
+        step(full.set(moved));
+
+        doc::Node malformed = *change.after;
+        malformed.properties.insert_or_assign(
+            std::string{schema::position_x},
+            doc::PropertyValue{std::string{"not a number"}});
+        step(full.set(malformed));
+
+        doc::Node retyped = *change.after;
+        retyped.type = "layer.text";
+        step(full.set(retyped));
+
+        const auto erased = full.erase(change.id);
+        MODEL_CHECK(erased.has_value());
+        step(*erased);
+
+        step(full);
+    }
+    MODEL_CHECK(steps == demo_nodes().size() + 1U + all.changes.size() * 5U);
+
+    // Link records are read against the whole scene: one instance batch
+    // makes every light count against the linked budget of four directional
+    // lights, and the document that adds a fifth is refused outright. A model
+    // that followed the edits must refuse it too, not go on drawing the four
+    // it had - and must come back when the fifth is taken away.
+    const std::array<scene::Mat4, 1U> one_instance{scene::identity()};
+    doc::Root budgeted = scoped(doc::Root{}
+        .set(node(1U, schema::stage_type, {}))
+        .set(node(2U, schema::model_type,
+                  {text(schema::source, "wall.glb"),
+                   text(scene::instance_batch_property,
+                        scene::encode_instance_batch(one_instance))})));
+    step(budgeted);
+    for (core::u64 light = 0U; light < 5U; ++light) {
+        budgeted = budgeted.set(node(
+            10U + light, schema::light_type,
+            {whole(schema::scene_id, 1),
+             text(schema::light_kind, schema::directional_kind)}));
+        step(budgeted);
+        scene::SceneModel cold;
+        cold.reset(budgeted);
+        // Four are accepted and the fifth is not, which is what makes this
+        // sequence a test of the boundary rather than of nothing.
+        MODEL_CHECK(cold.linked_error().has_value() == (light == 4U));
+        MODEL_CHECK(updated.linked_error().has_value() == (light == 4U));
+    }
+    const auto relieved = budgeted.erase(doc::NodeId{14U});
+    MODEL_CHECK(relieved.has_value());
+    step(*relieved);
+    MODEL_CHECK(!updated.linked_error().has_value());
+
+    // A document unrelated to the one held - another project opened - is
+    // reached the same way.
+    step(scoped(doc::Root{}.set(
+        node(77U, schema::object_type, {text(schema::primitive, "box")}))));
+    step(doc::Root{});
+    step(full);
 }
 
 void retyping_or_erasing_a_node_removes_what_it_drew() {
@@ -2738,21 +2845,21 @@ void cameras_are_singletons_within_each_scene() {
     root = root.set(node(20U, schema::stage_type, {}));
     // This legacy camera belongs to scene 10 and wins there by node id.
     root = root.set(node(
-        5U, schema::camera_type, {real(schema::eye_x, 5.0)}));
+        5U, schema::camera_type, {real(schema::position_x, 5.0)}));
     root = root.set(node(
         25U, schema::camera_type,
-        {whole(schema::scene_id, 10), real(schema::eye_x, 25.0)}));
+        {whole(schema::scene_id, 10), real(schema::position_x, 25.0)}));
     root = root.set(node(
         30U, schema::camera_type,
-        {whole(schema::scene_id, 10), real(schema::eye_x, 30.0)}));
+        {whole(schema::scene_id, 10), real(schema::position_x, 30.0)}));
     root = root.set(node(
         40U, schema::camera_type,
-        {whole(schema::scene_id, 20), real(schema::eye_x, 40.0)}));
+        {whole(schema::scene_id, 20), real(schema::position_x, 40.0)}));
     // Dangling explicit scope is retained but is not a duplicate in a valid
     // scene and is never selected for one.
     root = root.set(node(
         50U, schema::camera_type,
-        {whole(schema::scene_id, 999), real(schema::eye_x, 50.0)}));
+        {whole(schema::scene_id, 999), real(schema::position_x, 50.0)}));
 
     scene::SceneModel model;
     model.reset(scoped(root));
@@ -2793,7 +2900,7 @@ void multi_scene_reset_and_streamed_deltas_agree() {
         10U, schema::stage_type, {text(schema::scene_name, "A")}));
     nodes.push_back(node(
         30U, schema::camera_type,
-        {whole(schema::scene_id, 20), real(schema::eye_x, 3.0)}));
+        {whole(schema::scene_id, 20), real(schema::position_x, 3.0)}));
 
     const doc::Root final_root = root_of(nodes);
     scene::SceneModel checkpointed;
@@ -2829,7 +2936,7 @@ void clone_planning_is_deterministic_and_rewrites_scene_references() {
     root = root.set(node(20U, schema::stage_type, {text(schema::scene_name, "Other")}));
     root = root.set(node(
         30U, schema::camera_type,
-        {whole(schema::scene_id, 10), real(schema::eye_x, 3.0)}));
+        {whole(schema::scene_id, 10), real(schema::position_x, 3.0)}));
     root = root.set(node(
         40U, schema::light_type,
         {whole(schema::scene_id, 10),
@@ -4170,16 +4277,11 @@ void texture_budget_reads_back_within_the_envelope() {
     MODEL_CHECK(model.renderer_settings().texture_budget_mib == 1U);
 }
 
-// Colour joins the renderer profile digest once it is authored, and not
-// before.
-//
-// Before: a project that never opened the COLOUR tab must report exactly the
-// profile digest it always did, or a Director upgraded mid-show sees every
-// node's capability evidence go stale at once. After: every field that changes
-// what the output stage draws has to move the digest, because two nodes on
-// different transforms are grading the two halves of one wall differently and
-// evidence gathered under one is not evidence for the other.
-void colour_joins_the_profile_digest_only_when_authored() {
+// Every colour field that changes what the output stage draws moves the
+// renderer profile digest, because two nodes on different transforms are
+// grading the two halves of one wall differently and evidence gathered under
+// one is not evidence for the other.
+void colour_is_part_of_the_profile_digest() {
     scene::RendererSettings plain{};
     const auto baseline = scene::renderer_settings_digest(plain);
     scene::RendererSettings unchanged = plain;
@@ -4489,7 +4591,7 @@ void a_camera_bound_to_a_feed_is_the_tracked_camera() {
                                flag(schema::tracking_enabled, true),
                                whole(schema::tracking_port, 6301)}))
                     .set(node(4U, schema::camera_type,
-                              {real(schema::eye_x, 2.0),
+                              {real(schema::position_x, 2.0),
                                whole(schema::camera_tracking_source, 3)}))));
     MODEL_CHECK(model.counters().rejected == 0U);
 
@@ -5407,7 +5509,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 90U> cases{{
+constexpr std::array<Case, 91U> cases{{
+    {"an updated model is the model a rebuild would be",
+     &an_updated_model_is_the_model_a_rebuild_would_be},
     {"a solo draws only what it shows",
      &a_solo_draws_only_what_it_shows},
     {"a timing override evaluates a placement as proposed",
@@ -5498,8 +5602,8 @@ constexpr std::array<Case, 90U> cases{{
      &every_renderer_setting_survives_the_document},
     {"texture budget reads back within the envelope",
      &texture_budget_reads_back_within_the_envelope},
-    {"colour joins the profile digest only when authored",
-     &colour_joins_the_profile_digest_only_when_authored},
+    {"colour is part of the profile digest",
+     &colour_is_part_of_the_profile_digest},
     {"fog height round trips and is clamped",
      &fog_height_round_trips_and_is_clamped},
     {"background fog distance is authored bounded and digested",

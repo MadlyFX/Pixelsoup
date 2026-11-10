@@ -241,19 +241,8 @@ inline constexpr std::string_view marker_loop_fade = "marker_loop_fade_ms";
 //
 // A camera is placed like every other element: position_x..z and
 // rotation_yaw/pitch/roll (see scene.object), with the rotation turning a
-// camera that looks down -Z with +Y up. The eye/target/up names below are
-// read only, as the fallback for a camera authored before cameras had a
-// rotation, and are never written.
+// camera that looks down -Z with +Y up.
 
-inline constexpr std::string_view eye_x = "eye_x";
-inline constexpr std::string_view eye_y = "eye_y";
-inline constexpr std::string_view eye_z = "eye_z";
-inline constexpr std::string_view target_x = "target_x";
-inline constexpr std::string_view target_y = "target_y";
-inline constexpr std::string_view target_z = "target_z";
-inline constexpr std::string_view up_x = "up_x";
-inline constexpr std::string_view up_y = "up_y";
-inline constexpr std::string_view up_z = "up_z";
 // Vertical field of view, as a fraction of a full turn. 0.125 is 45 degrees.
 inline constexpr std::string_view fov_turns = "fov_turns";
 // The tracking source node feeding this camera, or absent for an ordinary
@@ -802,8 +791,7 @@ inline constexpr std::string_view tracking_sensor_aspect =
 inline constexpr std::string_view tracking_fallback_focal_mm =
     "tracking_fallback_focal_mm";
 // Where this tracking system's numbers sit relative to the stage. Absent means
-// the tracker already reports in stage space, which is the old behaviour and
-// the right default for a project authored before any of this existed.
+// the tracker already reports in stage space.
 inline constexpr std::string_view tracking_axes = "tracking_axes";
 inline constexpr std::string_view tracking_axes_stage = "stage";
 inline constexpr std::string_view tracking_axes_z_up = "z_up";
@@ -831,8 +819,9 @@ inline constexpr std::string_view asset_id = "asset_id";
 // once it reaches the end.
 inline constexpr std::string_view sequence_start = "sequence_start";
 inline constexpr std::string_view sequence_count = "sequence_count";
-// Optional exact native video rate. Both fields must be present and positive.
-// Their absence is the backward-compatible image-sequence/legacy 1:1 cadence.
+// Exact native video rate, recorded when a video is imported. Both fields
+// must be present and positive. An image sequence has none and shows one file
+// per show frame.
 inline constexpr std::string_view source_rate_numerator =
     "source_rate_numerator";
 inline constexpr std::string_view source_rate_denominator =

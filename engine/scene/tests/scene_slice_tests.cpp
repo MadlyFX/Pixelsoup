@@ -568,7 +568,7 @@ void an_orthographic_camera_is_checked_and_digested() {
     SLICE_CHECK(scene::valid(*lensed.lens_profile));
     SLICE_CHECK(!scene::valid(lensed));
 
-    // In the scene digest when set; absent, the digest is the historical one.
+    // The projection kind and its height are in the scene digest.
     scene::Scene base{};
     base.camera = perspective;
     scene::Scene ortho = base;

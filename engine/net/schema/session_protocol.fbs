@@ -331,7 +331,8 @@ enum RuntimeOutputDeploymentState:ubyte {
   DuplicateDisplayTarget = 6,
   MirroredDisplayTarget = 7,
   DuplicateRenderServer = 8,
-  PresenterUnavailable = 9
+  PresenterUnavailable = 9,
+  NoBoundDisplay = 10
 }
 
 table RuntimeMediaAssetStatus {

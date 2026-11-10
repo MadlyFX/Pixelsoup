@@ -137,9 +137,8 @@ namespace {
 // A property reader that fails loudly rather than quietly.
 //
 // A property that is absent takes its default: documents should not have to
-// spell out every field, and a scene authored before a property existed must
-// still load. A property that is *present with the wrong type* rejects the
-// whole node instead, because that is a typo or a schema mismatch, and
+// spell out every field. A property that is *present with the wrong type*
+// rejects the whole node instead, because that is a typo or a schema mismatch, and
 // silently substituting a default there would leave an operator staring at an
 // object in the wrong place with no indication why.
 class Reader final {
@@ -603,9 +602,8 @@ read_luma_key(Reader& reader) noexcept {
     } else {
         clip_time.frame = at_show_frame;
     }
-    // Native-rate videos resample exact replicated show time. Legacy clips and
-    // image sequences omit a rate and keep the original one-source-frame-per-
-    // show-frame mapping.
+    // Native-rate videos resample exact replicated show time. Image sequences
+    // have no rate and show one source frame per show frame.
     const auto elapsed = source_rate.has_value()
         ? media_frame_within(clip_time, *source_rate, sequence_count)
         : static_cast<core::u32>(clip_time.frame % sequence_count);
@@ -1050,23 +1048,15 @@ void SceneModel::put(const doc::Node& node) {
         CameraEntry camera{};
         camera.scene = read_required_scene_id(reader, node.properties);
         const Camera defaults{};
-        // Placed like every other element. A camera authored before cameras
-        // had a rotation was aimed at a target instead; its eye, target and
-        // up are the fallback for any component the new properties lack.
-        Camera aimed = defaults;
-        aimed.eye = reader.vector(
-            schema::eye_x, schema::eye_y, schema::eye_z, defaults.eye);
-        aimed.target = reader.vector(
-            schema::target_x, schema::target_y, schema::target_z, defaults.target);
-        aimed.up =
-            reader.vector(schema::up_x, schema::up_y, schema::up_z, defaults.up);
-        const Vec3 aimed_rotation = camera_rotation(aimed);
+        // Placed like every other element. Absent placement is the default
+        // camera's own.
+        const Vec3 default_rotation = camera_rotation(defaults);
         camera.position = reader.vector(schema::position_x, schema::position_y,
-                                        schema::position_z, aimed.eye);
+                                        schema::position_z, defaults.eye);
         camera.rotation =
-            Vec3{reader.number(schema::rotation_yaw, aimed_rotation.x),
-                 reader.number(schema::rotation_pitch, aimed_rotation.y),
-                 reader.number(schema::rotation_roll, aimed_rotation.z)};
+            Vec3{reader.number(schema::rotation_yaw, default_rotation.x),
+                 reader.number(schema::rotation_pitch, default_rotation.y),
+                 reader.number(schema::rotation_roll, default_rotation.z)};
         place_camera(camera.camera, camera.position, camera.rotation.x,
                      camera.rotation.y, camera.rotation.z);
         camera.camera.field_of_view =
@@ -1075,8 +1065,7 @@ void SceneModel::put(const doc::Node& node) {
             std::max(reader.integer(schema::camera_tracking_source, 0),
                      std::int64_t{0}))};
         {
-            // A camera authored before it could carry its own plate settings
-            // reads the built-in defaults, which is what it drew with.
+            // Absent plate settings are the built-in defaults.
             const IcvfxCameraSettings icvfx_defaults{};
             IcvfxCameraSettings icvfx{};
             icvfx.inner_frustum =
@@ -1584,8 +1573,7 @@ void SceneModel::put(const doc::Node& node) {
         source.settings.fallback_focal_length_mm = reader.number(
             schema::tracking_fallback_focal_mm,
             source.settings.fallback_focal_length_mm);
-        // Absent is stage-native, which is what every project authored before
-        // this existed meant, and leaves those projects rendering unchanged.
+        // Absent is stage-native: the tracker already reports stage space.
         // An unrecognised value is refused rather than guessed: tracking
         // through the wrong axis convention puts the plate somewhere confident
         // and wrong, which is worse than refusing to load.
@@ -2518,31 +2506,82 @@ void SceneModel::reset(const doc::Root& root) {
     history_nodes_.clear();
     document_version_ = doc::Version{};
     counters_ = SceneCounters{};
+    loaded_ = true;
     // Diffing against an empty root enumerates every node in ascending id
     // order, which is the enumeration the document does not otherwise offer -
-    // and the same code path a delta takes, so a checkpointed node and a
-    // streaming one cannot parse differently.
-    apply(diff(doc::Root{}, root));
+    // and adopt() is the same code a delta ends in, so a checkpointed node
+    // and a streaming one cannot parse differently. The document itself is
+    // taken as it stands: it is immutable and shared, so holding it copies
+    // nothing.
+    const bool links_dirty = touches_links(diff(doc::Root{}, root));
+    incoming_root_ = root;
+    adopt(root.version(), links_dirty);
 }
 
-void SceneModel::apply(const doc::Delta& delta) {
-    bool links_dirty = linked_error_.has_value();
+void SceneModel::update(const doc::Root& root) {
+    // A model holding a refused document is in the state a rebuild left it
+    // in, with nothing accepted to move forward from.
+    if (!loaded_ || linked_error_.has_value()) {
+        reset(root);
+        return;
+    }
+    const bool links_dirty = touches_links(diff(incoming_root_, root));
+    incoming_root_ = root;
+    adopt(root.version(), links_dirty);
+    if (linked_error_.has_value()) {
+        reset(root);
+    }
+}
+
+bool SceneModel::touches_links(const doc::Delta& delta) noexcept {
+    bool links_dirty = false;
     for (const auto& change : delta.changes) {
         if ((change.before && (is_link_record(*change.before) || change.before->properties.contains(instance_batch_property)))
             || (change.after && (is_link_record(*change.after) || change.after->properties.contains(instance_batch_property)))) {
             links_dirty = true; links_present_ = true;
         }
-        if (links_present_ && ((change.before && (change.before->type == schema::stage_type || change.before->type == schema::channel_type))
-            || (change.after && (change.after->type == schema::stage_type || change.after->type == schema::channel_type)))) links_dirty = true;
+        // Everything else the link records are read against. Stages and
+        // channels are named by them; models and lights are counted with them
+        // against the scene's budgets, and a document past a budget is
+        // refused whole. So with link records present, a change to any of
+        // these has them read again - or a machine that followed the edits
+        // would keep drawing a document one that loaded it cold refuses.
+        const auto read_with_links = [](const doc::NodeRef& node) noexcept {
+            return node && (node->type == schema::stage_type || node->type == schema::channel_type
+                || node->type == schema::model_type || node->type == schema::light_type);
+        };
+        if (links_present_ && (read_with_links(change.before) || read_with_links(change.after))) links_dirty = true;
+    }
+    return links_dirty;
+}
+
+void SceneModel::apply(const doc::Delta& delta) {
+    loaded_ = true;
+    const bool links_dirty = touches_links(delta) || linked_error_.has_value();
+    for (const auto& change : delta.changes) {
         if (change.after) incoming_root_ = incoming_root_.set(*change.after);
         else if (auto erased = incoming_root_.erase(change.id)) incoming_root_ = std::move(*erased);
     }
+    adopt(delta.to, links_dirty);
+}
+
+void SceneModel::adopt(doc::Version to, bool links_dirty) {
     // Whole-candidate admission keeps the last valid rendering AND digest on a
     // malformed hierarchy. Track incoming state separately so a later repair
     // can adopt all changes since the last accepted revision.
+    //
+    // A node that stops being a linked occurrence is parsed differently from
+    // then on, though the node itself did not change, so the occurrences
+    // being replaced are remembered and parsed again below with the new ones.
+    std::vector<doc::NodeId> former_occurrences;
     if (links_dirty) {
         auto parsed_links = read_linked_scene(incoming_root_);
         if (!parsed_links) { linked_error_ = parsed_links.error(); ++counters_.rejected; return; }
+        former_occurrences.reserve(linked_.occurrences.size());
+        for (const auto& [id, occurrence] : linked_.occurrences) {
+            static_cast<void>(occurrence);
+            former_occurrences.push_back(id);
+        }
         linked_ = std::move(parsed_links).value();
     }
     linked_error_.reset();
@@ -2597,7 +2636,11 @@ void SceneModel::apply(const doc::Delta& delta) {
         static_cast<void>(occurrence);
         if (const auto* node = accepted_root_.get(id)) put(*node);
     }
-    document_version_ = delta.to;
+    for (const doc::NodeId id : former_occurrences) {
+        if (linked_.occurrences.contains(id)) continue;
+        if (const auto* node = accepted_root_.get(id)) put(*node);
+    }
+    document_version_ = to;
     temporal_document_digest_ = 14695981039346656037ULL;
     for (const auto& [id, hash] : history_nodes_) {
         word(temporal_document_digest_, id.value());

@@ -170,6 +170,7 @@ struct OutputMonitorState final {
       DisplayMirrored,
       DuplicateRenderServer,
       PresenterRefused,
+      NoBoundDisplay,
     } output{OutputStatus::Unknown};
 
     // The last log fetched for this node, or null when none was asked for.

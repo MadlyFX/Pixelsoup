@@ -91,6 +91,8 @@ struct EditorShell::Frame final {
   // agrees to discard the unsaved changes for `action`.
   void confirm_discard(std::string_view action,
                        std::function<void(Frame &)> then);
+  // Asks once whether to open unsaved work recovered at start-up.
+  void offer_recovery();
   // Saves to the project's own file, or asks for one when it has none.
   void save_project();
   void adopt_dialog();

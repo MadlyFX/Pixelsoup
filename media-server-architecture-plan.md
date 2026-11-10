@@ -115,6 +115,60 @@ authenticated sync-device reports, and the present-barrier seam described
 under "Output synchronization" below. Neither answer is allowed to stand in
 for the other.
 
+### Director threads
+
+The Director runs two loops over the same show state
+(`apps/server/director_show_loop.hpp`).
+
+The sealing thread wakes at every show boundary, seals the control frames that
+are due, retires the ones the cohort has finished, and samples the camera
+trackers, so a pose is stamped for the frame it was sampled on. It does nothing
+else, because what it sends is what every node presents. The show thread does
+the rest: it evaluates the committed frame, draws the editor or presents the
+Director's own output, and authors what the operator asked for onto the next
+control frame. There is one authoring pass per control frame, made while that
+frame cannot be sealed, so an anchor still names the exact frame it takes
+effect on.
+
+They take turns through `AuthorityGate` (`apps/server/authority_gate.hpp`). A
+sealing thread that is waiting always goes first, and the show thread leaves
+the gate for everything that can block: drawing the panels and rendering
+Program and Stage, presenting, saving a project, and writing settings or the
+diagnostic log. What stays inside the gate is document work - evaluating the
+scene, projecting it for the panels, authoring edits. What the sealing thread
+has to tell the operator (edits paused, a node out of lockstep) is handed over
+inside the gate rather than written into text the editor may be drawing.
+
+Opening a project is on neither thread. `ProjectLoader`
+(`apps/server/project_loader.hpp`) reads and decodes the file on a thread of
+its own; the show thread stages the prepared document on the frame that finds
+the answer. The newest request wins: a load still waiting is replaced, and an
+answer to a request since replaced is dropped by its ticket. A video's native
+rate is recorded when it is imported, so loading never opens media files.
+
+How late sealing ran, measured on the development machine with an editor open
+on the built-in scene at 24 fps (Debug build; `wake-*` and `seal-wait-*` are
+the Director status line's own figures, described in `cluster-operations.md`):
+
+| | one loop (before) | two threads (now) |
+| --- | --- | --- |
+| idle editor: boundaries sealed more than 2 ms late | 15-19 of 24 | 0 of 24 |
+| idle editor: latest seal | 12-21 ms | 0.1 ms wake + at most 2.5 ms at the gate |
+| every editor frame held 60 ms: boundaries late | 14 of 14 | 0 of 24 |
+| every editor frame held 60 ms: latest seal | 71-75 ms | 0.4 ms wake + at most 1.9 ms at the gate |
+
+What is left is the show thread's document work, which the gate reports as
+`show-hold-max-us`: 2-4 ms in those Debug runs, and 23 ms once, on the frame a
+real project was staged and first evaluated. A Release build of the same runs
+waits at most 0.45 ms at the gate and holds it 0.2-0.8 ms, 4.3 ms on the frame
+that project was staged. Making that smaller means evaluating from a snapshot
+outside the gate; nothing in the split prevents it.
+
+One Director is not fully decoupled: one paced by house reference reads the
+reference from its presenter, which only the show thread may call, so it seals
+in step with that thread's wakes. An editor, and any Director on the system
+clock, does not.
+
 ### Transport and switching
 
 `engine/show` derives show time from a rational-rate `ShowClock` and stores
@@ -140,7 +194,68 @@ sealed frame, including empty frames, for the durable control-path/audit mode.
 Startup recovery gives valid recovered WAL state precedence, and damaged or
 unreadable recent projects fail closed to safe untitled startup.
 
+The default cadence journals no edits during a run, so unsaved work is
+protected separately: `ProjectAutosave` (`apps/server/project_autosave.hpp`)
+writes a recovery copy of a changed project from its own thread, one file per
+project path, and the editor offers it back at the next start unless the
+project was saved or its changes were deliberately discarded. Operator
+requests the scheduler refuses are reported and dropped by
+`DirectorShowLoop::refuse_operator_request`; only pacing, sealing and
+start-up faults end the Director.
+
 ## Authored models
+
+### Keeping the models up to date
+
+The Director and every node hold a scene model and a compositor model of the
+committed document, and bring them up to date whenever its version changes -
+which during a drag is every frame. They do it with `SceneModel::update` and
+`CompositorModel::update`, which parse only the nodes that differ from the
+document last held and leave the model exactly as `reset` on that document
+would. That equivalence is the contract: a node that joined from a checkpoint
+and one that followed every edit must hold the same scene. It is why a
+document whose Blender link records do not parse is rebuilt rather than held
+at its last good state, and why, once a document holds link records, a change
+to any stage, channel, model or light has them read again - the link reader
+counts those against the scene's budgets. The compositor model takes the
+canvas and effect settings from the loop's scene model instead of keeping a
+second one current. The four small models (assets, feed map, hardware map,
+sync policy) are still rebuilt; together they cost tens of microseconds.
+
+Measured with `mediaserver_director_tick_benchmark` (Release, development
+machine), the model work one machine does when one node moves:
+
+| project | nodes | rebuilt (before) | updated (now) |
+| --- | --- | --- | --- |
+| `scenetest` (media clips) | 95 | 0.82 ms | 0.05 ms |
+| `scenetest`, drawables x21 | 455 | 5.24 ms | 0.14 ms |
+| `blendtest2` (Blender-linked), a linked object moved | 106 | 1.96 ms | 0.47 ms |
+| `testscene` (Blender-linked), a linked object moved | 220 | 4.46 ms | 1.05 ms |
+
+A linked object still costs most of a millisecond because moving one has the
+link records read again and every linked occurrence parsed again; an unlinked
+object in the same `testscene` project costs 0.08 ms. The same tool's
+`--check` edits every node of a project in turn and compares updated models
+with rebuilt ones; run it on a real show after changing either model.
+
+The work repeated on every loop wake is small by comparison - 0.07 ms for the
+95-node project and 0.29 ms for the 455-node one - once the editor's asset
+manifest, a walk of the whole document, is collected on document change
+instead of on every wake.
+
+### Asset presence
+
+Whether a machine can open what the show needs is asked by
+`ProjectAssetScanner` (`apps/server/project_assets.hpp`) on its own thread.
+The Director and node loops each hold a `ProjectAssetReadiness`, which
+requests a scan when the asset manifest changes and when the operator presses
+RESCAN - which reaches nodes as the stage's `asset_refresh_generation` - and
+adopts the answer by ticket on the frame that finds it. The loops never ask
+the file system themselves, and nothing scans on a timer. Between request and answer a machine uses
+`provisional_asset_availability`: known files keep their state and new ones
+are assumed present, while readiness for the new manifest is withheld. The
+check is presence only; RESCAN on the Director also compares recorded size and
+modification time.
 
 ### Scene, animation, and assets
 

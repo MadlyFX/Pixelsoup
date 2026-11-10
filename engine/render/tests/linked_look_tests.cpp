@@ -29,8 +29,10 @@ int main(int argc,char** argv) {
         root=root.set({preview,std::string{ss::stage_type},{{"scene_name",std::string{"Look Preview"}},
             {"canvas_width",core::i64{640}},{"canvas_height",core::i64{360}},{"ambient",0.1}}});
         root=root.set({program,std::string{ss::stage_type},{{"scene_name",std::string{"Program"}}}});
+        scene::Camera aim{}; aim.eye=scene::Vec3{0.0F,1.2F,5.0F}; aim.target=scene::Vec3{0.0F,1.0F,-1.0F};
+        const scene::Vec3 turns=scene::camera_rotation(aim);
         root=root.set({doc::NodeId{10003},std::string{ss::camera_type},{{"scene_id",core::i64{10001}},
-            {"eye_y",1.2},{"eye_z",5.0},{"target_y",1.0},{"fov_turns",0.17}}});
+            {"position_x",0.0},{"position_y",1.2},{"position_z",5.0},{"rotation_yaw",(static_cast<double>(turns.x)+0.0)},{"rotation_pitch",(static_cast<double>(turns.y)+0.0)},{"rotation_roll",(static_cast<double>(turns.z)+0.0)},{"fov_turns",0.17}}});
         root=root.set({doc::NodeId{10004},std::string{ss::settings_type},{{"renderer_backend",std::string{"advanced"}}}});
         root=root.set(show::make_switcher_node({program,preview,program,program,{},0}));
         const auto planned=render::plan_linked_manifest(root,a.manifest,preview); check(bool(planned),planned ? "" : planned.error().message); root=planned.value();

@@ -151,6 +151,8 @@ std::string_view output_node_deployment_label(
     return "TWO RENDER SERVERS CLAIM THIS NODE INDEX";
   case OutputStatus::PresenterRefused:
     return "DISPLAY DOES NOT OFFER THE SAVED MODE";
+  case OutputStatus::NoBoundDisplay:
+    return "NO DISPLAY IS BOUND TO THIS RENDER SERVER";
   }
   return "OUTPUT NOT DEPLOYED";
 }

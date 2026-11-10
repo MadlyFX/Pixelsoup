@@ -168,6 +168,45 @@ void serve(net::TcpFramedStream& stream, std::size_t response_body_bytes) {
     return samples;
 }
 
+// Answers once for every `burst` records received.
+void serve_bursts(net::TcpFramedStream& stream, std::size_t burst) {
+    const auto response = packet(64U);
+    while (true) {
+        for (std::size_t index = 0U; index < burst; ++index) {
+            if (!stream.receive()) {
+                return;
+            }
+        }
+        if (!stream.send(response)) {
+            return;
+        }
+    }
+}
+
+// `burst` small records sent back to back, then one answer. This is the shape
+// of the frame stream - a sealed frame, its commit permit and a tracked pose
+// leave the Director one after another before any node replies - and the
+// shape Nagle's algorithm could hold back, the second small record waiting
+// for the first to be acknowledged. On loopback it costs nothing measurable
+// (acknowledgements there are immediate), so this row says only that the
+// stream itself adds no wait; whether Nagle matters between two machines
+// needs this run across a real link.
+[[nodiscard]] std::vector<double> measure_burst(
+    net::TcpFramedStream& client, std::size_t burst, std::size_t iterations) {
+    const auto record = packet(64U);
+    std::vector<double> samples;
+    samples.reserve(iterations);
+    for (std::size_t iteration = 0U; iteration < iterations; ++iteration) {
+        const auto started = std::chrono::steady_clock::now();
+        for (std::size_t index = 0U; index < burst; ++index) {
+            BENCH_CHECK(client.send(record).has_value());
+        }
+        BENCH_CHECK(client.receive().has_value());
+        samples.push_back(elapsed_milliseconds(started));
+    }
+    return samples;
+}
+
 void report_sleep_quantum() {
     constexpr std::size_t samples = 50U;
     const auto started = std::chrono::steady_clock::now();
@@ -210,6 +249,21 @@ int main() {
         client.close();
         responder.join();
         server.close();
+
+        for (const std::size_t burst : {std::size_t{2U}, std::size_t{3U}}) {
+            TcpPair burst_pair;
+            net::TcpFramedStream burst_client{burst_pair.take_client()};
+            net::TcpFramedStream burst_server{burst_pair.take_server()};
+            std::thread burst_responder{
+                [&burst_server, burst] { serve_bursts(burst_server, burst); }};
+            static_cast<void>(measure_burst(burst_client, burst, 20U));
+            report(
+                std::to_string(burst) + " records back to back (64 B)",
+                measure_burst(burst_client, burst, 200U));
+            burst_client.close();
+            burst_responder.join();
+            burst_server.close();
+        }
     } catch (const std::exception& error) {
         std::cerr << "benchmark failed: " << error.what() << '\n';
         return 1;

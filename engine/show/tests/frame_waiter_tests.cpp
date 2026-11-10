@@ -3,7 +3,9 @@
 #include "show_test_support.hpp"
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <thread>
 
 namespace {
 
@@ -122,6 +124,55 @@ void a_fixed_poll_sleeps_about_its_duration() {
     }
 }
 
+// A frame sealed on another thread ends the wait at once, long before the
+// deadline the waiter would otherwise sleep to.
+void a_notification_ends_a_wait_early() {
+    show::FrameWaiter waiter;
+    std::atomic<bool> waiting{false};
+    std::thread notifier{[&] {
+        while (!waiting.load()) {
+            std::this_thread::yield();
+        }
+        std::this_thread::sleep_for(3ms);
+        waiter.notify();
+    }};
+    const auto before = Clock::now();
+    waiting.store(true);
+    const bool notified = waiter.wait_until_notified(before + 30s, 30s);
+    const auto elapsed = Clock::now() - before;
+    notifier.join();
+    SHOW_CHECK(notified);
+    SHOW_CHECK(elapsed < 10s);
+}
+
+// Sent between a loop's last look at shared state and its wait, a
+// notification must not be lost; sent twice, it still ends only one wait.
+void a_notification_sent_before_the_wait_is_kept_once() {
+    show::FrameWaiter waiter;
+    waiter.notify();
+    waiter.notify();
+    const auto before = Clock::now();
+    SHOW_CHECK(waiter.wait_until_notified(before + 30s, 30s));
+    SHOW_CHECK(Clock::now() - before < 10s);
+    // Nothing is left over for the next wait.
+    SHOW_CHECK(!waiter.wait_until_notified(Clock::now() + 6ms, 10ms));
+}
+
+void a_wait_nobody_notifies_ends_at_its_deadline_or_ceiling() {
+    show::FrameWaiter waiter;
+    const auto before = Clock::now();
+    SHOW_CHECK(!waiter.wait_until_notified(before + 8ms, 10ms));
+    const auto at_deadline = Clock::now();
+    SHOW_CHECK(at_deadline - before < 500ms);
+    // A distant deadline: back after the ceiling, with nothing to report.
+    SHOW_CHECK(!waiter.wait_until_notified(at_deadline + 30s, 5ms));
+    SHOW_CHECK(Clock::now() - at_deadline < 500ms);
+    // A deadline already past still takes a waiting notification.
+    waiter.notify();
+    SHOW_CHECK(waiter.wait_until_notified(before, 10ms));
+    SHOW_CHECK(!waiter.wait_until_notified(before, 10ms));
+}
+
 constexpr std::array cases{
     show::test::Case{"lateness counts a boundary once when reached",
                      lateness_counts_a_boundary_once_when_reached},
@@ -138,6 +189,12 @@ constexpr std::array cases{
                      the_ceiling_bounds_a_distant_wait},
     show::test::Case{"a fixed poll sleeps about its duration",
                      a_fixed_poll_sleeps_about_its_duration},
+    show::test::Case{"a notification ends a wait early",
+                     a_notification_ends_a_wait_early},
+    show::test::Case{"a notification sent before the wait is kept once",
+                     a_notification_sent_before_the_wait_is_kept_once},
+    show::test::Case{"a wait nobody notifies ends at its deadline or ceiling",
+                     a_wait_nobody_notifies_ends_at_its_deadline_or_ceiling},
 };
 
 } // namespace

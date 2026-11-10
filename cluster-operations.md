@@ -102,7 +102,12 @@ Three things this deliberately does not do:
 
 - **Nagle is not the cause.** `TCP_NODELAY` was measured earlier and changed
   nothing, because the delay was a local wait rather than a queued segment. Do
-  not re-add it on latency grounds.
+  not re-add it on latency grounds. That measurement, and the benchmark's
+  back-to-back rows (two and three small records sent before any reply, the
+  frame stream's own shape), are loopback: acknowledgements there are
+  immediate, so they cannot show a Nagle delay and do not rule one out
+  between two machines. Settling it needs the same rows run across a real
+  link.
 - **The process timer resolution is left alone.** `timeBeginPeriod` would only
   shrink the quantum, applies to the whole process, and costs power everywhere
   else in it.
@@ -159,6 +164,19 @@ M boundaries over 2 ms). Loops wait on a high-resolution OS timer, so on an
 unloaded machine the maximum stays near a millisecond. A sustained higher
 figure means the loop's own work, or competing load on the machine, is
 delaying frame sealing or rendering.
+
+On the Director those figures are the sealing thread's alone. It seals control
+frames on a thread of its own and takes turns with the thread that evaluates,
+draws the editor and presents (see "Director threads" in
+`media-server-architecture-plan.md`), so the Director line carries four more
+figures for the same interval: `seal-wait-max-us` and `seal-wait-mean-us`, how
+long sealing waited for the other thread to finish its document work;
+`seal-waited=N/M`, how many of the sealing thread's M wakes waited more than
+2 ms; and `show-hold-max-us`, the longest the other thread kept the document to
+itself. A slow editor frame, a slow present or a project being opened does not
+appear in any of them. `show-hold-max-us` rising with a project's size is that
+project's evaluation and authoring cost, and is the figure to watch when a
+large show makes control frames late.
 
 The log contains no lifecycle secret or asset source path. Copy the WAL,
 release ledger, both diagnostic files, project, and relevant node logs before

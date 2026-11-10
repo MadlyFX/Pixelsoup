@@ -1021,6 +1021,8 @@ void CompositorModel::recount() noexcept {
 void CompositorModel::reset(const doc::Root& root) {
     nodes_.clear();
     edges_.clear();
+    // Comment boxes too: one deleted from the document must not outlive it.
+    comments_.clear();
     document_types_.clear();
     counters_ = CompositorCounters{};
     resource_scene_model_.reset(root);
@@ -1031,9 +1033,57 @@ void CompositorModel::reset(const doc::Root& root) {
         }
     }
     recount();
+    read_resources(resource_scene_model_);
+    document_ = root;
+}
+
+void CompositorModel::read_resources(const scene::SceneModel& scenes) {
+    resource_scenes_ = scenes.scenes();
+    resource_effect_settings_ = scenes.effect_settings();
+}
+
+void CompositorModel::update(const doc::Root& root) {
+    if (!document_.has_value()) {
+        reset(root);
+        return;
+    }
+    resource_scene_model_.update(root);
+    const doc::Delta delta = diff(*document_, root);
+    for (const doc::NodeChange& change : delta.changes) {
+        if (change.after) {
+            put(*change.after);
+        } else {
+            forget(change.id);
+        }
+    }
+    recount();
+    read_resources(resource_scene_model_);
+    document_ = root;
+}
+
+void CompositorModel::update(const doc::Root& root,
+                             const scene::SceneModel& scenes) {
+    if (!document_.has_value() || !scenes.holds(root)) {
+        update(root);
+        return;
+    }
+    // This object's own scene model is left where it was. It catches up, by
+    // however much has changed, the next time it is the one asked.
+    const doc::Delta delta = diff(*document_, root);
+    for (const doc::NodeChange& change : delta.changes) {
+        if (change.after) {
+            put(*change.after);
+        } else {
+            forget(change.id);
+        }
+    }
+    recount();
+    read_resources(scenes);
+    document_ = root;
 }
 
 void CompositorModel::apply(const doc::Delta& delta) {
+    document_.reset();
     resource_scene_model_.apply(delta);
     for (const doc::NodeChange& change : delta.changes) {
         switch (change.kind) {
@@ -1049,6 +1099,7 @@ void CompositorModel::apply(const doc::Delta& delta) {
         }
     }
     recount();
+    read_resources(resource_scene_model_);
 }
 
 CompositorGraph CompositorModel::evaluate() const {
@@ -1487,8 +1538,7 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene) co
     // A scoped projection has one exact authored stage. The whole-document
     // view is estimable only when that document also contains exactly one
     // stage; otherwise reporting a local output size would be misleading.
-    const std::vector<scene::SceneInfo> authored_scenes =
-        resource_scene_model_.scenes();
+    const std::vector<scene::SceneInfo>& authored_scenes = resource_scenes_;
     const scene::SceneInfo* authored_scene = nullptr;
     if (scoped_scene != nullptr) {
         const auto found = std::find_if(
@@ -1505,8 +1555,7 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene) co
     if (authored_scene != nullptr) {
         result.resources.available = true;
         result.resources.canvas = authored_scene->canvas;
-        result.resources.effect_settings =
-            resource_scene_model_.effect_settings();
+        result.resources.effect_settings = resource_effect_settings_;
         core::u64 spatial_render_passes{};
         core::u64 spatial_taps_per_pixel{};
         // Image passes a Merge adds: one per layer landed on its BASE, one

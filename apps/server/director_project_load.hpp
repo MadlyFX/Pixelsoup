@@ -1,7 +1,7 @@
 #pragma once
 
 // Project-file stages of the Director: recent paths, saved-baseline
-// comparison, media-rate enrichment and staging a loaded project.
+// comparison and staging a loaded project.
 
 #include <mediaserver/cmd/command.hpp>
 #include <mediaserver/cmd/director_scheduler.hpp>
@@ -42,14 +42,6 @@ project_file_error_label(persist::ProjectFileErrorCode code) noexcept;
 [[nodiscard]] std::string
 project_file_failure(std::string_view operation,
                      const persist::ProjectFileError &error);
-
-struct MediaRateEnrichment final {
-    doc::Root project;
-    std::size_t updated_nodes{};
-};
-
-[[nodiscard]] MediaRateEnrichment
-enrich_media_frame_rates(const doc::Root &project);
 
 [[nodiscard]] bool
 restore_project_transport(show::TransportAuthority &transport,

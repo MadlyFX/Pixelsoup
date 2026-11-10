@@ -555,12 +555,391 @@ void an_image_sequence_is_present_when_its_first_frame_is() {
     PROJECT_ASSET_CHECK(!app::scan_project_assets(manifest_of(doc::Root{}.set(clip))).ready());
 }
 
+// A show with one clip on disk and one model that is not, in `directory`.
+struct HalfPresentShow final {
+    doc::Root root;
+    std::string present_source;
+    std::string absent_source;
+};
+
+[[nodiscard]] HalfPresentShow half_present_show(const fs::path& directory) {
+    const fs::path present = directory / "clip.mp4";
+    write(present, "frames");
+    HalfPresentShow show;
+    show.present_source = assets::asset_source_from_path(present);
+    show.absent_source =
+        assets::asset_source_from_path(directory / "set.glb");
+    show.root = show.root.set(
+        asset_node(10U, assets::schema::media_type, show.present_source));
+    show.root = show.root.set(placement(
+        20U, scene::schema::media_type, show.present_source, 10U));
+    show.root = show.root.set(
+        placement(21U, scene::schema::model_type, show.absent_source));
+    return show;
+}
+
+[[nodiscard]] const app::ProjectAssetPresence* presence_of(
+    const app::ProjectAssetAvailability& availability,
+    std::string_view source) {
+    const auto found = std::find_if(
+        availability.assets.begin(), availability.assets.end(),
+        [source](const app::ProjectAssetPresence& presence) {
+            return presence.source == source;
+        });
+    return found == availability.assets.end() ? nullptr : &*found;
+}
+
+// The scanner answers the question the frame loop used to ask itself, from a
+// thread of its own: what it reports for a manifest is what is on the disk.
+void the_scanner_reports_what_is_on_disk_for_the_manifest_asked() {
+    TemporaryDirectory temporary;
+    const HalfPresentShow show = half_present_show(temporary.path());
+    const auto manifest = manifest_of(show.root);
+
+    app::ProjectAssetScanner scanner;
+    PROJECT_ASSET_CHECK(!scanner.take().has_value());
+    const core::u64 ticket = scanner.request(manifest);
+    PROJECT_ASSET_CHECK(ticket != 0U);
+    scanner.drain();
+
+    const auto scanned = scanner.take();
+    PROJECT_ASSET_CHECK(scanned.has_value());
+    PROJECT_ASSET_CHECK(scanned->ticket == ticket);
+    PROJECT_ASSET_CHECK(scanned->depth == app::ProjectAssetScanDepth::Presence);
+    PROJECT_ASSET_CHECK(scanned->availability.digest == manifest.digest);
+    PROJECT_ASSET_CHECK(scanned->availability.assets.size() == 2U);
+    PROJECT_ASSET_CHECK(scanned->availability.missing == 1U);
+    const auto* clip =
+        presence_of(scanned->availability, show.present_source);
+    const auto* set = presence_of(scanned->availability, show.absent_source);
+    PROJECT_ASSET_CHECK(clip != nullptr && clip->present);
+    PROJECT_ASSET_CHECK(set != nullptr && !set->present);
+    PROJECT_ASSET_CHECK(set->kind == assets::AssetKind::Model);
+    // A missing model keeps this machine from being ready to render.
+    PROJECT_ASSET_CHECK(!scanned->availability.render_ready());
+    // An answer is taken once.
+    PROJECT_ASSET_CHECK(!scanner.take().has_value());
+
+    // Asked again after the file arrives - which only ever happens because
+    // somebody asked - the answer is the new state of the disk.
+    write(temporary.path() / "set.glb", "mesh");
+    const core::u64 again = scanner.request(manifest);
+    PROJECT_ASSET_CHECK(again != 0U && again != ticket);
+    scanner.drain();
+    const auto rescanned = scanner.take();
+    PROJECT_ASSET_CHECK(rescanned.has_value());
+    PROJECT_ASSET_CHECK(rescanned->ticket == again);
+    PROJECT_ASSET_CHECK(rescanned->availability.missing == 0U);
+    PROJECT_ASSET_CHECK(rescanned->availability.render_ready());
+}
+
+// Several questions put before the worker gets to them leave one answer, and
+// it is the last question's: each earlier one was either answered and then
+// replaced, or never started and counted.
+void the_newest_question_is_the_one_answered() {
+    TemporaryDirectory temporary;
+    const HalfPresentShow show = half_present_show(temporary.path());
+    const auto with_model = manifest_of(show.root);
+    const auto erased = show.root.erase(doc::NodeId{21U});
+    PROJECT_ASSET_CHECK(erased.has_value());
+    const auto without_model = manifest_of(*erased);
+    PROJECT_ASSET_CHECK(with_model.digest != without_model.digest);
+
+    app::ProjectAssetScanner scanner;
+    constexpr std::size_t questions = 12U;
+    core::u64 last{};
+    for (std::size_t index = 0U; index < questions; ++index) {
+        last = scanner.request(index + 1U == questions ? without_model
+                                                       : with_model);
+        PROJECT_ASSET_CHECK(last != 0U);
+    }
+    scanner.drain();
+    PROJECT_ASSET_CHECK(scanner.superseded() < questions);
+
+    const auto answered = scanner.take();
+    PROJECT_ASSET_CHECK(answered.has_value());
+    PROJECT_ASSET_CHECK(answered->ticket == last);
+    PROJECT_ASSET_CHECK(answered->availability.digest == without_model.digest);
+    PROJECT_ASSET_CHECK(answered->availability.assets.size() == 1U);
+    PROJECT_ASSET_CHECK(answered->availability.missing == 0U);
+    PROJECT_ASSET_CHECK(!scanner.take().has_value());
+}
+
+// RESCAN's deeper look, on the same thread: the recorded revision is
+// compared, and the Library files that changed come back with the answer.
+void a_fingerprint_scan_compares_revisions_and_lists_changed_library_files() {
+    TemporaryDirectory temporary;
+    const fs::path changed_path = temporary.path() / "changed.mov";
+    const fs::path steady_path = temporary.path() / "steady.mov";
+    write(changed_path, "frames");
+    write(steady_path, "frames");
+    const std::string changed_source =
+        assets::asset_source_from_path(changed_path);
+    const std::string steady_source =
+        assets::asset_source_from_path(steady_path);
+    const auto recorded = assets::source_fingerprint(changed_source);
+    const auto steady = assets::source_fingerprint(steady_source);
+    PROJECT_ASSET_CHECK(recorded && steady);
+
+    doc::Root root;
+    root = root.set(fingerprinted_asset_node(
+        10U, assets::schema::media_type, changed_source, recorded.value()));
+    root = root.set(fingerprinted_asset_node(
+        11U, assets::schema::media_type, steady_source, steady.value()));
+    root = root.set(
+        placement(20U, scene::schema::media_type, changed_source, 10U));
+    assets::AssetModel model;
+    model.reset(root);
+    const assets::AssetRegistry library = model.evaluate();
+    const auto manifest = app::collect_project_asset_manifest(root, library);
+
+    const auto original_time = fs::last_write_time(changed_path);
+    write(changed_path, "new frames");
+    fs::last_write_time(changed_path,
+                        original_time + std::chrono::seconds{2});
+
+    app::ProjectAssetScanner scanner;
+    // The routine question sees a file that is there and nothing more.
+    const core::u64 routine = scanner.request(manifest);
+    scanner.drain();
+    const auto present = scanner.take();
+    PROJECT_ASSET_CHECK(present.has_value() && present->ticket == routine);
+    PROJECT_ASSET_CHECK(present->availability.ready());
+    PROJECT_ASSET_CHECK(present->changed_library_sources.empty());
+
+    const core::u64 asked = scanner.request(
+        manifest, app::ProjectAssetScanDepth::Fingerprints, library);
+    scanner.drain();
+    const auto checked = scanner.take();
+    PROJECT_ASSET_CHECK(checked.has_value() && checked->ticket == asked);
+    PROJECT_ASSET_CHECK(checked->depth ==
+                        app::ProjectAssetScanDepth::Fingerprints);
+    PROJECT_ASSET_CHECK(!checked->availability.ready());
+    PROJECT_ASSET_CHECK(checked->availability.mismatched == 1U);
+    PROJECT_ASSET_CHECK(checked->changed_library_sources.size() == 1U);
+    PROJECT_ASSET_CHECK(checked->changed_library_sources[0U].asset ==
+                        doc::NodeId{10U});
+    PROJECT_ASSET_CHECK(
+        checked->changed_library_sources[0U].observed.byte_length == 10U);
+}
+
+// Between asking and being answered, a machine goes on what it already
+// knew: a missing file stays missing, and a file it has not been asked
+// about before is taken to be there.
+void an_unanswered_manifest_keeps_what_was_known_and_assumes_the_rest() {
+    TemporaryDirectory temporary;
+    const HalfPresentShow show = half_present_show(temporary.path());
+    const auto first = manifest_of(show.root);
+    const auto known = app::scan_project_assets(first);
+    PROJECT_ASSET_CHECK(known.missing == 1U);
+
+    const std::string new_source = assets::asset_source_from_path(
+        temporary.path() / "never-checked.mov");
+    const doc::Root grown = show.root.set(
+        placement(22U, scene::schema::media_type, new_source));
+    const auto second = manifest_of(grown);
+    PROJECT_ASSET_CHECK(second.digest != first.digest);
+
+    const auto provisional =
+        app::provisional_asset_availability(second, known);
+    PROJECT_ASSET_CHECK(provisional.digest == second.digest);
+    PROJECT_ASSET_CHECK(provisional.assets.size() == 3U);
+    PROJECT_ASSET_CHECK(provisional.missing == 1U);
+    const auto* clip = presence_of(provisional, show.present_source);
+    const auto* set = presence_of(provisional, show.absent_source);
+    const auto* unknown = presence_of(provisional, new_source);
+    PROJECT_ASSET_CHECK(clip != nullptr && clip->present);
+    PROJECT_ASSET_CHECK(set != nullptr && !set->present);
+    PROJECT_ASSET_CHECK(set->state ==
+                        app::ProjectAssetPresence::State::Missing);
+    // Not on disk at all, and assumed present until somebody looks.
+    PROJECT_ASSET_CHECK(unknown != nullptr && unknown->present);
+    PROJECT_ASSET_CHECK(!fs::exists(temporary.path() / "never-checked.mov"));
+
+    // The scan itself is not fooled.
+    PROJECT_ASSET_CHECK(app::scan_project_assets(second).missing == 2U);
+    // With nothing known, everything is assumed.
+    const auto cold = app::provisional_asset_availability(second, {});
+    PROJECT_ASSET_CHECK(cold.missing == 0U && cold.assets.size() == 3U);
+}
+
+// What a frame loop sees. A machine does not call itself ready for a
+// manifest it has not looked at, however complete its assumption is, and it
+// finds a file that arrived later only when somebody asks it to look again.
+void readiness_is_found_not_assumed_and_changes_only_when_asked() {
+    TemporaryDirectory temporary;
+    const HalfPresentShow show = half_present_show(temporary.path());
+    const auto manifest = manifest_of(show.root);
+
+    app::ProjectAssetReadiness readiness;
+    PROJECT_ASSET_CHECK(!readiness.answered());
+    PROJECT_ASSET_CHECK(!readiness.poll().has_value());
+    // Nothing is held yet, so there is nothing to look at again.
+    PROJECT_ASSET_CHECK(!readiness.recheck());
+
+    PROJECT_ASSET_CHECK(readiness.require(manifest));
+    PROJECT_ASSET_CHECK(readiness.digest() == manifest.digest);
+    PROJECT_ASSET_CHECK(readiness.checking());
+    // Assumed complete, and exactly for that reason not reported ready.
+    PROJECT_ASSET_CHECK(readiness.availability().render_ready());
+    PROJECT_ASSET_CHECK(!readiness.answered());
+    PROJECT_ASSET_CHECK(!readiness.render_ready());
+    // The same manifest again is not a new question.
+    PROJECT_ASSET_CHECK(!readiness.require(manifest));
+
+    readiness.drain();
+    const auto first = readiness.poll();
+    PROJECT_ASSET_CHECK(first.has_value());
+    PROJECT_ASSET_CHECK(first->first_for_manifest);
+    PROJECT_ASSET_CHECK(first->depth == app::ProjectAssetScanDepth::Presence);
+    PROJECT_ASSET_CHECK(readiness.answered());
+    PROJECT_ASSET_CHECK(!readiness.checking());
+    PROJECT_ASSET_CHECK(readiness.availability().missing == 1U);
+    PROJECT_ASSET_CHECK(!readiness.render_ready());
+    PROJECT_ASSET_CHECK(!readiness.poll().has_value());
+
+    // The model is copied over. Nobody has asked, so nothing has looked.
+    write(temporary.path() / "set.glb", "mesh");
+    readiness.drain();
+    PROJECT_ASSET_CHECK(!readiness.poll().has_value());
+    PROJECT_ASSET_CHECK(readiness.availability().missing == 1U);
+    PROJECT_ASSET_CHECK(!readiness.render_ready());
+
+    // RESCAN. What was known stands until the answer arrives.
+    PROJECT_ASSET_CHECK(readiness.recheck());
+    PROJECT_ASSET_CHECK(readiness.answered());
+    PROJECT_ASSET_CHECK(readiness.availability().missing == 1U);
+    readiness.drain();
+    const auto again = readiness.poll();
+    PROJECT_ASSET_CHECK(again.has_value());
+    PROJECT_ASSET_CHECK(!again->first_for_manifest);
+    PROJECT_ASSET_CHECK(readiness.availability().missing == 0U);
+    PROJECT_ASSET_CHECK(readiness.render_ready());
+
+    // And the other way: a file that went away is reported when asked.
+    fs::remove(temporary.path() / "set.glb");
+    PROJECT_ASSET_CHECK(readiness.render_ready());
+    PROJECT_ASSET_CHECK(readiness.recheck());
+    readiness.drain();
+    PROJECT_ASSET_CHECK(readiness.poll().has_value());
+    PROJECT_ASSET_CHECK(!readiness.render_ready());
+}
+
+// A manifest that changes while its predecessor is still being looked at:
+// the earlier answer is for a question nobody is asking any more.
+void an_answer_to_a_replaced_question_is_never_adopted() {
+    TemporaryDirectory temporary;
+    const HalfPresentShow show = half_present_show(temporary.path());
+    const auto with_model = manifest_of(show.root);
+    const auto erased = show.root.erase(doc::NodeId{21U});
+    PROJECT_ASSET_CHECK(erased.has_value());
+    const auto without_model = manifest_of(*erased);
+
+    for (int round = 0; round < 20; ++round) {
+        app::ProjectAssetReadiness readiness;
+        PROJECT_ASSET_CHECK(readiness.require(with_model));
+        PROJECT_ASSET_CHECK(readiness.require(without_model));
+        readiness.drain();
+        const auto answer = readiness.poll();
+        PROJECT_ASSET_CHECK(answer.has_value());
+        PROJECT_ASSET_CHECK(answer->first_for_manifest);
+        PROJECT_ASSET_CHECK(readiness.digest() == without_model.digest);
+        PROJECT_ASSET_CHECK(readiness.availability().digest ==
+                            without_model.digest);
+        PROJECT_ASSET_CHECK(readiness.availability().assets.size() == 1U);
+        // Without the model the show is complete; with it, it was not.
+        PROJECT_ASSET_CHECK(readiness.render_ready());
+        PROJECT_ASSET_CHECK(!readiness.poll().has_value());
+    }
+}
+
+// The operator's deeper check survives a manifest change made while it is
+// out: the answer that arrives is still the one RESCAN asked for.
+void a_rescan_keeps_its_depth_when_the_manifest_changes_under_it() {
+    TemporaryDirectory temporary;
+    const fs::path clip_path = temporary.path() / "plate.mov";
+    write(clip_path, "frames");
+    const std::string source = assets::asset_source_from_path(clip_path);
+    const auto recorded = assets::source_fingerprint(source);
+    PROJECT_ASSET_CHECK(recorded);
+    doc::Root root;
+    root = root.set(fingerprinted_asset_node(
+        10U, assets::schema::media_type, source, recorded.value()));
+    root = root.set(placement(20U, scene::schema::media_type, source, 10U));
+    const auto library_of = [](const doc::Root& document) {
+        assets::AssetModel model;
+        model.reset(document);
+        return model.evaluate();
+    };
+    const auto before = app::collect_project_asset_manifest(
+        root, library_of(root));
+    const std::string second_source = assets::asset_source_from_path(
+        temporary.path() / "absent.glb");
+    const doc::Root grown =
+        root.set(placement(21U, scene::schema::model_type, second_source));
+    const auto after = app::collect_project_asset_manifest(
+        grown, library_of(grown));
+    PROJECT_ASSET_CHECK(before.digest != after.digest);
+
+    // The plate is replaced on disk after it was recorded.
+    const auto original_time = fs::last_write_time(clip_path);
+    write(clip_path, "longer frames");
+    fs::last_write_time(clip_path, original_time + std::chrono::seconds{2});
+
+    app::ProjectAssetReadiness readiness;
+    PROJECT_ASSET_CHECK(readiness.require(before, library_of(root)));
+    readiness.drain();
+    const auto routine = readiness.poll();
+    PROJECT_ASSET_CHECK(routine.has_value());
+    // Presence alone cannot see a replaced file.
+    PROJECT_ASSET_CHECK(readiness.availability().ready());
+
+    PROJECT_ASSET_CHECK(readiness.recheck(
+        app::ProjectAssetScanDepth::Fingerprints, library_of(root)));
+    PROJECT_ASSET_CHECK(readiness.require(after, library_of(grown)));
+    readiness.drain();
+    const auto deep = readiness.poll();
+    PROJECT_ASSET_CHECK(deep.has_value());
+    PROJECT_ASSET_CHECK(deep->depth ==
+                        app::ProjectAssetScanDepth::Fingerprints);
+    PROJECT_ASSET_CHECK(deep->first_for_manifest);
+    PROJECT_ASSET_CHECK(readiness.availability().digest == after.digest);
+    PROJECT_ASSET_CHECK(readiness.availability().mismatched == 1U);
+    PROJECT_ASSET_CHECK(readiness.availability().missing == 1U);
+    PROJECT_ASSET_CHECK(deep->changed_library_sources.size() == 1U);
+    PROJECT_ASSET_CHECK(deep->changed_library_sources[0U].asset ==
+                        doc::NodeId{10U});
+
+    // Once answered, the routine depth is the routine again.
+    const auto erased = grown.erase(doc::NodeId{21U});
+    PROJECT_ASSET_CHECK(erased.has_value());
+    PROJECT_ASSET_CHECK(readiness.require(before, library_of(*erased)));
+    readiness.drain();
+    const auto back = readiness.poll();
+    PROJECT_ASSET_CHECK(back.has_value());
+    PROJECT_ASSET_CHECK(back->depth == app::ProjectAssetScanDepth::Presence);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
 constexpr Case cases[]{
+    {"the scanner reports what is on disk for the manifest asked",
+     &the_scanner_reports_what_is_on_disk_for_the_manifest_asked},
+    {"the newest question is the one answered",
+     &the_newest_question_is_the_one_answered},
+    {"a fingerprint scan compares revisions and lists changed Library files",
+     &a_fingerprint_scan_compares_revisions_and_lists_changed_library_files},
+    {"an unanswered manifest keeps what was known and assumes the rest",
+     &an_unanswered_manifest_keeps_what_was_known_and_assumes_the_rest},
+    {"readiness is found, not assumed, and changes only when asked",
+     &readiness_is_found_not_assumed_and_changes_only_when_asked},
+    {"an answer to a replaced question is never adopted",
+     &an_answer_to_a_replaced_question_is_never_adopted},
+    {"a RESCAN keeps its depth when the manifest changes under it",
+     &a_rescan_keeps_its_depth_when_the_manifest_changes_under_it},
     {"RESCAN finds changed Library sources until they are accepted",
      &rescan_finds_changed_library_sources_until_they_are_accepted},
     {"an image sequence is present when its first frame is",

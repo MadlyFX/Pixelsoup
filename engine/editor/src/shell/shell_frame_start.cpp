@@ -42,6 +42,7 @@ bool EditorShell::Frame::start() {
   if (result.status == EditorStatus::Closed) {
     return false;
   }
+  offer_recovery();
   if (impl.window.pixel_width() != 0U && impl.window.pixel_height() != 0U) {
     impl.workspace_window_width = impl.window.pixel_width();
     impl.workspace_window_height = impl.window.pixel_height();

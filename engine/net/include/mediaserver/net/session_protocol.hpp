@@ -589,6 +589,8 @@ enum class RuntimeOutputDeploymentState : core::u8 {
     MirroredDisplayTarget = 7U,
     DuplicateRenderServer = 8U,
     PresenterUnavailable = 9U,
+    // The node's Render Server card binds no display target.
+    NoBoundDisplay = 10U,
 };
 
 struct HeartbeatAck final {

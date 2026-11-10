@@ -244,9 +244,7 @@ void the_digests_carry_every_field_that_changes_the_picture() {
     };
     EFFECT_CHECK(assets_of(sparks(1U)) != assets_of(sparks(1U, {text(schema::source, "effects/smoke.ajfx")})));
 
-    // The same evaluated scene with and without its effect differs. (That a
-    // scene without particles keeps the digest it had before they existed is
-    // pinned by the golden digests in scene_model_tests.)
+    // The same evaluated scene with and without its effect differs.
     const doc::Node object = node(4U, schema::object_type, {text(schema::primitive, "box")});
     const scene::Scene with = evaluate(staged().set(object).set(sparks(1U)));
     scene::Scene without = with;

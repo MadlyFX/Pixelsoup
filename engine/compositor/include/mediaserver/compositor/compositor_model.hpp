@@ -6,6 +6,7 @@
 #include <mediaserver/scene/scene_model.hpp>
 
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -30,6 +31,16 @@ class CompositorModel final {
 
     void reset(const doc::Root& root);
     void apply(const doc::Delta& delta);
+    // Brings the model to `root` and leaves it exactly as reset(root) would,
+    // parsing only the nodes that differ from the document it last held. A
+    // frame loop calls this when the committed document changes.
+    void update(const doc::Root& root);
+    // The same, for a caller that already keeps a scene model at `root`: the
+    // canvas and effect settings the resource estimates read are taken from
+    // it, where update(root) would work them out again in a scene model of
+    // this object's own. The result is identical either way; a `scenes` that
+    // does not hold exactly `root` is ignored.
+    void update(const doc::Root& root, const scene::SceneModel& scenes);
 
     // The whole authored graph, every scene at once. Useful for tooling and
     // for a document with a single scene; a renderer wants the scoped form.
@@ -57,11 +68,19 @@ class CompositorModel final {
     // project-effect settings to diagnostic resource estimates. Keeping the
     // same projection avoids a second parser or subtly different clamps.
     scene::SceneModel resource_scene_model_;
+    // What evaluation reads of that projection, taken once per document.
+    std::vector<scene::SceneInfo> resource_scenes_;
+    scene::EffectSettings resource_effect_settings_{};
     CompositorCounters counters_{};
+    // The document reset() or update() last brought the model to, kept so the
+    // next update() can find what changed. Empty after apply(), which is
+    // given a delta and no document.
+    std::optional<doc::Root> document_;
 
     void put(const doc::Node& node);
     void forget(doc::NodeId id) noexcept;
     void recount() noexcept;
+    void read_resources(const scene::SceneModel& scenes);
     [[nodiscard]] CompositorGraph build(const doc::NodeId* scene) const;
 };
 

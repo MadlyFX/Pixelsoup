@@ -156,7 +156,6 @@ int run_node_playback(net::NodeSessionService &service,
         std::move(presenter)});
     OutputDeployment active_deployment{};
     active_deployment.node_index = options.node_index;
-    active_deployment.legacy_single_output = true;
     active_deployment.outputs.push_back(output_presenters.front().output);
     bool node_deployment_runtime_ready = true;
     // Reported separately from readiness so the Director can say which
@@ -267,7 +266,16 @@ int run_node_playback(net::NodeSessionService &service,
     core::u64 node_asset_registry_digest = 0U;
     core::u64 node_asset_manifest_digest = 0U;
     bool node_assets_loaded = false;
-    ProjectAssetAvailability node_asset_availability;
+    // Whether this machine can open what the show needs is asked on a thread
+    // of its own: the present loop below hands the manifest over and adopts
+    // the answer on the frame that finds it, and never waits on a disk or a
+    // file server. It is asked when the manifest changes and when the
+    // operator presses RESCAN, and at no other time.
+    ProjectAssetReadiness node_asset_check;
+    const ProjectAssetAvailability &node_asset_availability =
+        node_asset_check.availability();
+    // The RESCAN generation last seen in the committed document.
+    std::optional<core::u64> node_asset_refresh_generation;
 
     // Output-window placement is authored in the replicated Hardware Mapping
     // document. It is evaluated on version changes and only rebuilds the
@@ -881,10 +889,9 @@ int run_node_playback(net::NodeSessionService &service,
                         // the next tick rather than assuming the replacement
                         // inherited the old window's membership.
                         node_sync_request_pending = true;
-                        // Explicit feed references are verified against the
-                        // evaluated Feed Map later in this same render tick.
-                        node_feed_bindings_runtime_ready =
-                            active_deployment.legacy_single_output;
+                        // Feed references are verified against the evaluated
+                        // Feed Map later in this same render tick.
+                        node_feed_bindings_runtime_ready = false;
                     }
                     publish_runtime_adoption();
                 }
@@ -1021,7 +1028,6 @@ int run_node_playback(net::NodeSessionService &service,
                 !node_assets_loaded ||
                 presented.version.value() != node_asset_version;
             bool digest_changed = false;
-            bool rechecked = false;
             if (document_changed) {
                 node_asset_model.reset(presented.root);
                 node_asset_registry = node_asset_model.evaluate();
@@ -1054,33 +1060,45 @@ int run_node_playback(net::NodeSessionService &service,
                                  manifest.digest != node_asset_manifest_digest;
                 if (digest_changed) {
                     node_asset_manifest_digest = manifest.digest;
-                    node_asset_availability = scan_project_assets(manifest);
+                    // Asked, not answered. Until it is, what was already
+                    // known stands and anything new is taken to be there;
+                    // readiness for this manifest is not claimed.
+                    static_cast<void>(node_asset_check.require(manifest));
+                    node_asset_runtime_ready = false;
+                    if (!node_asset_check.checking()) {
+                        std::cerr << "node " << options.node_index
+                                  << " could not queue its asset check\n";
+                    }
                     node_media_status_count = 0U;
                     if (options.output) {
                         node_decode_support.replace(manifest.digest,
                                                     node_asset_registry);
                     }
                     next_node_media_status_refresh = Clock::time_point::min();
-                    rechecked = true;
                 }
                 node_asset_version = presented.version.value();
                 node_assets_loaded = true;
             }
-            if (rechecked) {
-                const bool ready = node_asset_availability.render_ready();
+            // The scanner's answer, on whichever frame it is found. One for a
+            // question since replaced - an older manifest, or the check a
+            // RESCAN superseded - carries another ticket and is dropped.
+            if (const auto answer = node_asset_check.poll()) {
+                const bool first_answer = answer->first_for_manifest;
+                const bool ready = node_asset_check.render_ready();
                 const bool readiness_changed =
                     ready != node_asset_runtime_ready;
                 node_asset_runtime_ready = ready;
+                next_node_media_status_refresh = Clock::time_point::min();
                 // The report carries the digest it answers, so a new manifest
                 // has to be republished even when this node was already ready:
                 // otherwise the Director keeps comparing against the digest
                 // this node last named and the Program gate never opens.
-                if (digest_changed || readiness_changed) {
+                if (first_answer || readiness_changed) {
                     publish_runtime_adoption();
                 }
                 // One line per actual change, not per retry. The ongoing state
                 // belongs on the Output Monitor, not in a five-second log.
-                if (!node_asset_availability.ready() && (digest_changed || readiness_changed)) {
+                if (!node_asset_availability.ready() && (first_answer || readiness_changed)) {
                     for (const ProjectAssetPresence &presence :
                          node_asset_availability.assets) {
                         if (!presence.present) {
@@ -1141,13 +1159,15 @@ int run_node_playback(net::NodeSessionService &service,
         }
         if (render_scene) {
             if (!scene_loaded || presented.version.value() != scene_version) {
-                scene_model.reset(presented.root);
+                // The node parses only what the committed edit changed, and
+                // ends where a rebuild would: see SceneModel::update.
+                scene_model.update(presented.root);
                 scene_version = presented.version.value();
                 scene_loaded = true;
             }
             if (!compositor_loaded ||
                 presented.version.value() != compositor_version) {
-                compositor_model.reset(presented.root);
+                compositor_model.update(presented.root, scene_model);
                 compositor_version = presented.version.value();
                 compositor_loaded = true;
             }
@@ -1190,9 +1210,9 @@ int run_node_playback(net::NodeSessionService &service,
                         switcher_progress.from);
                     transition_to_graph = compositor_model.evaluate(
                         switcher_progress.to);
-                    // Older documents may contain a dissolve authored before
-                    // canvas compatibility was enforced. Never hand an
-                    // impossible pair to Presenter; promote Program as a cut.
+                    // A canvas edited while a dissolve runs can leave an
+                    // impossible pair, exactly as the Director sees it. Never
+                    // hand one to Presenter; promote Program as a cut.
                     if (!show::dissolve_canvases_compatible(
                             transition_from_frame.canvas,
                             transition_to_frame.canvas)) {
@@ -1233,6 +1253,19 @@ int run_node_playback(net::NodeSessionService &service,
                     active_deployment.render_server != doc::NodeId{};
             }
             node_asset_commit = scene_frame.asset_commit;
+            // RESCAN reaches a node as a generation on the committed stage.
+            // The operator asked for the files to be looked at again, so
+            // this machine looks too - a file copied over after the show was
+            // loaded is found now, and one that went away is reported.
+            // What is known stands until the answer arrives.
+            if (node_asset_refresh_generation.has_value() &&
+                *node_asset_refresh_generation !=
+                    scene_frame.asset_refresh_generation &&
+                node_assets_loaded) {
+                static_cast<void>(node_asset_check.recheck());
+            }
+            node_asset_refresh_generation =
+                scene_frame.asset_refresh_generation;
             scene_frame.publication_verified=node_publication_verification.observe(presented.root,scene_frame.id);
 
             // The pose this node was given for the frame it is drawing.
@@ -1293,7 +1326,6 @@ int run_node_playback(net::NodeSessionService &service,
                 scene::SceneTime{input.show_frame.value(), input.rate.numerator,
                                  input.rate.denominator});
             const bool feeds_ready =
-                active_deployment.legacy_single_output ||
                 std::all_of(
                     active_deployment.outputs.begin(),
                     active_deployment.outputs.end(),
@@ -2032,10 +2064,11 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     bool pending_editor_coalescing_close{};
     HistoryDescriptions history_descriptions;
     editor::HistoryState history_state;
-    // Startup validates the recent project before the frame loop, then hands
-    // the already-decoded root to the ordinary frame-boundary staging path.
-    // Manual Open requests leave this empty and continue to read at the
-    // boundary, so both paths share transport/switcher/WAL validation.
+    // Startup validates the recent project before the frame loops, then hands
+    // the already-decoded root to the ordinary staging path. Manual Open
+    // requests leave this empty and the project loader reads the file on its
+    // own thread; both then share transport/switcher/WAL validation on the
+    // frame that stages the prepared document.
     std::optional<doc::Root> pending_preloaded_project;
     std::optional<std::filesystem::path> recent_project_settings_file;
     std::vector<std::string> recent_project_paths;
@@ -2162,35 +2195,38 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             }
         }
     }
-    if (options.edit && recovered_session) {
+    // Work a previous run changed and never saved. The copy is looked for
+    // here, before the frame loop, and from then on only the autosave thread
+    // touches the recovery folder.
+    std::unique_ptr<ProjectAutosave> project_autosave;
+    std::optional<ProjectRecovery> project_recovery;
+    if (options.edit && recent_project_settings_file.has_value()) {
         try {
-            MediaRateEnrichment enrichment =
-                enrich_media_frame_rates(scheduler.projected_document());
-            if (enrichment.updated_nodes != 0U) {
-                const cmd::FrameNumber at{scheduler.sealed_through().value() +
-                                          1U};
-                auto scheduled = scheduler.schedule_document_replace(
-                    enrichment.project, cmd::UndoContextId{7U},
-                    cmd::TransactionId{at.value()}, at);
-                if (scheduled) {
-                    project_explicitly_dirty = true;
-                    project_message =
-                        "RECOVERED PROJECT - MEDIA FPS UPDATED (" +
-                        std::to_string(enrichment.updated_nodes) + ')';
-                    std::cerr << "enriched " << enrichment.updated_nodes
-                              << " recovered media node(s) with native FPS; "
-                                 "save the project to persist metadata\n";
-                } else {
-                    std::cerr << "could not schedule recovered media FPS "
-                                 "metadata enrichment\n";
-                }
+            const std::filesystem::path recovery_directory =
+                recent_project_settings_file->parent_path() / "recovery";
+            const std::string &opening = pending_project_load.has_value()
+                                             ? pending_project_load->path
+                                             : project_path;
+            const doc::Root *const saved =
+                pending_preloaded_project.has_value()
+                    ? &*pending_preloaded_project
+                    : !project_path.empty() ? &saved_project_snapshot
+                                            : nullptr;
+            project_recovery =
+                find_project_recovery(recovery_directory, opening, saved);
+            if (project_recovery.has_value()) {
+                std::cerr << "found unsaved changes from "
+                          << project_recovery->saved_at << " for "
+                          << (project_recovery->project_path.empty()
+                                  ? std::string{"an untitled project"}
+                                  : project_recovery->project_path)
+                          << '\n';
             }
-        } catch (const std::bad_alloc &) {
-            std::cerr << "could not enrich recovered media FPS metadata: "
-                         "allocation failed\n";
-        } catch (const std::length_error &) {
-            std::cerr << "could not enrich recovered media FPS metadata: "
-                         "project limits exceeded\n";
+            project_autosave =
+                std::make_unique<ProjectAutosave>(recovery_directory);
+        } catch (const std::exception &error) {
+            std::cerr << "project recovery is unavailable: " << error.what()
+                      << '\n';
         }
     }
     // The next id to try for a created element; advanced past any occupied id
@@ -2493,6 +2529,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .saved_project_snapshot = saved_project_snapshot,
         .project_explicitly_dirty = project_explicitly_dirty,
         .project_generation = project_generation,
+        .project_autosave = project_autosave,
+        .project_recovery = project_recovery,
         .linked_ingest = linked_ingest,
         .blender_links = blender_links,
         .blender_store_project = blender_store_project,

@@ -1926,6 +1926,8 @@ output_status_for(net::RuntimeOutputDeploymentState state) noexcept {
         return Row::DuplicateRenderServer;
     case net::RuntimeOutputDeploymentState::PresenterUnavailable:
         return Row::PresenterRefused;
+    case net::RuntimeOutputDeploymentState::NoBoundDisplay:
+        return Row::NoBoundDisplay;
     }
     return Row::Unknown;
 }

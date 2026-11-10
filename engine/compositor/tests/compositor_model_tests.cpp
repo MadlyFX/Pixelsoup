@@ -2370,6 +2370,108 @@ void comment_boxes_are_layout_in_their_scene() {
     COMPOSITOR_CHECK(with.counters().nodes == without.counters().nodes);
 }
 
+// The frame loop's update() must leave the model a rebuild would: every node
+// of a graph with a comment box is edited, broken, erased and restored in
+// turn, and each time the updated model's graph is the rebuilt one's.
+void an_updated_model_is_the_model_a_rebuild_would_be() {
+    std::vector<doc::Node> authored = saturation_graph(2.25);
+    authored.push_back(stage(5U, 1920U, 1080U));
+    authored.push_back(node(40U, schema::comment_type,
+                            {whole(schema::scene_id, 5),
+                             text(schema::label, "Plates"),
+                             real(schema::comment_width, 400.0),
+                             real(schema::comment_height, 240.0)}));
+    const doc::Root full = root_of(authored);
+
+    compositor::CompositorModel updated;
+    // The same again the way a frame loop does it, reading the canvas and
+    // effect settings from the scene model the loop already keeps.
+    scene::SceneModel scenes;
+    compositor::CompositorModel sharing;
+    std::size_t steps = 0U;
+    const auto step = [&](const doc::Root& document) {
+        updated.update(document);
+        scenes.update(document);
+        sharing.update(document, scenes);
+        compositor::CompositorModel rebuilt;
+        rebuilt.reset(document);
+        COMPOSITOR_CHECK(updated.evaluate() == rebuilt.evaluate());
+        COMPOSITOR_CHECK(sharing.evaluate() == rebuilt.evaluate());
+        COMPOSITOR_CHECK(sharing.evaluate(doc::NodeId{5U}) ==
+                         rebuilt.evaluate(doc::NodeId{5U}));
+        // The estimates are only there to compare when a stage is: the
+        // scoped graph's canvas is the authored one, by either route.
+        if (document.contains(doc::NodeId{5U})) {
+            COMPOSITOR_CHECK(sharing.evaluate(doc::NodeId{5U})
+                                 .resources.available);
+        }
+        COMPOSITOR_CHECK(updated.evaluate(doc::NodeId{5U}) ==
+                         rebuilt.evaluate(doc::NodeId{5U}));
+        COMPOSITOR_CHECK(updated.size() == rebuilt.size());
+        COMPOSITOR_CHECK(updated.counters().nodes == rebuilt.counters().nodes);
+        COMPOSITOR_CHECK(updated.counters().edges == rebuilt.counters().edges);
+        ++steps;
+    };
+
+    doc::Root running;
+    for (const doc::Node& one : authored) {
+        running = running.set(one);
+        step(running);
+    }
+    const doc::Delta all = doc::diff(doc::Root{}, full);
+    for (const doc::NodeChange& change : all.changes) {
+        doc::Node changed = *change.after;
+        changed.properties.insert_or_assign(std::string{schema::amount},
+                                            doc::PropertyValue{0.375});
+        step(full.set(changed));
+
+        doc::Node malformed = *change.after;
+        malformed.properties.insert_or_assign(
+            std::string{schema::amount},
+            doc::PropertyValue{std::string{"not a number"}});
+        step(full.set(malformed));
+
+        const auto erased = full.erase(change.id);
+        COMPOSITOR_CHECK(erased.has_value());
+        step(*erased);
+
+        step(full);
+    }
+    COMPOSITOR_CHECK(steps == authored.size() + all.changes.size() * 4U);
+    step(doc::Root{});
+    step(full);
+
+    // A scene model that is not at the document is not believed: the canvas
+    // comes out as the document's own, not as the stale model's.
+    scene::SceneModel stale;
+    stale.update(doc::Root{}.set(stage(5U, 640U, 360U)));
+    compositor::CompositorModel wary;
+    wary.update(full);
+    wary.update(full.set(stage(6U, 320U, 200U)), stale);
+    const auto canvas = wary.evaluate(doc::NodeId{5U}).resources.canvas;
+    COMPOSITOR_CHECK(canvas.width == 1920U && canvas.height == 1080U);
+}
+
+// A rebuild discards comment boxes with everything else: one deleted from the
+// document, or left over from the project that was open before, is gone.
+void a_rebuild_forgets_comment_boxes_the_document_no_longer_holds() {
+    const std::vector<doc::Node> plain{stage(5U, 1920U, 1080U),
+                                       node(1U, schema::output_type,
+                                            {whole(schema::scene_id, 5)})};
+    std::vector<doc::Node> boxed = plain;
+    boxed.push_back(node(40U, schema::comment_type,
+                         {whole(schema::scene_id, 5),
+                          text(schema::label, "Plates"),
+                          real(schema::comment_width, 400.0),
+                          real(schema::comment_height, 240.0)}));
+
+    compositor::CompositorModel model;
+    model.reset(root_of(boxed));
+    COMPOSITOR_CHECK(model.evaluate(doc::NodeId{5U}).comments.size() == 1U);
+    model.reset(root_of(plain));
+    COMPOSITOR_CHECK(model.evaluate(doc::NodeId{5U}).comments.empty());
+}
+
 // Pasting a copied selection: new ids in order, wires rewritten to the
 // copies, everything moved together, and what a graph can hold only one of
 // left behind.
@@ -2756,7 +2858,11 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 39U> cases{{
+constexpr std::array<Case, 41U> cases{{
+    {"an updated model is the model a rebuild would be",
+     &an_updated_model_is_the_model_a_rebuild_would_be},
+    {"a rebuild forgets comment boxes the document no longer holds",
+     &a_rebuild_forgets_comment_boxes_the_document_no_longer_holds},
     {"Merge is typed, bounded and digested",
      &merge_is_typed_bounded_and_digested},
     {"Background is typed, bounded and digested",

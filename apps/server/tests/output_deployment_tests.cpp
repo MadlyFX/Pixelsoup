@@ -104,7 +104,6 @@ void two_bindings_create_two_exact_outputs() {
     const auto deployed =
         app::resolve_output_deployment(options(), map, &inventory);
     DEPLOY_CHECK(deployed.ready());
-    DEPLOY_CHECK(!deployed.legacy_single_output);
     DEPLOY_CHECK(deployed.render_server == doc::NodeId{1U});
     DEPLOY_CHECK(deployed.outputs.size() == 2U);
     DEPLOY_CHECK(deployed.outputs[0U].window.output_bit_depth == 10U);
@@ -237,16 +236,16 @@ void missing_and_duplicate_targets_fail_deterministically() {
                  app::OutputDeploymentIssueCode::DuplicateDisplayTarget);
 }
 
-void legacy_projects_keep_the_single_output_contract() {
+// A card cabled into the show but with no display bound opens nothing, even
+// with a window mode on the card itself, and says why.
+void a_server_with_no_bound_display_opens_nothing() {
     topology::HardwareMap map{};
     auto configured = server(1U, 3U);
     configured.window_mode = topology::HardwareWindowMode::Borderless;
     configured.desktop_x = 1920;
-    configured.desktop_y = 0;
     configured.width = 1920U;
     configured.height = 1080U;
     map.devices.push_back(configured);
-    // Cabled for control only: no bound display identities yet.
     topology::HardwareDevice operator_machine{};
     operator_machine.node = doc::NodeId{2U};
     operator_machine.kind = topology::HardwareDeviceKind::OperatorMachine;
@@ -256,13 +255,33 @@ void legacy_projects_keep_the_single_output_contract() {
         topology::HardwareEndpoint{doc::NodeId{1U}, 0U}});
 
     const auto deployed = app::resolve_output_deployment(options(), map, nullptr);
+    DEPLOY_CHECK(!deployed.ready());
+    DEPLOY_CHECK(deployed.render_server == doc::NodeId{1U});
+    DEPLOY_CHECK(deployed.outputs.empty());
+    DEPLOY_CHECK(deployed.issues.size() == 1U);
+    DEPLOY_CHECK(deployed.issues[0U].code ==
+                 app::OutputDeploymentIssueCode::NoBoundDisplay);
+    DEPLOY_CHECK(app::runtime_output_deployment_state(deployed) ==
+                 net::RuntimeOutputDeploymentState::NoBoundDisplay);
+}
+
+// A node index no card owns is a command-line launch: one window, as its
+// arguments describe it, fed by its own node index.
+void an_unowned_node_index_opens_its_launch_window() {
+    topology::HardwareMap map{};
+    map.devices.push_back(server(1U, 9U));
+    auto launch = options();
+    launch.window_x = -640;
+    launch.window_position_explicit = true;
+
+    const auto deployed = app::resolve_output_deployment(launch, map, nullptr);
     DEPLOY_CHECK(deployed.ready());
-    DEPLOY_CHECK(deployed.legacy_single_output);
+    DEPLOY_CHECK(deployed.render_server == doc::NodeId{});
     DEPLOY_CHECK(deployed.outputs.size() == 1U);
     DEPLOY_CHECK(deployed.outputs[0U].feed_index == 3U);
-    DEPLOY_CHECK(deployed.outputs[0U].window.position_x == 1920);
-    DEPLOY_CHECK(deployed.outputs[0U].window.borderless);
-    DEPLOY_CHECK(!deployed.outputs[0U].window.require_exact_display_mode);
+    DEPLOY_CHECK(deployed.outputs[0U].window.width == 1280U);
+    DEPLOY_CHECK(deployed.outputs[0U].window.position_x == -640);
+    DEPLOY_CHECK(deployed.outputs[0U].display_name == "launch output");
 }
 
 // A second card on the same node index with no cable is a parked
@@ -289,7 +308,6 @@ void a_parked_card_does_not_shadow_the_bound_server() {
     map.output_bindings.clear();
     deployed = app::resolve_output_deployment(options(), map, &inventory);
     DEPLOY_CHECK(deployed.ready());
-    DEPLOY_CHECK(deployed.legacy_single_output);
     DEPLOY_CHECK(deployed.render_server == doc::NodeId{});
     DEPLOY_CHECK(deployed.outputs[0U].display_name == "launch output");
 }
@@ -299,7 +317,7 @@ struct Case final {
     void (*run)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
     {"two bindings create two exact outputs",
      &two_bindings_create_two_exact_outputs},
     {"a mirrored display is refused with its own reason",
@@ -310,8 +328,10 @@ constexpr std::array<Case, 7U> cases{{
      &inactive_targets_at_the_origin_are_not_mirrors},
     {"missing and duplicate targets fail deterministically",
      &missing_and_duplicate_targets_fail_deterministically},
-    {"legacy projects keep one output",
-     &legacy_projects_keep_the_single_output_contract},
+    {"a server with no bound display opens nothing",
+     &a_server_with_no_bound_display_opens_nothing},
+    {"an unowned node index opens its launch window",
+     &an_unowned_node_index_opens_its_launch_window},
     {"a parked card does not shadow the bound server",
      &a_parked_card_does_not_shadow_the_bound_server},
 }};

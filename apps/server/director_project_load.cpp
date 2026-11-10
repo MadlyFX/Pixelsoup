@@ -3,7 +3,6 @@
 #include <mediaserver/assets/asset_schema.hpp>
 #include <mediaserver/doc/node.hpp>
 #include <mediaserver/persist/sealed_frame_log.hpp>
-#include <mediaserver/render/media_source.hpp>
 #include <mediaserver/scene/linked_scene.hpp>
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/scene/scene_model.hpp>
@@ -153,88 +152,6 @@ project_file_failure(std::string_view operation,
     message.append(" PROJECT: ");
     message.append(project_file_error_label(error.code));
     return message;
-}
-
-// Projects authored before native video cadence was persisted remain readable
-// as 1:1 sequences in SceneModel. At the Director's project boundary, enrich
-// only nodes with *neither* rate field. A partial/malformed authored pair is
-// deliberately left intact for the schema model to reject, rather than being
-// silently repaired. probe_media_frame_rate itself rejects non-video paths, and
-// this cache opens each distinct recognized video at most once per load.
-[[nodiscard]] MediaRateEnrichment
-enrich_media_frame_rates(const doc::Root &project) {
-    struct CachedProbe final {
-        std::string source;
-        std::optional<render::MediaFrameRate> rate;
-    };
-
-    MediaRateEnrichment result{project, 0U};
-    std::vector<CachedProbe> probes;
-    const auto rate_for =
-        [&](std::string_view source) -> std::optional<render::MediaFrameRate> {
-        const auto found = std::find_if(
-            probes.begin(), probes.end(),
-            [&](const CachedProbe &entry) { return entry.source == source; });
-        if (found != probes.end()) {
-            return found->rate;
-        }
-        const std::string owned{source};
-        const auto rate = render::probe_media_frame_rate(owned);
-        probes.push_back(CachedProbe{owned, rate});
-        return rate;
-    };
-
-    const doc::Delta contents = doc::diff(doc::Root{}, project);
-    for (const doc::NodeChange &change : contents.changes) {
-        if (!change.after) {
-            continue;
-        }
-        const doc::Node &node = *change.after;
-        const bool placement =
-            std::string_view{node.type} == scene::schema::media_type;
-        const bool asset =
-            std::string_view{node.type} == assets::schema::media_type;
-        if (!placement && !asset) {
-            continue;
-        }
-
-        const std::string_view numerator_name =
-            placement ? scene::schema::source_rate_numerator
-                      : assets::schema::media_rate_numerator;
-        const std::string_view denominator_name =
-            placement ? scene::schema::source_rate_denominator
-                      : assets::schema::media_rate_denominator;
-        // Any authored member makes this pair intentional. In particular, do
-        // not hide a partial pair by filling in its missing half.
-        if (node.properties.find(numerator_name) != node.properties.end() ||
-            node.properties.find(denominator_name) != node.properties.end()) {
-            continue;
-        }
-        const auto source = node.properties.find(
-            placement ? scene::schema::source : assets::schema::source);
-        if (source == node.properties.end()) {
-            continue;
-        }
-        const auto *const path = std::get_if<std::string>(&source->second);
-        if (path == nullptr || path->empty()) {
-            continue;
-        }
-        const auto rate = rate_for(*path);
-        if (!rate.has_value()) {
-            continue;
-        }
-
-        doc::Node enriched = node;
-        enriched.properties.emplace(
-            std::string{numerator_name},
-            doc::PropertyValue{static_cast<std::int64_t>(rate->numerator)});
-        enriched.properties.emplace(
-            std::string{denominator_name},
-            doc::PropertyValue{static_cast<std::int64_t>(rate->denominator)});
-        result.project = result.project.set(std::move(enriched));
-        ++result.updated_nodes;
-    }
-    return result;
 }
 
 [[nodiscard]] bool

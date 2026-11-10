@@ -71,10 +71,8 @@ runtime_output_deployment_state(const OutputDeployment& deployment) noexcept {
         return State::Ready;
     }
     switch (deployment.issues.front().code) {
-    case OutputDeploymentIssueCode::MissingRenderServer:
-        // Not a fault: no authored server is the legacy launch contract, and
-        // resolve_output_deployment returns a usable output for it.
-        return State::Ready;
+    case OutputDeploymentIssueCode::NoBoundDisplay:
+        return State::NoBoundDisplay;
     case OutputDeploymentIssueCode::DuplicateRenderServer:
         return State::DuplicateRenderServer;
     case OutputDeploymentIssueCode::InventoryUnavailable:
@@ -112,10 +110,8 @@ OutputDeployment resolve_output_deployment(
     }
     const topology::HardwareDevice* const server = owner.device;
     if (server == nullptr) {
-        // No authored server remains the explicit legacy launch contract.
-        // A rejected/ambiguous document is handled by presenter_window_update
-        // before this resolver is called.
-        result.legacy_single_output = true;
+        // No card owns this node index: a command-line launch, drawn in the
+        // window its arguments describe and fed by its own node index.
         result.outputs.push_back(DeployedOutput{
             {}, topology::first_render_server_video_port,
             options.node_index, {}, presenter_window_settings(options, {}),
@@ -131,11 +127,9 @@ OutputDeployment resolve_output_deployment(
         }
     }
     if (bindings.empty()) {
-        result.legacy_single_output = true;
-        result.outputs.push_back(DeployedOutput{
-            {}, topology::first_render_server_video_port,
-            options.node_index, {},
-            presenter_window_settings(options, hardware), server->name});
+        result.issues.push_back(issue(
+            OutputDeploymentIssueCode::NoBoundDisplay, {}, {},
+            "this Render Server has no display bound to an output"));
         return result;
     }
 

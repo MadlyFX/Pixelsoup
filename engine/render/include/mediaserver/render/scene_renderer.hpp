@@ -1270,6 +1270,9 @@ private:
     // composited clips because each needs its own depth-writing pass before
     // any destination-reading draw runs.
     std::vector<CompositeDraw> depth_only_media_;
+    // This renderer's standing offer of its device for video decode,
+    // withdrawn with it.
+    VideoDecodeDeviceOffer video_decode_offer_;
     // order_composites_by_planes scratch, sized once for max_instances.
     std::vector<LayerVolume> layer_volumes_;
     std::vector<std::pair<core::u32, core::u32>> layer_edges_;

@@ -1229,24 +1229,37 @@ restart, stale manifest, duplicate node index, or pending Hardware Map change
 shows on the Output Monitor, but it does not hold a Program promotion: the
 operator, not the readiness gate, decides when a look goes on air.
 
-**Presence is routine; content is asked for.** When the manifest revision
+**Presence is routine; revisions are asked for.** When the manifest revision
 changes, every machine stats the required paths and reports present or missing.
-That is one stat per asset, it reads nothing, and it cannot report a content
-mismatch because it never looks at content.
+That is one stat per asset, it reads nothing, and it cannot report a mismatch
+because it looks at nothing but whether the file is there. Hashing file
+contents was tried and took too long, so presence is the routine answer.
 
-`RESCAN`, in the Library, is the other question: it streams each required file
-and reports wrong byte lengths, wrong hashes, and local verification failures.
-It is the only thing in the program that reads a source's bytes for this
-purpose, and the only place a mismatch can come from. It also finds Library
-files that changed since they were recorded and offers to accept them; see
-[Changed source files](#the-library-panel).
+The question is asked on a thread of its own on every machine. The loop that
+seals frames on the Director, and the one that presents them on a node, hand
+the manifest over and take the answer on whichever frame finds it, so a slow
+disk or a file server that has stopped answering holds neither. Until the
+answer arrives a machine goes on what it already knew, takes a newly required
+file to be there - a clip just placed opens at once, and shows the usual grey
+box if it turns out to be missing - and does not report itself ready for the
+new manifest.
 
-Nothing rescans on a timer. An earlier build re-verified every fingerprinted
-source every five seconds for as long as anything was missing, which on a 40 MB
-plate stalled the control thread for two and a half seconds at a time, forever,
-because a missing file never stops being missing. A share that mounts late is
-picked up by pressing `RESCAN` - which is a worse answer than automatic
-recovery only if the automatic version is free, and that one was not.
+`RESCAN`, in the Library, is the other question. On the Director it compares
+each required file's size and modification time with the revision recorded for
+it and reports the ones that differ or cannot be read; it reads no file
+contents. It also finds Library files that changed since they were recorded
+and offers to accept them; see [Changed source files](#the-library-panel).
+The status bar shows CHECKING ASSETS... until the answer arrives, then ASSETS
+VERIFIED or ASSETS INCOMPLETE - SEE LIBRARY. The same press makes every render
+node look at its own files again, so a file copied to a node after the show
+was loaded, or a share that mounted late, is found without restarting it.
+
+Nothing rescans on a timer; a machine looks at its disks when the set of
+required files changes and when you press `RESCAN`, and at no other time. An
+earlier build re-verified every fingerprinted source every five seconds for as
+long as anything was missing, which on a 40 MB plate stalled the control
+thread for two and a half seconds at a time, forever, because a missing file
+never stops being missing.
 
 Thumbnails are derivatives, not assets. Their key contains the persistent Asset
 NodeId, expected fingerprint, frozen `thumb-320x180-srgb` profile, and generator
@@ -1729,7 +1742,8 @@ never rewrite bindings, cables, or project files on their own.
 A node that could not open its displays reads `OUTPUT FAILED` in Output
 Monitor, and its row names the reason: the bound display not connected, present
 but switched off, mirroring another, claimed by two bindings, or not offering
-the saved mode. That is reported separately from asset readiness on purpose. A
+the saved mode, or no display bound to its Render Server at all. That is
+reported separately from asset readiness on purpose. A
 node with no outputs has no renderer to report either, which on the Director is
 indistinguishable from one still loading, so the row used to say the assets
 were not ready while the fault was a display.
@@ -1738,7 +1752,10 @@ One lifecycle agent still supervises one fixed render-process identity. That
 child now opens one presenter per saved output binding and selects each binding's
 Feed index. Changing bindings is replicated as project state; Restart from
 Output Monitor relaunches the same process, which reapplies the saved deployment.
-Projects without output-binding nodes use the single-window output model.
+A Render Server with no output binding opens nothing and reads `NO DISPLAY IS
+BOUND TO THIS RENDER SERVER`; bind a display to one of its outputs. Only a
+render process whose node index no Render Server card claims - a command-line
+launch such as the wall demo - opens the single window its arguments describe.
 
 ## Hardware Map and LED processors
 
@@ -2666,7 +2683,36 @@ time; asking for another while one is up shows "Another dialog is already
 open" in the status bar instead. If another project is opened while a dialog
 is up, its answer is dropped rather than applied to
 the new project.
+
+Opening a project does not pause the show either. The file is read - and any
+video in it that records no frame rate is opened to find one - away from the
+frames the cluster is waiting for. The status bar shows LOADING PROJECT..., the
+project that was open stays on screen and on air, and the new one replaces it
+on a single frame once it is ready. Choosing another project while one is still
+loading opens only the last one chosen. Saving writes the file while control
+frames keep going out; the editor's own window waits for the write.
+
 `.mstage` saves are checksummed and atomically replaced. Recovered WAL state
 takes precedence at startup; otherwise the last successfully opened/saved
 project is offered through recent-project recovery. A damaged or inaccessible
 project safely falls back to untitled startup.
+
+While a project has unsaved changes the editor keeps a recovery copy of it,
+refreshed within ten seconds of each change, in
+`%LOCALAPPDATA%\MediaServer\settings\recovery`. An untitled project has one
+too. The copy is written on its own thread, so it never holds a frame. Saving
+the project removes it, and so does closing the editor, opening another project
+or starting a new one once you have agreed to discard the changes. If the
+editor stops any other way - a crash, a power cut, the process being ended -
+the next start asks "Recover Unsaved Changes" and names the project and the
+time of the copy. Yes opens the recovered work under the project's own name,
+still unsaved, with RECOVERED UNSAVED CHANGES in the status bar; save to keep
+it. No carries on from the saved project and leaves the copy in place until
+the project is next saved or closed. AUTOSAVE FAILED - SAVE THE PROJECT in the
+status bar means the copy could not be written and the changes are not
+protected until you save.
+
+A request the project refuses - an edit, an undo, a scene or publish request
+that no longer fits the document - is dropped and reported in the status bar
+as, for example, KEYFRAME EDIT NOT APPLIED. The show keeps running and the
+rest of the project is untouched; the log names the exact step.
