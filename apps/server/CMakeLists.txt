@@ -118,9 +118,10 @@ target_link_libraries(mediaserver_server
 
 if(WIN32)
     # ole32/oleaut32 read the Windows Firewall rules, shell32 asks for the
-    # elevation that adds them, and advapi32 holds the sign-in entry.
+    # elevation that adds them, and advapi32 holds the sign-in entry. psapi
+    # reports the process private bytes on the node status line.
     target_link_libraries(mediaserver_server
-        PUBLIC dxgi user32 ole32 oleaut32 shell32 advapi32)
+        PUBLIC dxgi user32 ole32 oleaut32 shell32 advapi32 psapi)
 endif()
 
 # The machine-level Quadro Sync probe and the D3D12 present barrier share the
@@ -195,6 +196,9 @@ if(BUILD_TESTING)
     # Project loading off the frame loops: real project files in a temporary
     # folder, read by the loader thread, with a counting media probe.
     mediaserver_server_test(project_loader)
+    # The memory fields on the node status line: formatting only, plus a
+    # live read of this process's private bytes on Windows.
+    mediaserver_server_test(status_memory)
     mediaserver_server_test(proxy_generation_service)
     mediaserver_server_test(proxy_playback)
     # The render machine's stored path - what a launch with no arguments

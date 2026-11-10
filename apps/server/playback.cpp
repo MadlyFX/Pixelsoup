@@ -1606,6 +1606,18 @@ int run_node_playback(net::NodeSessionService &service,
             if (!output_presenters.empty()) {
                 std::cout << gpu_timing_text(
                     output_presenters.front().presenter->timing());
+                // The OS reports local and system usage for the whole
+                // process, so any presenter's sample covers every output;
+                // the renderer's committed count is per device and is summed.
+                auto memory = output_presenters.front().presenter->memory();
+                for (std::size_t index = 1U; index < output_presenters.size();
+                     ++index) {
+                    memory.committed +=
+                        output_presenters[index].presenter->memory().committed;
+                }
+                std::cout << memory_text(memory, process_private_bytes());
+            } else {
+                std::cout << memory_text({}, process_private_bytes());
             }
             std::cout << boundary_wake_text(boundary_lateness.take());
             std::cout << " sync=" << sync_mode_label(node_sync_policy.mode)
@@ -1668,7 +1680,9 @@ int run_node_playback(net::NodeSessionService &service,
                           ? "closed"
                           : "headless")
                   << gpu_timing_text(
-                         output_presenters.front().presenter->timing());
+                         output_presenters.front().presenter->timing())
+                  << memory_text(output_presenters.front().presenter->memory(),
+                                 process_private_bytes());
     }
     std::cout << " last=" << outcome_label(last_outcome) << '\n' << std::flush;
     return 0;

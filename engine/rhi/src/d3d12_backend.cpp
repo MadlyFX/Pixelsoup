@@ -1570,8 +1570,15 @@ VideoMemory d3d12_video_memory(void* value) noexcept {
             0U, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
         return {};
     }
-    return VideoMemory{static_cast<core::u64>(info.Budget),
+    VideoMemory memory{static_cast<core::u64>(info.Budget),
                        static_cast<core::u64>(info.CurrentUsage)};
+    DXGI_QUERY_VIDEO_MEMORY_INFO system{};
+    if (SUCCEEDED(state->adapter->QueryVideoMemoryInfo(
+            0U, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &system))) {
+        memory.system_budget = static_cast<core::u64>(system.Budget);
+        memory.system_usage = static_cast<core::u64>(system.CurrentUsage);
+    }
+    return memory;
 }
 
 core::u64 d3d12_committed_bytes(void* value) noexcept {

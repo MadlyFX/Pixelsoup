@@ -74,6 +74,15 @@ boundary_wake_text(const show::BoundaryLateness::Window &window);
 
 [[nodiscard]] std::string gpu_timing_text(const show::PresenterTiming &timing);
 
+// Private bytes this process has committed, or zero where the platform does
+// not say. Includes the GPU's system-memory allocations made on its behalf.
+[[nodiscard]] core::u64 process_private_bytes() noexcept;
+
+// GPU and process memory for the status line, in MiB. Fields the presenter
+// cannot measure are left out rather than printed as zero.
+[[nodiscard]] std::string memory_text(const show::PresenterMemory &memory,
+                                      core::u64 private_bytes);
+
 [[nodiscard]] net::RuntimeRendererBackend runtime_renderer_backend(
     scene::RendererBackend backend) noexcept;
 

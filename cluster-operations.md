@@ -165,6 +165,19 @@ unloaded machine the maximum stays near a millisecond. A sustained higher
 figure means the loop's own work, or competing load on the machine, is
 delaying frame sealing or rendering.
 
+Each node's status line also samples memory at the same interval, in MiB:
+`gpu-local-mib=U/B` is the video memory the process uses (U) against the
+budget the OS currently allows it (B); `gpu-system-mib` is system memory held
+on the GPU's behalf, including resources demoted out of video memory once U
+reaches B; `gpu-committed-mib` is what the renderer's own textures and geometry
+buffers account for; and `private-mib` is the process's committed private
+memory. The GPU fields are absent on an output with no D3D12 device. A leak
+shows as `gpu-system-mib` and `private-mib` climbing while `gpu-local-mib`
+sits at its budget, usually with `gpu-observed-us` stepping up as the GPU
+starts reading demoted resources across the bus. If `gpu-committed-mib` stays
+flat while the other figures climb, the growth is outside the renderer's
+accounting: decoder surfaces, upload heaps or driver allocations.
+
 On the Director those figures are the sealing thread's alone. It seals control
 frames on a thread of its own and takes turns with the thread that evaluates,
 draws the editor and presents (see "Director threads" in

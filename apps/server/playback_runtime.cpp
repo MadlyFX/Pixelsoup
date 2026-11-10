@@ -1,3 +1,14 @@
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <psapi.h>
+#endif
+
 #include "playback_runtime.hpp"
 
 #include <mediaserver/core/render_conformance.hpp>
@@ -141,6 +152,36 @@ boundary_wake_text(const show::BoundaryLateness::Window &window) {
            " gpu-skipped=" + std::to_string(timing.skipped_presents) +
            " media-buffered=" + std::to_string(timing.media_deferred_frames) +
            " gpu-present=" + (timing.vsync_limited ? "vsync" : "unthrottled");
+}
+
+core::u64 process_private_bytes() noexcept {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb = sizeof(counters);
+    if (GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters),
+            sizeof(counters))) {
+        return static_cast<core::u64>(counters.PrivateUsage);
+    }
+#endif
+    return 0U;
+}
+
+[[nodiscard]] std::string memory_text(const show::PresenterMemory &memory,
+                                      core::u64 private_bytes) {
+    constexpr core::u64 mib = 1024U * 1024U;
+    std::string text;
+    if (memory.known) {
+        text += " gpu-local-mib=" + std::to_string(memory.local_usage / mib) +
+                '/' + std::to_string(memory.local_budget / mib) +
+                " gpu-system-mib=" + std::to_string(memory.system_usage / mib) +
+                " gpu-committed-mib=" + std::to_string(memory.committed / mib);
+    }
+    if (private_bytes != 0U) {
+        text += " private-mib=" + std::to_string(private_bytes / mib);
+    }
+    return text;
 }
 
 [[nodiscard]] net::RuntimeRendererBackend runtime_renderer_backend(

@@ -1290,6 +1290,21 @@ SdlPresenter::renderer_readiness() const noexcept {
     return result;
 }
 
+show::PresenterMemory SdlPresenter::memory() const noexcept {
+    if (platform_ == nullptr || !platform_->device) {
+        return {};
+    }
+    const rhi::VideoMemory video = platform_->device->video_memory();
+    if (!video.known()) {
+        return {};
+    }
+    return show::PresenterMemory{true,
+                                 video.usage,
+                                 video.budget,
+                                 video.system_usage,
+                                 platform_->device->committed_bytes()};
+}
+
 show::PresenterPlateStats SdlPresenter::plates() const noexcept {
     show::PresenterPlateStats stats{};
     if (platform_ == nullptr) {

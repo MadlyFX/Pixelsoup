@@ -174,6 +174,26 @@ struct PresenterTiming final {
     bool operator==(const PresenterTiming&) const = default;
 };
 
+// GPU memory as the presenter's device sees it, sampled when asked. Kept out
+// of PresenterTiming because it is a kernel query, not a per-frame counter,
+// and because it moves with other processes on the same GPU. `known` is false
+// on paths with no device or a backend that cannot tell.
+struct PresenterMemory final {
+    bool known{};
+    // Adapter-local memory this process uses, and what the OS lets it keep.
+    core::u64 local_usage{};
+    core::u64 local_budget{};
+    // System memory held on the GPU's behalf, demotions out of local memory
+    // included. Growth here with local usage pinned at budget is a leak.
+    core::u64 system_usage{};
+    // Textures and geometry buffers the device created and still holds, by
+    // the renderer's own count. Diverging from local_usage points outside it:
+    // decoder surfaces, driver allocations, upload heaps.
+    core::u64 committed{};
+
+    bool operator==(const PresenterMemory&) const = default;
+};
+
 // Whether this presenter joined the vendor swap group / present barrier the
 // project asked for. Deliberately mirrors the RHI enum without depending on
 // it: a headless presenter and a headless test both need to name these states
@@ -508,6 +528,10 @@ public:
     // What this path cost. A CPU presenter reports nothing but its frame
     // count, which is the honest answer: there is no submission to time.
     [[nodiscard]] virtual PresenterTiming timing() const noexcept { return {}; }
+
+    // GPU memory now. Queries the kernel, so callers sample it at their status
+    // interval rather than per frame. A CPU presenter reports unknown.
+    [[nodiscard]] virtual PresenterMemory memory() const noexcept { return {}; }
 
     // What this path did with the inner frustum.
     //

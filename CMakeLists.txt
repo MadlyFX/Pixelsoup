@@ -54,6 +54,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
+# Release builds carry symbols. A dump from a stage machine is otherwise a
+# list of bare addresses: the optimized package is what runs on a wall, so it
+# is the build whose dumps we get. /Z7 keeps debug info in each object rather
+# than one compile PDB, so parallel Ninja compiles never contend for it; the
+# linker still writes a single media-server.pdb beside the executable. /DEBUG
+# turns off reference elimination and COMDAT folding unless asked, so both are
+# asked for and the shipped code stays what it was. Debug keeps its default.
+if(MSVC)
+    set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
+        "$<$<CONFIG:Release>:Embedded>$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>")
+    add_link_options("$<$<CONFIG:Release>:/DEBUG:FULL;/OPT:REF;/OPT:ICF>")
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(ProjectOptions)
 

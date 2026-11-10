@@ -196,6 +196,7 @@ class SdlPresenter final : public show::Presenter {
     [[nodiscard]] show::PresenterTiming timing() const noexcept override {
         return timing_;
     }
+    [[nodiscard]] show::PresenterMemory memory() const noexcept override;
     [[nodiscard]] show::PresenterPlateStats plates() const noexcept override;
     [[nodiscard]] show::PresenterStatus hold() noexcept override;
     void begin_document_stream() noexcept override;
