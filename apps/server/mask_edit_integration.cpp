@@ -153,6 +153,64 @@ struct MaskLookup final {
                    : Result::failure(planned.error());
 }
 
+// What a drawn mask is called until the operator names it.
+[[nodiscard]] std::string drawn_mask_name(const scene::MaskShape& shape) {
+    if (std::holds_alternative<scene::EllipseMaskShape>(shape)) {
+        return "Ellipse Mask";
+    }
+    if (std::holds_alternative<scene::BezierMaskShape>(shape)) {
+        return "Bezier Mask";
+    }
+    return "Rectangle Mask";
+}
+
+// The next free place in `target`'s stack, after every mask it has.
+[[nodiscard]] std::optional<core::i64> next_mask_order(
+    const doc::Root& document, scene::SceneId scene_id, doc::NodeId target) {
+    scene::SceneModel model;
+    model.reset(document);
+    core::i64 order = -1;
+    for (const scene::MaskInstance& mask : model.masks(scene_id)) {
+        if (mask.target == target) {
+            order = std::max(order, mask.order);
+        }
+    }
+    if (order == std::numeric_limits<core::i64>::max()) {
+        return std::nullopt;
+    }
+    return order + 1;
+}
+
+[[nodiscard]] Result draw_mask(const doc::Root& document,
+                               const editor::MaskDrawIntent& intent,
+                               core::u64 next_node) {
+    const doc::Node* const target = document.get(intent.target);
+    if (target == nullptr) {
+        return failure(ErrorCode::TargetMissing, intent.target);
+    }
+    const scene::MaskCoordinateSpace expected =
+        target->type == scene::schema::group_type
+            ? scene::MaskCoordinateSpace::AuthoredCanvas
+            : scene::MaskCoordinateSpace::SourceLayer;
+    if (intent.coordinate_space != expected) {
+        return failure(ErrorCode::InvalidShape, intent.target);
+    }
+    const auto order = next_mask_order(document, intent.scene, intent.target);
+    if (!order.has_value()) {
+        return failure(ErrorCode::InvalidValue, intent.target);
+    }
+    scene::CreateMaskRequest request{};
+    request.scene = intent.scene;
+    request.target = intent.target;
+    request.order = *order;
+    request.name = drawn_mask_name(intent.shape);
+    request.shape = intent.shape;
+    auto planned = scene::plan_create_mask(document, std::move(request),
+                                           doc::NodeId{next_node});
+    return planned ? finished(std::move(planned).value(), next_node)
+                   : Result::failure(planned.error());
+}
+
 [[nodiscard]] Result translate_mask(
     const doc::Root& document,
     const editor::MaskViewportTranslateIntent& intent,
@@ -372,6 +430,9 @@ MaskEditIntegrationResult plan_mask_edit_integration(
                                          Request,
                                          editor::MaskViewportTranslateIntent>) {
                     return translate_mask(document, request, next_node);
+                } else if constexpr (std::is_same_v<
+                                         Request, editor::MaskDrawIntent>) {
+                    return draw_mask(document, request, next_node);
                 } else {
                     static_assert(std::is_same_v<
                                   Request,
@@ -380,6 +441,38 @@ MaskEditIntegrationResult plan_mask_edit_integration(
                 }
             },
             edit.request);
+    } catch (const std::bad_alloc&) {
+        return failure(ErrorCode::AllocationFailed);
+    } catch (const std::length_error&) {
+        return failure(ErrorCode::AllocationFailed);
+    }
+}
+
+MaskEditIntegrationResult plan_shape_card(
+    const doc::Root& document, doc::Node card, scene::SceneId scene,
+    scene::MaskShape mask, core::u64 next_node) {
+    try {
+        if (next_node == 0U) {
+            return failure(ErrorCode::InvalidFirstId);
+        }
+        const doc::NodeId target = card.id;
+        if (target == doc::NodeId{} || document.contains(target)) {
+            return failure(ErrorCode::InvalidFirstId, target);
+        }
+        // The mask's ids start past the card's, which the caller drew from
+        // the same counter.
+        next_node = std::max(next_node, target.value() + 1U);
+        const doc::Root with_card = document.set(std::move(card));
+        scene::CreateMaskRequest request{};
+        request.scene = scene;
+        request.target = target;
+        request.order = 0;
+        request.name = drawn_mask_name(mask);
+        request.shape = std::move(mask);
+        auto planned = scene::plan_create_mask(with_card, std::move(request),
+                                               doc::NodeId{next_node});
+        return planned ? finished(std::move(planned).value(), next_node)
+                       : Result::failure(planned.error());
     } catch (const std::bad_alloc&) {
         return failure(ErrorCode::AllocationFailed);
     } catch (const std::length_error&) {

@@ -274,6 +274,113 @@ void EditorShell::Frame::emit_transform(const TransformDelta &delta,
   }
 }
 
+// A shape finished on Program Output. Drawn on a layer it is a mask of that
+// layer, in the layer's own coordinates. Drawn on bare picture it is a new
+// Background card standing where it was drawn, facing the camera, on the
+// plane through what the camera looks at - a rectangle is the card itself,
+// an ellipse or a curve the card with that mask - as one undo step.
+void EditorShell::Frame::author_canvas_shape(
+    const CanvasShape &shape, const scene::Scene &view,
+    const ViewportProjection *projection) {
+  const bool pen = shape.tool == CanvasTool::Pen;
+  if (pen && shape.points.size() < 3U) {
+    return;
+  }
+  if (shape.on_layer) {
+    const ElementInfo *const element = find_element(elements, impl.anchor());
+    if (element == nullptr || element->locked) {
+      return;
+    }
+    scene::MaskShape drawn;
+    const scene::MaskBounds bounds{shape.left, shape.top, shape.right,
+                                   shape.bottom};
+    if (pen) {
+      drawn = scene::BezierMaskShape{shape.points};
+    } else if (shape.tool == CanvasTool::Ellipse) {
+      drawn = scene::EllipseMaskShape{bounds};
+    } else {
+      drawn = scene::RectangleMaskShape{bounds};
+    }
+    queue_mask_edit(MaskEditRequest{MaskDrawIntent{
+        authored_stage.id, element->node,
+        scene::MaskCoordinateSpace::SourceLayer, std::move(drawn)}});
+    return;
+  }
+
+  // The box the shape covers, in canvas pixels. A curve lies inside the
+  // hull of its points and handles.
+  float left = shape.left;
+  float top = shape.top;
+  float right = shape.right;
+  float bottom = shape.bottom;
+  if (pen) {
+    left = right = shape.points.front().x;
+    top = bottom = shape.points.front().y;
+    for (const scene::MaskPointGeometry &point : shape.points) {
+      for (const float x : {point.x, point.in_x, point.out_x}) {
+        left = std::min(left, x);
+        right = std::max(right, x);
+      }
+      for (const float y : {point.y, point.in_y, point.out_y}) {
+        top = std::min(top, y);
+        bottom = std::max(bottom, y);
+      }
+    }
+  }
+  if (!(right - left > 0.5F) || !(bottom - top > 0.5F)) {
+    return;
+  }
+  const scene::Vec3 forward =
+      scene::normalize(view.camera.target - view.camera.eye);
+  const scene::Vec3 across =
+      scene::normalize(scene::cross(forward, view.camera.up),
+                       scene::Vec3{1.0F, 0.0F, 0.0F});
+  const scene::Vec3 upward = scene::cross(across, forward);
+  const auto top_left = impl.program_panel.canvas_point_on_plane(
+      view, projection, view.camera.target, across, upward, left, top);
+  const auto bottom_right = impl.program_panel.canvas_point_on_plane(
+      view, projection, view.camera.target, across, upward, right, bottom);
+  if (!top_left.has_value() || !bottom_right.has_value()) {
+    return;
+  }
+  const float card_width = scene::dot(*bottom_right - *top_left, across);
+  const float card_height =
+      scene::dot(*top_left - *bottom_right, upward);
+  if (!(card_width > 1.0e-4F) || !(card_height > 1.0e-4F)) {
+    return;
+  }
+  AddIntent add{};
+  add.kind = AddKind::Background;
+  add.gesture = impl.next_edit_gesture++;
+  add.scene = authored_stage.id;
+  add.position = (*top_left + *bottom_right) * 0.5F;
+  add.rotation = rotation_turns_of({across, upward, forward * -1.0F});
+  add.scale = scene::Vec3{card_width, card_height, 1.0F};
+  add.select = true;
+  if (pen) {
+    // The same curve as fractions of the card it now fills.
+    scene::BezierMaskShape curve{shape.points};
+    for (scene::MaskPointGeometry &point : curve.points) {
+      for (float *const x : {&point.x, &point.in_x, &point.out_x}) {
+        *x = (*x - left) / (right - left);
+      }
+      for (float *const y : {&point.y, &point.in_y, &point.out_y}) {
+        *y = (*y - top) / (bottom - top);
+      }
+    }
+    add.mask = std::move(curve);
+    add.name = "Shape";
+  } else if (shape.tool == CanvasTool::Ellipse) {
+    add.mask = scene::EllipseMaskShape{};
+    add.name = "Ellipse";
+  } else {
+    add.name = "Rectangle";
+  }
+  result.adds.push_back(std::move(add));
+  impl.history_context = HistoryContext::Scene;
+  impl.semantic_boundary = true;
+}
+
 // Alt+G / Alt+R / Alt+S over the Stage: Blender's clear location, rotation
 // and scale, as one undo step for the whole selection.
 void EditorShell::Frame::clear_transform(TransformTool tool,

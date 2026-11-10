@@ -363,6 +363,18 @@ enum class Icon : core::u8 {
     // Two curves thrown from one point, a particle at the end of one: the
     // paths particles take.
     Paths,
+    // The Program view's tools: an open hand moves the view, a large lens
+    // zooms it, and a frame holding a picture is the whole flat canvas.
+    Hand,
+    ZoomTool,
+    Canvas,
+    // The shape tools: a rectangle, an ellipse, and a pen nib over the
+    // curve it is drawing.
+    RectangleTool,
+    EllipseTool,
+    PenTool,
+    // A ramp's line between its two ends, across a frame: the gradient tool.
+    GradientTool,
 };
 void draw_icon(
     UiDrawList& list,

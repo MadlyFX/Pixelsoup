@@ -2,15 +2,19 @@
 
 #include <mediaserver/editor/preview_resolution.hpp>
 
+#include <mediaserver/editor/canvas_tool.hpp>
 #include <mediaserver/editor/element.hpp>
+#include <mediaserver/editor/fill_handles.hpp>
 #include <mediaserver/editor/gizmo.hpp>
 #include <mediaserver/editor/masks_panel.hpp>
 #include <mediaserver/editor/measurement.hpp>
 #include <mediaserver/editor/model_surface_cache.hpp>
 #include <mediaserver/editor/stage_placement.hpp>
 #include <mediaserver/editor/stage_view.hpp>
+#include <mediaserver/editor/transform_box.hpp>
 #include <mediaserver/editor/transform_tool.hpp>
 #include <mediaserver/doc/ids.hpp>
+#include <mediaserver/gui/canvas_view.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/output/feed_map.hpp>
@@ -98,6 +102,24 @@ enum class EmptyCanvasInteraction : core::u8 {
     Navigate,
 };
 
+// A shape finished with one of the Program view's shape tools. On a layer its
+// coordinates are fractions across and down that layer, which is what a mask
+// of it is authored in; otherwise they are pixels of the canvas shown, for
+// the shell to turn into a card of that shape.
+struct CanvasShape final {
+    CanvasTool tool{CanvasTool::Rectangle};
+    bool on_layer{};
+    // Rectangle and Ellipse: the box drawn.
+    float left{};
+    float top{};
+    float right{};
+    float bottom{};
+    // Pen: the closed curve, in the order its points were placed.
+    std::vector<scene::MaskPointGeometry> points;
+
+    bool operator==(const CanvasShape&) const = default;
+};
+
 // What one viewport frame reported to the shell above it.
 struct ViewportFrame final {
     // Where the render actually landed, letterboxed inside the panel.
@@ -172,6 +194,46 @@ struct ViewportFrame final {
     std::optional<bool> layout_choice;
     // The Stage view's shading menu chose how this view shades.
     std::optional<render::ViewShading> shading_choice;
+
+    // The Program view's transform box round the primary element, and the
+    // handle under the pointer or held. Not visible on Stage, with another
+    // tool, or when the element has nothing to put a box round.
+    TransformBox box{};
+    TransformBoxHandle box_handle{TransformBoxHandle::None};
+    // The Hand or Zoom tool, a middle drag or the wheel moved the view this
+    // frame: nothing was picked and nothing authored.
+    bool navigated{};
+    // A shape tool finished a shape this frame; `shape_drawing` while one is
+    // under way, which is the tool's and not yet anything in the document.
+    std::optional<CanvasShape> shape;
+    bool shape_drawing{};
+    // The Gradient tool is dragging the primary element's fill: what the
+    // fill should now be, whole. Reported each frame of the drag.
+    std::optional<scene::Fill> fill;
+};
+
+// The primary element's box as the Program view's options bar reads it, in
+// the pixels of the canvas the view shows: where its middle is, how long its
+// sides are, and how far it is turned clockwise as seen.
+struct CanvasBoxMetrics final {
+    float x{};
+    float y{};
+    float width{};
+    float height{};
+    float turns{};
+    // False for an element with no flat face: it has a middle and a size on
+    // screen, and no turn of its own to read.
+    bool sides{};
+
+    bool operator==(const CanvasBoxMetrics&) const = default;
+};
+
+enum class CanvasBoxField : core::u8 {
+    X,
+    Y,
+    Width,
+    Height,
+    Rotation,
 };
 
 // One canvas-space corner of a drawable's normalized source plane. Source
@@ -315,6 +377,9 @@ struct MaskViewportFrame final {
     bool selection_changed{};
     MasksPanelSelection selection{};
     std::optional<MaskViewportIntent> intent;
+    // A press landed on the picture and on no mask, point or handle. Stage
+    // ignores it; Program takes it as leaving the mask for its layer.
+    bool pressed_away{};
 };
 
 // Resolves a pointer through the exact letterboxed image rectangle and reads
@@ -396,6 +461,58 @@ class ViewportPanel final {
         const ViewportProjection* projection = nullptr);
 
     [[nodiscard]] bool dragging() const noexcept { return dragging_; }
+
+    // The Program view's tool. Stage has its own toolbar and ignores it.
+    [[nodiscard]] CanvasTool canvas_tool() const noexcept {
+        return canvas_tool_;
+    }
+    void set_canvas_tool(CanvasTool tool) noexcept { canvas_tool_ = tool; }
+    // Whether the picture is fitted to the panel, and how many panel units
+    // one pixel of the canvas takes as last drawn. `set_canvas_scale` zooms
+    // about the panel's middle; `fit_canvas` goes back to the whole picture.
+    [[nodiscard]] bool canvas_fitted() const noexcept { return canvas_fitted_; }
+    [[nodiscard]] float canvas_scale() const noexcept { return canvas_scale_; }
+    void set_canvas_scale(float units_per_canvas_pixel) noexcept;
+    void fit_canvas() noexcept { canvas_fitted_ = true; }
+    // Whether the Program view puts a box round the primary element. Off
+    // while nothing may be authored there, so no handle offers what it
+    // would then refuse.
+    void set_box_enabled(bool enabled) noexcept { box_enabled_ = enabled; }
+    // Whether a shape tool may start a card of its own on bare picture. Off
+    // where the picture is a warped surface, whose pixels do not say where
+    // in the scene a card would stand.
+    void set_card_drawing_enabled(bool enabled) noexcept {
+        card_drawing_enabled_ = enabled;
+    }
+    // A shape is part-drawn: a drag under way, or Pen points placed and not
+    // yet closed. `cancel_shape` drops it.
+    [[nodiscard]] bool shape_in_progress() const noexcept {
+        return shape_drawing_ || !pen_points_.empty();
+    }
+    void cancel_shape() noexcept;
+    // Where canvas pixel (x, y) is on the plane through `origin` spanned by
+    // the unit vectors `right` and `up`, as this view shows it. Empty when
+    // the plane is edge-on or behind the view.
+    [[nodiscard]] std::optional<scene::Vec3>
+    canvas_point_on_plane(const scene::Scene& scene,
+                          const ViewportProjection* projection,
+                          scene::Vec3 origin, scene::Vec3 right,
+                          scene::Vec3 up, float x, float y);
+
+    // The box `draw` would put round `node`, measured in the pixels of the
+    // canvas `projection` (or the scene's own camera) shows. Empty for an
+    // element with nothing to measure, or one behind the view.
+    [[nodiscard]] std::optional<CanvasBoxMetrics>
+    canvas_box_metrics(const scene::Scene& scene, doc::NodeId node,
+                       const ViewportProjection* projection = nullptr);
+    // The gesture that takes one of those measurements to `value`: a move
+    // for X and Y, a resize about the middle for Width and Height, a turn
+    // for Rotation (in turns). Empty when the element cannot take it.
+    [[nodiscard]] std::optional<TransformDelta>
+    canvas_box_edit(const scene::Scene& scene, doc::NodeId node,
+                    const ViewportProjection* projection, CanvasBoxField field,
+                    float value);
+
     [[nodiscard]] PreviewResolution resolution() const noexcept { return resolution_; }
     void set_resolution(PreviewResolution resolution) noexcept {
         if (valid(resolution)) resolution_ = resolution;
@@ -748,6 +865,56 @@ class ViewportPanel final {
     nearest_element_vertex(const scene::Scene& scene, doc::NodeId node,
                            const scene::Mat4& world, scene::Vec3 near);
 
+    // The Program view: its tool, its zoom and pan, and a box handle held.
+    CanvasTool canvas_tool_{CanvasTool::Select};
+    bool box_enabled_{true};
+    bool canvas_fitted_{true};
+    gui::CanvasView canvas_view_{};
+    scene::Canvas canvas_shown_{};
+    gui::Rect canvas_pane_{};
+    float canvas_scale_{1.0F};
+    bool canvas_panning_{};
+    bool canvas_pan_middle_{};
+    float canvas_pan_x_{};
+    float canvas_pan_y_{};
+    // One element's box in the world and on the canvas, for hit-testing,
+    // drawing and the options bar alike.
+    struct LayerBox final {
+        bool sides{};
+        std::array<scene::Vec3, 4U> world{};
+        std::array<scene::CanvasProjection, 4U> canvas{};
+        scene::Vec3 centre{};
+        // Unit vectors across and down the box and out of its face.
+        std::array<scene::Vec3, 3U> basis{};
+    };
+    [[nodiscard]] std::optional<LayerBox>
+    layer_box(const scene::Scene& scene, doc::NodeId node,
+              const ViewportProjection* projection);
+    TransformBoxHandle box_handle_{TransformBoxHandle::None};
+    LayerBox box_press_{};
+    std::array<gui::UiPoint, 4U> box_press_quad_{};
+    BoxPoint box_press_point_{};
+    // A shape tool's drag, and the Pen's points so far, in the space the
+    // shape will be authored in.
+    bool card_drawing_enabled_{true};
+    bool shape_drawing_{};
+    bool shape_cancelled_{};
+    bool shape_on_layer_{};
+    doc::NodeId shape_node_{};
+    gui::UiPoint shape_press_{};
+    std::vector<scene::MaskPointGeometry> pen_points_;
+    bool pen_dragging_{};
+    // The Gradient tool's drag: which handle, the fill as it stood at the
+    // press, and where on the layer the press was.
+    enum class FillDrag : core::u8 { None, Centre, End, Line };
+    FillDrag fill_drag_{FillDrag::None};
+    scene::Fill fill_press_{};
+    BoxPoint fill_press_point_{};
+    doc::NodeId fill_node_{};
+    // The part of `image` the panel shows: all of it on Stage, what the
+    // pane has not cropped in a zoomed Program view.
+    [[nodiscard]] gui::Rect shown_image(const gui::Rect& image) const noexcept;
+
     bool mask_gesture_active_{};
     bool mask_gesture_cancelled_{};
     MaskViewportHit mask_gesture_hit_{MaskViewportHit::None};
@@ -765,8 +932,15 @@ class ViewportPanel final {
     // src/viewport/viewport_frame.hpp).
     struct Frame;
     [[nodiscard]] bool begin_frame(Frame& f);
+    void navigate_canvas(Frame& f);
     void prepare_surfaces(Frame& f);
     void prepare_gizmos(Frame& f);
+    void prepare_transform_box(Frame& f);
+    void run_shape_tool(Frame& f);
+    void draw_shape_tool(Frame& f);
+    void run_gradient_tool(Frame& f);
+    [[nodiscard]] bool press_transform_box(Frame& f);
+    [[nodiscard]] bool drag_transform_box(Frame& f);
     void update_pivot_drag(Frame& f);
     void pick_hovered_surface(Frame& f);
     void resolve_deep_select_menu(Frame& f);

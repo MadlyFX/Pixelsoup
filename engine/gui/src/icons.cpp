@@ -695,6 +695,61 @@ void draw_icon(
         pen.stroke({{-6.0F, 6.0F}, {-2.6F, 3.0F}, {1.4F, 1.6F}, {5.5F, 2.4F}}, 1.4F);
         add_disc(list, UiPoint{center_x + 4.6F, center_y - 4.6F}, 2.0F, color, 10U);
         return;
+    case Icon::Hand:
+        // An open hand: four fingers up from a palm, the thumb out to the
+        // left.
+        pen.stroke({{-3.0F, 1.0F}, {-3.0F, -4.5F}}, 1.6F);
+        pen.stroke({{-0.6F, 0.5F}, {-0.6F, -6.0F}}, 1.6F);
+        pen.stroke({{1.8F, 0.5F}, {1.8F, -5.5F}}, 1.6F);
+        pen.stroke({{4.2F, 1.0F}, {4.2F, -3.5F}}, 1.6F);
+        pen.stroke({{-3.0F, 1.5F}, {-5.8F, -0.8F}}, 1.6F);
+        pen.fill({{-3.8F, 0.5F}, {5.0F, 0.5F}, {4.2F, 4.5F}});
+        pen.fill({{-3.8F, 0.5F}, {4.2F, 4.5F}, {2.6F, 6.3F}});
+        pen.fill({{-3.8F, 0.5F}, {2.6F, 6.3F}, {-1.6F, 6.3F}});
+        return;
+    case Icon::ZoomTool:
+        // A lens filling the square, a plus inside it, the handle running
+        // down to the right.
+        pen.shifted(-1.5F, -1.5F).stroked_arc(4.0F, 0.0F, tau, 1.4F, 20U);
+        pen.stroke({{1.6F, 1.6F}, {6.0F, 6.0F}}, 1.8F);
+        pen.rect(-3.5F, -2.0F, 4.0F, 1.0F);
+        pen.rect(-2.0F, -3.5F, 1.0F, 4.0F);
+        return;
+    case Icon::Canvas:
+        // A frame, a horizon across it and a sun above: the whole picture.
+        pen.stroke({{-6.5F, -4.5F}, {6.5F, -4.5F}, {6.5F, 4.5F}, {-6.5F, 4.5F},
+                    {-6.5F, -4.5F}},
+                   1.4F);
+        pen.stroke({{-5.0F, 2.8F}, {-1.5F, -0.6F}, {1.0F, 1.6F}, {2.8F, 0.2F},
+                    {5.0F, 2.6F}},
+                   1.2F);
+        add_disc(list, UiPoint{center_x + 3.2F, center_y - 2.0F}, 1.2F, color,
+                 8U);
+        return;
+    case Icon::RectangleTool:
+        pen.stroke({{-6.0F, -4.5F}, {6.0F, -4.5F}, {6.0F, 4.5F}, {-6.0F, 4.5F},
+                    {-6.0F, -4.5F}},
+                   1.6F);
+        return;
+    case Icon::EllipseTool:
+        pen.stroked_arc(5.5F, 0.0F, tau, 1.6F, 24U);
+        return;
+    case Icon::PenTool:
+        // A nib pointing down to the left, its slit, and the anchor it has
+        // just set at the end of a short curve.
+        pen.fill({{-6.0F, 6.0F}, {-3.5F, -1.0F}, {1.0F, 3.5F}});
+        pen.stroke({{-3.5F, -1.0F}, {2.5F, -6.0F}, {6.0F, -2.5F}, {1.0F, 3.5F}},
+                   1.4F);
+        pen.shifted(5.0F, 5.0F).dot(3.0F);
+        return;
+    case Icon::GradientTool:
+        pen.stroke({{-6.5F, -5.5F}, {6.5F, -5.5F}, {6.5F, 5.5F}, {-6.5F, 5.5F},
+                    {-6.5F, -5.5F}},
+                   1.2F);
+        pen.stroke({{-3.5F, 2.5F}, {3.5F, -2.5F}}, 1.4F);
+        pen.shifted(-3.5F, 2.5F).dot(3.2F);
+        pen.shifted(3.5F, -2.5F).stroked_arc(1.8F, 0.0F, tau, 1.2F, 10U);
+        return;
     case Icon::Reset: {
         // Most of a ring turning back anticlockwise into its arrowhead, the
         // way Unreal marks a value that differs from its default.

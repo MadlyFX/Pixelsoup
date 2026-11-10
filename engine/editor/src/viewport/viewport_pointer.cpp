@@ -36,9 +36,21 @@ void ViewportPanel::begin_interaction(Frame& f) {
     auto& interaction_canvas = f.interaction_canvas;
     auto& canvas_width = f.canvas_width;
     auto& occluded = f.occluded;
+    // The Program view answers across its whole pane: a box handle may
+    // stand outside the picture, and a zoomed picture is cropped by it.
     const gui::Rect interaction_bounds =
-        occluded || frame.keyboard_transform ? gui::Rect{} : frame.image;
-    const gui::Interaction it = ctx.grab(id_, interaction_bounds);
+        occluded || frame.keyboard_transform || f.navigating
+            ? gui::Rect{}
+            : (role_ == ViewportRole::Program ? f.pane : frame.image);
+    gui::Interaction it = ctx.grab(id_, interaction_bounds);
+    // Out in the bars beside the picture only a box handle answers: a press
+    // there otherwise starts nothing, as it always has.
+    const bool on_picture =
+        role_ != ViewportRole::Program ||
+        frame.image.contains(ctx.pointer_x(), ctx.pointer_y()) ||
+        frame.box_handle != TransformBoxHandle::None;
+    it.hovered = it.hovered && on_picture;
+    it.pressed = it.pressed && on_picture;
     frame.hovered = it.hovered;
     frame.held = it.held;
     frame.pointer =
@@ -111,6 +123,7 @@ void ViewportPanel::handle_press(Frame& f) {
         deep_select_armed_ = false;
         deep_select_open_ = false;
         deep_candidates_.clear();
+        box_handle_ = TransformBoxHandle::None;
 
         // On Stage, Alt+left orbits and left added to a right or middle drag
         // pans: camera chords that never pick, or drag, what is underneath.
@@ -138,6 +151,8 @@ void ViewportPanel::handle_press(Frame& f) {
             if (measure_hover_.has_value()) {
                 measure_.click(*measure_hover_, ctx.shift_held());
             }
+        } else if (press_transform_box(f)) {
+            // A handle of the Program view's box: the selection's own.
         } else if (hovered_surface_axis != GizmoAxis::None &&
                    selected_surface_value != nullptr) {
             frame.surface_picked = selected_surface_value->node;
@@ -382,6 +397,12 @@ void ViewportPanel::drag_element(Frame& f) {
     auto& projection = f.projection;
     auto& view_forward = f.view_forward;
     auto& it = f.it;
+    if (drag_transform_box(f)) {
+        if (!it.held) {
+            drag_snap_target_.reset();
+        }
+        return;
+    }
     if (it.held && dragging_) {
         const float dx = frame.pointer.x - press_x_;
         const float dy = frame.pointer.y - press_y_;
@@ -489,6 +510,7 @@ void ViewportPanel::finish_gesture(Frame& f) {
         dragging_ = false;
         surface_dragging_ = false;
         drag_axis_ = GizmoAxis::None;
+        box_handle_ = TransformBoxHandle::None;
     }
 }
 

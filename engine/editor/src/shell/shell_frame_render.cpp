@@ -195,6 +195,36 @@ void EditorShell::Frame::render_views() {
     }
     if (!program_preview_ok || program_preview_held) next_asset_gate = impl.asset_gate;
 
+    // The Canvas view of the scene on the Stage, through that scene's own
+    // camera: the whole authored canvas, as Program would show it were the
+    // scene on air. Drawn by the transition's second executor, which nothing
+    // else uses outside a transition.
+    canvas_stage_texture = nullptr;
+    if (program_canvas_stage && impl.canvas_display.has_value()) {
+      scene::Scene &drawn_stage =
+          stage_view_scene.has_value() ? *stage_view_scene : stage_scene;
+      auto authored_camera = authored_stage.camera;
+      auto authored_canvas = authored_stage.canvas;
+      std::swap(drawn_stage.camera, authored_camera);
+      std::swap(drawn_stage.canvas, authored_canvas);
+      const rhi::Texture *const rendered_canvas = record_editor_scene(
+          impl.program_to_renderer, commands, drawn_stage, compositor_graph,
+          &impl.frame_media_cache);
+      std::swap(drawn_stage.camera, authored_camera);
+      std::swap(drawn_stage.canvas, authored_canvas);
+      impl.canvas_display->adopt_color(drawn_stage.renderer_settings.color,
+                                       scene::asset_generation_key(drawn_stage));
+      if (rendered_canvas != nullptr &&
+          impl.canvas_display->render(
+              commands, *rendered_canvas,
+              scene::CanvasRect{0U, 0U, program_extent.preview_width,
+                                program_extent.preview_height},
+              impl.program_to_renderer.scene_linear_output())) {
+        canvas_stage_texture = &impl.canvas_display->target();
+      }
+      impl.canvas_preview_valid = canvas_stage_texture != nullptr;
+    }
+
     // The Stage cameras are a render override, not the geometry policy
     // camera. Keep the authored camera/canvas for LOD and shadow selection
     // while the matrices below drive each view. Swap the small camera
@@ -415,6 +445,8 @@ void EditorShell::Frame::render_views() {
     if (!submitted) {
       program_preview_ok = false;
       program_preview_fault = "PROGRAM SUBMIT FAILED";
+      impl.canvas_preview_valid = false;
+      canvas_stage_texture = nullptr;
       impl.stage_assets = {false, "STAGE SUBMIT FAILED",
                            "The Stage image could not be submitted to the GPU."};
       for (std::size_t index = 0U; index < stage_view_count; ++index) {
@@ -575,6 +607,11 @@ void EditorShell::Frame::render_views() {
     program_preview_held = true;
   } else {
     program_preview_fault = "PROGRAM GPU BUSY";
+  }
+  // The same pressure leaves the Preview canvas on its last whole picture.
+  if (!acquired && program_canvas_stage && impl.canvas_preview_valid &&
+      impl.canvas_display.has_value()) {
+    canvas_stage_texture = &impl.canvas_display->target();
   }
   result.renderer_readiness = renderer_readiness;
   result.render_adapter = impl.window.device().adapter_identity();

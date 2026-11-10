@@ -152,7 +152,7 @@ void an_arrowhead_points_along_its_direction() {
 // Every icon draws something, about the point it is given: inside a square
 // a little larger than the 14px it is designed for, and not lopsided.
 void every_icon_draws_about_its_centre() {
-    for (int value = 0; value <= static_cast<int>(gui::Icon::Paths); ++value) {
+    for (int value = 0; value <= static_cast<int>(gui::Icon::GradientTool); ++value) {
         gui::UiDrawList list = fresh_list();
         gui::draw_icon(list, static_cast<gui::Icon>(value), 300.0F, 200.0F,
                        gui::UiColor{1.0F, 1.0F, 1.0F, 1.0F});

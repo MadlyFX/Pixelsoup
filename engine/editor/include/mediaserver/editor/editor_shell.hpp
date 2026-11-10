@@ -200,6 +200,14 @@ struct AddIntent final {
   // placement - its start, its show-frame duration and its first source
   // frame. Empty places the whole source from frame zero.
   std::optional<scene::ClipTiming> timing;
+  // A shape drawn on Program Output with nothing selected: a Background card
+  // of the size drawn, named for its shape, born with `mask` when the shape
+  // is not the card's own rectangle - all in the one undo step - and
+  // selected once it exists. Empty and false for every other add.
+  std::optional<scene::Vec3> scale;
+  std::optional<scene::MaskShape> mask;
+  std::string name;
+  bool select{};
 
   bool operator==(const AddIntent &) const = default;
 };
@@ -481,7 +489,7 @@ struct SelectionSetEditIntent final {
 // rotation likewise land as one shape edit.
 using MaskEditRequest =
     std::variant<MasksPanelIntent, MaskViewportTranslateIntent,
-                 MaskViewportShapeEditIntent>;
+                 MaskViewportShapeEditIntent, MaskDrawIntent>;
 
 struct MaskEditIntent final {
   MaskEditRequest request;
@@ -1146,6 +1154,12 @@ public:
   [[nodiscard]] bool apply_selection_set_recall(
       scene::SceneId scene, std::span<const doc::NodeId> targets,
       std::optional<doc::NodeId> primary = std::nullopt) noexcept;
+
+  // Selects a mask the Director has just authored, once it appears in the
+  // scene this editor shows. Returns false if that scene is not displayed.
+  [[nodiscard]] bool apply_mask_selection(scene::SceneId scene,
+                                          doc::NodeId target,
+                                          doc::NodeId mask) noexcept;
 
   [[nodiscard]] bool apply_key_edit_selection(
       scene::SceneId scene,

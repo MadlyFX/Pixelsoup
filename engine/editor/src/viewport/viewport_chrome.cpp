@@ -221,6 +221,14 @@ void ViewportPanel::draw_gizmos(Frame& f) {
             }
         }
     }
+    if (role_ == ViewportRole::Program) {
+        if (canvas_tool_ == CanvasTool::Select) {
+            draw_transform_box(list, ctx.theme(), frame.box, frame.box_handle,
+                               dragging_ ? box_handle_
+                                         : TransformBoxHandle::None);
+        }
+        draw_shape_tool(f);
+    }
     if (keyboard_.active) {
         draw_keyboard_transform(ctx, list, frame.image, scene, keyboard_centre,
                                 keyboard_reading);

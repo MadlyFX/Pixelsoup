@@ -1103,6 +1103,13 @@ PhaseExit DirectorShowLoop::apply_group_selection_and_mask_requests(OperatorFram
             }
             next_new_node = planned.value().next_node;
             project_message = "MASK EDIT APPLIED";
+            // A mask drawn on the picture is selected once the editor has
+            // it, so its handles are there to refine it with.
+            if (const auto *const drawn =
+                    std::get_if<editor::MaskDrawIntent>(&request.request)) {
+                static_cast<void>(editor->apply_mask_selection(
+                    drawn->scene, drawn->target, planned.value().mask));
+            }
         }
     }
     return std::nullopt;
@@ -1379,7 +1386,35 @@ PhaseExit DirectorShowLoop::apply_property_and_effect_requests(OperatorFrame &op
         // graph takes back everything the drop did.
         const cmd::UndoContextId context{add.graph_layer.has_value() ? 6U
                                                                      : 2U};
-        if (!schedule_add(
+        if (add.mask.has_value()) {
+            // A shape drawn on Program: the card and the mask that gives it
+            // its shape are one replacement document, so they arrive and
+            // undo together.
+            auto planned = plan_shape_card(
+                scheduler.projected_document(),
+                make_added_node(id, add, transport.anchor().rate,
+                                scene_model.renderer_settings()
+                                    .icvfx.camera_defaults),
+                add.scene, *add.mask, next_new_node);
+            if (!planned) {
+                if (planned.error().code ==
+                    scene::MaskAuthoringErrorCode::AllocationFailed) {
+                    std::cerr << "could not allocate a drawn shape\n";
+                    return 1;
+                }
+                project_message =
+                    mask_edit_error_message(planned.error().code);
+                continue;
+            }
+            if (!scheduler.schedule_document_replace(
+                    planned.value().document, context,
+                    cmd::TransactionId{add.gesture}, frame)) {
+                std::cerr << "could not author a drawn shape for frame "
+                          << frame.value() << '\n';
+                return 1;
+            }
+            next_new_node = planned.value().next_node;
+        } else if (!schedule_add(
                 scheduler, add, id, frame,
                 transport.anchor().rate,
                 scene_model.renderer_settings()
@@ -1388,6 +1423,11 @@ PhaseExit DirectorShowLoop::apply_property_and_effect_requests(OperatorFrame &op
                 << "could not author an element add for frame "
                 << frame.value() << '\n';
             return 1;
+        }
+        if (add.select) {
+            const doc::NodeId made[]{id};
+            static_cast<void>(
+                editor->apply_selection_set_recall(add.scene, made, id));
         }
         if (add.graph_layer.has_value()) {
             editor::CompositorAddIntent layer = *add.graph_layer;

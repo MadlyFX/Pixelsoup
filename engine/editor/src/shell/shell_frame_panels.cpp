@@ -67,6 +67,25 @@ void EditorShell::Frame::prepare_panels() {
     view.panel.set_precise_work(precise_media_work);
   }
   impl.program_panel.set_precise_work(precise_media_work);
+  // A mask drawn a moment ago is selected the first frame it is here.
+  if (impl.pending_mask_selection.has_value()) {
+    const MasksPanelSelection &wanted = *impl.pending_mask_selection;
+    const bool arrived =
+        wanted.scene == authored_stage.id &&
+        std::any_of(authored_stage.masks.begin(), authored_stage.masks.end(),
+                    [&](const scene::MaskInstance &mask) {
+                      return mask.source == wanted.mask &&
+                             mask.target == wanted.target;
+                    });
+    if (arrived) {
+      impl.mask_selection = wanted;
+      impl.pending_mask_selection.reset();
+    } else if (impl.pending_mask_frames == 0U) {
+      impl.pending_mask_selection.reset();
+    } else {
+      --impl.pending_mask_frames;
+    }
+  }
   const ElementInfo *const mask_target_element =
       find_element(elements, impl.anchor());
   const bool mask_target_supported =
@@ -93,7 +112,26 @@ void EditorShell::Frame::prepare_panels() {
   // layer the picture does not contain would be authored somewhere nobody is
   // looking. A running dissolve is excluded outright - the picture is a mix of
   // two committed scenes and belongs to neither.
-  mask_program_active = mask_stage_active && authored_stage.id == switcher.program_scene &&
+  // The Canvas view of a Preview scene shows the Stage's own scene, so there
+  // the two panels agree again.
+  //
+  // Program is in the mask's domain only while one of the target's masks is
+  // selected and Select is the tool: choosing a layer and shaping its mask
+  // are then two states of one tool rather than two modes of the panel, and
+  // Esc or a click away from the mask goes back to the layer. A shape tool
+  // draws new masks instead of editing the selected one.
+  // With no Stage scene of its own the Stage is showing Program's.
+  const bool stage_shows_program =
+      switcher.stage_scene == nullptr ||
+      authored_stage.id == switcher.program_scene;
+  const bool target_mask_selected =
+      mask_target_supported && impl.mask_selection.mask != doc::NodeId{} &&
+      impl.mask_selection.scene == mask_target.scene &&
+      impl.mask_selection.target == mask_target.target;
+  mask_program_active =
+      target_mask_selected &&
+      impl.program_panel.canvas_tool() == CanvasTool::Select &&
+      (stage_shows_program || program_canvas_stage) &&
       !switcher.transition_active;
   // Compositor nodes are scene-scoped, so the graph on screen is the graph of
   // the scene on the Stage and editing it never reaches Program. The one thing

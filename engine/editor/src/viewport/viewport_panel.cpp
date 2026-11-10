@@ -54,6 +54,9 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     }
     prepare_surfaces(f);
     prepare_gizmos(f);
+    prepare_transform_box(f);
+    run_shape_tool(f);
+    run_gradient_tool(f);
     update_pivot_drag(f);
     pick_hovered_surface(f);
     resolve_deep_select_menu(f);
@@ -69,7 +72,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     // The editor chrome is a clipped 2D pass over the zero-copy scene image.
     // Program stays clean except for selection outlines; Stage adds the spatial
     // guides an operator needs to author the scene.
-    ctx.push_clip(f.result.image);
+    ctx.push_clip(shown_image(f.result.image));
     draw_overlays(f);
     draw_gizmos(f);
     ctx.pop_clip();
@@ -116,13 +119,28 @@ bool ViewportPanel::begin_frame(Frame& f) {
         image_bounds.height -= stage_toolbar_height;
     }
 
+    f.pane = image_bounds;
+    f.interaction_canvas = interaction_canvas;
+    if (role_ == ViewportRole::Program) {
+        navigate_canvas(f);
+    }
     // Letterboxed to the canvas, never stretched: a pixel the operator clicks
-    // has to be the pixel the renderer drew, or picking lies.
-    frame.image =
-        ctx.image_fit(image_bounds, target, canvas_width / canvas_height);
+    // has to be the pixel the renderer drew, or picking lies. A zoomed
+    // Program view keeps that shape and is cropped by its pane.
+    if (role_ == ViewportRole::Program && !canvas_fitted_) {
+        frame.image = canvas_view_.to_screen(
+            image_bounds, gui::Rect{0.0F, 0.0F, canvas_width, canvas_height});
+        ctx.push_clip(image_bounds);
+        ctx.image(frame.image, target);
+        ctx.pop_clip();
+    } else {
+        frame.image =
+            ctx.image_fit(image_bounds, target, canvas_width / canvas_height);
+    }
     if (frame.image.width <= 0.0F || frame.image.height <= 0.0F) {
         return false;
     }
+    canvas_scale_ = frame.image.width / canvas_width;
     // The view's own menu sits over the image's top-right corner, so the
     // pointer over it picks nothing underneath.
     const gui::Rect view_menu =

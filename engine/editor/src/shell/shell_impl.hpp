@@ -109,6 +109,14 @@ struct EditorShell::Impl final {
   render::ProjectionMeshWarp program_to_warp;
   render::SceneMixer program_mixer;
   render::OutputTransform program_display;
+  // The Canvas view of a scene that is not on Program: its display image,
+  // made the first time that view is shown. The picture itself is drawn by
+  // the transition's second executor, which is idle outside a transition.
+  std::optional<render::OutputTransform> canvas_display;
+  // That image is a complete picture of this scene, kept on a frame whose
+  // command acquisition is missed, as Program keeps its own.
+  bool canvas_preview_valid{};
+  scene::SceneId canvas_preview_scene{};
   render::CompositorSceneExecutor stage_renderer;
   render::OutputTransform stage_display;
   render::OutputProjectionCache program_projection_cache;
@@ -308,6 +316,11 @@ struct EditorShell::Impl final {
   // operation/point within that target and is shared only by Masks + Stage.
   MasksPanelSelection mask_selection{};
   bool mask_coverage_visible{};
+  // A mask the Director has authored and asked to have selected. Its node
+  // reaches this editor a frame or more later, so the request waits here for
+  // the first projected scene that holds it.
+  std::optional<MasksPanelSelection> pending_mask_selection;
+  core::u32 pending_mask_frames{};
   // Group ids are allocated at the Director boundary. Keep the exact child
   // set briefly so the first projected frame containing their new parent can
   // promote that parent to the canonical selection.
@@ -322,6 +335,11 @@ struct EditorShell::Impl final {
   core::u32 pending_new_group_frames{};
   std::optional<doc::NodeId> stage_surface_selection;
   std::optional<doc::NodeId> program_output_map_node;
+  // Program shows the whole authored canvas, flat, rather than one output's
+  // connector image: the picture 2D work is done on.
+  bool program_canvas_view{};
+  // The Program options bar's position, size and rotation fields.
+  NumberField program_fields;
   scene::SceneId displayed_scene{};
   std::size_t scene_list_offset{};
   std::optional<scene::SceneId> pending_scene_delete;

@@ -28,6 +28,11 @@ struct EditorShell::Frame final {
   void draw_panel(gui::PanelId panel, const gui::Rect &bounds);
   void draw_stage_panel(const gui::Rect &bounds);
   void draw_program_panel(const gui::Rect &bounds);
+  void draw_program_options(const gui::Rect &bar,
+                            const scene::Scene &authored,
+                            const scene::Scene &view,
+                            const ViewportProjection *projection,
+                            bool picture_ok);
   void draw_scene_panel(const gui::Rect &bounds);
   void draw_selection_sets_panel(const gui::Rect &bounds);
   void draw_masks_panel(const gui::Rect &bounds);
@@ -109,6 +114,8 @@ struct EditorShell::Frame final {
   void draw_placeholder(const gui::Rect &bounds, std::string_view title,
                         std::span<const std::string_view> rows);
   void queue_mask_edit(MaskEditRequest request);
+  void author_canvas_shape(const CanvasShape &shape, const scene::Scene &view,
+                           const ViewportProjection *projection);
   void run_color_sampler(gui::UiId id, const gui::Rect &image,
                          const rhi::Texture &target,
                          bool pointer_available = true);
@@ -171,6 +178,11 @@ struct EditorShell::Frame final {
   // the scene itself.
   std::optional<scene::Scene> program_interaction_scene{};
   const output::OutputMap *program_output{};
+  // Program's Canvas view is showing the scene on the Stage rather than the
+  // one on air: the two differ (Preview) and no transition holds the
+  // executor it draws with. Its picture, once there is one.
+  bool program_canvas_stage{};
+  const rhi::Texture *canvas_stage_texture{};
   ProgramOutputExtent program_extent{};
   std::size_t stage_view_count{};
   std::array<PreviewExtent, 4U> stage_previews{};

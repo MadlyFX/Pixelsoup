@@ -226,7 +226,8 @@ if(BUILD_TESTING)
     mediaserver_server_test(tracker_listener)
     mediaserver_server_test(transport_command TEST transport_commands)
     mediaserver_server_test(waveform_generation_service)
-    # mask_edit_integration.cpp has no tests yet.
+    # Shapes drawn on Program Output: a mask on a layer, a card with its mask.
+    mediaserver_server_test(mask_edit_integration)
 
     add_executable(mediaserver_proxy_encoder_benchmark
         tests/proxy_encoder_benchmark.cpp)

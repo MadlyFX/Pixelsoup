@@ -93,12 +93,15 @@ bool EditorShell::Frame::start() {
     impl.scene_selection.clear();
     impl.selection_set_selection = {};
     impl.mask_selection = {};
+    impl.pending_mask_selection.reset();
     impl.mask_coverage_visible = false;
     impl.color_sample_request.reset();
     impl.pending_group_members.clear();
     impl.pending_group_frames = 0U;
     impl.stage_surface_selection.reset();
     impl.program_output_map_node.reset();
+    impl.program_canvas_view = false;
+    impl.program_panel.fit_canvas();
     impl.pending_scene_delete.reset();
     impl.program_projection_cache.reset();
     impl.program_panel.reset_project_state();
@@ -305,6 +308,7 @@ void EditorShell::Frame::prepare_views() {
     impl.scene_selection.clear();
     impl.selection_set_selection = {};
     impl.mask_selection = {};
+    impl.pending_mask_selection.reset();
     impl.mask_coverage_visible = false;
     impl.pending_group_members.clear();
     impl.pending_group_frames = 0U;
@@ -419,8 +423,20 @@ void EditorShell::Frame::prepare_views() {
 
   // Both scene targets are rendered before the UI pass. They belong to the
   // same device as UiWindow, so the panels sample them directly with no copy.
-  program_output = selected_program_output(feed_map, impl.program_output_map_node);
+  program_output = impl.program_canvas_view
+                       ? nullptr
+                       : selected_program_output(feed_map,
+                                                 impl.program_output_map_node);
   program_extent = program_output_extent(scene, program_output, hardware_map);
+  // The Canvas view follows the Stage into Preview: the scene being built
+  // there is the one its layers are moved about on. A transition needs both
+  // Program executors, and a scene with a canvas of another shape would not
+  // fit the targets, so either leaves the view on Program.
+  program_canvas_stage =
+      impl.program_canvas_view && switcher.stage_scene != nullptr &&
+      authored_stage.id != switcher.program_scene &&
+      !switcher.transition_active && !switcher.loop_fade_active &&
+      authored_stage.canvas == scene.canvas;
   const PreviewExtent program_preview = preview_extent(
       program_extent.preview_width, program_extent.preview_height,
       impl.program_panel.resolution());
@@ -483,6 +499,7 @@ void EditorShell::Frame::prepare_views() {
   }
   if (impl.program_preview_width != program_extent.preview_width ||
       impl.program_preview_height != program_extent.preview_height) {
+    impl.canvas_preview_valid = false;
     impl.program_preview_valid = false;
     impl.program_preview_width = program_extent.preview_width;
     impl.program_preview_height = program_extent.preview_height;
@@ -499,6 +516,27 @@ void EditorShell::Frame::prepare_views() {
                                 program_extent.preview_height) &&
       impl.program_display.resize(device, program_extent.preview_width,
                                   program_extent.preview_height);
+  if (program_canvas_stage && program_targets_ready) {
+    if (!impl.canvas_display.has_value()) {
+      if (auto display = render::OutputTransform::create(
+              device, program_extent.preview_width,
+              program_extent.preview_height)) {
+        impl.canvas_display.emplace(std::move(display).value());
+      }
+    }
+    if (!impl.canvas_display.has_value() ||
+        !impl.canvas_display->resize(device, program_extent.preview_width,
+                                     program_extent.preview_height)) {
+      program_canvas_stage = false;
+    }
+  } else {
+    program_canvas_stage = false;
+  }
+  if (!program_canvas_stage ||
+      impl.canvas_preview_scene != authored_stage.id) {
+    impl.canvas_preview_valid = false;
+    impl.canvas_preview_scene = authored_stage.id;
+  }
   for (std::size_t index = 0U; index < stage_view_count; ++index) {
     stage_targets_ready[index] =
         stage_renderer_of(index).resize(device, stage_previews[index].width,

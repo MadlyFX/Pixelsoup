@@ -192,6 +192,18 @@ struct MaskPointDeleteIntent final {
   bool operator==(const MaskPointDeleteIntent &) const = default;
 };
 
+// A shape drawn on the picture with a shape tool: a mask of exactly that
+// shape on `target`, where the panel's own Create makes a default one.
+struct MaskDrawIntent final {
+  scene::SceneId scene{};
+  doc::NodeId target{};
+  scene::MaskCoordinateSpace coordinate_space{
+      scene::MaskCoordinateSpace::SourceLayer};
+  scene::MaskShape shape{scene::RectangleMaskShape{}};
+
+  bool operator==(const MaskDrawIntent &) const = default;
+};
+
 using MasksPanelIntent = std::variant<
     MaskCreateIntent, MaskRenameIntent, MaskEnabledIntent, MaskCombineIntent,
     MaskInvertIntent, MaskScalarEditIntent, MaskBoundsEditIntent,

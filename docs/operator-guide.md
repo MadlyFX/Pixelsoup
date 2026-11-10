@@ -288,20 +288,134 @@ timeline - the playhead and its transport buttons, including step, jump, and
 go-to-start - drives Preview alone. The show keeps running underneath at its
 own frame, and the status bar reads `PREVIEW  PGM <frame>` so the live position
 is always visible. The Program viewport and Output Monitor keep reporting the
-live show, never the rehearsal. Preview's playhead is never replicated and
+live show, never the rehearsal - except Program Output's **Canvas** view, which
+follows the Stage into Preview and says so (see
+[Working in 2D on Program Output](#working-in-2d-on-program-output)).
+Preview's playhead is never replicated and
 never written to the project: render nodes only ever hear about Program.
 
+### Working in 2D on Program Output
+
+Program Output is also where layers are laid out flat, the way an editing or
+compositing program's viewer works. Three things make it so: a tool palette
+down its left edge, a box round the selected layer, and a bar of numbers above
+the picture.
+
+**Tools.** Each has a key while the pointer is over the picture.
+
+| Tool | Key | What it does |
+| --- | --- | --- |
+| Select | V | Click a layer to select it; drag it to move it; use its box to resize and turn it |
+| Hand | H | Drag to move the picture inside the panel |
+| Zoom | Z | Click to zoom in on a point, Alt+click to zoom out |
+| Rectangle | R | Drag out a rectangle |
+| Ellipse | E | Drag out an ellipse |
+| Pen | P | Click out a closed curve |
+| Gradient | G | Drag a Background's gradient about on the picture |
+
+The wheel zooms on the pointer and a middle drag moves the picture with any
+tool. **F** fits the picture to the panel again. The zoom button in the output
+bar reads `Fit` or a percentage of the output's own pixels, and its menu offers
+Fit, 50%, 100%, 200% and 400%. Zooming and panning change only this panel:
+nothing about the show moves.
+
+**The box.** With Select, the selected layer is outlined with a handle at each
+corner and side and one on a stalk above it.
+
+- Drag a corner to resize both ways, a side to resize one way. The opposite
+  corner or side stays where it is; hold **Alt** to resize about the middle,
+  and **Shift** on a corner to keep the layer's proportions.
+- Drag the handle on the stalk to turn the layer. **Shift** turns in
+  fifteen-degree steps. A flat layer turns in its own plane, so it stays
+  facing the way it faced.
+- Drag the layer itself to move it, as before.
+
+A flat layer - media, a plane, a Background, a track's screen - has its own
+outline as its box, which leans and foreshortens with it. A model or other
+solid gets a box round what it covers on the picture, with corner handles that
+resize it as a whole. The box writes the same position, rotation and scale the
+Stage gizmo and Properties do, keys them when Auto-key is on and the value is
+animated, and one drag is one undo step. With several layers selected the box
+is round the one selected last and the others follow it.
+
+**Shapes.** Rectangle, Ellipse and Pen draw one of two things, as they do in
+a compositing program:
+
+- **On a selected flat layer**, the shape is a mask of that layer, exactly
+  where it was drawn, in the layer's own coordinates - so it stays on the
+  layer when the layer moves. The new mask is selected, so switching to Select
+  shows its handles to refine it; drawing again adds another mask.
+- **With nothing selected**, the shape is a new Background card standing where
+  it was drawn, facing the camera, on the plane through the point the camera
+  looks at. A rectangle is the card itself. An ellipse or a pen curve is a
+  card the size of the shape with that mask on it. The card and its mask are
+  one undo step, and the card is selected once it exists, named `Rectangle`,
+  `Ellipse` or `Shape`. It is an ordinary Background: its fill, its box and
+  its masks are edited like any other.
+
+Rectangle and Ellipse are a drag: **Shift** keeps the shape square or round,
+**Alt** draws it from its middle, and **Esc** during the drag drops it. With
+the Pen, click to place points and drag from a click to pull that point's
+handles out into a curve. Click the first point again, or press **Enter**, to
+close the shape - it takes at least three points. **Backspace** takes the last
+point back and **Esc** drops the whole curve.
+
+A new card can be drawn on the Canvas view, on an unmapped Program picture and
+on an output that is a crop of the canvas. On a physical or warped surface the
+picture's pixels do not say where in the scene a card would stand, so there the
+shape tools only draw masks on a selected layer.
+
+**Gradient.** With a Background selected whose fill is Linear or Radial, the
+Gradient tool draws the fill's own line on the picture: a handle at its middle
+and one at its far end (colour B), or the rim of a radial fill.
+
+- Drag the middle to move the gradient.
+- Drag the end to turn it and change its length, or a radial fill's radius.
+- Drag anywhere else on the card to draw it afresh: colour A where the drag
+  starts, colour B where it ends; for a radial fill, the centre and then the
+  rim.
+
+The handles are where the renderer puts the ramp, so what moves under the
+pointer is the picture. These are the same Angle, Centre and Size that
+Properties shows; a fill of one colour has no handles until it is made a
+gradient there.
+
+**The options bar** shows where the selected layer's middle is on the picture
+(`X`, `Y`), how long its sides are (`W`, `H`) and how far it is turned (`R`, in
+degrees clockwise), all in the pixels of the view shown. Drag a number or
+click it to type. The amber arrows put position, scale and rotation back to
+their defaults. A locked layer shows its numbers and takes no edits.
+
+**Which picture.** The button at the left of the output bar goes round the
+outputs and then to **Canvas**: the whole authored canvas laid flat, with no
+crop or warp. On an output, the box and the numbers follow that output's own
+projection, so a handle is where the layer is on that connector's picture; on
+a curved or warped surface the box's sides stay straight between its corners
+while the picture bends. Canvas is the view to lay things out in.
+
+Canvas shows the scene on the Stage. While that is the scene on air it is the
+live picture, and an edit is live. In Preview it is the scene being built: the
+button reads `Canvas - Preview`, the footer says `The scene in Preview, not on
+air` and the state pill reads `Preview`, and nothing done there reaches the
+wall until a Take. During a transition the view goes back to Program, and
+Select is unavailable until it finishes.
+
 **Masking on the output.** A matte is judged against the picture it is cutting,
-which is the one on the wall rather than the one in a perspective viewport. With
-the Masks panel open on a target, the Program Output panel becomes a second
-authoring surface for it: the same masks, the same selection, the same undo
-gesture as the Stage, drawn over the connector image. Its overlay resolves
-through the output's own projection, so a mask over a canvas slice registers
-with the crop and one over a physical surface registers with the warp, and the
-panel says `PROGRAM OUTPUT  /  MASKS` while it is doing so.
-Both mask-authoring viewports display `Can't select while masking`, making
-the temporary interaction domain explicit instead of leaving an ordinary
-selection click to appear broken.
+which is the one on the wall rather than the one in a perspective viewport.
+Program Output is a second authoring surface for a layer's masks: the same
+masks, the same selection, the same undo gesture as the Stage, drawn over the
+connector image. Its overlay resolves through the output's own projection, so a
+mask over a canvas slice registers with the crop and one over a physical
+surface registers with the warp.
+
+The two panels enter that state differently. The Stage edits masks for as long
+as the Masks tab is in front, and says `Can't select while masking`. Program
+Output edits a mask only while one of the selected layer's masks is selected
+and **Select** is the tool - select it by drawing it, by clicking its row in
+Masks, or by clicking it on the Stage. The options bar then reads `Editing a
+mask`, and a click away from the mask, or **Esc**, goes back to the layer and
+its box. Choosing a layer and shaping its mask are two states of one tool
+there, not two modes of the panel.
 
 Primitive masks are transformed on the picture itself. Selecting a rectangle
 or ellipse exposes four resize handles and a rotation handle; dragging the body
@@ -319,7 +433,8 @@ planes and media - have one surface for a mask to sit on; a mask on a volume or
 imported model reports `SOURCE MASK MAPPING UNAVAILABLE` on Stage, and the
 render refuses the frame rather than cut it somewhere arbitrary.
 
-Program Output authors masks only while the Stage is on the Program scene. In
+Program Output authors masks only while it is showing the Stage's scene: the
+Program scene, or any scene in its Canvas view. On an output in
 Preview the two panels are showing different scenes, and a mask dragged over a
 picture that does not contain the layer it belongs to would be authored
 somewhere nobody is looking; the panel stays an ordinary output view until the

@@ -1170,6 +1170,21 @@ placed_clip_duration(const editor::AddIntent &add,
                 std::string{scene::schema::position_z},
                 real(static_cast<double>(add.position->z)));
         }
+        if (add.scale.has_value()) {
+            node.properties.insert_or_assign(
+                std::string{scene::schema::scale_x},
+                real(static_cast<double>(add.scale->x)));
+            node.properties.insert_or_assign(
+                std::string{scene::schema::scale_y},
+                real(static_cast<double>(add.scale->y)));
+            node.properties.insert_or_assign(
+                std::string{scene::schema::scale_z},
+                real(static_cast<double>(add.scale->z)));
+        }
+        if (!add.name.empty()) {
+            node.properties.insert_or_assign(
+                std::string{scene::schema::group_name}, text(add.name));
+        }
         if (add.rotation.has_value()) {
             node.properties.insert_or_assign(
                 std::string{scene::schema::rotation_yaw},

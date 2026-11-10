@@ -243,6 +243,20 @@ bool EditorShell::apply_selection_set_recall(
   }
 }
 
+bool EditorShell::apply_mask_selection(scene::SceneId wanted_scene,
+                                       doc::NodeId target,
+                                       doc::NodeId mask) noexcept {
+  Impl &impl = *impl_;
+  if (wanted_scene == scene::SceneId{} ||
+      wanted_scene != impl.displayed_scene || mask == doc::NodeId{}) {
+    return false;
+  }
+  impl.pending_mask_selection =
+      MasksPanelSelection{wanted_scene, target, mask, std::nullopt};
+  impl.pending_mask_frames = 240U;
+  return true;
+}
+
 bool EditorShell::apply_key_edit_selection(
     scene::SceneId wanted_scene,
     std::span<const TimelineKeyAddress> selection) noexcept {

@@ -69,6 +69,22 @@ struct ViewportPanel::Frame final {
     GizmoAxis hovered_surface_axis{GizmoAxis::None};
     bool hovered_surface_yaw{};
 
+    // Set by begin_frame(): the pane the image is placed in, and whether
+    // the Hand or Zoom tool owns the pointer this frame.
+    gui::Rect pane{};
+    bool navigating{};
+
+    // Set by prepare_transform_box(): the primary element's box in the
+    // world, for the press that takes hold of one of its handles.
+    std::optional<ViewportPanel::LayerBox> layer_box;
+
+    // Set by run_shape_tool(): what the shape tool has drawn so far, in
+    // panel pixels - its outlines, the Pen's points, and whether a click
+    // here would close the Pen's curve.
+    std::vector<std::vector<gui::UiPoint>> tool_outlines;
+    std::vector<gui::UiPoint> tool_points;
+    bool tool_closes{};
+
     // Set by pick_hovered_surface(): the unlocked surface under the pointer.
     const viewport::ProjectedSurface* hit_surface{};
 
