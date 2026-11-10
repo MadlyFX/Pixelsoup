@@ -1536,8 +1536,9 @@ SdlPresenter::present_recorded(const RecordFrame &record,
             return show::PresenterStatus::Failed;
         }
     } else {
-        // The window is not showing. The frame was still composited, which
-        // keeps the offscreen target and the timing honest.
+        // The window is not showing, or the display has not taken the
+        // previous flip yet. The frame was still composited, which keeps the
+        // offscreen target and the timing honest.
         ++timing_.skipped_presents;
         status = show::PresenterStatus::Skipped;
     }

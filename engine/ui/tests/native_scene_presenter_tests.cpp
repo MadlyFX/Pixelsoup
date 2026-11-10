@@ -128,7 +128,15 @@ void buffered_output_keeps_presenting_with_offline_media() {
   for (int i = 0; i < 3; ++i) {
     frame.control_frame = frame.show_frame = static_cast<mediaserver::core::u64>(i + 10);
     frame.media.front().world = scene::translation({static_cast<float>(i) * 0.2F, 0, 0});
-    PRESENTER_CHECK(presenter.present(frame, scene::whole(frame.canvas)) == show::PresenterStatus::Presented);
+    // Outputs flip on the display refresh, so presenting faster than it can
+    // find the display not ready yet: that frame is composited but Skipped.
+    const auto shown_by = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    auto status = presenter.present(frame, scene::whole(frame.canvas));
+    while (status == show::PresenterStatus::Skipped && std::chrono::steady_clock::now() < shown_by) {
+      std::this_thread::sleep_for(std::chrono::milliseconds{2});
+      status = presenter.present(frame, scene::whole(frame.canvas));
+    }
+    PRESENTER_CHECK(status == show::PresenterStatus::Presented);
     const auto image = presenter.readback();
     PRESENTER_CHECK(image);
     PRESENTER_CHECK(image.digest != previous);
@@ -198,8 +206,10 @@ void two_native_outputs_publish_bakes_together_and_a_late_output_holds() {
       status = output.present(frame, scene::whole(frame.canvas));
       // Busy means no candidate was recorded. An asset-deferred submission,
       // however, must remain observable to the publication assertions below.
-      if (status != show::PresenterStatus::Deferred ||
-          output.timing().frames != submissions)
+      // Skipped means the display had not taken the previous flip yet.
+      if (status != show::PresenterStatus::Skipped &&
+          (status != show::PresenterStatus::Deferred ||
+           output.timing().frames != submissions))
         break;
       std::this_thread::sleep_for(std::chrono::milliseconds{1});
     } while (std::chrono::steady_clock::now() < deadline);
