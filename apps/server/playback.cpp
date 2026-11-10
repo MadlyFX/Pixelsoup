@@ -144,6 +144,9 @@ int run_node_playback(net::NodeSessionService &service,
         DeployedOutput output;
         std::unique_ptr<show::Presenter> presenter;
         OutputFrameSubmission submission{};
+        // This presenter's failure count when the node last looked, so a new
+        // failure is attributed to the output that had it.
+        core::u64 seen_failures{};
     };
     std::vector<NodeOutputPresenter> output_presenters;
     output_presenters.push_back(NodeOutputPresenter{
@@ -238,6 +241,9 @@ int run_node_playback(net::NodeSessionService &service,
     core::u64 node_missed_poses = 0U;
     core::u64 since_status = 0U;
     core::u64 present_failures = 0U;
+    // The latest failed frame's cause, reported to the Director so the
+    // Output Monitor can say why this node is holding its picture.
+    core::PresentFailure node_present_failure{};
     auto last_outcome = show::FrameCommitOutcome::Idle;
     auto closed = false;
 
@@ -521,6 +527,7 @@ int run_node_playback(net::NodeSessionService &service,
         sync.missed_frames = missed_boundaries;
         sync.late_frames = late_boundaries;
         sync.held_frames = policy_held_boundaries;
+        sync.present_failure = node_present_failure;
         if (previous == net::RuntimeBarrierState::Joined &&
             sync.barrier != net::RuntimeBarrierState::Joined) {
             ++barrier_loss_transitions;
@@ -548,7 +555,17 @@ int run_node_playback(net::NodeSessionService &service,
             node_output_sync.barrier_presents_in_sync !=
                 published_output_sync.barrier_presents_in_sync ||
             node_output_sync.reference_clock !=
-                published_output_sync.reference_clock;
+                published_output_sync.reference_clock ||
+            // A node starting or stopping failing, or failing differently,
+            // is told at once; the running count rides the status cadence.
+            node_output_sync.present_failure.ongoing !=
+                published_output_sync.present_failure.ongoing ||
+            node_output_sync.present_failure.step !=
+                published_output_sync.present_failure.step ||
+            node_output_sync.present_failure.refusal !=
+                published_output_sync.present_failure.refusal ||
+            node_output_sync.present_failure.map_node !=
+                published_output_sync.present_failure.map_node;
         if (!force && !changed) {
             return;
         }
@@ -1457,12 +1474,42 @@ int run_node_playback(net::NodeSessionService &service,
             publish_runtime_adoption();
             closed = true;
             break;
-        case show::PresenterStatus::Failed:
+        case show::PresenterStatus::Failed: {
             ++present_failures;
             if (at_boundary) {
                 missed_boundaries += report.boundaries;
             }
+            // The output whose own count moved had the failure and knows
+            // where. None moving means it refused before drawing anything:
+            // the output was not set up for what it was given.
+            core::PresentFailure latest{};
+            latest.step = core::PresentStep::Setup;
+            for (NodeOutputPresenter &slot : output_presenters) {
+                const core::PresentFailure seen =
+                    slot.presenter->present_failure();
+                if (seen.failed_frames != slot.seen_failures) {
+                    slot.seen_failures = seen.failed_frames;
+                    latest = seen;
+                }
+            }
+            latest.failed_frames = present_failures;
+            latest.ongoing = true;
+            const bool changed =
+                !node_present_failure.ongoing ||
+                latest.step != node_present_failure.step ||
+                latest.refusal != node_present_failure.refusal ||
+                latest.map_node != node_present_failure.map_node;
+            node_present_failure = latest;
+            if (changed) {
+                // One line per change, not per frame: a refusal repeats on
+                // every frame that asks for the same work.
+                std::cerr << "node " << options.node_index
+                          << " cannot draw its frames: "
+                          << core::present_failure_text(latest) << '\n';
+                publish_output_sync(false);
+            }
             break;
+        }
         case show::PresenterStatus::Deferred:
             if (at_boundary) {
                 missed_boundaries += report.boundaries;
@@ -1470,6 +1517,14 @@ int run_node_playback(net::NodeSessionService &service,
             break;
         case show::PresenterStatus::Presented:
         case show::PresenterStatus::Skipped:
+            if (node_present_failure.ongoing) {
+                node_present_failure.ongoing = false;
+                std::cerr << "node " << options.node_index
+                          << " is drawing its frames again after "
+                          << node_present_failure.failed_frames
+                          << " failed\n";
+                publish_output_sync(false);
+            }
             break;
         }
         if (render_output && transport.has_value()) {

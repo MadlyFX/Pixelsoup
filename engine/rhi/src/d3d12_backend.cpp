@@ -432,6 +432,7 @@ struct CommandContext final {
     std::array<core::RenderPass, max_timed_passes> pass_categories{};
     std::array<bool, max_timed_passes> pass_ended{};
     core::u64 query_overflows{}, upload_bytes{}, present_ns{};
+    core::GpuRefusal first_refusal{core::GpuRefusal::None};
     D3d12Swapchain* pending_swapchain{};
     core::u32 pending_swapchain_index{};
     bool recording{};
@@ -787,6 +788,13 @@ struct UploadAllocation final {
     return {};
 }
 
+// Keeps the first refusal of a recording: the later ones usually follow from it.
+void note_refusal(CommandContext& commands, core::GpuRefusal refusal) noexcept {
+    if (commands.first_refusal == core::GpuRefusal::None) {
+        commands.first_refusal = refusal;
+    }
+}
+
 [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS upload_bytes(
     CommandContext& commands,
     std::span<const core::u8> bytes,
@@ -801,6 +809,7 @@ struct UploadAllocation final {
     const UploadAllocation allocation = allocate_upload(
         commands, padded, padded, alignment);
     if (allocation.resource == nullptr) {
+        note_refusal(commands, core::GpuRefusal::UploadSpaceFull);
         return 0U;
     }
     std::memcpy(allocation.mapped + allocation.offset,
@@ -2857,6 +2866,7 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_acquire_commands(
         context.recording = true;
         context.timed_passes = 0U;
         context.query_overflows = context.upload_bytes = context.present_ns = 0U;
+        context.first_refusal = core::GpuRefusal::None;
         context.list->EndQuery(
             state->timestamp_queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
             context.query_index * queries_per_context);
@@ -2938,8 +2948,11 @@ bool d3d12_upload_buffer_range(
         return true;
     }
     // All or nothing: a refusal never leaves a partly copied range.
-    if (d3d12_upload_space(command_value) < data.size()
-        || !transition_buffer(*commands, *buffer, D3D12_RESOURCE_STATE_COPY_DEST)) {
+    if (d3d12_upload_space(command_value) < data.size()) {
+        note_refusal(*commands, core::GpuRefusal::UploadSpaceFull);
+        return false;
+    }
+    if (!transition_buffer(*commands, *buffer, D3D12_RESOURCE_STATE_COPY_DEST)) {
         return false;
     }
     for (core::u64 copied = 0U; copied < data.size();) {
@@ -2998,21 +3011,40 @@ bool d3d12_upload_buffer(
         buffer->device_local || data.size() > buffer->bytes) {
         return false;
     }
-    if (data.empty()) {
-        return true;
-    }
-
     auto* const snapshot = snapshot_for(*buffer, *commands);
     if (snapshot == nullptr) {
         return false;
     }
     const auto committed_address = buffer->resource->GetGPUVirtualAddress();
+    if (data.empty()) {
+        // An empty write still gives the draws after it a snapshot of their
+        // own. Without one they would bind the persistent resource, and a
+        // non-empty upload later in this recording - the next mapped view
+        // drawing a plate the first view did not - would then be refused as
+        // overwriting what an earlier draw reads, failing every such frame.
+        // A recording that already bound the persistent resource keeps that
+        // record, so the refusal still protects that draw.
+        if (snapshot->generation == commands->recording_generation
+            && snapshot->address == committed_address && snapshot->bound) {
+            return true;
+        }
+        static constexpr std::array<core::u8, 16U> nothing{};
+        const auto address = upload_bytes(*commands, nothing, 16U);
+        if (address == 0U) {
+            return false;
+        }
+        snapshot->generation = commands->recording_generation;
+        snapshot->address = address;
+        snapshot->bound = false;
+        return true;
+    }
     if (!committed_buffer_writable(*buffer)) {
         // An earlier recorded or in-flight draw captured the persistent
         // resource. Updating it would retroactively change that draw, and
         // skipping the update would violate StorageBuffer's persistent
         // contents for a later recording. Refuse without waiting so the owner
         // can retain its prior frame and discard this command list.
+        note_refusal(*commands, core::GpuRefusal::BufferInUse);
         return false;
     }
 
@@ -4248,6 +4280,10 @@ core::u64 d3d12_upload_bytes(void* value) noexcept {
     const auto* commands = as_commands(value);
     return commands ? commands->upload_bytes : 0U;
 }
+core::GpuRefusal d3d12_first_refusal(void* value) noexcept {
+    const auto* commands = as_commands(value);
+    return commands ? commands->first_refusal : core::GpuRefusal::None;
+}
 core::FrameTiming d3d12_work_frame_timing(void* value, void* work) noexcept {
     core::FrameTiming result{};
     auto* state = as_device(value);
@@ -4287,6 +4323,7 @@ namespace mediaserver::rhi::detail {
 core::u32 d3d12_begin_gpu_pass(void*, core::RenderPass) noexcept { return 0U; }
 void d3d12_end_gpu_pass(void*, core::u32) noexcept {}
 core::u64 d3d12_upload_bytes(void*) noexcept { return 0U; }
+core::GpuRefusal d3d12_first_refusal(void*) noexcept { return core::GpuRefusal::None; }
 core::FrameTiming d3d12_work_frame_timing(void*, void*) noexcept { return {}; }
 bool d3d12_available() noexcept { return false; }
 core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(

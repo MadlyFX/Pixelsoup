@@ -1,4 +1,5 @@
 #pragma once
+#include <mediaserver/core/present_failure.hpp>
 #include <mediaserver/core/frame_timing.hpp>
 #include <mediaserver/core/render_conformance.hpp>
 #include <mediaserver/core/asset_publication.hpp>
@@ -408,6 +409,11 @@ struct RuntimeOutputSync final {
     RuntimeReferenceClockState reference_clock{
         RuntimeReferenceClockState::Unknown};
     core::u32 reference_frame_counter{};
+    // Frames this node tried and failed to draw, and where the latest one
+    // failed. A refusal repeats on every frame that asks for the same work, so
+    // a node that hits one holds its picture indefinitely; this is what tells
+    // the operator why.
+    core::PresentFailure present_failure{};
 
     bool operator==(const RuntimeOutputSync&) const = default;
 };

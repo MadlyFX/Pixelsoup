@@ -1,5 +1,6 @@
 #pragma once
 #include <mediaserver/core/frame_timing.hpp>
+#include <mediaserver/core/present_failure.hpp>
 #include <array>
 #include <mediaserver/core/render_conformance.hpp>
 
@@ -1122,6 +1123,9 @@ public:
     [[nodiscard]] core::u32 begin_gpu_pass(core::RenderPass pass) noexcept;
     void end_gpu_pass(core::u32 token) noexcept;
     [[nodiscard]] core::u64 upload_bytes() const noexcept;
+    // The first command this recording refused, and why. A frame that fails
+    // to record reports it so the operator is told what ran out or clashed.
+    [[nodiscard]] core::GpuRefusal first_refusal() const noexcept;
     [[nodiscard]] Device* device() const noexcept { return device_; }
 
     CommandList() noexcept = default;

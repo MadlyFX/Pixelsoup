@@ -3,6 +3,7 @@
 // The Output Monitor: Program and render-node status and lifecycle.
 
 #include <mediaserver/core/frame_timing.hpp>
+#include <mediaserver/core/present_failure.hpp>
 #include <mediaserver/core/render_conformance.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
@@ -177,6 +178,16 @@ struct OutputMonitorState final {
     std::shared_ptr<const OutputNodeLog> log;
     // A log request is on its way.
     bool log_fetching{};
+    // Frames this node failed to draw, and where the latest one failed. A
+    // node that keeps failing holds its last picture, which from the wall
+    // looks like a stall; this is what says why.
+    core::PresentFailure present_failure{};
+    // The failed map's operator name, resolved from the feed map.
+    std::string present_failure_map;
+
+    [[nodiscard]] bool frames_failing() const noexcept {
+      return present_failure.ongoing;
+    }
 
     [[nodiscard]] bool output_failed() const noexcept {
       return output != OutputStatus::Unknown &&
@@ -309,6 +320,12 @@ output_node_connection_label(const OutputMonitorState::Node &node) noexcept;
 // stays distinguishable from an asset one without inspecting glyphs.
 [[nodiscard]] std::string_view
 output_node_deployment_label(const OutputMonitorState::Node &node) noexcept;
+
+// Where this node's latest failed frame failed and why, naming the map:
+// "Drawing Wall - DP1.2, viewport 2 failed: ...". Empty when no frame has
+// failed. Public so tests can check the wording without inspecting glyphs.
+[[nodiscard]] std::string
+output_node_failure_text(const OutputMonitorState::Node &node);
 
 // One line on what an open node log shows: when it was read and how much of
 // it is the previous run, or why there is none. Public so tests can check the

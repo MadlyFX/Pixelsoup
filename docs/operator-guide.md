@@ -1947,6 +1947,17 @@ node with no outputs has no renderer to report either, which on the Director is
 indistinguishable from one still loading, so the row used to say the assets
 were not ready while the fault was a display.
 
+A node that is connected but cannot draw its frames reads `FRAMES FAILING`, and
+the cluster headline reads `A NODE CANNOT DRAW ITS FRAMES`. Such a node holds
+its last picture, which on the wall looks like a stall. The row's tooltip and
+its expanded **Drawing** line name the map being drawn (its label and viewport
+number), and the reason when the GPU refused the work: the frame ran out of GPU
+upload space, or a buffer was rewritten after an earlier map in the same frame
+had used it. A refusal repeats on every frame that asks for the same work, so
+the node keeps failing until what it draws changes. When it draws again the
+line keeps the failed-frame count and the last cause. The node's log has one
+line each time it starts failing, fails differently, or recovers.
+
 One lifecycle agent still supervises one fixed render-process identity. That
 child now opens one presenter per saved output binding and selects each binding's
 Feed index. Changing bindings is replicated as project state; Restart from

@@ -1384,6 +1384,27 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
             return 1;
         }
     }
+    // Reported whatever the sync policy: a node that cannot draw its frames
+    // holds its picture on an unsynced wall too. Filled before the headline
+    // below reads it.
+    for (auto &row : output_nodes) {
+        row.present_failure = {};
+        row.present_failure_map.clear();
+        net::RuntimeOutputSync runtime{};
+        if (!barrier.runtime_output_sync(row.node_index, runtime)) {
+            continue;
+        }
+        row.present_failure = runtime.present_failure;
+        const auto failed_map = row.present_failure.map_node;
+        for (const output::OutputMap &map : tick.feed_map.maps) {
+            if (failed_map != 0U && map.node.value() == failed_map) {
+                const std::string viewport =
+                    "viewport " + std::to_string(map.order + 1);
+                row.present_failure_map =
+                    map.name.empty() ? viewport : map.name + ", " + viewport;
+            }
+        }
+    }
     if (options.lifecycle_discovery_port != 0U) {
         topology::HardwareDiscovery &discovery =
             hardware_runtime.discovery;
@@ -1533,9 +1554,17 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
     // The label is a view over a literal, which is what this field holds; the
     // row beside it already names which node, so the headline carries the
     // reason alone rather than owning a composed string for one frame.
+    // Next, a node that is connected but failing every frame it draws: it
+    // holds its last picture, so the cohort headline would blame loading.
+    const bool frames_failing = std::any_of(
+        output_nodes.begin(), output_nodes.end(),
+        [](const editor::OutputMonitorState::Node& row) noexcept {
+            return row.frames_failing();
+        });
     output_monitor.cluster.renderer_headline =
         failed_output != output_nodes.end()
         ? editor::output_node_deployment_label(*failed_output)
+        : frames_failing ? std::string_view{"A NODE CANNOT DRAW ITS FRAMES"}
         : director_asset_cohort.digest != 0 && !director_asset_cohort.visible
             ? director_asset_cohort.some_visible
                 ? core::asset_commit_confirmation_expired(last_asset_commit_frame, control_frame.value())

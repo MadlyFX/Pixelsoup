@@ -502,7 +502,12 @@ them:
 - The **render process** reports present-barrier membership, the joined output
   count against the expected one, and its presented, missed, late, held,
   repeated, and loss-of-sync counters. These travel on the already-validated
-  node-session heartbeat.
+  node-session heartbeat. The same report carries its failed frames whatever
+  the sync policy: how many, whether the latest attempt failed, the step and
+  output map that failed, and the GPU's refusal (upload space full, or a
+  buffer rewritten after an earlier draw in the same frame used it). A change
+  of cause or of failing/drawing is sent at once; the count rides the status
+  cadence. Output Monitor shows it as `FRAMES FAILING`.
 
 Anything unmeasured stays Unknown or Unsupported. There is no default that
 means "probably locked", and an unanswered query is never treated as a lock.

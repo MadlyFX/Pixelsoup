@@ -3417,6 +3417,43 @@ void content_labels_distinguish_missing_stale_and_verification_failures() {
 // finished yet", and each physical fault has to stay distinguishable: an
 // operator sent to check the assets when a display is mirrored looks in the
 // wrong place entirely.
+// A node that is connected but cannot draw its frames holds its last picture,
+// which from the wall looks like a stall. The row names the failing map and
+// the GPU's reason in plain words, and says when it is drawing again.
+void failed_frames_name_the_map_and_the_reason() {
+  editor::OutputMonitorState::Node node{};
+  UI_CHECK(!node.frames_failing());
+  UI_CHECK(editor::output_node_failure_text(node).empty());
+
+  node.present_failure = mediaserver::core::PresentFailure{
+      5'120U, mediaserver::core::PresentStep::DrawMap,
+      mediaserver::core::GpuRefusal::BufferInUse, 100'020U, 2'391U, true};
+  node.present_failure_map = "Wall - DP1.2, viewport 2";
+  UI_CHECK(node.frames_failing());
+  UI_CHECK(editor::output_node_failure_text(node) ==
+           "Drawing Wall - DP1.2, viewport 2 failed: a GPU buffer was "
+           "rewritten after an earlier map in the same frame had used it "
+           "(show frame 2391)");
+
+  node.present_failure.refusal = mediaserver::core::GpuRefusal::UploadSpaceFull;
+  UI_CHECK(editor::output_node_failure_text(node).find(
+               "ran out of GPU upload space") != std::string::npos);
+
+  // Not a map step: no map is named even if one was resolved earlier.
+  node.present_failure.step = mediaserver::core::PresentStep::Submit;
+  node.present_failure.refusal = mediaserver::core::GpuRefusal::None;
+  node.present_failure.show_frame = 0U;
+  UI_CHECK(editor::output_node_failure_text(node) ==
+           "The GPU did not accept the frame");
+
+  // Drawing again: the cause stays for the operator, the row is not failing.
+  node.present_failure.ongoing = false;
+  UI_CHECK(!node.frames_failing());
+  UI_CHECK(!editor::output_node_failure_text(node).empty());
+  // A failure of frames is not a display fault.
+  UI_CHECK(!node.output_failed());
+}
+
 void output_failures_are_named_and_distinct_from_asset_failures() {
   using OutputStatus = editor::OutputMonitorState::Node::OutputStatus;
   editor::OutputMonitorState::Node node{};
@@ -4626,7 +4663,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 139U> cases{{
+constexpr std::array<Case, 140U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -4826,6 +4863,8 @@ constexpr std::array<Case, 139U> cases{{
      &content_labels_distinguish_missing_stale_and_verification_failures},
     {"output failures are named and distinct from asset failures",
      &output_failures_are_named_and_distinct_from_asset_failures},
+    {"failed frames name the map and the reason",
+     &failed_frames_name_the_map_and_the_reason},
     {"output monitor scroll reaches later cluster nodes",
      &output_monitor_scroll_reaches_later_cluster_nodes},
     {"output monitor emits explicit cluster relaunch",

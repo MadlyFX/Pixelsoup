@@ -2,6 +2,7 @@
 #include <mediaserver/core/frame_timing.hpp>
 #include <mediaserver/core/render_conformance.hpp>
 #include <mediaserver/core/asset_publication.hpp>
+#include <mediaserver/core/present_failure.hpp>
 
 #include <array>
 #include <cstddef>
@@ -555,6 +556,13 @@ public:
     // for a frame slot, or perform any I/O.
     [[nodiscard]] virtual PresenterRendererReadiness
     renderer_readiness() const noexcept {
+        return {};
+    }
+
+    // Frames this presenter tried and failed to draw, and where the latest
+    // one failed. Kept up to date by present(); never probes anything.
+    [[nodiscard]] virtual core::PresentFailure
+    present_failure() const noexcept {
         return {};
     }
 };

@@ -196,6 +196,122 @@ void a_dispatch_writes_buffers_and_the_next_runs_from_its_arguments() {
     RHI_CHECK(args[4] == 6U && args[5] == element_count && args[6] == 0U && args[7] == 0U);
 }
 
+// A node draws each of its wall maps through one renderer on one command list.
+// A map with nothing to draw uploads an empty instance list; a later map that
+// does draw something must still be able to upload and read its own list.
+void an_empty_upload_does_not_block_a_later_upload_on_the_same_list() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    auto device = open_d3d12();
+    auto scale = device.create_compute_pipeline(compute(code(mediaserver_buffer_scale_probe_comp_dxil), 1U, 2U));
+    auto input = device.create_storage_buffer(element_count * 4U);
+    auto values = device.create_writable_buffer((element_count + 1U) * 4U);
+    auto arguments = device.create_writable_buffer(32U);
+    auto readback = device.create_readback((element_count + 1U) * 4U);
+    RHI_CHECK(scale && input && values && arguments && readback);
+
+    std::array<core::u32, element_count> source{};
+    for (core::u32 i = 0U; i < element_count; ++i) {
+        source[i] = 13U * i + 5U;
+    }
+
+    auto acquired = device.acquire_commands();
+    RHI_CHECK(acquired);
+    auto commands = std::move(acquired).value();
+    const rhi::StorageBuffer* reads[] = {&input.value()};
+    const rhi::StorageBuffer* writes[] = {&values.value(), &arguments.value()};
+    rhi::ComputeDispatch work{};
+    work.pipeline = &scale.value();
+    work.storage_buffers = reads;
+    work.writable_buffers = writes;
+    work.groups_x = 1U;
+
+    // The first view: nothing to draw, but the buffer is still bound.
+    RHI_CHECK(commands.upload(input.value(), std::span<const core::u8>{}));
+    const Parameters empty_parameters{0U, factor, {}};
+    work.uniform = bytes_of(empty_parameters);
+    RHI_CHECK(commands.dispatch(work));
+
+    // The second view has content.
+    RHI_CHECK(commands.upload(input.value(), bytes_of(source)));
+    const Parameters parameters{element_count, factor, {}};
+    work.uniform = bytes_of(parameters);
+    work.groups_x = (element_count + 63U) / 64U;
+    RHI_CHECK(commands.dispatch(work));
+    RHI_CHECK(commands.download(values.value(), 0U, (element_count + 1U) * 4U, readback.value()));
+    submit_and_wait(device, std::move(commands));
+
+    const std::vector<core::u32> result = read_uints(readback.value(), element_count + 1U);
+    RHI_CHECK(result.size() == element_count + 1U);
+    for (core::u32 i = 0U; i < element_count; ++i) {
+        RHI_CHECK(result[i] == source[i] * factor + i);
+    }
+    RHI_CHECK(result[element_count] == 0U);
+}
+
+// A refused frame says why, so the node can tell the operator.
+void a_recording_reports_why_the_gpu_refused_an_upload() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    auto device = open_d3d12();
+    auto scale = device.create_compute_pipeline(compute(code(mediaserver_buffer_scale_probe_comp_dxil), 1U, 2U));
+    auto input = device.create_storage_buffer(64U);
+    auto values = device.create_writable_buffer(64U);
+    auto arguments = device.create_writable_buffer(32U);
+    RHI_CHECK(scale && input && values && arguments);
+    const std::array<core::u32, 4U> data{1U, 2U, 3U, 4U};
+    {
+        auto acquired = device.acquire_commands();
+        RHI_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        RHI_CHECK(commands.first_refusal() == core::GpuRefusal::None);
+        // Bound with no upload in this recording: the draw reads the buffer
+        // in place, so rewriting it now would change that draw.
+        const rhi::StorageBuffer* reads[] = {&input.value()};
+        const rhi::StorageBuffer* writes[] = {&values.value(), &arguments.value()};
+        rhi::ComputeDispatch work{};
+        work.pipeline = &scale.value();
+        work.storage_buffers = reads;
+        work.writable_buffers = writes;
+        const Parameters parameters{4U, factor, {}};
+        work.uniform = bytes_of(parameters);
+        work.groups_x = 1U;
+        RHI_CHECK(commands.dispatch(work));
+        RHI_CHECK(!commands.upload(input.value(), bytes_of(data)));
+        RHI_CHECK(commands.first_refusal() == core::GpuRefusal::BufferInUse);
+        submit_and_wait(device, std::move(commands));
+    }
+    {
+        // Each upload below takes most of one upload page; the recording has
+        // five, so the sixth cannot fit.
+        constexpr core::u32 large = 15U << 20U;
+        auto big = device.create_storage_buffer(large);
+        RHI_CHECK(big);
+        const std::vector<core::u8> bytes(large, 0x5AU);
+        auto acquired = device.acquire_commands();
+        RHI_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        RHI_CHECK(commands.first_refusal() == core::GpuRefusal::None);
+        int accepted = 0;
+        for (int i = 0; i < 6 && commands.upload(big.value(), bytes); ++i) {
+            ++accepted;
+        }
+        RHI_CHECK(accepted == 5);
+        RHI_CHECK(commands.first_refusal() == core::GpuRefusal::UploadSpaceFull);
+        submit_and_wait(device, std::move(commands));
+    }
+    // A new recording starts clean.
+    auto acquired = device.acquire_commands();
+    RHI_CHECK(acquired);
+    auto commands = std::move(acquired).value();
+    RHI_CHECK(commands.first_refusal() == core::GpuRefusal::None);
+    RHI_CHECK(commands.upload(input.value(), bytes_of(data)));
+    RHI_CHECK(commands.first_refusal() == core::GpuRefusal::None);
+    submit_and_wait(device, std::move(commands));
+}
+
 void bad_bindings_are_refused_before_anything_is_recorded() {
     if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
         return;
@@ -369,6 +485,10 @@ int main() {
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
         {"a_dispatch_writes_buffers_and_the_next_runs_from_its_arguments",
          a_dispatch_writes_buffers_and_the_next_runs_from_its_arguments},
+        {"an_empty_upload_does_not_block_a_later_upload_on_the_same_list",
+         an_empty_upload_does_not_block_a_later_upload_on_the_same_list},
+        {"a_recording_reports_why_the_gpu_refused_an_upload",
+         a_recording_reports_why_the_gpu_refused_an_upload},
         {"bad_bindings_are_refused_before_anything_is_recorded", bad_bindings_are_refused_before_anything_is_recorded},
         {"an_indirect_draw_takes_its_instance_count_from_the_gpu", an_indirect_draw_takes_its_instance_count_from_the_gpu},
         {"a_copy_moves_one_range_of_a_buffer_into_another", a_copy_moves_one_range_of_a_buffer_into_another},

@@ -1074,6 +1074,69 @@ void runtime_output_sync_round_trips_and_fails_closed() {
 // The node's tracking report. Defaults to zero, so an ack from a node with no
 // tracking encodes exactly as it did before this field existed; a node that has
 // something to say round-trips every counter.
+// A node that cannot draw its frames says where and why. Every field travels
+// on its own, and a report that contradicts itself is refused rather than
+// shown to the operator as a believable cause.
+void runtime_present_failure_round_trips_and_fails_closed() {
+    auto message = heartbeat_ack();
+    SESSION_CHECK(message.output_sync.present_failure == core::PresentFailure{});
+
+    message.output_sync.present_failure = core::PresentFailure{
+        5'120U, core::PresentStep::DrawMap, core::GpuRefusal::BufferInUse,
+        100'020U, 2'391U, true};
+    auto encoded = net::encode_session(net::SessionMessage{message});
+    SESSION_CHECK(encoded.has_value());
+    auto decoded = net::decode_session(encoded.value());
+    SESSION_CHECK(decoded.has_value());
+    const auto* round_tripped =
+        std::get_if<net::HeartbeatAck>(&decoded.value());
+    SESSION_CHECK(round_tripped != nullptr);
+    SESSION_CHECK(*round_tripped == message);
+    const auto& failure = round_tripped->output_sync.present_failure;
+    SESSION_CHECK(failure.failed_frames == 5'120U);
+    SESSION_CHECK(failure.step == core::PresentStep::DrawMap);
+    SESSION_CHECK(failure.refusal == core::GpuRefusal::BufferInUse);
+    SESSION_CHECK(failure.map_node == 100'020U);
+    SESSION_CHECK(failure.show_frame == 2'391U);
+    SESSION_CHECK(failure.ongoing);
+
+    // Recovered: the cause stays for the operator, the flag clears alone.
+    auto recovered = message;
+    recovered.output_sync.present_failure.ongoing = false;
+    recovered.output_sync.present_failure.refusal =
+        core::GpuRefusal::UploadSpaceFull;
+    auto again = net::decode_session(
+        net::encode_session(net::SessionMessage{recovered}).value());
+    SESSION_CHECK(again.has_value());
+    SESSION_CHECK(!std::get_if<net::HeartbeatAck>(&again.value())
+                       ->output_sync.present_failure.ongoing);
+    SESSION_CHECK(std::get_if<net::HeartbeatAck>(&again.value())
+                      ->output_sync.present_failure.refusal ==
+                  core::GpuRefusal::UploadSpaceFull);
+
+    const auto refused = [](core::PresentFailure failure) {
+        auto bad = heartbeat_ack();
+        bad.output_sync.present_failure = failure;
+        auto result = net::encode_session(net::SessionMessage{bad});
+        return !result.has_value() &&
+               result.error() == net::SessionEncodeError::InvalidHeartbeatAck;
+    };
+    // Failed frames with no step to name.
+    SESSION_CHECK(refused({3U, core::PresentStep::None,
+                           core::GpuRefusal::None, 0U, 0U, false}));
+    // A step with no failed frames.
+    SESSION_CHECK(refused({0U, core::PresentStep::Draw,
+                           core::GpuRefusal::None, 0U, 0U, false}));
+    // A map named for a step that is not about a map.
+    SESSION_CHECK(refused({1U, core::PresentStep::Submit,
+                           core::GpuRefusal::None, 7U, 0U, true}));
+    // Values the protocol does not define.
+    SESSION_CHECK(refused({1U, static_cast<core::PresentStep>(99U),
+                           core::GpuRefusal::None, 0U, 0U, true}));
+    SESSION_CHECK(refused({1U, core::PresentStep::Draw,
+                           static_cast<core::GpuRefusal>(99U), 0U, 0U, true}));
+}
+
 void runtime_tracking_round_trips() {
     auto message = heartbeat_ack();
     SESSION_CHECK(message.tracking == net::RuntimeTracking{});
@@ -1392,6 +1455,8 @@ int main() {
         {"runtime media status round trip",
          &runtime_media_status_round_trips_and_is_bounded},
         {"runtime tracking round trip", &runtime_tracking_round_trips},
+        {"runtime present failure round trip",
+         &runtime_present_failure_round_trips_and_fails_closed},
         {"priority transport admits only operator anchors",
          &priority_transport_admits_only_operator_anchors},
     };

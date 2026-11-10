@@ -290,10 +290,42 @@ template <typename Acknowledgement>
     return false;
 }
 
+[[nodiscard]] bool valid_present_failure(
+    const core::PresentFailure& value) noexcept {
+    switch (value.step) {
+    case core::PresentStep::None:
+        // Nothing failed: there is no step, cause or map to name.
+        return value.failed_frames == 0U
+            && value.refusal == core::GpuRefusal::None
+            && value.map_node == 0U && value.show_frame == 0U
+            && !value.ongoing;
+    case core::PresentStep::Setup:
+    case core::PresentStep::Draw:
+    case core::PresentStep::DrawMap:
+    case core::PresentStep::MapProjection:
+    case core::PresentStep::Submit:
+        break;
+    default:
+        return false;
+    }
+    switch (value.refusal) {
+    case core::GpuRefusal::None:
+    case core::GpuRefusal::UploadSpaceFull:
+    case core::GpuRefusal::BufferInUse:
+        break;
+    default:
+        return false;
+    }
+    const bool names_map = value.step == core::PresentStep::DrawMap
+        || value.step == core::PresentStep::MapProjection;
+    return value.failed_frames != 0U && (names_map || value.map_node == 0U);
+}
+
 [[nodiscard]] bool valid_output_sync(const RuntimeOutputSync& value) noexcept {
     // A node that claims more joined outputs than it has is reporting a bug,
     // not a barrier; refusing keeps the readiness gate fail-closed.
     return valid_barrier_state(value.barrier)
+        && valid_present_failure(value.present_failure)
         && valid_reference_clock_state(value.reference_clock)
         && value.joined_outputs <= value.expected_outputs
         && value.barrier_presents_in_sync <= value.barrier_presents;
@@ -964,7 +996,15 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    static_cast<fb::RuntimeOutputDeploymentState>(
                        heartbeat_ack->output_deployment),
                    heartbeat_ack->renderer.video_memory_needed,
-                   heartbeat_ack->renderer.video_memory_free)
+                   heartbeat_ack->renderer.video_memory_free,
+                   heartbeat_ack->output_sync.present_failure.failed_frames,
+                   static_cast<std::uint8_t>(
+                       heartbeat_ack->output_sync.present_failure.step),
+                   static_cast<std::uint8_t>(
+                       heartbeat_ack->output_sync.present_failure.refusal),
+                   heartbeat_ack->output_sync.present_failure.map_node,
+                   heartbeat_ack->output_sync.present_failure.show_frame,
+                   heartbeat_ack->output_sync.present_failure.ongoing)
                    .Union();
     } else if (const auto* goodbye = std::get_if<Goodbye>(&message)) {
         const auto session = encode_id(goodbye->session_id);
@@ -1494,6 +1534,14 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
         value.renderer.video_memory_free = source->renderer_video_memory_free();
         value.output_deployment = static_cast<RuntimeOutputDeploymentState>(
             source->output_deployment());
+        value.output_sync.present_failure = core::PresentFailure{
+            source->output_failed_frames(),
+            static_cast<core::PresentStep>(source->output_failure_step()),
+            static_cast<core::GpuRefusal>(source->output_failure_refusal()),
+            source->output_failure_map(),
+            source->output_failure_show_frame(),
+            source->output_failing(),
+        };
         if (const auto* timing = source->renderer_timing()) {
             if (!timing->pass_ns() || timing->pass_ns()->size() != core::render_pass_count)
                 return core::Result<SessionMessage, SessionDecodeError>::failure(SessionDecodeError::InvalidHeartbeatAck);

@@ -232,6 +232,10 @@ class SdlPresenter final : public show::Presenter {
     output_projection_mesh_status() const noexcept;
     [[nodiscard]] show::PresenterRendererReadiness
     renderer_readiness() const noexcept override;
+    [[nodiscard]] core::PresentFailure
+    present_failure() const noexcept override {
+        return failure_;
+    }
 
   private:
     struct Platform;
@@ -263,6 +267,11 @@ class SdlPresenter final : public show::Presenter {
                      const scene::Scene *asset_scene = nullptr,
                      const scene::Scene *asset_partner = nullptr) noexcept;
 
+    // Counts a failed frame and remembers where it failed.
+    [[nodiscard]] show::PresenterStatus
+    fail(core::PresentStep step,
+         core::GpuRefusal refusal = core::GpuRefusal::None) noexcept;
+
     static constexpr std::size_t command_capacity = 16U;
 
     show::PresenterSurface surface_;
@@ -274,6 +283,10 @@ class SdlPresenter final : public show::Presenter {
     bool buffered_media_{};
     bool closed_{};
     show::PresenterTiming timing_{};
+    core::PresentFailure failure_{};
+    // The show frame and output map being drawn, so a failure can name them.
+    core::u64 drawing_frame_{};
+    core::u64 drawing_map_{};
     show::PresenterSyncRequest sync_request_{};
     show::PresenterBarrierState sync_state_{
         show::PresenterBarrierState::Unknown};
