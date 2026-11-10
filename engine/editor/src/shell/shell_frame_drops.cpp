@@ -554,8 +554,21 @@ void EditorShell::Frame::apply_drops() {
     }
     if (media != nullptr && timeline_panel_drawn &&
         timeline_panel_bounds.contains(drop.screen_x, drop.screen_y)) {
-      if (const auto point =
-              impl.timeline_panel.lane_point_at(drop.screen_x, drop.screen_y)) {
+      const auto point =
+          impl.timeline_panel.lane_point_at(drop.screen_x, drop.screen_y);
+      // A file is laid over a track's own screen. A vehicle track has no
+      // screen of its own and its slot screens show its takes, so on either
+      // the drop does nothing rather than file a clip where none can play.
+      const bool on_a_car =
+          point.has_value() &&
+          std::any_of(timeline_lanes.begin(), timeline_lanes.end(),
+                      [&](const scene::TimelineLane &lane) {
+                        return lane.id == point->lane &&
+                               (lane.vehicle || lane.parent != doc::NodeId{});
+                      });
+      if (on_a_car) {
+        // Nothing to place.
+      } else if (point.has_value()) {
         result.source_edits.push_back(SourceRangeEditIntent{
             authored_stage.id, drop.asset, drop.source_in, drop.source_frames,
             SourceEditMode::Overwrite, point->lane,
@@ -588,10 +601,12 @@ void EditorShell::Frame::apply_drops() {
     }
   }
 
-  // A plateset let go on the Timeline or Stage is placed: on a placed
-  // plate it swaps that take; anywhere else on the Timeline it starts where
-  // it lands, and on Stage at the playhead. When the scene's rig already
-  // plays something on the sockets it needs, the operator is asked first.
+  // A plateset let go on the Timeline or Stage is placed: on a take it
+  // plays instead of it; on a vehicle track's band it is a new take there
+  // from the frame under the pointer; anywhere else on the Timeline it
+  // starts where it lands, and on Stage at the playhead. Only a scene with
+  // no vehicle track yet, whose rig already plays something on the sockets
+  // the plates need, has anything to ask the operator first.
   if (pending_asset_drop.has_value() && !switcher.rehearsal_locked) {
     const auto &drop = *pending_asset_drop;
     const assets::Asset *const dropped = asset_registry.asset(drop.asset);
@@ -605,20 +620,45 @@ void EditorShell::Frame::apply_drops() {
                         impl.asset_viewer_panel.plateset_editor().rig_contains(
                             drop.screen_x, drop.screen_y);
     if (plateset != nullptr && !on_rig) {
+      // Let go on a take - its own row, or its bar on its vehicle track -
+      // the plateset plays instead of it. Let go on a vehicle track where no
+      // take is, it is a new take there.
       std::optional<doc::NodeId> take_clip;
+      doc::NodeId track{};
       if (on_timeline) {
         for (const auto &target : impl.timeline_panel.replacement_targets()) {
-          const ElementInfo *const plate = find_element(elements, target.node);
+          const ElementInfo *const clip = find_element(elements, target.node);
           if (target.bounds.contains(drop.screen_x, drop.screen_y) &&
-              plate != nullptr && plate->plateset_take != 0) {
+              clip != nullptr && clip->take) {
             take_clip = target.node;
             break;
           }
         }
-        // A plateset's take row stands for its plates.
-        if (!take_clip.has_value()) {
-          take_clip =
-              impl.timeline_panel.take_at(drop.screen_x, drop.screen_y);
+        const auto point =
+            impl.timeline_panel.lane_point_at(drop.screen_x, drop.screen_y);
+        const auto under =
+            point.has_value()
+                ? std::find_if(timeline_lanes.begin(), timeline_lanes.end(),
+                               [&](const scene::TimelineLane &lane) {
+                                 return lane.id == point->lane;
+                               })
+                : timeline_lanes.end();
+        if (under != timeline_lanes.end() && under->vehicle) {
+          track = under->id;
+          // The take in front at that frame, as the scene would show it.
+          const ElementInfo *front = nullptr;
+          for (const ElementInfo &clip : elements) {
+            if (clip.kind == ElementKind::Media && clip.take &&
+                clip.timeline_lane == track && clip.timing.placed() &&
+                point->frame >= clip.timing.start &&
+                point->frame <= clip.timing.last_frame() &&
+                (front == nullptr || clip.clip_order >= front->clip_order)) {
+              front = std::addressof(clip);
+            }
+          }
+          if (!take_clip.has_value() && front != nullptr) {
+            take_clip = front->node;
+          }
         }
       }
       if (take_clip.has_value()) {
@@ -642,8 +682,13 @@ void EditorShell::Frame::apply_drops() {
             rig = std::addressof(node);
           }
         }
+        // With a vehicle track in the scene the take goes on it - the one
+        // it was let go on, else the scene's own - and nothing is rewired.
+        const bool has_vehicle_track = std::any_of(
+            timeline_lanes.begin(), timeline_lanes.end(),
+            [](const scene::TimelineLane &lane) { return lane.vehicle; });
         bool busy = false;
-        if (rig != nullptr) {
+        if (rig != nullptr && !has_vehicle_track) {
           for (const compositor::GraphEdge &edge : compositor_graph.edges) {
             if (edge.to.node == rig->node &&
                 edge.to.port < assets::plateset_slot_count &&
@@ -653,7 +698,7 @@ void EditorShell::Frame::apply_drops() {
           }
         }
         PlatesetPlaceIntent place{authored_stage.id, plateset->id, start,
-                                  PlatesetRigChoice::Auto, 0U};
+                                  PlatesetRigChoice::Auto, 0U, track};
         if (busy) {
           impl.pending_plateset_place = place;
           ui.open_context_menu(gui::ui_id("plateset.rig.choice"),

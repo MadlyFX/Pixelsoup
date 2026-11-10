@@ -438,6 +438,12 @@ still findable and still have a gizmo.
 They are carried in the evaluated scene rather than re-derived by each panel,
 which is what makes the editor and the renderer agree about where a screen is.
 
+A **vehicle track** is the one track that owns no screen. It holds the takes
+of a placed plateset, and each take plays on the track's slot screens - one
+per wall of the car - so the nine angles are edited as one clip while each
+wall keeps a screen of its own. See
+[Vehicle process platesets](#vehicle-process-platesets).
+
 A track holds any number of clips from any number of sources. Start and
 duration decide when a clip plays; explicit clip order decides where it sits in
 the layer stack even when two clips have different start times. The list runs
@@ -491,7 +497,8 @@ the track takes that place in the stack, the same reorder a header drag makes;
 moved in time as well, both are one undo step. A track with a locked clip
 refuses the drag rather than leave that clip behind.
 
-A placed plateset's tracks are listed together under one **take row**; see
+A placed plateset is one clip on a **vehicle track**, whose slot screens are
+listed under it on request; see
 [Vehicle process platesets](#vehicle-process-platesets).
 
 **Splitting a track.** The razor on a track's bar, **Split Track at Playhead**
@@ -1497,74 +1504,106 @@ diamond-on-a-staff button in the Timeline toolbar shows or hides the band.
 They are not cues and never stop the show.
 
 **Placing a plateset.** Drag it from the Library onto the Timeline (it
-starts where it lands) or the Stage (at the playhead). Each plate gets a
-track named after its slot and the take, its raster set to the plate's,
-and a clip lasting the frames every plate covers. The scene's compositor
-gets a Scene Layer per track wired to the matching socket of an LED Car
-Process, created and fed to Output (composited over what Output already
-shows) when the scene has none. When the scene's rig already plays
-something on a socket the plates need, a menu asks whether to replace those
-plates, add a second LED Car Process, or keep its wires and fill only the
-free sockets. The whole placement is one undo step.
+starts where it lands) or the Stage (at the playhead). A placed plateset is
+one **take**: a single clip on a **vehicle track**, lasting the frames every
+plate covers and named after the set. The scene's first placement makes the
+vehicle track - named **Vehicle**, marked with the plateset's car - and with
+it a **slot screen** for each plate, named after its slot, its raster set to
+the plate's. The compositor gets a Scene Layer per slot screen wired to the
+matching socket of an LED Car Process, created and fed to Output (composited
+over what Output already shows) when the scene has none. The whole placement
+is one undo step.
 
-**The take row.** On the Timeline a placed plateset reads as one track: a
-take row, marked with the plateset's car and named after the set (as the
-Library names it, or after what its tracks' names share), with how many
-plates it holds - and how many takes, once a cut has made more than one. It
-starts closed, listing only the row, whose lane draws a bar per take from
-its first frame to its last, with its fade ramps and a hairline per plate.
-The bar edits the take as a clip: drag it to move the take, drag an end to
-trim it, pull a fade knob, Slip it, or click it with the **Razor (`C`)** to
-cut it (`Shift` cuts every clip on every track, as on a clip). Each is the
-same edit the front plate's own clip makes, so it is one undo step and every
-plate of the take follows; a move never changes tracks or stack order.
-Ripple, Roll and Slide would move one plate's neighbours alone, so the bar
-answers them as Selection does. A take with a locked plate or track takes no
-drag. Clicking the row or a bar selects every plate it stands for - the
-row all of its takes, a bar its own - with the front plate shown in the
-Inspector, so Delete and Copy act on the whole take.
+Once a scene has a vehicle track, every later plateset goes on it as another
+take and nothing is rewired: dropped on the track's band it starts at the
+frame under the pointer, and dropped anywhere else on the Timeline or on the
+Stage it goes on the scene's vehicle track, in front of any take already
+there. A set with a plate in a slot the car has no screen for gains that one
+screen, wired to the rig the others feed. Only a scene with no vehicle track
+whose rig already plays something on a socket the plates need asks first: a
+menu offers to replace those plates, add a second LED Car Process, or keep
+its wires and fill only the free sockets. **Add a second LED Car Process**
+makes a second vehicle track, **Vehicle 2**, with screens and a rig of its
+own.
 
-The row's eye, **Solo** and padlock switch every track of the set at once:
-each reads lit while all of its tracks are, and a click brings every track
-to the same state. Drag the row by its name to move all of its tracks up or
-down the stack together, in their order; a track dropped onto a closed row
-goes in front of or behind the whole set, never between its tracks. A set
-with a locked track stays where it is. Right-click the row to **List** or
-**Fold Plate Tracks**, **Mute** or **Lock Plates**, **Split Take at
-Playhead**, **Set In/Out to Plateset**, **Open Plateset in Asset Viewer**,
-or **Delete Plateset Tracks and Plates**, which removes every track of the
-set with its plate in one undo step.
+**The vehicle track.** It is a track like any other on the Timeline - a
+header with its number, eye, **Solo**, sync lock and padlock, and a bar when
+it is closed - and it owns no screen itself: its takes play on its slot
+screens. Switching the track off, soloing it or locking it does so for the
+whole car. It has no **Target** switch, because Insert and Overwrite lay a
+file over a track's own screen and it has none, and it cannot be split: cut
+its take with the razor instead, on the take's own row with the track open.
+**Delete Track and Its Clips** removes the track, its takes and its slot
+screens in one undo step. A project made before takes were one clip shows
+each of its old plates as an ordinary clip on an ordinary track; place the
+plateset again to get a take.
 
-Twirl the row open, or double-click it or a bar, to list the plates' tracks
-under it, one indent in. Each is named by its slot alone - **LEFT**, or its
-tag **L** when the list is too narrow - since the row above names the set;
-hover for the track's full name, which renaming still starts from. Each is
-still its own track and screen: its own grade, mute, lock, solo, target,
-keys and clips, edited as before, and the row stays above them with its
-bars. Open or closed is the operator's view,
-not saved in the project; a search opens it, and pointing at a plate from
-another panel opens it. A track joins the row while every clip on it is a
-plate of that set; tracks that share a take are one placement, so two
-placements of one set are two rows, and the halves of a razored take stay in
-one. The row sits where its frontmost track would be, and its tracks keep
-their numbers whether it is open or closed. A track moved in between a
-set's tracks parts the row in two, one above it and one below, so the list
-always shows the stacking order the Stage draws; moving it out joins them
-again. The document still holds one track per
-plate; the row is only how the Timeline shows them, and changes nothing the
-Stage, Program or the render nodes draw.
+**Editing a take.** A take is one clip, so every clip tool edits it as it
+edits any clip: drag it to move it, drag an end to trim it, pull a fade knob,
+cut it with the **Razor (`C`)**, and Ripple, Roll, Slip and Slide it against
+the takes beside it. Copy, paste, duplicate and delete act on the one clip.
+Every plate follows, because the plates are the clip's, not clips of their
+own. A take can be dragged to another vehicle track and nowhere else; an
+ordinary clip cannot be dragged onto a vehicle track or a slot screen, and a
+file dropped on a take does not replace it.
 
-**Editing a take.** Moving, trimming, fading, slipping or cutting one plate
-of a placed take does the same to every plate of it: plates sharing a take,
-a start and a length are one unit. A plate moved on its own leaves its take,
-and its take row shows it as a bar of its own.
-Changing the set's offsets moves every placed plate's source in by the
-difference, and shortens the take if a plate would now run out. Drop
-another plateset onto a placed plate, or onto its take row (a bar there
-picks that take), to **swap the take**: each plate plays
-the new set's media for its slot at the same take position, keeping its
-trims, track, grade and wiring; tracks named after the old take are
-renamed, and plates the new set has no slot for stay as they were.
+Where two takes overlap on one vehicle track, each slot screen shows the take
+in front that has a plate for it - a screen plays one picture at a time - so
+takes cut and fade to and from black rather than dissolve into each other.
+Butt two takes end to end to cut from one to the next.
+
+**Swapping a take.** Drop another plateset onto a take - its row, or its bar
+on the vehicle track - and that take plays the new set instead: the clip
+keeps its place on the Timeline, its trim as a position in the take, its
+fades and its effects, and is shortened if the new footage runs out sooner.
+The vehicle track and its slot screens are not touched, so where each wall
+stands, how it is graded and its time offset all carry over; that is how a
+new scene is put up without moving the car or the camera. A slot the new set
+has no plate for leaves its screen standing and showing nothing while the
+take is up, and the status line says how many.
+
+**Slot screens.** A slot screen is one wall of the car: a screen like any
+track's, placed, scaled, graded and keyed the same way, and wired into the
+rig through its own Scene Layer. It takes no clips of its own, and a mask
+cannot be put on a single wall. The screens are folded away so the car reads
+as one track;
+right-click the vehicle track and choose **List Screens** to list them under
+it, front first and round the car to the ceiling, and **Fold Screens** to put
+them away. Each is named by its slot - or its tag (**L**, **TOP**) when the
+list is too narrow - has no track number, and starts closed; twirl one open
+for its Properties and keys. Clicking a plate on the Stage selects its slot
+screen, ready to be moved or scaled to land a reflection; selecting a take
+outlines every wall it is playing on.
+
+**The Inspector.** With the vehicle track selected the Inspector shows the
+car from above, front up, with a tile per wall. A wall the car has a screen
+for is a button: click it to select that slot screen, which also lists it on
+the Timeline. With a take selected the same view is lit where the take has a
+plate; a screen the take leaves empty reads dim, and a plate with no screen
+to play on is outlined as a warning. **Open plateset** shows the take's set
+in the Asset Viewer, where its plates, sync offsets and moments are. A slot
+screen's **Screen** section has, besides the raster and its lock, a **Time
+offset**: whole source frames its plate plays ahead of its take, or behind it
+when negative.
+
+**Where each adjustment lives.**
+
+- *The footage* - which file is in which slot, each plate's **SYNC** offset,
+  the kept moments, the half-size decode - belongs to the plateset, in the
+  Asset Viewer. A change there reaches every take of that set, in the same
+  undo step: a take keeps its position in the footage, and is shortened if a
+  plate would now run out. A plate added in a slot the car has no screen for
+  is not shown until the set is placed or swapped in again, which makes the
+  screen.
+- *One wall* - its position, scale and rotation, its raster, its opacity and
+  effects, its time offset - belongs to its slot screen, and stays when the
+  take is swapped. Use the time offset to move one wall against the car; use
+  **SYNC** when the footage itself came in out of step.
+- *The whole car* - opacity and effects on the vehicle track apply to every
+  wall after that wall's own, and the LED Car Process node in the Compositor
+  places and sizes the rig and takes the setup's effects and filters.
+- *One take* - effects on the take's clip apply to every wall while that
+  take is up, before each wall's own.
 
 ## Render-node lifecycle control
 

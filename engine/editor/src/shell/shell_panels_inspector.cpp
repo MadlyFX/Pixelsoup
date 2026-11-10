@@ -191,6 +191,22 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
   if (inspector.panel_request.has_value()) {
     pending_inspector_panel = inspector.panel_request;
   }
+  // A wall clicked on the Inspector's rig: that slot screen is selected and
+  // its row listed under its car on the Timeline.
+  if (inspector.select_node.has_value()) {
+    const ElementInfo *const wall =
+        find_element(elements, *inspector.select_node);
+    if (wall != nullptr && !wall->locked) {
+      impl.stage_surface_selection.reset();
+      impl.select_only(wall->node);
+      impl.timeline_panel.reveal(wall->node, ui.time_seconds());
+    }
+  }
+  if (inspector.open_asset.has_value() &&
+      asset_registry.asset(*inspector.open_asset) != nullptr) {
+    impl.show_panel(panel_asset_viewer);
+    impl.asset_viewer_panel.open(*inspector.open_asset);
+  }
   if (!inspector.effect_adds.empty()) {
     const auto gesture = impl.next_edit_gesture++;
     for (const auto& effect : inspector.effect_adds)

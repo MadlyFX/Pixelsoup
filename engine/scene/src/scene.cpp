@@ -2301,6 +2301,18 @@ double particle_parameter_at(const ParticleParameter& parameter, core::i64 frame
     return parameter.base;
 }
 
+core::u64 plate_stream(doc::NodeId clip, core::u8 slot) noexcept {
+    // SplitMix64 over the take and the slot: integer-only, so every machine
+    // derives the same identity, and spread so it does not land on the node
+    // id an ordinary clip of the same file is known by.
+    core::u64 x = clip.value() * 0x9e3779b97f4a7c15ULL
+        + (static_cast<core::u64>(slot) + 1U) * 0xd6e8feb86659fd93ULL;
+    x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+    x ^= x >> 31U;
+    return x != 0U ? x : 1U;
+}
+
 core::u32 particle_instance_seed(const ParticleEffect& effect) noexcept {
     // SplitMix64 over the node identity and the authored seed: integer-only,
     // so every node derives the same seed.

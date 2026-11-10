@@ -108,7 +108,6 @@ struct EditorShell::Frame final {
       std::optional<scene::ClipTiming> timing = std::nullopt);
   void draw_placeholder(const gui::Rect &bounds, std::string_view title,
                         std::span<const std::string_view> rows);
-  std::vector<const ElementInfo *> take_siblings(const ElementInfo &clip);
   void queue_mask_edit(MaskEditRequest request);
   void run_color_sampler(gui::UiId id, const gui::Rect &image,
                          const rhi::Texture &target,
@@ -203,7 +202,6 @@ struct EditorShell::Frame final {
   bool plateset_editor_drawn{};
   std::vector<assets::DerivativeKey> plateset_thumbnail_keys{};
   std::vector<TimelineMoment> timeline_moments{};
-  std::vector<TimelinePlateset> timeline_platesets{};
   std::vector<doc::NodeId> dragging_assets{};
   std::optional<LibraryAddAction> dragging_generator{};
   std::optional<LibraryGeneratorDrop> pending_generator_drop{};

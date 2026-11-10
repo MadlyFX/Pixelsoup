@@ -101,6 +101,9 @@ doc::PropertyMap planar_reflection_properties(const PlanarReflection& value) {
 
 namespace {
 
+// The vocabulary names the slots and the evaluated scene counts them.
+static_assert(schema::vehicle_slot_count == vehicle_slot_count);
+
 [[nodiscard]] const doc::PropertyValue* find(
     const doc::PropertyMap& properties,
     std::string_view name) noexcept {
@@ -1659,6 +1662,42 @@ void SceneModel::put(const doc::Node& node) {
             lane.raster_height = raster_height;
         }
         lane.aspect_locked = reader.boolean(schema::lane_aspect_locked, true);
+        if (find(node.properties, schema::lane_kind) != nullptr) {
+            if (reader.text(schema::lane_kind, "") == schema::lane_kind_vehicle) {
+                lane.vehicle = true;
+            } else {
+                reader.fail();
+            }
+        }
+        // A slot screen names its vehicle track and its slot together. One
+        // without the other is a screen that belongs nowhere, and a vehicle
+        // track is never itself a slot of another.
+        const bool has_parent =
+            find(node.properties, schema::lane_parent) != nullptr;
+        const bool has_slot =
+            find(node.properties, schema::lane_slot) != nullptr;
+        if (has_parent != has_slot || (has_parent && lane.vehicle)) {
+            reader.fail();
+        } else if (has_parent) {
+            const auto parent = reader.integer(schema::lane_parent, -1);
+            const auto slot = std::find(
+                schema::vehicle_slot_keys.begin(),
+                schema::vehicle_slot_keys.end(),
+                reader.text(schema::lane_slot, ""));
+            if (parent <= 0 || slot == schema::vehicle_slot_keys.end()) {
+                reader.fail();
+            } else {
+                lane.parent = doc::NodeId{static_cast<core::u64>(parent)};
+                lane.slot = static_cast<core::u8>(
+                    slot - schema::vehicle_slot_keys.begin());
+            }
+        }
+        lane.time_offset = reader.integer(schema::lane_time_offset, 0);
+        if (lane.time_offset < -max_lane_time_offset
+            || lane.time_offset > max_lane_time_offset
+            || (lane.time_offset != 0 && !has_parent)) {
+            reader.fail();
+        }
         parsed = Entry{std::move(lane)};
     } else if (node.type == schema::timeline_marker_type) {
         MarkerEntry marker{};
@@ -1789,6 +1828,43 @@ void SceneModel::put(const doc::Node& node) {
             media.resolution = MediaResolution::Half;
         } else if (resolution != schema::media_resolution_full) {
             reader.fail();
+        }
+        // A take's plates. Read only from a clip that says it came from a
+        // plateset, so an ordinary clip pays for none of these lookups.
+        if (find(node.properties, schema::plateset_asset) != nullptr) {
+            for (std::size_t slot = 0U; slot < vehicle_slot_count; ++slot) {
+                const std::string source_name =
+                    schema::plate_property(slot, schema::plate_source_suffix);
+                if (find(node.properties, source_name) == nullptr) {
+                    continue;
+                }
+                MediaEntry::Plate plate{};
+                plate.source = std::string{reader.text(source_name, "")};
+                const auto plate_asset = reader.integer(
+                    schema::plate_property(slot, schema::plate_asset_suffix),
+                    0);
+                const auto plate_count = reader.integer(
+                    schema::plate_property(slot, schema::plate_count_suffix),
+                    0);
+                plate.offset = reader.integer(
+                    schema::plate_property(slot, schema::plate_offset_suffix),
+                    0);
+                // A plate with no file, no frames or a negative skip is a
+                // damaged take, refused whole: playing the plates that did
+                // parse would put a car on stage with a wall missing and
+                // nothing to say why.
+                if (plate.source.empty() || plate_asset < 0
+                    || !as_u32(plate_count, plate.count) || plate.count == 0U
+                    || plate.offset < 0
+                    || plate.offset > max_lane_time_offset) {
+                    reader.fail();
+                    continue;
+                }
+                plate.asset =
+                    doc::NodeId{static_cast<core::u64>(plate_asset)};
+                media.plates.resize(vehicle_slot_count);
+                media.plates[slot] = std::move(plate);
+            }
         }
         parsed = Entry{media};
     } else if (node.type == schema::model_type) {
@@ -3915,6 +3991,10 @@ std::vector<TimelineLane> SceneModel::lanes(SceneId scene_id) const {
                 projected.raster_height = lane->raster_height;
                 projected.aspect_locked = lane->aspect_locked;
                 projected.sync_locked = lane->sync_locked;
+                projected.vehicle = lane->vehicle;
+                projected.parent = lane->parent.value_or(doc::NodeId{});
+                projected.slot = lane->slot;
+                projected.time_offset = lane->time_offset;
                 result.push_back(std::move(projected));
             }
         } else if (const auto* const clip = std::get_if<MediaEntry>(&entry)) {
@@ -4793,11 +4873,18 @@ Scene SceneModel::evaluate(
     struct MediaCandidate final {
         doc::NodeId node{};
         core::i64 lane_order{};
+        // The track the stack orders this under: a plate's is its take's
+        // vehicle track, so a car's screens stay together in the stack.
+        doc::NodeId group{};
+        // Which plate of a take this is; `no_vehicle_slot` for a clip that
+        // is drawn once.
+        core::u8 plate{no_vehicle_slot};
         doc::NodeId lane{};
         core::i64 start{};
         core::i64 clip_order{};
         bool lane_locked{};
         BlendMode lane_compositing{BlendMode::Normal};
+        const MediaEntry* clip{};
     };
     std::map<doc::NodeId, const LaneEntry*> lanes_by_id;
     for (const auto& [id, entry] : entries_) {
@@ -4807,6 +4894,32 @@ Scene SceneModel::evaluate(
             lanes_by_id.emplace(id, lane);
         }
     }
+    // Each vehicle track's slot screens, by slot. A screen naming a track
+    // that is not a vehicle track in this scene belongs to nothing and shows
+    // nothing; two claiming one slot leave it to the lower node id, which the
+    // map's order reaches first on every machine.
+    using SlotScreens = std::array<doc::NodeId, vehicle_slot_count>;
+    std::map<doc::NodeId, SlotScreens> vehicle_slots;
+    for (const auto& [lane_id, lane] : lanes_by_id) {
+        if (lane->vehicle) {
+            vehicle_slots.emplace(lane_id, SlotScreens{});
+        }
+    }
+    for (const auto& [lane_id, lane] : lanes_by_id) {
+        if (!lane->parent.has_value() || lane->slot >= vehicle_slot_count) {
+            continue;
+        }
+        const auto vehicle = vehicle_slots.find(*lane->parent);
+        if (vehicle != vehicle_slots.end()
+            && vehicle->second[lane->slot] == doc::NodeId{}) {
+            vehicle->second[lane->slot] = lane_id;
+        }
+    }
+    // A show never reaches 2^63 frames; the saturation exists so the signed
+    // placement arithmetic below has no undefined edge at all.
+    const auto show_frame = static_cast<core::i64>(std::min(
+        time.frame,
+        static_cast<core::u64>(std::numeric_limits<core::i64>::max())));
     std::vector<MediaCandidate> media_candidates;
     media_candidates.reserve(counters_.media);
     for (const auto& [id, entry] : entries_) {
@@ -4833,6 +4946,7 @@ Scene SceneModel::evaluate(
         }
         MediaCandidate candidate{};
         candidate.node = id;
+        candidate.clip = clip;
         candidate.start = timing_of(id, *clip).start;
         candidate.clip_order = clip->lane.has_value()
             ? clip->clip_order
@@ -4842,8 +4956,43 @@ Scene SceneModel::evaluate(
             if (found == lanes_by_id.end() || found->second->muted) {
                 continue;
             }
-            candidate.lane = *clip->lane;
+            // A slot screen takes no clips of its own: what plays on it is
+            // its vehicle track's take, and a second picture filed straight
+            // onto it would be one layer with two sources.
+            if (found->second->parent.has_value()) {
+                continue;
+            }
             candidate.lane_order = found->second->order;
+            candidate.group = *clip->lane;
+            if (const auto vehicle = vehicle_slots.find(*clip->lane);
+                vehicle != vehicle_slots.end()) {
+                // A take: one candidate per plate it has a screen for. A clip
+                // with no plates has nothing to show on a track with no plane.
+                for (std::size_t slot = 0U; slot < clip->plates.size();
+                     ++slot) {
+                    const doc::NodeId screen = vehicle->second[slot];
+                    if (clip->plates[slot].source.empty()
+                        || screen == doc::NodeId{}) {
+                        continue;
+                    }
+                    const LaneEntry& slot_lane = *lanes_by_id.at(screen);
+                    if (slot_lane.muted) {
+                        continue;
+                    }
+                    MediaCandidate plate = candidate;
+                    plate.plate = static_cast<core::u8>(slot);
+                    plate.lane = screen;
+                    plate.lane_locked =
+                        found->second->locked || slot_lane.locked;
+                    plate.lane_compositing =
+                        slot_lane.compositing != BlendMode::Normal
+                            ? slot_lane.compositing
+                            : found->second->compositing;
+                    media_candidates.push_back(plate);
+                }
+                continue;
+            }
+            candidate.lane = *clip->lane;
             candidate.lane_locked = found->second->locked;
             candidate.lane_compositing = found->second->compositing;
         }
@@ -4854,20 +5003,33 @@ Scene SceneModel::evaluate(
         [](const MediaCandidate& left,
            const MediaCandidate& right) noexcept {
             return std::tuple{
-                       left.lane_order, left.lane.value(), left.clip_order,
-                       left.start, left.node.value()}
+                       left.lane_order, left.group.value(), left.plate,
+                       left.clip_order, left.start, left.node.value()}
                 < std::tuple{
-                       right.lane_order, right.lane.value(), right.clip_order,
-                       right.start, right.node.value()};
+                       right.lane_order, right.group.value(), right.plate,
+                       right.clip_order, right.start, right.node.value()};
         });
-    std::map<doc::NodeId, MediaProjection> media_projection;
+    // Keyed by the clip and, for a take, which of its plates.
+    using MediaKey = std::pair<doc::NodeId, core::u8>;
+    std::map<MediaKey, MediaProjection> media_projection;
+    // A slot screen shows one plate at a time. It is one layer - the screen
+    // is what a grade, a mask and a Compositor wire address - so where two
+    // takes overlap on a vehicle track, the one in front has the screen and
+    // the other is not drawn there: last in the stack order above, among the
+    // takes on air at this frame.
+    std::map<doc::NodeId, doc::NodeId> slot_takes;
     for (std::size_t index = 0U; index < media_candidates.size(); ++index) {
         const auto& candidate = media_candidates[index];
         media_projection.emplace(
-            candidate.node,
+            MediaKey{candidate.node, candidate.plate},
             MediaProjection{
                 static_cast<core::u64>(index), candidate.lane_locked,
                 candidate.lane_compositing, candidate.lane});
+        if (candidate.plate != no_vehicle_slot
+            && clip_visible(timing_of(candidate.node, *candidate.clip),
+                            show_frame)) {
+            slot_takes.insert_or_assign(candidate.lane, candidate.node);
+        }
     }
 
     // Each track's screen, resolved once. A track is a plane in the scene and
@@ -4884,6 +5046,8 @@ Scene SceneModel::evaluate(
         LayerStyle style{};
     };
     std::map<doc::NodeId, Screen> screens;
+    // A vehicle track's opacity, which every plate on its screens carries.
+    std::map<doc::NodeId, float> vehicle_opacity;
     for (const auto& [lane_id, lane] : lanes_by_id) {
         auto position = lane->position;
         Turns yaw = lane->yaw;
@@ -4892,7 +5056,21 @@ Scene SceneModel::evaluate(
         Vec3 scale = lane->scale;
         LayerStyle style = lane->style;
         apply_override(lane_id, position, yaw, pitch, roll, scale, style);
+        if (lane->vehicle) {
+            // No plane of its own, so no screen: what it contributes is its
+            // opacity and its effects, to the plates on its slot screens.
+            vehicle_opacity.emplace(lane_id, style.opacity);
+            continue;
+        }
         fold_style(lane_id, style);
+        // A slot screen is switched off and locked with its vehicle track.
+        const LaneEntry* vehicle{};
+        if (lane->parent.has_value()) {
+            const auto found = lanes_by_id.find(*lane->parent);
+            if (found != lanes_by_id.end() && found->second->vehicle) {
+                vehicle = found->second;
+            }
+        }
         // The lock is applied after channels, so an animated width carries its
         // height with it rather than animating the screen out of shape.
         const auto extent = screen_extent(
@@ -4905,7 +5083,8 @@ Scene SceneModel::evaluate(
         scene.screens.push_back(SceneScreen{
             lane_id, scene_id, lane->name, lane->order, world,
             lane->raster_width, lane->raster_height, lane->aspect_locked,
-            style, lane->muted, lane->locked});
+            style, lane->muted || (vehicle != nullptr && vehicle->muted),
+            lane->locked || (vehicle != nullptr && vehicle->locked)});
     }
     // Deterministic and matching the timeline's own stacking, so two nodes
     // digest the same list and the editor's row order is the scene's order.
@@ -4982,159 +5161,238 @@ Scene SceneModel::evaluate(
             if (scope_of(id) != scene_id) {
                 continue;
             }
-            const ClipTiming& timing = timing_of(id, *clip);
-            const auto projection = media_projection.find(id);
-            if (projection == media_projection.end()) {
+            // One picture of the clip: the clip itself, or one plate of a
+            // take. Everything below is the same for both but what is named
+            // here - the file, where in it the clip's first frame falls, and
+            // for a plate the vehicle track whose grade and opacity it also
+            // carries.
+            struct Picture final {
+                const std::string* source{};
+                doc::NodeId asset{};
+                core::u32 first{};
+                core::u32 count{};
+                ClipTiming timing{};
+                core::u8 plate{no_vehicle_slot};
+                doc::NodeId vehicle{};
+            };
+            const auto place = [&](const MediaProjection& projection,
+                                   const Picture& picture) {
+                const ClipTiming& timing = picture.timing;
+                const bool is_plate = picture.plate != no_vehicle_slot;
+                scene.media_assets->push_back({picture.asset, *picture.source});
+                const GroupResolution* parent = nullptr;
+                if (!clip->visible) {
+                    return;
+                }
+                if (clip->parent_group.has_value()) {
+                    const auto found =
+                        group_projection.resolved.find(*clip->parent_group);
+                    if (found == group_projection.resolved.end()
+                        || !found->second.visible) {
+                        return;
+                    }
+                    parent = &found->second;
+                }
+                // Placement is decided before the capacity check, so a timeline
+                // may hold far more clips than one frame can draw as long as few
+                // of them are on air at once.
+                // What this clip will want shortly, named so it can be decoded
+                // before it is asked for. Reaching an arbitrary frame of a
+                // long-GOP file means seeking back to a keyframe and walking
+                // forward, which is several show frames of work; a clip first
+                // asked on the frame it needs answers late, and the wall holds a
+                // frame from somewhere else or nothing at all.
+                //
+                // Two moments break continuity, and both are invisible to the
+                // renderer until they have already happened. The playhead reaching
+                // a clip that is not on air yet is one. The show's own range
+                // wrapping is the other, and it is the worse of the two: a clip
+                // still on air across the wrap is not cut to, so nothing marks the
+                // discontinuity, yet its source is rarely the length of the show
+                // and the wrap therefore lands it somewhere unrelated in its own
+                // file. Each is warmed with the frame wanted first on the far side.
+                if (picture.count != 0U) {
+                    const auto warm = [&](core::u64 at) {
+                        const core::u64 distance = at > time.frame ? at - time.frame
+                            : loop.last >= time.frame ? loop.last - time.frame + 1U : 0U;
+                        MediaPrewarm request{
+                            *picture.source,
+                            clip_frame_at(
+                                time, at, timing, clip->frame_rate,
+                                picture.first, picture.count),
+                            id, picture.asset, picture.first,
+                            picture.count, distance, clip->resolution,
+                            is_plate ? plate_stream(id, picture.plate) : 0U};
+                        const auto position = std::lower_bound(
+                            scene.media_prewarm.begin(), scene.media_prewarm.end(), request,
+                            [](const MediaPrewarm& a, const MediaPrewarm& b) {
+                                if (a.frames_until_start != b.frames_until_start)
+                                    return a.frames_until_start < b.frames_until_start;
+                                return a.source_node < b.source_node;
+                            });
+                        if (scene.media_prewarm.size() < max_media_prewarm_clips
+                            || position != scene.media_prewarm.end()) {
+                            scene.media_prewarm.insert(position, std::move(request));
+                            if (scene.media_prewarm.size() > max_media_prewarm_clips)
+                                scene.media_prewarm.pop_back();
+                        }
+                    };
+                    if (clip_starts_within(
+                            timing, show_frame, media_prewarm_lead)) {
+                        warm(static_cast<core::u64>(timing.start));
+                    }
+                    if (show_wraps_within(
+                            loop, show_frame, media_prewarm_lead)) {
+                        const auto after = static_cast<core::i64>(std::min(
+                            loop.first,
+                            static_cast<core::u64>(
+                                std::numeric_limits<core::i64>::max())));
+                        if (clip_visible(timing, after)) {
+                            warm(loop.first);
+                        }
+                    }
+                }
+                if (!clip_visible(timing, show_frame)) {
+                    return;
+                }
+                const auto screen = screens.find(projection.lane);
+                const bool on_screen = screen != screens.end();
+                if (is_plate) {
+                    // Its screen shows one take at a time: the one in front.
+                    const auto showing = slot_takes.find(projection.lane);
+                    if (!on_screen || showing == slot_takes.end()
+                        || showing->second != id) {
+                        return;
+                    }
+                }
+                if (scene.media.size() >= max_scene_media) {
+                    return;
+                }
+                auto position = clip->position;
+                Turns yaw = clip->yaw;
+                Turns pitch = clip->pitch;
+                Turns roll = clip->roll;
+                Vec3 scale = clip->scale;
+                LayerStyle style = clip->style;
+                apply_override(id, position, yaw, pitch, roll, scale, style);
+                fold_style(id, style);
+                if (on_screen) {
+                    // The track's grade runs after the clip's, because the screen
+                    // is what the clip is playing on: the operator who set a look
+                    // on the wall means it to survive whichever plate is up.
+                    fold_style(projection.lane, style);
+                    style.opacity *= screen->second.style.opacity;
+                }
+                if (is_plate) {
+                    // And the vehicle track's after its screen's: the take's own
+                    // look, then that one wall's, then the whole car's.
+                    fold_style(picture.vehicle, style);
+                    const auto whole = vehicle_opacity.find(picture.vehicle);
+                    if (whole != vehicle_opacity.end()) {
+                        style.opacity *= whole->second;
+                    }
+                }
+                // A non-Normal clip mode is an explicit per-placement choice. A
+                // Normal clip inherits its lane's compositing mode, making the
+                // lane setting useful without erasing authored clip style.
+                if (style.blend == BlendMode::Normal) {
+                    style.blend = projection.lane_compositing;
+                }
+                const auto local = multiply(
+                    translation(position),
+                    multiply(rotation(yaw, pitch, roll), scaling(scale)));
+                // A clip on a screen is drawn on that screen. Its own transform
+                // is left in the document untouched and simply not read, so a
+                // clip dragged out of a track returns to where it was rather than
+                // to the origin. Group membership still decides whether the clip
+                // is visible and whether it is locked; it does not get to move a
+                // picture that is on a wall somewhere else.
+                const auto world = on_screen
+                    ? screen->second.world
+                    : (parent == nullptr ? local
+                                         : multiply(parent->world, local));
+                const auto frame_index = clip_frame_at(
+                    time, time.frame, timing, clip->frame_rate,
+                    picture.first, picture.count);
+                // The head and tail ramps multiply whatever opacity was authored
+                // or keyed, so a dissolve composes with an animated layer instead
+                // of replacing its animation.
+                if (timing.placed()) {
+                    style.opacity *= clip_fade(timing, show_frame);
+                }
+                scene.media.push_back(MediaInstance{
+                    clip->mesh,
+                    world,
+                    normal_basis(world),
+                    *picture.source,
+                    frame_index,
+                    picture.first,
+                    picture.count,
+                    picture.asset,
+                    // A plate is its slot screen's picture: the screen is the
+                    // layer, and the take that put it there is the placement.
+                    is_plate ? projection.lane : id,
+                    projection.lane,
+                    projection.order,
+                    style,
+                    clip->locked || projection.lane_locked
+                        || (parent != nullptr && parent->locked),
+                    clip->parent_group,
+                    clip->group_order,
+                    false,
+                    clip->resolution,
+                    is_plate ? id : doc::NodeId{},
+                    is_plate ? plate_stream(id, picture.plate) : 0U});
+            };
+
+            const ClipTiming& clip_timing = timing_of(id, *clip);
+            const auto take = clip->lane.has_value()
+                ? vehicle_slots.find(*clip->lane) : vehicle_slots.end();
+            if (take == vehicle_slots.end()) {
+                const auto projection = media_projection.find(
+                    MediaKey{id, no_vehicle_slot});
+                if (projection != media_projection.end()) {
+                    place(projection->second,
+                          Picture{&clip->source, clip->asset,
+                                  clip->sequence_start, clip->sequence_count,
+                                  clip_timing, no_vehicle_slot, doc::NodeId{}});
+                }
                 continue;
             }
-            scene.media_assets->push_back({clip->asset, clip->source});
-            const GroupResolution* parent = nullptr;
-            if (!clip->visible) {
-                continue;
-            }
-            if (clip->parent_group.has_value()) {
-                const auto found =
-                    group_projection.resolved.find(*clip->parent_group);
-                if (found == group_projection.resolved.end()
-                    || !found->second.visible) {
+            // A take. Its own trim is the front plate's: every other plate
+            // starts as far from that as its sync offset is from the front
+            // plate's, and then by whatever its screen adds. A plate asked
+            // for frames before its first holds its first.
+            const core::i64 front_offset =
+                clip->plates.empty() ? 0 : clip->plates.front().offset;
+            for (std::size_t slot = 0U; slot < clip->plates.size(); ++slot) {
+                const MediaEntry::Plate& plate = clip->plates[slot];
+                const auto projection = media_projection.find(
+                    MediaKey{id, static_cast<core::u8>(slot)});
+                if (plate.source.empty()
+                    || projection == media_projection.end()) {
                     continue;
                 }
-                parent = &found->second;
-            }
-            // A show never reaches 2^63 frames; the saturation exists so the
-            // signed placement arithmetic below has no undefined edge at all.
-            const auto show_frame = static_cast<core::i64>(std::min(
-                time.frame,
-                static_cast<core::u64>(
-                    std::numeric_limits<core::i64>::max())));
-            // Placement is decided before the capacity check, so a timeline
-            // may hold far more clips than one frame can draw as long as few
-            // of them are on air at once.
-            // What this clip will want shortly, named so it can be decoded
-            // before it is asked for. Reaching an arbitrary frame of a
-            // long-GOP file means seeking back to a keyframe and walking
-            // forward, which is several show frames of work; a clip first
-            // asked on the frame it needs answers late, and the wall holds a
-            // frame from somewhere else or nothing at all.
-            //
-            // Two moments break continuity, and both are invisible to the
-            // renderer until they have already happened. The playhead reaching
-            // a clip that is not on air yet is one. The show's own range
-            // wrapping is the other, and it is the worse of the two: a clip
-            // still on air across the wrap is not cut to, so nothing marks the
-            // discontinuity, yet its source is rarely the length of the show
-            // and the wrap therefore lands it somewhere unrelated in its own
-            // file. Each is warmed with the frame wanted first on the far side.
-            if (clip->sequence_count != 0U) {
-                const auto warm = [&](core::u64 at) {
-                    const core::u64 distance = at > time.frame ? at - time.frame
-                        : loop.last >= time.frame ? loop.last - time.frame + 1U : 0U;
-                    MediaPrewarm request{
-                        clip->source,
-                        clip_frame_at(
-                            time, at, timing, clip->frame_rate,
-                            clip->sequence_start, clip->sequence_count),
-                        id, clip->asset, clip->sequence_start,
-                        clip->sequence_count, distance, clip->resolution};
-                    const auto position = std::lower_bound(
-                        scene.media_prewarm.begin(), scene.media_prewarm.end(), request,
-                        [](const MediaPrewarm& a, const MediaPrewarm& b) {
-                            if (a.frames_until_start != b.frames_until_start)
-                                return a.frames_until_start < b.frames_until_start;
-                            return a.source_node < b.source_node;
-                        });
-                    if (scene.media_prewarm.size() < max_media_prewarm_clips
-                        || position != scene.media_prewarm.end()) {
-                        scene.media_prewarm.insert(position, std::move(request));
-                        if (scene.media_prewarm.size() > max_media_prewarm_clips)
-                            scene.media_prewarm.pop_back();
-                    }
-                };
-                if (clip_starts_within(
-                        timing, show_frame, media_prewarm_lead)) {
-                    warm(static_cast<core::u64>(timing.start));
+                ClipTiming plate_timing = clip_timing;
+                if (plate_timing.source_in >= 0) {
+                    // Both terms are bounded far inside the signed range at
+                    // parse, so only the sum with the trim can leave it.
+                    const core::i64 shift = plate.offset - front_offset
+                        + lanes_by_id.at(projection->second.lane)->time_offset;
+                    plate_timing.source_in = shift <= 0
+                        ? std::max<core::i64>(
+                              0, plate_timing.source_in + shift)
+                        : (plate_timing.source_in
+                                   > std::numeric_limits<core::i64>::max()
+                                       - shift
+                               ? std::numeric_limits<core::i64>::max()
+                               : plate_timing.source_in + shift);
                 }
-                if (show_wraps_within(
-                        loop, show_frame, media_prewarm_lead)) {
-                    const auto after = static_cast<core::i64>(std::min(
-                        loop.first,
-                        static_cast<core::u64>(
-                            std::numeric_limits<core::i64>::max())));
-                    if (clip_visible(timing, after)) {
-                        warm(loop.first);
-                    }
-                }
+                place(projection->second,
+                      Picture{&plate.source, plate.asset, 0U, plate.count,
+                              plate_timing, static_cast<core::u8>(slot),
+                              *clip->lane});
             }
-            if (!clip_visible(timing, show_frame)) {
-                continue;
-            }
-            if (scene.media.size() >= max_scene_media) {
-                continue;
-            }
-            auto position = clip->position;
-            Turns yaw = clip->yaw;
-            Turns pitch = clip->pitch;
-            Turns roll = clip->roll;
-            Vec3 scale = clip->scale;
-            LayerStyle style = clip->style;
-            apply_override(id, position, yaw, pitch, roll, scale, style);
-            fold_style(id, style);
-            const auto screen = screens.find(projection->second.lane);
-            const bool on_screen = screen != screens.end();
-            if (on_screen) {
-                // The track's grade runs after the clip's, because the screen
-                // is what the clip is playing on: the operator who set a look
-                // on the wall means it to survive whichever plate is up.
-                fold_style(projection->second.lane, style);
-                style.opacity *= screen->second.style.opacity;
-            }
-            // A non-Normal clip mode is an explicit per-placement choice. A
-            // Normal clip inherits its lane's compositing mode, making the
-            // lane setting useful without erasing authored clip style.
-            if (style.blend == BlendMode::Normal) {
-                style.blend = projection->second.lane_compositing;
-            }
-            const auto local = multiply(
-                translation(position),
-                multiply(rotation(yaw, pitch, roll), scaling(scale)));
-            // A clip on a screen is drawn on that screen. Its own transform
-            // is left in the document untouched and simply not read, so a
-            // clip dragged out of a track returns to where it was rather than
-            // to the origin. Group membership still decides whether the clip
-            // is visible and whether it is locked; it does not get to move a
-            // picture that is on a wall somewhere else.
-            const auto world = on_screen
-                ? screen->second.world
-                : (parent == nullptr ? local
-                                     : multiply(parent->world, local));
-            const auto frame_index = clip_frame_at(
-                time, time.frame, timing, clip->frame_rate,
-                clip->sequence_start, clip->sequence_count);
-            // The head and tail ramps multiply whatever opacity was authored
-            // or keyed, so a dissolve composes with an animated layer instead
-            // of replacing its animation.
-            if (timing.placed()) {
-                style.opacity *= clip_fade(timing, show_frame);
-            }
-            scene.media.push_back(MediaInstance{
-                clip->mesh,
-                world,
-                normal_basis(world),
-                clip->source,
-                frame_index,
-                clip->sequence_start,
-                clip->sequence_count,
-                clip->asset,
-                id,
-                projection->second.lane,
-                projection->second.order,
-                style,
-                clip->locked || projection->second.lane_locked
-                    || (parent != nullptr && parent->locked),
-                clip->parent_group,
-                clip->group_order,
-                false,
-                clip->resolution});
             continue;
         }
 

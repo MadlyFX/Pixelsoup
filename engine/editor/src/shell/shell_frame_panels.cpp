@@ -14,11 +14,12 @@ void EditorShell::Frame::prepare_panels() {
   // can land on its slots.
   plateset_editor_drawn = false;
   // The thumbnails its slot tiles show, kept and made like the Library's.
-  // Kept plateset moments where the Stage scene plays them: each placed
-  // front plate's moments, through its clip's trim and rate, inside it.
+  // Kept plateset moments where the Stage scene plays them: each take's
+  // moments - they are in front plate frames, which is what a take's own
+  // trim counts in - through its trim and rate, inside it.
   for (const ElementInfo &plate : elements) {
     if (plate.kind != ElementKind::Media || plate.plateset == doc::NodeId{} ||
-        plate.plateset_slot != "front" || !plate.timing.placed()) {
+        !plate.take || !plate.timing.placed()) {
       continue;
     }
     const assets::Asset *const asset = asset_registry.asset(plate.plateset);
@@ -50,24 +51,6 @@ void EditorShell::Frame::prepare_panels() {
       }
       timeline_moments.push_back(
           TimelineMoment{show, moment.kind, plate.node});
-    }
-  }
-  // The Library's names for the platesets placed plates come from, for the
-  // Timeline's take rows.
-  for (const ElementInfo &plate : elements) {
-    if (plate.kind != ElementKind::Media || plate.plateset == doc::NodeId{} ||
-        std::any_of(timeline_platesets.begin(), timeline_platesets.end(),
-                    [&](const TimelinePlateset &named) {
-                      return named.asset == plate.plateset;
-                    })) {
-      continue;
-    }
-    const assets::Asset *const asset = asset_registry.asset(plate.plateset);
-    if (const auto *const set =
-            asset != nullptr ? std::get_if<assets::PlatesetAsset>(asset)
-                             : nullptr) {
-      timeline_platesets.push_back(
-          TimelinePlateset{plate.plateset, set->display_name});
     }
   }
   // Files dragged in from the desktop that the Library imported itself.
@@ -117,25 +100,6 @@ void EditorShell::Frame::prepare_panels() {
   // that still has to hold is a running dissolve: both of its inputs are
   // already committed pictures, so no graph edit may land mid-transition.
   compositor_locked = switcher.rehearsal_locked;
-}
-
-// The other plates of `clip`'s take: the same take, start and length.
-// A plate moved or trimmed on its own has left its take.
-std::vector<const ElementInfo *>
-EditorShell::Frame::take_siblings(const ElementInfo &clip) {
-  std::vector<const ElementInfo *> plates;
-  if (clip.plateset_take == 0) {
-    return plates;
-  }
-  for (const ElementInfo &other : elements) {
-    if (other.node != clip.node && other.kind == ElementKind::Media &&
-        other.plateset_take == clip.plateset_take &&
-        other.timing.start == clip.timing.start &&
-        other.timing.duration == clip.timing.duration && !other.locked) {
-      plates.push_back(std::addressof(other));
-    }
-  }
-  return plates;
 }
 
 void EditorShell::Frame::queue_mask_edit(MaskEditRequest request) {
@@ -263,7 +227,7 @@ void EditorShell::Frame::open_clip_in_viewer(
     return;
   }
   impl.show_panel(panel_asset_viewer);
-  // A take row opens the set its plates come from, rig and all.
+  // A take opens the set its plates come from, rig and all.
   if (request.plateset && clip->plateset != doc::NodeId{}) {
     impl.asset_viewer_panel.open(clip->plateset);
     return;

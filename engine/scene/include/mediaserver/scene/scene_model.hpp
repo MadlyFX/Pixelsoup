@@ -410,6 +410,16 @@ private:
         bool locked{};
         bool visible{true};
         MediaResolution resolution{MediaResolution::Full};
+        // A take's plates, by slot: what each slot screen of the vehicle
+        // track it is on plays. A slot with no source is not filled. Empty
+        // for every ordinary clip.
+        struct Plate final {
+            std::string source;
+            doc::NodeId asset{};
+            core::u32 count{};
+            core::i64 offset{};
+        };
+        std::vector<Plate> plates;
     };
 
     struct LaneEntry final {
@@ -431,6 +441,11 @@ private:
         core::u32 raster_height{default_raster_height};
         bool aspect_locked{true};
         bool sync_locked{};
+        // A vehicle track, or one of its slot screens. See TimelineLane.
+        bool vehicle{};
+        std::optional<doc::NodeId> parent;
+        core::u8 slot{no_vehicle_slot};
+        core::i64 time_offset{};
     };
 
     struct MarkerEntry final {

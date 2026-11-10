@@ -722,6 +722,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                 upcoming.source = warm.source;
                 upcoming.frame_index = warm.frame_index;
                 upcoming.source_node = warm.source_node;
+                upcoming.stream = warm.stream;
                 upcoming.asset = warm.asset;
                 upcoming.loop_first = warm.loop_first;
                 upcoming.loop_count = warm.loop_count;
@@ -1017,7 +1018,10 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                 scene::MediaPrewarm next_start{};
                 next_start.source = next_segment->path.string();
                 next_start.frame_index = 0U;
-                next_start.source_node = original.source_node;
+                // The same playhead the placement is drawn with, so the next
+                // segment is warmed for the decoder that will ask for it.
+                next_start.source_node = original.placed_by();
+                next_start.stream = original.stream;
                 next_start.asset = original.asset;
                 next_start.frames_until_start = frames_to_next_segment;
                 next_start.resolution = original.resolution;

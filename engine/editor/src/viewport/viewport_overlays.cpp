@@ -563,9 +563,18 @@ void draw_selection_outlines(gui::UiDrawList& list, const gui::Rect& image,
         }
     }
     for (const auto& clip : view.media) {
-        if (selected(selection, clip.source_node)) {
-            wire_quad(list, image, view, clip.world, false,
-                      outline(clip.source_node),
+        // A take is drawn as its plates, each its slot screen's picture:
+        // choosing the take outlines every wall it is playing on, and
+        // choosing one screen outlines that wall.
+        const doc::NodeId chosen =
+            selected(selection, clip.source_node)
+                ? clip.source_node
+                : (clip.placement != doc::NodeId{} &&
+                           selected(selection, clip.placement)
+                       ? clip.placement
+                       : doc::NodeId{});
+        if (chosen != doc::NodeId{}) {
+            wire_quad(list, image, view, clip.world, false, outline(chosen),
                       projection);
         }
     }

@@ -680,19 +680,6 @@ struct EditorShell::Impl final {
     semantic_boundary = true;
   }
 
-  // Several nodes chosen as one - a plateset take's plates - with `primary`
-  // the one the Inspector shows.
-  void select_set(std::span<const doc::NodeId> nodes, doc::NodeId primary) {
-    scene_settings_selection = SceneSettingsTarget::None;
-    pending_group_members.clear();
-    pending_group_frames = 0U;
-    pending_new_group_parent.reset();
-    scene_selection.replace(nodes, primary);
-    delete_domain = DeleteDomain::Scene;
-    history_context = HistoryContext::Scene;
-    semantic_boundary = true;
-  }
-
   void toggle(doc::NodeId node) {
     scene_settings_selection = SceneSettingsTarget::None;
     pending_group_members.clear();

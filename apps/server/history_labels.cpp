@@ -288,13 +288,13 @@ editor::HistoryStep describe_history_step(
         step.kind = editor::HistoryStepKind::Change;
     }
 
-    // A plateset placement or take swap touches a track, a clip and wiring
-    // per plate; what the operator did was one thing.
-    const auto plates = [](const auto& nodes) {
+    // A plateset placement can make a vehicle track, a screen per plate and
+    // their wiring besides the take; what the operator did was one thing.
+    const auto takes = [](const auto& nodes) {
         return static_cast<std::size_t>(std::count_if(
             nodes.begin(), nodes.end(), [](const doc::Node* node) {
                 return node->type == scene::schema::media_type &&
-                       node->properties.contains(scene::schema::plateset_take);
+                       node->properties.contains(scene::schema::plateset_asset);
             }));
     };
     const std::size_t swapped = static_cast<std::size_t>(std::count_if(
@@ -309,12 +309,16 @@ editor::HistoryStep describe_history_step(
             return change->after->type == scene::schema::media_type &&
                    set(*change->before) != set(*change->after);
         }));
-    if (const std::size_t placed = plates(added); placed > 0U) {
-        step.label = "Place plateset (" + std::to_string(placed) +
-                     (placed == 1U ? " plate)" : " plates)");
+    // A razor adds a take too - the tail - but it changes the head it cut
+    // from, which a placement never does.
+    const bool cut = std::any_of(
+        modified.begin(), modified.end(), [](const NetChange* change) {
+            return change->after->type == scene::schema::media_type;
+        });
+    if (takes(added) > 0U && !cut) {
+        step.label = "Place plateset";
     } else if (swapped > 0U) {
-        step.label = "Swap take (" + std::to_string(swapped) +
-                     (swapped == 1U ? " plate)" : " plates)");
+        step.label = "Swap take";
     } else
     // Adding or deleting usually renumbers or rewires its neighbours too; the
     // node that came or went is what the operator did.

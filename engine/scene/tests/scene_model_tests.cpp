@@ -3994,6 +3994,540 @@ void a_track_owns_the_screen_its_clips_are_drawn_on() {
                 == scene::digest(evaluated));
 }
 
+// A vehicle track (20) in scene 100 with slot screens for the front (21), the
+// right (22) and the ceiling (23), each moved to its own x so a plate can be
+// told by where it lands. There is deliberately no screen for the back.
+[[nodiscard]] doc::Root vehicle_stage() {
+    doc::Root root;
+    root = root.set(node(100U, schema::stage_type, {}));
+    root = root.set(node(
+        20U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Car"),
+         whole(schema::lane_order, 10),
+         text(schema::lane_kind, schema::lane_kind_vehicle)}));
+    root = root.set(node(
+        21U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Front"),
+         whole(schema::lane_order, 11), whole(schema::lane_parent, 20),
+         text(schema::lane_slot, "front"), real(schema::position_x, 1.0)}));
+    root = root.set(node(
+        22U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Right"),
+         whole(schema::lane_order, 12), whole(schema::lane_parent, 20),
+         text(schema::lane_slot, "right"), real(schema::position_x, 2.0)}));
+    root = root.set(node(
+        23U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Ceiling"),
+         whole(schema::lane_order, 13), whole(schema::lane_parent, 20),
+         text(schema::lane_slot, "ceiling"), real(schema::position_x, 3.0)}));
+    return root;
+}
+
+// One plate of a take, as four properties on its clip.
+void add_plate(doc::Node& clip, std::size_t slot, std::string_view source,
+               std::int64_t asset, std::int64_t count, std::int64_t offset) {
+    clip.properties.insert_or_assign(
+        schema::plate_property(slot, schema::plate_source_suffix),
+        doc::PropertyValue{std::string{source}});
+    clip.properties.insert_or_assign(
+        schema::plate_property(slot, schema::plate_asset_suffix),
+        doc::PropertyValue{asset});
+    clip.properties.insert_or_assign(
+        schema::plate_property(slot, schema::plate_count_suffix),
+        doc::PropertyValue{count});
+    clip.properties.insert_or_assign(
+        schema::plate_property(slot, schema::plate_offset_suffix),
+        doc::PropertyValue{offset});
+}
+
+// A take on `lane`: an ordinary clip of its front plate at the show's own
+// rate, so one show frame is one source frame and the arithmetic below reads
+// straight off the numbers.
+[[nodiscard]] doc::Node take_node(core::u64 id, std::int64_t lane,
+                                  std::int64_t start, std::int64_t duration,
+                                  std::int64_t source_in, std::int64_t order) {
+    return node(
+        id, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "front.mov"),
+         whole(schema::asset_id, 501), whole(schema::sequence_count, 100),
+         whole(schema::source_rate_numerator, 60),
+         whole(schema::source_rate_denominator, 1),
+         whole(schema::lane_id, lane), whole(schema::clip_start, start),
+         whole(schema::clip_duration, duration),
+         whole(schema::source_in, source_in),
+         whole(schema::clip_order, order),
+         whole(schema::plateset_asset, 900)});
+}
+
+constexpr std::size_t front_slot = 0U;
+constexpr std::size_t right_slot = 2U;
+constexpr std::size_t back_slot = 4U;
+constexpr std::size_t ceiling_slot = 8U;
+
+[[nodiscard]] const scene::MediaInstance* plate_on(const scene::Scene& scene,
+                                                   core::u64 screen) {
+    const auto found = std::find_if(
+        scene.media.begin(), scene.media.end(),
+        [screen](const scene::MediaInstance& clip) noexcept {
+            return clip.timeline_lane == doc::NodeId{screen};
+        });
+    return found == scene.media.end() ? nullptr : std::addressof(*found);
+}
+
+void a_take_plays_each_plate_on_its_slot_screen() {
+    doc::Root root = vehicle_stage();
+    // The right screen plays three frames ahead of its take, and the ceiling
+    // a thousand behind it - further back than the plate has frames.
+    {
+        doc::Node right = *root.get(doc::NodeId{22U});
+        right.properties.insert_or_assign(
+            std::string{schema::lane_time_offset},
+            doc::PropertyValue{std::int64_t{3}});
+        root = root.set(right);
+        doc::Node ceiling = *root.get(doc::NodeId{23U});
+        ceiling.properties.insert_or_assign(
+            std::string{schema::lane_time_offset},
+            doc::PropertyValue{std::int64_t{-1000}});
+        root = root.set(ceiling);
+    }
+    // One clip: frames 10..59 of the show, trimmed five frames in. Each plate
+    // has a different length and a different sync offset.
+    doc::Node take = take_node(2U, 20, 10, 50, 5, 1);
+    add_plate(take, front_slot, "front.mov", 501, 100, 4);
+    add_plate(take, right_slot, "right.mov", 502, 80, 6);
+    add_plate(take, back_slot, "back.mov", 503, 90, 0);
+    add_plate(take, ceiling_slot, "ceiling.mov", 504, 60, 0);
+    root = root.set(take);
+
+    scene::SceneModel model;
+    model.reset(scoped(root));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    // The Timeline's view: one clip, on the vehicle track.
+    const auto clips = model.clips(scene::SceneId{100U});
+    MODEL_CHECK(clips.size() == 1U);
+    MODEL_CHECK(clips.front().node == doc::NodeId{2U});
+    MODEL_CHECK(clips.front().lane == doc::NodeId{20U});
+    MODEL_CHECK(clips.front().source == "front.mov");
+
+    const auto lanes = model.lanes(scene::SceneId{100U});
+    MODEL_CHECK(lanes.size() == 4U);
+    MODEL_CHECK(lanes[0U].id == doc::NodeId{20U});
+    MODEL_CHECK(lanes[0U].vehicle);
+    MODEL_CHECK(lanes[0U].parent == doc::NodeId{});
+    MODEL_CHECK(lanes[0U].slot == scene::no_vehicle_slot);
+    MODEL_CHECK(lanes[2U].id == doc::NodeId{22U});
+    MODEL_CHECK(!lanes[2U].vehicle);
+    MODEL_CHECK(lanes[2U].parent == doc::NodeId{20U});
+    MODEL_CHECK(lanes[2U].slot == right_slot);
+    MODEL_CHECK(lanes[2U].time_offset == 3);
+    MODEL_CHECK(lanes[3U].slot == ceiling_slot);
+    MODEL_CHECK(lanes[3U].time_offset == -1000);
+
+    // Ten frames into the clip.
+    const scene::SceneTime moment{20U, 60U, 1U};
+    const auto evaluated = model.evaluate(scene::SceneId{100U}, moment);
+    // Three plates have a screen; the back has none and is not drawn.
+    MODEL_CHECK(evaluated.media.size() == 3U);
+    const auto* const front = plate_on(evaluated, 21U);
+    const auto* const right = plate_on(evaluated, 22U);
+    const auto* const ceiling = plate_on(evaluated, 23U);
+    MODEL_CHECK(front != nullptr && right != nullptr && ceiling != nullptr);
+
+    // Each is its screen's picture - the screen is the layer - placed by the
+    // one take, with a playhead of its own.
+    MODEL_CHECK(front->source_node == doc::NodeId{21U});
+    MODEL_CHECK(right->source_node == doc::NodeId{22U});
+    MODEL_CHECK(ceiling->source_node == doc::NodeId{23U});
+    MODEL_CHECK(front->placement == doc::NodeId{2U});
+    MODEL_CHECK(right->placed_by() == doc::NodeId{2U});
+    MODEL_CHECK(ceiling->placed_by() == doc::NodeId{2U});
+    MODEL_CHECK(front->stream_id() ==
+                scene::plate_stream(doc::NodeId{2U}, front_slot));
+    MODEL_CHECK(right->stream_id() ==
+                scene::plate_stream(doc::NodeId{2U}, right_slot));
+    MODEL_CHECK(front->stream_id() != right->stream_id());
+    MODEL_CHECK(front->stream_id() != 0U && front->stream_id() != 2U);
+
+    MODEL_CHECK(front->source == "front.mov");
+    MODEL_CHECK(right->source == "right.mov");
+    MODEL_CHECK(ceiling->source == "ceiling.mov");
+    MODEL_CHECK(front->asset == doc::NodeId{501U});
+    MODEL_CHECK(right->asset == doc::NodeId{502U});
+    MODEL_CHECK(ceiling->asset == doc::NodeId{504U});
+    MODEL_CHECK(right->loop_count == 80U);
+    MODEL_CHECK(ceiling->loop_count == 60U);
+
+    // The front plate is the clip: trim 5, ten frames in. The right starts
+    // two frames further into its file (sync 6 against the front's 4) and its
+    // screen adds three. The ceiling would start before its first frame, so
+    // it starts on it.
+    MODEL_CHECK(front->frame_index == 15U);
+    MODEL_CHECK(right->frame_index == 20U);
+    MODEL_CHECK(ceiling->frame_index == 10U);
+
+    // Each on its own screen's plane.
+    MODEL_CHECK(std::abs(front->world.at(0U, 3U) - 1.0F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(right->world.at(0U, 3U) - 2.0F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(ceiling->world.at(0U, 3U) - 3.0F) <= 1.0e-5F);
+
+    // The vehicle track owns no plane, so it is not among the screens; its
+    // three slot screens are.
+    MODEL_CHECK(evaluated.screens.size() == 3U);
+    MODEL_CHECK(evaluated.screens[0U].node == doc::NodeId{21U});
+    MODEL_CHECK(evaluated.screens[2U].node == doc::NodeId{23U});
+
+    // Every plate that plays is in the scene's media, whatever is on air.
+    MODEL_CHECK(evaluated.media_assets.has_value());
+    MODEL_CHECK(evaluated.media_assets->size() == 3U);
+
+    // A different plate on one screen is a different picture.
+    scene::Scene other = evaluated;
+    other.media.front().source = "elsewhere.mov";
+    MODEL_CHECK(scene::digest(other) != scene::digest(evaluated));
+
+    // Before the clip and after it, nothing plays.
+    MODEL_CHECK(model.evaluate(scene::SceneId{100U},
+                               scene::SceneTime{9U, 60U, 1U})
+                    .media.empty());
+    MODEL_CHECK(model.evaluate(scene::SceneId{100U},
+                               scene::SceneTime{60U, 60U, 1U})
+                    .media.empty());
+    // One frame before it, each plate is named with the frame it opens on
+    // and the playhead it will be drawn with.
+    const auto before = model.evaluate(
+        scene::SceneId{100U}, scene::SceneTime{9U, 60U, 1U});
+    MODEL_CHECK(before.media_prewarm.size() == 3U);
+    for (const scene::MediaPrewarm& warm : before.media_prewarm) {
+        MODEL_CHECK(warm.source_node == doc::NodeId{2U});
+        MODEL_CHECK(warm.frames_until_start == 1U);
+        if (warm.source == "right.mov") {
+            MODEL_CHECK(warm.frame_index == 10U);
+            MODEL_CHECK(warm.stream_id() ==
+                        scene::plate_stream(doc::NodeId{2U}, right_slot));
+        } else if (warm.source == "front.mov") {
+            MODEL_CHECK(warm.frame_index == 5U);
+        } else {
+            MODEL_CHECK(warm.source == "ceiling.mov");
+            MODEL_CHECK(warm.frame_index == 0U);
+        }
+    }
+
+    // A previewed trim of the one clip moves every plate with it.
+    const std::array<scene::ClipTimingOverride, 1U> preview{{
+        {doc::NodeId{2U}, scene::ClipTiming{10, 50, 25, 0, 0}},
+    }};
+    const auto previewed = model.evaluate(
+        scene::SceneId{100U}, moment, scene::ShowLoop{}, preview);
+    MODEL_CHECK(plate_on(previewed, 21U)->frame_index == 35U);
+    MODEL_CHECK(plate_on(previewed, 22U)->frame_index == 40U);
+
+    scene::SceneModel streamed;
+    streamed.reset(scoped(doc::Root{}));
+    streamed.apply(diff(scoped(doc::Root{}), scoped(root)));
+    MODEL_CHECK(streamed.lanes(scene::SceneId{100U}) == lanes);
+    MODEL_CHECK(streamed.evaluate(scene::SceneId{100U}, moment).media ==
+                evaluated.media);
+    MODEL_CHECK(scene::digest(
+                    streamed.evaluate(scene::SceneId{100U}, moment))
+                == scene::digest(evaluated));
+}
+
+void a_take_carries_its_own_look_its_screens_and_its_vehicle_tracks() {
+    doc::Root root = vehicle_stage();
+    {
+        doc::Node car = *root.get(doc::NodeId{20U});
+        car.properties.insert_or_assign(
+            std::string{schema::opacity}, doc::PropertyValue{0.5});
+        root = root.set(car);
+        doc::Node right = *root.get(doc::NodeId{22U});
+        right.properties.insert_or_assign(
+            std::string{schema::opacity}, doc::PropertyValue{0.5});
+        right.properties.insert_or_assign(
+            std::string{schema::lane_compositing_mode},
+            doc::PropertyValue{std::string{schema::lane_add_mode}});
+        root = root.set(right);
+    }
+    doc::Node take = take_node(2U, 20, 0, 50, 0, 1);
+    add_plate(take, front_slot, "front.mov", 501, 100, 0);
+    add_plate(take, right_slot, "right.mov", 502, 100, 0);
+    take.properties.insert_or_assign(
+        std::string{schema::fade_in}, doc::PropertyValue{std::int64_t{4}});
+    root = root.set(take);
+    // A grade on the take, one on the right screen and one on the whole car.
+    root = root.set(effect_node(40U, 2U, schema::brightness_kind, 0, 2.0));
+    root = root.set(effect_node(41U, 22U, schema::saturation_kind, 0, 0.5));
+    root = root.set(effect_node(42U, 20U, schema::blur_kind, 0, 6.0));
+
+    scene::SceneModel model;
+    model.reset(scoped(root));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const auto evaluated = model.evaluate(
+        scene::SceneId{100U}, scene::SceneTime{20U, 60U, 1U});
+    const auto* const front = plate_on(evaluated, 21U);
+    const auto* const right = plate_on(evaluated, 22U);
+    MODEL_CHECK(front != nullptr && right != nullptr);
+
+    // The car's opacity is on every plate; a screen's multiplies it.
+    MODEL_CHECK(std::abs(front->style.opacity - 0.5F) <= 1.0e-5F);
+    MODEL_CHECK(std::abs(right->style.opacity - 0.25F) <= 1.0e-5F);
+    // A screen's blend mode is its own; the others take the car's.
+    MODEL_CHECK(front->style.blend == scene::BlendMode::Normal);
+    MODEL_CHECK(right->style.blend == scene::BlendMode::Add);
+
+    // The take's grade first, then the screen's, then the car's.
+    const auto& front_grade = front->style.effects.inline_operations;
+    const auto& right_grade = right->style.effects.inline_operations;
+    MODEL_CHECK(front_grade.size() == 1U);
+    MODEL_CHECK(front_grade[0U].kind == scene::EffectKind::Brightness);
+    MODEL_CHECK(right_grade.size() == 2U);
+    MODEL_CHECK(right_grade[0U].kind == scene::EffectKind::Brightness);
+    MODEL_CHECK(right_grade[1U].kind == scene::EffectKind::Saturation);
+    MODEL_CHECK(front->style.effects.blur_enabled);
+    MODEL_CHECK(right->style.effects.blur_enabled);
+    MODEL_CHECK(std::abs(front->style.effects.blur_radius - 6.0F) <= 1.0e-5F);
+
+    // The clip's fade is every plate's: two of four frames in, half way.
+    const auto fading = model.evaluate(
+        scene::SceneId{100U}, scene::SceneTime{2U, 60U, 1U});
+    MODEL_CHECK(std::abs(plate_on(fading, 21U)->style.opacity - 0.25F)
+                <= 1.0e-5F);
+    MODEL_CHECK(std::abs(plate_on(fading, 22U)->style.opacity - 0.125F)
+                <= 1.0e-5F);
+}
+
+void the_take_in_front_has_the_slot_screen() {
+    doc::Root root = vehicle_stage();
+    // Two takes that overlap from frame 30 to frame 49. The later one is in
+    // front and has no plate for the right.
+    doc::Node first = take_node(2U, 20, 0, 50, 0, 1);
+    add_plate(first, front_slot, "a-front.mov", 501, 100, 0);
+    add_plate(first, right_slot, "a-right.mov", 502, 100, 0);
+    root = root.set(first);
+    doc::Node second = take_node(3U, 20, 30, 50, 7, 2);
+    add_plate(second, front_slot, "b-front.mov", 601, 100, 0);
+    root = root.set(second);
+
+    scene::SceneModel model;
+    model.reset(scoped(root));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const auto alone = model.evaluate(
+        scene::SceneId{100U}, scene::SceneTime{10U, 60U, 1U});
+    MODEL_CHECK(alone.media.size() == 2U);
+    MODEL_CHECK(plate_on(alone, 21U)->source == "a-front.mov");
+
+    // Where they overlap the front screen shows the take in front and
+    // nothing of the one behind: a screen is one layer with one picture. The
+    // right screen, which only the first take fills, still shows it.
+    const auto overlap = model.evaluate(
+        scene::SceneId{100U}, scene::SceneTime{40U, 60U, 1U});
+    MODEL_CHECK(overlap.media.size() == 2U);
+    const auto* const front = plate_on(overlap, 21U);
+    const auto* const right = plate_on(overlap, 22U);
+    MODEL_CHECK(front != nullptr && right != nullptr);
+    MODEL_CHECK(front->source == "b-front.mov");
+    MODEL_CHECK(front->placement == doc::NodeId{3U});
+    MODEL_CHECK(front->frame_index == 17U);
+    MODEL_CHECK(right->source == "a-right.mov");
+    MODEL_CHECK(right->placement == doc::NodeId{2U});
+    // Two cuts on one screen keep a playhead each.
+    MODEL_CHECK(front->stream_id() !=
+                scene::plate_stream(doc::NodeId{2U}, front_slot));
+
+    // Once the first has ended only the second is left.
+    const auto after = model.evaluate(
+        scene::SceneId{100U}, scene::SceneTime{60U, 60U, 1U});
+    MODEL_CHECK(after.media.size() == 1U);
+    MODEL_CHECK(after.media.front().placement == doc::NodeId{3U});
+
+    // Raising the first above the second gives it the screen back.
+    doc::Node raised = first;
+    raised.properties.insert_or_assign(
+        std::string{schema::clip_order}, doc::PropertyValue{std::int64_t{5}});
+    scene::SceneModel reordered;
+    reordered.reset(scoped(root.set(raised)));
+    const auto swapped = reordered.evaluate(
+        scene::SceneId{100U}, scene::SceneTime{40U, 60U, 1U});
+    MODEL_CHECK(plate_on(swapped, 21U)->source == "a-front.mov");
+    MODEL_CHECK(scene::digest(swapped) != scene::digest(overlap));
+}
+
+void a_vehicle_track_shows_only_takes_and_switches_its_screens_off_with_it() {
+    doc::Root root = vehicle_stage();
+    root = root.set(node(
+        30U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Wall"),
+         whole(schema::lane_order, 20), real(schema::position_x, 9.0)}));
+    doc::Node take = take_node(2U, 20, 0, 50, 0, 1);
+    add_plate(take, front_slot, "front.mov", 501, 100, 0);
+    add_plate(take, right_slot, "right.mov", 502, 100, 0);
+    root = root.set(take);
+    // An ordinary clip filed on the vehicle track, and one filed straight
+    // onto a slot screen: neither has anywhere to play.
+    root = root.set(node(
+        3U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "stray.png"),
+         whole(schema::lane_id, 20), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 50)}));
+    root = root.set(node(
+        4U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "direct.png"),
+         whole(schema::lane_id, 22), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 50)}));
+    // The same take on an ordinary track is an ordinary clip of its front
+    // plate: one picture, on that track's screen, known by the clip.
+    doc::Node on_wall = take_node(5U, 30, 0, 50, 0, 1);
+    add_plate(on_wall, front_slot, "front.mov", 501, 100, 0);
+    add_plate(on_wall, right_slot, "right.mov", 502, 100, 0);
+    root = root.set(on_wall);
+
+    scene::SceneModel model;
+    model.reset(scoped(root));
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const scene::SceneTime moment{10U, 60U, 1U};
+    const auto evaluated = model.evaluate(scene::SceneId{100U}, moment);
+    MODEL_CHECK(evaluated.media.size() == 3U);
+    MODEL_CHECK(plate_on(evaluated, 21U) != nullptr);
+    MODEL_CHECK(plate_on(evaluated, 22U) != nullptr);
+    MODEL_CHECK(plate_on(evaluated, 22U)->source == "right.mov");
+    const auto* const wall = plate_on(evaluated, 30U);
+    MODEL_CHECK(wall != nullptr);
+    MODEL_CHECK(wall->source_node == doc::NodeId{5U});
+    MODEL_CHECK(wall->placement == doc::NodeId{});
+    MODEL_CHECK(wall->stream_id() == 5U);
+    MODEL_CHECK(wall->source == "front.mov");
+    MODEL_CHECK(std::abs(wall->world.at(0U, 3U) - 9.0F) <= 1.0e-5F);
+
+    const auto with = [&root](core::u64 lane, std::string_view name,
+                              bool value) {
+        doc::Node changed = *root.get(doc::NodeId{lane});
+        changed.properties.insert_or_assign(
+            std::string{name}, doc::PropertyValue{value});
+        scene::SceneModel changed_model;
+        changed_model.reset(scoped(root.set(changed)));
+        return changed_model.evaluate(
+            scene::SceneId{100U}, scene::SceneTime{10U, 60U, 1U});
+    };
+
+    // One screen switched off loses its plate and no other.
+    const auto right_off = with(22U, schema::lane_muted, true);
+    MODEL_CHECK(plate_on(right_off, 21U) != nullptr);
+    MODEL_CHECK(plate_on(right_off, 22U) == nullptr);
+    MODEL_CHECK(right_off.media.size() == 2U);
+
+    // The vehicle track switched off takes every screen with it, and they
+    // read as off; the ordinary track is untouched.
+    const auto car_off = with(20U, schema::lane_muted, true);
+    MODEL_CHECK(car_off.media.size() == 1U);
+    MODEL_CHECK(plate_on(car_off, 30U) != nullptr);
+    for (const scene::SceneScreen& screen : car_off.screens) {
+        MODEL_CHECK(screen.muted == (screen.node != doc::NodeId{30U}));
+    }
+
+    // Locked the same way: the whole car, or one screen of it.
+    const auto car_locked = with(20U, schema::lane_locked, true);
+    MODEL_CHECK(plate_on(car_locked, 21U)->locked);
+    MODEL_CHECK(plate_on(car_locked, 22U)->locked);
+    MODEL_CHECK(!plate_on(car_locked, 30U)->locked);
+    const auto right_locked = with(22U, schema::lane_locked, true);
+    MODEL_CHECK(!plate_on(right_locked, 21U)->locked);
+    MODEL_CHECK(plate_on(right_locked, 22U)->locked);
+
+    // A second screen claiming the front slot is left out: the lower node
+    // id has it, on every machine.
+    doc::Root doubled = root.set(node(
+        19U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Front again"),
+         whole(schema::lane_order, 14), whole(schema::lane_parent, 20),
+         text(schema::lane_slot, "front"), real(schema::position_x, -4.0)}));
+    scene::SceneModel doubled_model;
+    doubled_model.reset(scoped(doubled));
+    const auto contested =
+        doubled_model.evaluate(scene::SceneId{100U}, moment);
+    MODEL_CHECK(plate_on(contested, 19U) != nullptr);
+    MODEL_CHECK(plate_on(contested, 21U) == nullptr);
+    MODEL_CHECK(contested.media.size() == 3U);
+}
+
+void damaged_vehicle_tracks_and_takes_are_refused() {
+    const auto rejected = [](const doc::Root& root) {
+        scene::SceneModel model;
+        model.reset(scoped(root));
+        return model.counters().rejected;
+    };
+    const doc::Root stage = vehicle_stage();
+    MODEL_CHECK(rejected(stage) == 0U);
+
+    const auto lane = [](std::initializer_list<Property> extra) {
+        doc::Node built = node(
+            50U, schema::timeline_lane_type,
+            {whole(schema::scene_id, 100), text(schema::lane_name, "Odd"),
+             whole(schema::lane_order, 30)});
+        for (const Property& property : extra) {
+            built.properties.insert_or_assign(property.first, property.second);
+        }
+        return built;
+    };
+    // A kind that is not a kind.
+    MODEL_CHECK(rejected(stage.set(lane(
+                    {text(schema::lane_kind, "boat")}))) == 1U);
+    // A slot with no vehicle track, and a vehicle track with no slot.
+    MODEL_CHECK(rejected(stage.set(lane(
+                    {text(schema::lane_slot, "left")}))) == 1U);
+    MODEL_CHECK(rejected(stage.set(lane(
+                    {whole(schema::lane_parent, 20)}))) == 1U);
+    // A slot nothing is called.
+    MODEL_CHECK(rejected(stage.set(lane(
+                    {whole(schema::lane_parent, 20),
+                     text(schema::lane_slot, "bonnet")}))) == 1U);
+    // A vehicle track that is also a slot of another.
+    MODEL_CHECK(rejected(stage.set(lane(
+                    {text(schema::lane_kind, schema::lane_kind_vehicle),
+                     whole(schema::lane_parent, 20),
+                     text(schema::lane_slot, "left")}))) == 1U);
+    // A time offset on a track that is not a slot screen, and one past the
+    // bound on a track that is.
+    MODEL_CHECK(rejected(stage.set(lane(
+                    {whole(schema::lane_time_offset, 2)}))) == 1U);
+    MODEL_CHECK(rejected(stage.set(lane(
+                    {whole(schema::lane_parent, 20),
+                     text(schema::lane_slot, "left"),
+                     whole(schema::lane_time_offset,
+                           scene::max_lane_time_offset + 1)}))) == 1U);
+    MODEL_CHECK(rejected(stage.set(lane(
+                    {whole(schema::lane_parent, 20),
+                     text(schema::lane_slot, "left"),
+                     whole(schema::lane_time_offset,
+                           -scene::max_lane_time_offset)}))) == 0U);
+
+    // A take with a plate that has no frames, no file or a negative sync
+    // offset is refused whole.
+    const auto take = [](std::string_view source, std::int64_t count,
+                         std::int64_t offset) {
+        doc::Node built = take_node(2U, 20, 0, 50, 0, 1);
+        add_plate(built, front_slot, "front.mov", 501, 100, 0);
+        add_plate(built, right_slot, source, 502, count, offset);
+        return built;
+    };
+    MODEL_CHECK(rejected(stage.set(take("right.mov", 80, 3))) == 0U);
+    MODEL_CHECK(rejected(stage.set(take("right.mov", 0, 3))) == 1U);
+    MODEL_CHECK(rejected(stage.set(take("", 80, 3))) == 1U);
+    MODEL_CHECK(rejected(stage.set(take("right.mov", 80, -1))) == 1U);
+    scene::SceneModel refused;
+    refused.reset(scoped(stage.set(take("right.mov", 0, 3))));
+    MODEL_CHECK(refused.evaluate(scene::SceneId{100U},
+                                 scene::SceneTime{10U, 60U, 1U})
+                    .media.empty());
+
+    // Plates are read only from a clip that names its plateset: the same
+    // properties on an ordinary clip are not a take.
+    doc::Node plain = take("right.mov", 0, 3);
+    plain.properties.erase(std::string{schema::plateset_asset});
+    MODEL_CHECK(rejected(stage.set(plain)) == 0U);
+}
+
 void timeline_markers_are_scene_scoped_cues_in_show_order() {
     doc::Root root;
     root = root.set(node(100U, schema::stage_type, {}));
@@ -5509,7 +6043,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 91U> cases{{
+constexpr std::array<Case, 96U> cases{{
     {"an updated model is the model a rebuild would be",
      &an_updated_model_is_the_model_a_rebuild_would_be},
     {"a solo draws only what it shows",
@@ -5590,6 +6124,16 @@ constexpr std::array<Case, 91U> cases{{
      &timeline_lanes_order_mute_lock_and_preserve_implicit_clips},
     {"a track owns the screen its clips are drawn on",
      &a_track_owns_the_screen_its_clips_are_drawn_on},
+    {"a take plays each plate on its slot screen",
+     &a_take_plays_each_plate_on_its_slot_screen},
+    {"a take carries its own look, its screen's and its vehicle track's",
+     &a_take_carries_its_own_look_its_screens_and_its_vehicle_tracks},
+    {"the take in front has the slot screen",
+     &the_take_in_front_has_the_slot_screen},
+    {"a vehicle track shows only takes and switches its screens off with it",
+     &a_vehicle_track_shows_only_takes_and_switches_its_screens_off_with_it},
+    {"damaged vehicle tracks and takes are refused",
+     &damaged_vehicle_tracks_and_takes_are_refused},
     {"timeline markers are scene-scoped cues in show order",
      &timeline_markers_are_scene_scoped_cues_in_show_order},
     {"an open aspect lock leaves the authored plane alone",

@@ -51,6 +51,9 @@ enum class LaneAuthorError : core::u8 {
     Locked,
     // Split: the cut leaves one of the two tracks with nothing on it.
     NothingToSplit,
+    // Split: a vehicle track and its slot screens are one car, and half a
+    // car is not a track. Its takes are cut with the clip razor.
+    VehicleTrack,
     IdExhausted,
     InvalidDocument,
     AllocationFailed,
@@ -74,6 +77,8 @@ struct LaneAuthorPlan final {
 // the cut on. A clip straddling the cut is split, its tail going to the new
 // track. Both tracks must end up holding something; a cut outside the track's
 // clips would only be a move, and is refused rather than performed as one.
+//
+// Deleting a vehicle track deletes its slot screens with it.
 [[nodiscard]] core::Result<LaneAuthorPlan, LaneAuthorError>
 plan_lane_authoring(const doc::Root& document,
                     const LaneAuthorRequest& request,

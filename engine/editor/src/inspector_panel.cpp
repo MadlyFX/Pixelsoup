@@ -2,6 +2,8 @@
 #include <mediaserver/editor/effects_panel.hpp>
 #include <mediaserver/editor/operator_widgets.hpp>
 
+#include <mediaserver/assets/plateset.hpp>
+
 #include <mediaserver/gui/color_picker.hpp>
 
 #include <mediaserver/scene/scene_schema.hpp>
@@ -245,6 +247,7 @@ constexpr std::array<std::string_view, 3U> tracker_protocol_choices{
     pristine.style.horizontal_blend = fresh.style.horizontal_blend;
     pristine.raster_width = fresh.raster_width;
     pristine.raster_height = fresh.raster_height;
+    pristine.time_offset = fresh.time_offset;
     pristine.field_of_view = fresh.field_of_view;
     pristine.shutter_seconds = fresh.shutter_seconds;
     pristine.aperture_f_number = fresh.aperture_f_number;
@@ -486,6 +489,12 @@ InspectorPanel::editable_value(const ElementInfo& element,
         if (binding.property == scene::schema::lane_raster_height) {
             return EditableValue{element.node, element.node,
                                  static_cast<double>(element.raster_height)};
+        }
+        // Only a slot screen plays a plate that can be early or late.
+        if (binding.property == scene::schema::lane_time_offset &&
+            element.vehicle_track != doc::NodeId{}) {
+            return EditableValue{element.node, element.node,
+                                 static_cast<double>(element.time_offset)};
         }
         return std::nullopt;
     case FieldDomain::Camera:
@@ -1003,6 +1012,13 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
         }
         return value;
       case FieldDomain::Screen:
+        // Whole source frames, either way.
+        if (binding.property == scene::schema::lane_time_offset) {
+          return std::clamp(
+              std::round(value),
+              -static_cast<double>(scene::max_lane_time_offset),
+              static_cast<double>(scene::max_lane_time_offset));
+        }
         // A raster is whole pixels. Rounding here rather than at the document
         // boundary means the field itself never shows 1919.6.
         return std::clamp(std::round(value), 1.0,
@@ -1867,7 +1883,9 @@ void InspectorPanel::draw_content(gui::UiContext& ctx, Cursor& cursor,
 void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,
                                  const ElementInfo& element,
                                  InspectorFrame& frame) {
-    if (element.kind != ElementKind::Track) {
+    // A vehicle track owns no plane, so it has no format to set: its walls
+    // are its slot screens, each with a section of its own.
+    if (element.kind != ElementKind::Track || element.vehicle) {
         return;
     }
     if (!section(ctx, cursor, "SCREEN", screen_open_)) {
@@ -1906,6 +1924,132 @@ void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,
             NamedEdit{element.node,
                       std::string{scene::schema::lane_aspect_locked},
                       element.aspect_locked ? 0.0 : 1.0});
+    }
+
+    // A slot screen's plate can play ahead of its take or behind it. The
+    // offset is the screen's, so it stays when the take is swapped: it is for
+    // timing one wall against the car, not for footage that came in out of
+    // sync, which the plateset's own sync offsets put right.
+    if (element.vehicle_track != doc::NodeId{}) {
+        constexpr std::array<std::string_view, 1U> unit{{"frames"}};
+        const std::array<float, 1U> offset{
+            static_cast<float>(element.time_offset)};
+        const std::array<FieldBinding, 1U> offset_binding{{
+            {FieldDomain::Screen, {}, scene::schema::lane_time_offset}}};
+        vector_row(ctx, cursor, "Time offset", unit, offset, 1.0F,
+                   offset_binding, frame);
+        ctx.tooltip(cursor.last(),
+                    "Source frames this screen's plate plays ahead of its "
+                    "take (negative: behind). It stays with the screen when "
+                    "the take is swapped.");
+    }
+}
+
+// The car from above, front up, as the plateset page draws it: a tile per
+// slot, each standing for that wall's screen. On a vehicle track it shows
+// which walls the car has; on a take, which of them this take plays on. A
+// wall with a screen is a button that selects it, which is where that wall's
+// place, grade and timing are set.
+void InspectorPanel::draw_vehicle(gui::UiContext& ctx, Cursor& cursor,
+                                  const ElementInfo& element,
+                                  InspectorFrame& frame) {
+    const bool car = element.kind == ElementKind::Track && element.vehicle;
+    const bool take = element.kind == ElementKind::Media && element.take;
+    if ((!car && !take) ||
+        !section(ctx, cursor, "VEHICLE", vehicle_open_)) {
+        return;
+    }
+    const gui::Theme& theme = ctx.theme();
+    constexpr float gap = 4.0F;
+    const gui::Rect area = take_row(cursor, 132.0F);
+    cursor.space(row_gap);
+    const float side = std::max(std::min(area.width, area.height), 0.0F);
+    const gui::Rect rig{area.x + (area.width - side) * 0.5F, area.y, side,
+                        side};
+    const float cell = (side - gap * 2.0F) / 3.0F;
+    // Column and row of each slot, in slot order: the eight walls clockwise
+    // from the front, then the ceiling over the car.
+    constexpr std::array<std::array<int, 2U>, scene::vehicle_slot_count>
+        cells{{{1, 0}, {2, 0}, {2, 1}, {2, 2}, {1, 2}, {0, 2}, {0, 1}, {0, 0},
+               {1, 1}}};
+    for (std::size_t slot = 0U; slot < cells.size(); ++slot) {
+        const auto role = static_cast<assets::PlatesetSlot>(slot);
+        const gui::Rect tile{
+            rig.x + static_cast<float>(cells[slot][0]) * (cell + gap),
+            rig.y + static_cast<float>(cells[slot][1]) * (cell + gap), cell,
+            cell};
+        const doc::NodeId screen = element.slot_screens[slot];
+        const bool has_screen = screen != doc::NodeId{};
+        const bool plays = take && element.plates[slot];
+        gui::Interaction it{};
+        if (has_screen) {
+            it = ctx.grab(
+                gui::ui_id(gui::ui_id(id_, "vehicle wall",
+                                      element.node.value()),
+                           "slot", slot),
+                tile);
+            ctx.cursor_for(it, gui::Cursor::Hand);
+            if (it.clicked) {
+                frame.select_node = screen;
+            }
+        }
+        const float hover = ctx.ease(
+            gui::ui_id(gui::ui_id(id_, "vehicle wall hover",
+                                  element.node.value()),
+                       "slot", slot),
+            it.hovered ? 1.0F : 0.0F);
+        if (has_screen) {
+            // A take lights the walls it plays on and leaves the rest dim.
+            const gui::UiColor resting =
+                take && !plays ? gui::blend(theme.track, theme.widget, 0.4F)
+                               : theme.widget;
+            ctx.rounded(tile,
+                        gui::blend(resting, theme.accent,
+                                   hover * 0.25F + (plays ? 0.18F : 0.0F)),
+                        theme.radius_small);
+        } else {
+            // No screen here. A plate with nowhere to play is the one case
+            // worth a warning.
+            ctx.rounded_outline(
+                tile,
+                plays ? theme.warning
+                      : gui::blend(theme.track, theme.border, 0.6F),
+                theme.radius_small);
+        }
+        const std::string_view tag = assets::plateset_slot_tag(role);
+        ctx.label(gui::Rect{tile.x + std::max((tile.width -
+                                               ctx.font_width(tag)) *
+                                                  0.5F,
+                                              0.0F),
+                            tile.y, tile.width, tile.height},
+                  tag, has_screen ? theme.text : theme.text_muted);
+        std::string tip{assets::plateset_slot_label(role)};
+        if (has_screen && take) {
+            tip += plays ? ": this take's plate plays on this screen. Click "
+                           "to select the screen."
+                         : ": this take has no plate for this screen, so it "
+                           "shows nothing while the take is up. Click to "
+                           "select the screen.";
+        } else if (has_screen) {
+            tip += ": click to select this screen and set where it stands, "
+                   "how it is graded and its time offset.";
+        } else if (plays) {
+            tip += ": this take has a plate here, but the car has no screen "
+                   "for it.";
+        } else {
+            tip += ": the car has no screen here.";
+        }
+        ctx.tooltip(tile, tip);
+    }
+    if (take && element.plateset != doc::NodeId{}) {
+        const gui::Rect row = take_row(cursor, row_height);
+        cursor.space(row_gap);
+        if (ctx.button(gui::ui_id(id_, "open plateset", element.node.value()),
+                       row, "Open plateset")) {
+            frame.open_asset = element.plateset;
+        }
+        ctx.tooltip(row, "Show this take's plateset in the Asset Viewer: "
+                         "its plates, sync offsets and moments.");
     }
 }
 
@@ -3354,6 +3498,9 @@ InspectorFrame InspectorPanel::draw_selection(
                                        length, 0,
                                        static_cast<int>(line.size() - 1U)))},
                   ctx.theme().text_muted);
+    } else if (displayed->kind == ElementKind::Track && displayed->vehicle) {
+        // A vehicle track owns no plane: nine fields here would move
+        // nothing. Its walls are placed one at a time, from the rig below.
     } else {
         draw_transform(ctx, cursor, *displayed, frame, keyframes, show_frame);
     }
@@ -3366,6 +3513,7 @@ InspectorFrame InspectorPanel::draw_selection(
                displayed->kind != ElementKind::ParticleEffect) {
         cursor.space(row_gap);
         if (!displayed->linked) draw_content(ctx, cursor, *displayed, frame);
+        draw_vehicle(ctx, cursor, *displayed, frame);
         draw_screen(ctx, cursor, *displayed, frame);
         draw_fill(ctx, cursor, *displayed, frame);
         draw_material(ctx, cursor, *displayed, frame);

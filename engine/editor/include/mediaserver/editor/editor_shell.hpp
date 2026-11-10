@@ -321,19 +321,21 @@ enum class PlatesetRigChoice : core::u8 {
   NewRig,
 };
 
-// A Library plateset let go on the Timeline or Stage: a track and clip per
-// plate from `start`, wired into a rig, as one undo step.
+// A Library plateset let go on the Timeline or Stage: one take from `start`
+// on a vehicle track - `track` when it was let go on one, else the scene's
+// own, else a new one with its screens wired into a rig - as one undo step.
 struct PlatesetPlaceIntent final {
   scene::SceneId scene{};
   doc::NodeId plateset{};
   core::i64 start{};
   PlatesetRigChoice rig{PlatesetRigChoice::Auto};
   core::u64 gesture{};
+  doc::NodeId track{};
 
   bool operator==(const PlatesetPlaceIntent &) const = default;
 };
 
-// A plateset let go on a placed plate: its take plays the new set instead.
+// A plateset let go on a take: that clip plays the new set instead.
 struct PlatesetSwapIntent final {
   scene::SceneId scene{};
   doc::NodeId clip{};

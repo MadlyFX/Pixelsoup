@@ -4695,244 +4695,82 @@ void the_list_seam_drags_and_double_click_fits_the_names() {
   UI_CHECK(std::abs(h.panel.list_width() - fitted) < 0.5F);
 }
 
-// A placed plateset: the front plate (the harness clip) on FRONT and a left
-// plate on LEFT, one take at frames 20..60. LEFT is in front of FRONT, so it
-// is listed first; the front plate still leads the take.
+// A car: the harness clip is a take on a vehicle track, which has a front
+// and a left slot screen. LEFT stacks below FRONT in the document; the list
+// puts them in slot order.
 const doc::NodeId plateset_node{300U};
-const doc::NodeId left_plate_node{8U};
+const doc::NodeId front_screen_node{60U};
+const doc::NodeId left_screen_node{61U};
 
-void placed_plateset(Harness &h) {
-  editor::ElementInfo &front = h.elements[1U];
-  front.timeline_lane = lane_node;
-  front.plateset = plateset_node;
-  front.plateset_slot = "front";
-  front.plateset_take = 9;
-  editor::ElementInfo left = front;
-  left.node = left_plate_node;
-  left.timeline_lane = destination_lane_node;
-  left.plateset_slot = "left";
-  h.elements.push_back(left);
-  for (const doc::NodeId track : {lane_node, destination_lane_node}) {
-    editor::ElementInfo screen{};
-    screen.node = track;
-    screen.kind = editor::ElementKind::Track;
-    h.elements.push_back(screen);
-  }
-  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
-                                        "FRONT / Chicago drive", false, false,
-                                        scene::BlendMode::Normal, false});
-  h.lanes.push_back(scene::TimelineLane{
-      destination_lane_node, scene::SceneId{100U}, 20, "LEFT / Chicago drive",
-      false, false, scene::BlendMode::Normal, false});
+void placed_take(Harness &h) {
+  editor::ElementInfo &take = h.elements[1U];
+  take.timeline_lane = lane_node;
+  take.plateset = plateset_node;
+  take.take = true;
+  scene::TimelineLane vehicle{lane_node, scene::SceneId{100U}, 10, "Vehicle",
+                              false, false, scene::BlendMode::Normal, false};
+  vehicle.vehicle = true;
+  h.lanes.push_back(vehicle);
+  const auto screen = [&](doc::NodeId id, mediaserver::core::i64 order, const char *name,
+                          mediaserver::core::u8 slot) {
+    scene::TimelineLane lane{id, scene::SceneId{100U}, order, name, false,
+                             false, scene::BlendMode::Normal, false};
+    lane.parent = lane_node;
+    lane.slot = slot;
+    h.lanes.push_back(lane);
+    editor::ElementInfo wall{};
+    wall.node = id;
+    wall.kind = editor::ElementKind::Track;
+    h.elements.push_back(wall);
+  };
+  screen(left_screen_node, 11, "LEFT", 6U);
+  screen(front_screen_node, 12, "FRONT", 0U);
   h.keys.clear();
 }
 
-void set_take_timing(Harness &h, const scene::ClipTiming &timing) {
-  for (editor::ElementInfo &element : h.elements) {
-    if (element.plateset == plateset_node) {
-      element.timing = timing;
-    }
-  }
-}
-
-[[nodiscard]] bool track_listed(const Harness &h, doc::NodeId lane,
-                                float y) {
+// Where `lane`'s track row was drawn, or nothing when it is not listed.
+[[nodiscard]] std::optional<float> track_row_y(const Harness &h,
+                                               doc::NodeId lane) {
   for (const auto &target : h.panel.replacement_targets()) {
-    if (target.track && target.node == lane && target.bounds.y == y) {
-      return true;
+    if (target.track && target.node == lane) {
+      return target.bounds.y;
     }
   }
-  return false;
+  return std::nullopt;
 }
 
-// The take row acts on its set as one. With a track Other in front of it
-// (y=76..100) the row sits at y=100..124. At 1400 wide the list is 340: its
-// eye is at x=4..28, its lock at 312..336 and its solo at 290..308. Each
-// sets every track of the set that is not there yet; its menu folds,
-// switches, cuts, ranges, opens and removes the set; and dragging it lands
-// its tracks together, in their order.
-void a_take_row_switches_and_moves_its_set_as_one() {
+// A vehicle track is one track row, y=76..100, with its take under it. Its
+// menu's first entry lists the car's screens under it and folds them away
+// again; they are never there unasked.
+void a_vehicle_track_reads_as_one_track_and_lists_its_screens_on_request() {
   Harness h;
   h.bounds.width = 1'400.0F;
-  placed_plateset(h);
-  const doc::NodeId other_lane{42U};
-  h.lanes.push_back(scene::TimelineLane{other_lane, scene::SceneId{100U}, 30,
-                                        "Other", false, false,
-                                        scene::BlendMode::Normal, false});
-  for (scene::TimelineLane &lane : h.lanes) {
-    lane.muted = lane.id == destination_lane_node;
-  }
+  placed_take(h);
   static_cast<void>(h.frame(0.0F, 0.0F, false));
-  UI_CHECK(h.panel.take_at(120.0F, 112.0F) == std::optional{clip_node});
-
-  using Action = editor::TimelineLaneAction;
-  UI_CHECK(h.click(16.0F, 112.0F).lane_edits ==
-           (std::vector<editor::TimelineLaneEdit>{
-               {Action::ToggleMute, lane_node, {}}}));
-  UI_CHECK(h.click(324.0F, 112.0F).lane_edits ==
-           (std::vector<editor::TimelineLaneEdit>{
-               {Action::ToggleLock, destination_lane_node, {}},
-               {Action::ToggleLock, lane_node, {}}}));
-  static_cast<void>(h.click(299.0F, 112.0F));
-  UI_CHECK(h.panel.soloed() ==
-           (std::set<doc::NodeId>{lane_node, destination_lane_node}));
-  static_cast<void>(h.click(299.0F, 112.0F));
-  UI_CHECK(h.panel.soloed().empty());
-
-  // Its menu: List Plate Tracks, Mute Plates, Lock Plates, Split Take at
-  // Playhead (frame 50), Set In/Out to Plateset, Open Plateset in Asset
-  // Viewer, Delete Plateset Tracks and Plates.
-  static_cast<void>(h.choose(120.0F, 112.0F, 0U));
-  static_cast<void>(h.frame(0.0F, 0.0F, false));
-  UI_CHECK(track_listed(h, destination_lane_node, 124.0F));
-  static_cast<void>(h.choose(120.0F, 112.0F, 0U));
-  static_cast<void>(h.frame(0.0F, 0.0F, false));
-  UI_CHECK(!track_listed(h, destination_lane_node, 124.0F));
-  UI_CHECK(h.choose(120.0F, 112.0F, 1U).lane_edits ==
-           (std::vector<editor::TimelineLaneEdit>{
-               {Action::ToggleMute, lane_node, {}}}));
-  UI_CHECK(h.choose(120.0F, 112.0F, 3U).clip_splits ==
-           (std::vector<editor::TimelineClipSplit>{{clip_node, 50}}));
-  const editor::TimelinePanelFrame ranged = h.choose(120.0F, 112.0F, 4U);
-  UI_CHECK(ranged.range.has_value() && ranged.range->first == 20U &&
-           ranged.range->last == 59U);
-  const editor::TimelinePanelFrame opened = h.choose(120.0F, 112.0F, 5U);
-  UI_CHECK(opened.view_clip.has_value() && opened.view_clip->plateset &&
-           opened.view_clip->clip == clip_node);
-  UI_CHECK(h.choose(120.0F, 112.0F, 6U).lane_edits ==
-           (std::vector<editor::TimelineLaneEdit>{
-               {Action::DeleteClips, destination_lane_node, {}},
-               {Action::DeleteClips, lane_node, {}}}));
-
-  // Dragged up over Other, the set goes in front of it, back track first so
-  // each lands in front of the last: FRONT before Other, then LEFT in front
-  // of FRONT. One gesture, so one undo step.
-  static_cast<void>(h.frame(120.0F, 112.0F, false));
-  static_cast<void>(h.frame(120.0F, 112.0F, true));
-  UI_CHECK(h.frame(1'200.0F, 87.0F, true).lane_edits.empty());
-  UI_CHECK(h.frame(1'200.0F, 87.0F, false).lane_edits ==
-           (std::vector<editor::TimelineLaneEdit>{
-               {Action::MoveTo, lane_node, {}, other_lane},
-               {Action::MoveTo, destination_lane_node, {}, lane_node}}));
-  static_cast<void>(h.frame(0.0F, 0.0F, false));
-
-  // Other dragged down onto the closed row goes behind the whole set,
-  // never between its tracks.
-  static_cast<void>(h.frame(80.0F, 88.0F, false));
-  static_cast<void>(h.frame(80.0F, 88.0F, true));
-  static_cast<void>(h.frame(1'200.0F, 112.0F, true));
-  UI_CHECK(h.frame(1'200.0F, 112.0F, false).lane_edits ==
-           (std::vector<editor::TimelineLaneEdit>{
-               {Action::MoveTo, other_lane, {}, lane_node}}));
-}
-
-// Its two tracks fold into one take row, y=76..100, whose bar (x=408..704,
-// y=79..97) moves, trims and cuts the take by its front plate: the panel
-// reports the front plate's edit alone, and the shell carries it to the
-// rest of the take. Double-clicking the bar lists the tracks; its twirl
-// folds them again.
-void a_placed_plateset_reads_as_one_take_row() {
-  Harness h;
-  placed_plateset(h);
-  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(track_row_y(h, lane_node) == std::optional{76.0F});
+  UI_CHECK(!track_row_y(h, front_screen_node).has_value());
+  UI_CHECK(!track_row_y(h, left_screen_node).has_value());
+  // The take is a clip row under the track like any other clip.
+  bool take_listed = false;
   for (const auto &target : h.panel.replacement_targets()) {
-    UI_CHECK(!target.track);
+    take_listed = take_listed || (!target.track && target.node == clip_node);
   }
-  // The row and its bar stand for the take, which a plateset dropped there
-  // swaps.
-  UI_CHECK(h.panel.take_at(500.0F, 88.0F) == std::optional{clip_node});
-  UI_CHECK(h.panel.take_at(120.0F, 88.0F) == std::optional{clip_node});
-  UI_CHECK(!h.panel.take_at(500.0F, 112.0F).has_value());
-  // Closed, the object follows straight after the take row.
-  const editor::TimelinePanelFrame object_click = h.click(80.0F, 112.0F);
-  UI_CHECK(object_click.selection.has_value() &&
-           object_click.selection->node == object_node);
+  UI_CHECK(take_listed);
 
-  // Choosing the row chooses every plate, the front one leading.
-  const editor::TimelinePanelFrame row_click = h.click(120.0F, 88.0F);
-  UI_CHECK(row_click.selection.has_value());
-  UI_CHECK(row_click.selection->node == clip_node);
-  UI_CHECK(row_click.selection->action == editor::SelectionAction::Replace);
-  UI_CHECK(row_click.selection->members ==
-           (std::vector<doc::NodeId>{left_plate_node, clip_node}));
-
-  // A drag on the bar moves the take: one edit, the front plate's, with no
-  // change of track and no reorder even when carried over another row.
-  static_cast<void>(h.frame(500.0F, 88.0F, false));
-  const editor::TimelinePanelFrame pressed = h.frame(500.0F, 88.0F, true);
-  UI_CHECK(pressed.selection.has_value() &&
-           pressed.selection->node == clip_node &&
-           pressed.selection->members.size() == 2U);
-  UI_CHECK(!pressed.seek_to_frame.has_value());
-  UI_CHECK(h.panel.dragging_clip());
-  const editor::TimelinePanelFrame moving = h.frame(574.0F, 112.0F, true);
-  UI_CHECK(moving.clip_edits.empty());
-  UI_CHECK(moving.drag_readout.starts_with("TAKE +"));
-  const editor::TimelinePanelFrame moved = h.frame(574.0F, 112.0F, false);
-  UI_CHECK(moved.clip_edits ==
-           (std::vector<editor::TimelineClipEdit>{
-               {clip_node, scene::ClipTiming{30, 40, 0, 0, 0},
-                std::nullopt}}));
-  UI_CHECK(moved.layer_reorders.empty());
-  UI_CHECK(moved.lane_edits.empty());
-  UI_CHECK(!h.panel.dragging_clip());
-
-  // The Director adopts it on every plate; the tail (x=778) trims the take.
-  set_take_timing(h, scene::ClipTiming{30, 40, 0, 0, 0});
+  // List Screens: both walls appear under the car, front above left.
+  static_cast<void>(h.choose(120.0F, 88.0F, 0U));
   static_cast<void>(h.frame(0.0F, 0.0F, false));
-  static_cast<void>(h.frame(776.0F, 88.0F, false));
-  static_cast<void>(h.frame(776.0F, 88.0F, true));
-  static_cast<void>(h.frame(813.0F, 88.0F, true));
-  UI_CHECK(h.frame(813.0F, 88.0F, false).clip_edits ==
-           (std::vector<editor::TimelineClipEdit>{
-               {clip_node, scene::ClipTiming{30, 45, 0, 0, 0},
-                std::nullopt}}));
-  set_take_timing(h, scene::ClipTiming{30, 45, 0, 0, 0});
+  const std::optional<float> front = track_row_y(h, front_screen_node);
+  const std::optional<float> left = track_row_y(h, left_screen_node);
+  UI_CHECK(front.has_value() && left.has_value());
+  UI_CHECK(*front > 76.0F && *left > *front);
+  UI_CHECK(track_row_y(h, lane_node) == std::optional{76.0F});
+
+  // Fold Screens: the same entry puts them away.
+  static_cast<void>(h.choose(120.0F, 88.0F, 0U));
   static_cast<void>(h.frame(0.0F, 0.0F, false));
-
-  // The razor cuts the front plate where it lands - frame 40 is x=556 -
-  // and the shell cuts the rest of the take with it.
-  h.focus();
-  static_cast<void>(h.type("c"));
-  static_cast<void>(h.frame(556.0F, 88.0F, false));
-  UI_CHECK(h.frame(556.0F, 88.0F, true).clip_splits ==
-           (std::vector<editor::TimelineClipSplit>{{clip_node, 40}}));
-  static_cast<void>(h.frame(556.0F, 88.0F, false));
-  static_cast<void>(h.type("v"));
-
-  // A double-click on the bar lists the plates' tracks under the row, one
-  // indent in: LEFT at y=100, FRONT at y=172, each with its Properties and
-  // its clip, and each still a track of its own.
-  static_cast<void>(h.click(500.0F, 88.0F));
-  static_cast<void>(h.click(500.0F, 88.0F));
-  static_cast<void>(h.frame(0.0F, 0.0F, false));
-  UI_CHECK(track_listed(h, destination_lane_node, 100.0F));
-  UI_CHECK(track_listed(h, lane_node, 172.0F));
-  const editor::TimelinePanelFrame track_click = h.click(120.0F, 112.0F);
-  UI_CHECK(track_click.selection.has_value() &&
-           track_click.selection->node == destination_lane_node &&
-           track_click.selection->members.empty());
-  // The left plate's own bar (y=148..172) still edits that plate alone.
-  static_cast<void>(h.frame(600.0F, 160.0F, false));
-  const editor::TimelinePanelFrame plate_press = h.frame(600.0F, 160.0F, true);
-  UI_CHECK(plate_press.selection.has_value() &&
-           plate_press.selection->node == left_plate_node &&
-           plate_press.selection->members.empty());
-  static_cast<void>(h.frame(600.0F, 160.0F, false));
-
-  // The twirl folds them back into the row.
-  static_cast<void>(h.click(38.0F, 88.0F));
-  static_cast<void>(h.frame(0.0F, 0.0F, false));
-  UI_CHECK(!track_listed(h, destination_lane_node, 100.0F));
-  UI_CHECK(h.click(80.0F, 112.0F).selection->node == object_node);
-
-  // A locked plate keeps the take from moving apart: its bar takes no drag.
-  h.elements[2U].locked = true;
-  static_cast<void>(h.frame(500.0F, 88.0F, false));
-  static_cast<void>(h.frame(500.0F, 88.0F, true));
-  UI_CHECK(!h.panel.dragging_clip());
-  static_cast<void>(h.frame(574.0F, 88.0F, true));
-  UI_CHECK(h.frame(574.0F, 88.0F, false).clip_edits.empty());
+  UI_CHECK(!track_row_y(h, front_screen_node).has_value());
+  UI_CHECK(!track_row_y(h, left_screen_node).has_value());
 }
 
 struct Case final {
@@ -4940,7 +4778,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 135U> cases{{
+constexpr std::array<Case, 134U> cases{{
     {"soloing a group shows what is inside it",
      &soloing_a_group_shows_what_is_inside_it},
     {"a track is listed once, by its header",
@@ -5193,10 +5031,8 @@ constexpr std::array<Case, 135U> cases{{
      &a_track_twirl_closes_it_to_its_header},
     {"a track keys, marks and splits like a layer",
      &a_track_keys_marks_and_splits_like_a_layer},
-    {"a placed plateset reads as one take row",
-     &a_placed_plateset_reads_as_one_take_row},
-    {"a take row switches and moves its set as one",
-     &a_take_row_switches_and_moves_its_set_as_one},
+    {"a vehicle track reads as one track and lists its screens on request",
+     &a_vehicle_track_reads_as_one_track_and_lists_its_screens_on_request},
 }};
 
 } // namespace

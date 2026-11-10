@@ -565,6 +565,7 @@ PhaseExit DirectorShowLoop::apply_clip_requests(OperatorFrame &op) {
         place.scene = request.scene;
         place.plateset = request.plateset;
         place.start = request.start;
+        place.track = request.track;
         place.show_rate = show_rate;
         place.rig = request.rig == editor::PlatesetRigChoice::Replace
                         ? PlatesetRigChoice::Replace
@@ -598,12 +599,18 @@ PhaseExit DirectorShowLoop::apply_clip_requests(OperatorFrame &op) {
     }
     pending_plateset_places.clear();
     for (const auto &request : pending_plateset_swaps) {
-        auto planned = plan_plateset_swap(scheduler.projected_document(),
-                                          request.clip, request.plateset);
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        auto planned =
+            plan_plateset_swap(scheduler.projected_document(), request.clip,
+                               request.plateset, show_rate, next_new_node);
         if (!planned) {
             project_message = plateset_authoring_error_text(planned.error());
             continue;
         }
+        next_new_node = std::max(next_new_node, planned.value().next_node);
         if (!scheduler.schedule_document_replace(
                 planned.value().document, cmd::UndoContextId{2U},
                 cmd::TransactionId{request.gesture}, frame)) {
@@ -616,7 +623,7 @@ PhaseExit DirectorShowLoop::apply_clip_requests(OperatorFrame &op) {
                 ? std::string{"TAKE SWAPPED"}
                 : "TAKE SWAPPED; " +
                       std::to_string(planned.value().unmatched.size()) +
-                      " PLATES HAD NO MATCH AND STAYED";
+                      " SCREENS HAVE NO PLATE IN THIS SET";
     }
     pending_plateset_swaps.clear();
     return std::nullopt;
@@ -811,6 +818,10 @@ PhaseExit DirectorShowLoop::apply_element_and_lane_requests(OperatorFrame &op) {
             case LaneAuthorError::LaneLimit:
                 project_message =
                     "TRACK EDIT REJECTED - THE SCENE HOLDS THE MOST TRACKS";
+                break;
+            case LaneAuthorError::VehicleTrack:
+                project_message = "TRACK SPLIT REJECTED - CUT A VEHICLE "
+                                  "TRACK'S TAKE WITH THE RAZOR";
                 break;
             default:
                 project_message = "TRACK EDIT REJECTED";

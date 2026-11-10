@@ -14,6 +14,7 @@
 #include "timeline_playback_cache.hpp"
 
 #include <mediaserver/assets/asset_registry.hpp>
+#include <mediaserver/assets/asset_schema.hpp>
 #include <mediaserver/assets/derivative.hpp>
 #include <mediaserver/assets/derivative_cache.hpp>
 #include <mediaserver/assets/derivative_profile_id.hpp>
@@ -362,6 +363,22 @@ namespace mediaserver::app {
         info.effective_visible =
             info.effective_visible && parent->effective_visible;
     };
+    // A vehicle track's slot screens, by slot; the lower node id where two
+    // claim one, as evaluation has it.
+    const auto slot_screens_of = [&lanes](doc::NodeId track) {
+        std::array<doc::NodeId, scene::vehicle_slot_count> screens{};
+        for (const scene::TimelineLane &lane : lanes) {
+            if (lane.parent != track || track == doc::NodeId{} ||
+                lane.slot >= scene::vehicle_slot_count) {
+                continue;
+            }
+            doc::NodeId &screen = screens[lane.slot];
+            if (screen == doc::NodeId{} || lane.id < screen) {
+                screen = lane.id;
+            }
+        }
+        return screens;
+    };
     // Every authored clip placement, on air or not. A clip the playhead has
     // moved past is still the operator's to select, drag, and trim, so the
     // authored list rather than the evaluated Scene is what the panels get.
@@ -385,13 +402,46 @@ namespace mediaserver::app {
             };
             info.plateset = doc::NodeId{static_cast<core::u64>(
                 std::max<std::int64_t>(whole(scene::schema::plateset_asset), 0))};
-            info.plateset_take = whole(scene::schema::plateset_take);
-            const auto slot =
-                plate->properties.find(scene::schema::plateset_slot);
-            if (slot != plate->properties.end()) {
-                if (const auto *const key =
-                        std::get_if<std::string>(&slot->second)) {
-                    info.plateset_slot = *key;
+            // A take: one clip that names a front plate and plays every
+            // plate of its set.
+            info.take = info.plateset != doc::NodeId{} &&
+                        plate->properties.contains(
+                            scene::schema::plate_property(
+                                0U, scene::schema::plate_source_suffix));
+            if (info.take) {
+                // The car it is on, and which of its walls it has a plate
+                // for, so a panel can draw the rig without the track list.
+                const auto on = std::find_if(
+                    lanes.begin(), lanes.end(),
+                    [&](const scene::TimelineLane &value) {
+                        return value.id == clip.lane && value.vehicle;
+                    });
+                if (on != lanes.end()) {
+                    info.vehicle_track = on->id;
+                    info.slot_screens = slot_screens_of(on->id);
+                }
+                for (std::size_t slot = 0U; slot < info.plates.size();
+                     ++slot) {
+                    info.plates[slot] = plate->properties.contains(
+                        scene::schema::plate_property(
+                            slot, scene::schema::plate_source_suffix));
+                }
+            }
+            // It reads by its plateset's name unless the operator gave it
+            // one: the front plate's file name says one wall of nine.
+            if (info.take &&
+                !plate->properties.contains(scene::schema::group_name)) {
+                if (const doc::Node *const set =
+                        scheduler.projected_document().get(info.plateset)) {
+                    const auto named =
+                        set->properties.find(assets::schema::display_name);
+                    if (named != set->properties.end()) {
+                        if (const auto *const name =
+                                std::get_if<std::string>(&named->second);
+                            name != nullptr && !name->empty()) {
+                            info.display_name = *name;
+                        }
+                    }
                 }
             }
         }
@@ -408,10 +458,12 @@ namespace mediaserver::app {
                 info.screen_name = lane->name;
             }
         }
+        // A take is on air as its plates, each its slot screen's picture:
+        // the first of them, the front where it has one, stands for it.
         const auto evaluated =
             std::find_if(scene.media.begin(), scene.media.end(),
                          [&clip](const scene::MediaInstance &value) noexcept {
-                             return value.source_node == clip.node;
+                             return value.placed_by() == clip.node;
                          });
         info.on_air = evaluated != scene.media.end();
         if (info.on_air) {
@@ -662,6 +714,13 @@ namespace mediaserver::app {
         info.raster_height = lane.raster_height;
         info.aspect_locked = lane.aspect_locked;
         info.locked = lane.locked;
+        info.vehicle = lane.vehicle;
+        info.vehicle_track = lane.parent;
+        info.vehicle_slot = lane.slot;
+        info.time_offset = lane.time_offset;
+        if (lane.vehicle) {
+            info.slot_screens = slot_screens_of(lane.id);
+        }
         // Muting a track is what hiding it means, so one control reads and
         // writes one state rather than the timeline and the Inspector each
         // owning half of it.
@@ -1769,10 +1828,17 @@ void DirectorShowLoop::observe_timeline_playback(DirectorTick &tick,
         // a source the asset overlay moved - and its numbering in that file.
         for (const scene::MediaInstance &instance :
              tick.stage_scene_frame.media) {
+            // A take's clip is its front plate's: the other plates decode
+            // other files, which the clip's own numbering says nothing of.
+            if (instance.placement != doc::NodeId{} &&
+                instance.stream !=
+                    scene::plate_stream(instance.placement, 0U)) {
+                continue;
+            }
             const auto clip = std::find_if(
                 stage_clips.begin(), stage_clips.end(),
                 [&](const scene::ClipPlacement &candidate) noexcept {
-                    return candidate.node == instance.source_node;
+                    return candidate.node == instance.placed_by();
                 });
             if (clip == stage_clips.end() || instance.offline) {
                 continue;

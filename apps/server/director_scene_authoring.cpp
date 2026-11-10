@@ -391,6 +391,22 @@ map_transport(editor::TransportRequest request) noexcept {
             edit.value, 1.0, static_cast<double>(scene::max_raster_extent))));
         updated.properties.insert_or_assign(edit.property,
                                             doc::PropertyValue{extent});
+    } else if (edit.property == scene::schema::lane_time_offset) {
+        // Whole source frames, and a slot screen's alone: on any other track
+        // the scene model refuses the node, and the track with it.
+        if (!std::isfinite(edit.value) ||
+            !existing->properties.contains(scene::schema::lane_parent)) {
+            return true;
+        }
+        const auto frames = static_cast<std::int64_t>(std::llround(std::clamp(
+            edit.value, -static_cast<double>(scene::max_lane_time_offset),
+            static_cast<double>(scene::max_lane_time_offset))));
+        if (frames == 0) {
+            updated.properties.erase(edit.property);
+        } else {
+            updated.properties.insert_or_assign(edit.property,
+                                                doc::PropertyValue{frames});
+        }
     } else if (edit.property == scene::schema::two_sided || edit.property == scene::schema::use_color_temperature || edit.property == scene::schema::casts_shadow || edit.property == scene::schema::bake_static || edit.property == scene::schema::bake_indirect || edit.property == scene::schema::animation_enabled || edit.property == scene::schema::animation_loop) {
         // The Inspector speaks in doubles because most of what it edits is a
         // number. A boolean written as 1.0 would parse as absent, so the
@@ -1490,17 +1506,15 @@ bool schedule_asset_library_edit(
     if (!planned.has_value()) {
         return true;
     }
-    // Placed plates stay in sync with their set: an offset change moves
-    // their source in by the same frames, in the same undo step.
-    if (request.edit.kind ==
-        assets::LibraryEdit::Kind::SetPlatesetHalfResolution) {
-        planned = follow_plateset_resolution(std::move(*planned),
-                                             request.edit.target);
-    }
-    if (request.edit.kind == assets::LibraryEdit::Kind::SetPlatesetOffsets) {
-        planned = follow_plateset_offsets(scheduler.projected_document(),
-                                          std::move(*planned),
-                                          request.edit.target, show_rate);
+    // Placed takes stay in step with their set: a plate moved to another
+    // slot, a sync offset or the decode size reaches every take of it, in
+    // the same undo step.
+    if (request.edit.kind == assets::LibraryEdit::Kind::SetPlatesetSlot ||
+        request.edit.kind == assets::LibraryEdit::Kind::SetPlatesetOffsets ||
+        request.edit.kind ==
+            assets::LibraryEdit::Kind::SetPlatesetHalfResolution) {
+        planned = follow_plateset(std::move(*planned), request.edit.target,
+                                  show_rate);
     }
     // Organising the Library is a direct UI action, undone from the same
     // globally reachable context as removing an asset.

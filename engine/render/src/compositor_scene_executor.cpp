@@ -1525,10 +1525,13 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
                     }
                 }
             }
+            // A vehicle take's plate is drawn as its slot screen, so a
+            // screen's layer meets its own track id again among its media.
+            // Only a drawable two layers both claim is ambiguous.
             for (const doc::NodeId source_node : sources) {
-                if (!graph_layer_for_source
-                         .try_emplace(source_node, layer->node)
-                         .second) {
+                const auto [owner, added] = graph_layer_for_source.try_emplace(
+                    source_node, layer->node);
+                if (!added && owner->second != layer->node) {
                     return PlanResult::failure(
                         CompositorScenePlanError::UnsupportedTopology);
                 }

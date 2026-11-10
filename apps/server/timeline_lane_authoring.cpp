@@ -350,7 +350,14 @@ core::Result<LaneAuthorPlan, LaneAuthorError> plan_lane_authoring(
                 clips.push_back(id);
             }
         }
+        const auto* const kind = text(lane, scene::schema::lane_kind);
+        const bool vehicle =
+            kind != nullptr && *kind == scene::schema::lane_kind_vehicle;
         if (request.action == LaneAuthorAction::Split) {
+            if (vehicle
+                || reference(lane, scene::schema::lane_parent).has_value()) {
+                return Result::failure(LaneAuthorError::VehicleTrack);
+            }
             if (read_bool(lane, scene::schema::lane_locked)) {
                 return Result::failure(LaneAuthorError::Locked);
             }
@@ -621,6 +628,25 @@ core::Result<LaneAuthorPlan, LaneAuthorError> plan_lane_authoring(
             return Result::failure(LaneAuthorError::InvalidDocument);
         }
 
+        // A vehicle track's slot screens are its walls: they go with it
+        // rather than being left as screens of nothing.
+        if (vehicle) {
+            for (const auto& [id, node] : nodes) {
+                if (node.type != scene::schema::timeline_lane_type
+                    || reference(node, scene::schema::lane_parent)
+                        != lane.id) {
+                    continue;
+                }
+                const auto removed = plan.document.erase(id);
+                if (!removed.has_value()) {
+                    return Result::failure(LaneAuthorError::InvalidDocument);
+                }
+                plan.document = *removed;
+                plan.erased.push_back(id);
+                lanes.erase(std::remove(lanes.begin(), lanes.end(), id),
+                            lanes.end());
+            }
+        }
         const auto removed_lane = plan.document.erase(lane.id);
         if (!removed_lane.has_value()) {
             return Result::failure(LaneAuthorError::InvalidDocument);
