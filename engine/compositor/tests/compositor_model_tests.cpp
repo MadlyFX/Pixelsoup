@@ -1413,14 +1413,25 @@ void led_car_setup_places_a_takes_plates_by_their_slot_screens() {
     COMPOSITOR_CHECK(right.placement == doc::NodeId{2U});
 
     // Each plate stands at its own socket of the rig, on its default four
-    // metre radius: the front straight ahead, the right a quarter turn round.
+    // metre radius: the front straight ahead at +Z, the right a quarter turn
+    // round on the car's right. Facing +Z with +Y up in this right-handed
+    // scene, that right is -X: the cross product of forward and up.
     const auto about = [](float value, float expected) {
         return std::abs(value - expected) <= 1.0e-4F;
     };
     COMPOSITOR_CHECK(about(front.world.at(0U, 3U), 0.0F));
     COMPOSITOR_CHECK(about(front.world.at(2U, 3U), 4.0F));
-    COMPOSITOR_CHECK(about(right.world.at(0U, 3U), 4.0F));
+    const scene::Vec3 forward{0.0F, 0.0F, 1.0F};
+    const scene::Vec3 up{0.0F, 1.0F, 0.0F};
+    const scene::Vec3 car_right{forward.y * up.z - forward.z * up.y,
+                                forward.z * up.x - forward.x * up.z,
+                                forward.x * up.y - forward.y * up.x};
+    COMPOSITOR_CHECK(about(right.world.at(0U, 3U), 4.0F * car_right.x));
     COMPOSITOR_CHECK(about(right.world.at(2U, 3U), 0.0F));
+    // Both walls face the car: a plate's local +Z points at the centre.
+    COMPOSITOR_CHECK(front.world.at(2U, 2U) < 0.0F);
+    COMPOSITOR_CHECK(right.world.at(0U, 2U) * car_right.x < 0.0F);
+    COMPOSITOR_CHECK(about(right.world.at(2U, 2U), 0.0F));
     // And the screens an operator picks stand where their plates do.
     for (const scene::SceneScreen& screen : applied.screens) {
         COMPOSITOR_CHECK(screen.world ==

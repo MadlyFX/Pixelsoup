@@ -914,10 +914,16 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
             Adjustment& adjustment = adjustments[source_node];
             scene::Mat4 slot{};
             if (image.target_port < 8U) {
+                // The car faces +Z, where its front plate stands. In this
+                // right-handed scene (+X right, +Y up, -Z forward) someone
+                // in the car facing its front has their right at -X, so the
+                // sockets go round from the front towards -X: front right,
+                // right, back right, back, then the left side at +X. Each
+                // wall yaws to face the centre.
                 const scene::Turns angle = static_cast<float>(
                     static_cast<double>(image.target_port) / 8.0);
                 const scene::Vec3 position{
-                    scene::deterministic::sin_turns(angle) *
+                    -scene::deterministic::sin_turns(angle) *
                         parameters.array_scale,
                     0.0F,
                     scene::deterministic::cos_turns(angle) *
@@ -926,7 +932,7 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
                     scene::translation(position),
                     scene::multiply(
                         scene::rotation(scene::wrap_turns(
-                                            static_cast<double>(angle) + 0.5),
+                                            0.5 - static_cast<double>(angle)),
                                         0.0F, 0.0F),
                         scene::scaling(scene::Vec3{parameters.plate_scale,
                                                    parameters.plate_scale,
