@@ -55,6 +55,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     prepare_surfaces(f);
     prepare_gizmos(f);
     prepare_transform_box(f);
+    run_guides(f);
     run_shape_tool(f);
     run_gradient_tool(f);
     update_pivot_drag(f);
@@ -74,8 +75,10 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     // guides an operator needs to author the scene.
     ctx.push_clip(shown_image(f.result.image));
     draw_overlays(f);
+    draw_layout_overlays(f);
     draw_gizmos(f);
     ctx.pop_clip();
+    draw_rulers(f);
     draw_stage_view_menu(ctx, f.view_menu, f.result);
     draw_stage_shading_menu(ctx, f.shading_menu, f.result);
 
@@ -119,6 +122,24 @@ bool ViewportPanel::begin_frame(Frame& f) {
         image_bounds.height -= stage_toolbar_height;
     }
 
+    // The Program view's rulers take a strip off the top and the left.
+    constexpr float ruler_top_height = 18.0F;
+    constexpr float ruler_left_width = 36.0F;
+    if (role_ == ViewportRole::Program && rulers_shown_ &&
+        image_bounds.width > 160.0F && image_bounds.height > 120.0F) {
+        f.ruler_top = gui::Rect{image_bounds.x + ruler_left_width,
+                                image_bounds.y,
+                                image_bounds.width - ruler_left_width,
+                                ruler_top_height};
+        f.ruler_left = gui::Rect{image_bounds.x,
+                                 image_bounds.y + ruler_top_height,
+                                 ruler_left_width,
+                                 image_bounds.height - ruler_top_height};
+        image_bounds.x += ruler_left_width;
+        image_bounds.width -= ruler_left_width;
+        image_bounds.y += ruler_top_height;
+        image_bounds.height -= ruler_top_height;
+    }
     f.pane = image_bounds;
     f.interaction_canvas = interaction_canvas;
     if (role_ == ViewportRole::Program) {

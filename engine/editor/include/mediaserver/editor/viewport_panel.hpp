@@ -2,6 +2,7 @@
 
 #include <mediaserver/editor/preview_resolution.hpp>
 
+#include <mediaserver/editor/canvas_snap.hpp>
 #include <mediaserver/editor/canvas_tool.hpp>
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/fill_handles.hpp>
@@ -210,6 +211,10 @@ struct ViewportFrame final {
     // The Gradient tool is dragging the primary element's fill: what the
     // fill should now be, whole. Reported each frame of the drag.
     std::optional<scene::Fill> fill;
+    // The canvas lines, down and across the picture, a moved layer has
+    // snapped to this frame.
+    std::optional<float> snap_x;
+    std::optional<float> snap_y;
 };
 
 // The primary element's box as the Program view's options bar reads it, in
@@ -484,6 +489,38 @@ class ViewportPanel final {
     void set_card_drawing_enabled(bool enabled) noexcept {
         card_drawing_enabled_ = enabled;
     }
+    // What `node` covers on the canvas this view shows, upright: the box a
+    // move snaps by and Align lines up.
+    [[nodiscard]] std::optional<CanvasBox>
+    canvas_box_bounds(const scene::Scene& scene, doc::NodeId node,
+                      const ViewportProjection* projection = nullptr);
+    // A layer moved on the Program view lands on the canvas's edges and
+    // middle, other layers' and the guides when it comes near them.
+    [[nodiscard]] bool canvas_snapping() const noexcept {
+        return canvas_snapping_;
+    }
+    void set_canvas_snapping(bool snapping) noexcept {
+        canvas_snapping_ = snapping;
+    }
+    // Rulers along the top and left of the Program view, with the guides
+    // pulled out of them; and the action- and title-safe frames.
+    [[nodiscard]] bool rulers_shown() const noexcept { return rulers_shown_; }
+    void set_rulers_shown(bool shown) noexcept { rulers_shown_ = shown; }
+    [[nodiscard]] bool safe_areas_shown() const noexcept {
+        return safe_areas_shown_;
+    }
+    void set_safe_areas_shown(bool shown) noexcept {
+        safe_areas_shown_ = shown;
+    }
+    // The guides, in canvas pixels: lines down the picture at an x, and
+    // across it at a y.
+    [[nodiscard]] std::span<const float> guides_down() const noexcept {
+        return guides_x_;
+    }
+    [[nodiscard]] std::span<const float> guides_across() const noexcept {
+        return guides_y_;
+    }
+    void clear_guides() noexcept;
     // A shape is part-drawn: a drag under way, or Pen points placed and not
     // yet closed. `cancel_shape` drops it.
     [[nodiscard]] bool shape_in_progress() const noexcept {
@@ -904,6 +941,19 @@ class ViewportPanel final {
     gui::UiPoint shape_press_{};
     std::vector<scene::MaskPointGeometry> pen_points_;
     bool pen_dragging_{};
+    // Laying out: the snap toggle, what the moved layer covered at the
+    // press and the lines it may land on, and the rulers and their guides.
+    bool canvas_snapping_{true};
+    std::optional<CanvasBox> snap_box_;
+    std::vector<float> snap_lines_x_;
+    std::vector<float> snap_lines_y_;
+    bool rulers_shown_{};
+    bool safe_areas_shown_{};
+    std::vector<float> guides_x_;
+    std::vector<float> guides_y_;
+    enum class GuideDrag : core::u8 { None, Across, Down };
+    GuideDrag guide_drag_{GuideDrag::None};
+    std::size_t guide_index_{};
     // The Gradient tool's drag: which handle, the fill as it stood at the
     // press, and where on the layer the press was.
     enum class FillDrag : core::u8 { None, Centre, End, Line };
@@ -939,6 +989,11 @@ class ViewportPanel final {
     void run_shape_tool(Frame& f);
     void draw_shape_tool(Frame& f);
     void run_gradient_tool(Frame& f);
+    void capture_snap(Frame& f, doc::NodeId node);
+    void snap_canvas_move(Frame& f, float& dx, float& dy);
+    void run_guides(Frame& f);
+    void draw_layout_overlays(Frame& f);
+    void draw_rulers(Frame& f);
     [[nodiscard]] bool press_transform_box(Frame& f);
     [[nodiscard]] bool drag_transform_box(Frame& f);
     void update_pivot_drag(Frame& f);

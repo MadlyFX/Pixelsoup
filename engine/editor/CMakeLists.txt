@@ -33,6 +33,8 @@ add_library(mediaserver_editor STATIC
     src/viewport/viewport_chrome.cpp
     src/viewport/viewport_masks.cpp
     src/viewport/viewport_canvas.cpp
+    src/viewport/viewport_layout.cpp
+    src/canvas_snap.cpp
     src/canvas_tool.cpp
     src/transform_box.cpp
     src/fill_handles.cpp

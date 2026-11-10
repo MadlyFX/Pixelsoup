@@ -70,6 +70,11 @@ struct EditorShell::Frame final {
   void emit_components(doc::NodeId node, scene::TransformChannel first,
                        scene::Vec3 values, core::u64 gesture);
   void emit_transform(const TransformDelta &delta, core::u64 gesture);
+  void emit_moves(std::span<const scene::Vec3> translations,
+                  core::u64 gesture);
+  void align_selection(std::size_t choice, const scene::Scene &authored,
+                       const scene::Scene &view,
+                       const ViewportProjection *projection);
   void clear_transform(TransformTool tool, const scene::Scene &authored_scene);
   void route_surface_edit(FeedSurfaceEditRequest request);
   void enqueue_model(std::string source, scene::SceneId add_scene,

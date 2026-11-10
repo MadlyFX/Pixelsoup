@@ -73,6 +73,10 @@ struct ViewportPanel::Frame final {
     // the Hand or Zoom tool owns the pointer this frame.
     gui::Rect pane{};
     bool navigating{};
+    // The Program view's rulers, when shown: strips taken off the top and
+    // left of the bounds before the pane.
+    gui::Rect ruler_top{};
+    gui::Rect ruler_left{};
 
     // Set by prepare_transform_box(): the primary element's box in the
     // world, for the press that takes hold of one of its handles.

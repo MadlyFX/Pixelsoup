@@ -274,6 +274,121 @@ void EditorShell::Frame::emit_transform(const TransformDelta &delta,
   }
 }
 
+// One move each for the captured elements, `translations` parallel to them:
+// what Align and Distribute author. An element with nowhere to go is left
+// alone rather than given a key it never asked for.
+void EditorShell::Frame::emit_moves(std::span<const scene::Vec3> translations,
+                                    core::u64 gesture) {
+  for (std::size_t index = 0U;
+       index < impl.group_nodes.size() && index < translations.size();
+       ++index) {
+    const scene::Vec3 &translation = translations[index];
+    if (translation.x == 0.0F && translation.y == 0.0F &&
+        translation.z == 0.0F) {
+      continue;
+    }
+    const doc::NodeId node = impl.group_nodes[index];
+    TransformDelta delta{};
+    delta.tool = TransformTool::Move;
+    delta.translation = translation;
+    const TransformResult moved =
+        apply_transform(impl.group_transform[index], delta);
+    const bool position_keyed = impl.timeline_panel.auto_key_enabled() && (
+        keyed(keyframes, node, scene::TransformChannel::PositionX) ||
+        keyed(keyframes, node, scene::TransformChannel::PositionY) ||
+        keyed(keyframes, node, scene::TransformChannel::PositionZ));
+    if (!position_keyed) {
+      result.edits.push_back(EditIntent{node, moved.position, gesture});
+    } else {
+      emit_components(node, scene::TransformChannel::PositionX,
+                      moved.position, gesture);
+    }
+  }
+}
+
+// Align and Distribute from Program's options bar, by what each selected
+// layer covers on the picture: lined up with the box round them all - or
+// with the canvas, for one layer alone - or spaced evenly between the two
+// outermost. One undo step.
+void EditorShell::Frame::align_selection(std::size_t choice,
+                                         const scene::Scene &authored,
+                                         const scene::Scene &view,
+                                         const ViewportProjection *projection) {
+  std::vector<doc::NodeId> nodes;
+  std::vector<CanvasBox> boxes;
+  for (const doc::NodeId node : impl.scene_selection.members()) {
+    const ElementInfo *const element = find_element(elements, node);
+    if (element == nullptr || element->locked) {
+      continue;
+    }
+    if (const auto box =
+            impl.program_panel.canvas_box_bounds(view, node, projection)) {
+      nodes.push_back(node);
+      boxes.push_back(*box);
+    }
+  }
+  if (nodes.empty()) {
+    return;
+  }
+  const scene::Canvas canvas =
+      projection != nullptr && projection->project ? projection->canvas
+                                                   : view.canvas;
+  std::vector<CanvasMove> moves;
+  if (choice < 6U) {
+    const CanvasBox reference =
+        boxes.size() >= 2U
+            ? bounds_of(boxes)
+            : CanvasBox{0.0F, 0.0F, static_cast<float>(canvas.width),
+                        static_cast<float>(canvas.height)};
+    moves = align_boxes(boxes, reference, static_cast<CanvasAlign>(choice));
+  } else {
+    moves = distribute_boxes(boxes, choice == 6U);
+  }
+  impl.history_context = HistoryContext::Scene;
+  capture_group(authored, view);
+  std::vector<scene::Vec3> translations(impl.group_nodes.size());
+  bool any = false;
+  for (std::size_t index = 0U; index < nodes.size(); ++index) {
+    const auto captured = std::find(impl.group_nodes.begin(),
+                                    impl.group_nodes.end(), nodes[index]);
+    if (captured == impl.group_nodes.end() ||
+        (moves[index].x == 0.0F && moves[index].y == 0.0F)) {
+      continue;
+    }
+    // Each way on its own, through the same resolution the options bar's
+    // X and Y use; a move across and one down simply add.
+    scene::Vec3 translation{};
+    const auto metrics =
+        impl.program_panel.canvas_box_metrics(view, nodes[index], projection);
+    if (!metrics.has_value()) {
+      continue;
+    }
+    if (moves[index].x != 0.0F) {
+      if (const auto across = impl.program_panel.canvas_box_edit(
+              view, nodes[index], projection, CanvasBoxField::X,
+              metrics->x + moves[index].x)) {
+        translation = translation + across->translation;
+      }
+    }
+    if (moves[index].y != 0.0F) {
+      if (const auto down = impl.program_panel.canvas_box_edit(
+              view, nodes[index], projection, CanvasBoxField::Y,
+              metrics->y + moves[index].y)) {
+        translation = translation + down->translation;
+      }
+    }
+    translations[static_cast<std::size_t>(
+        std::distance(impl.group_nodes.begin(), captured))] = translation;
+    any = true;
+  }
+  if (any) {
+    emit_moves(translations, impl.next_edit_gesture++);
+    impl.semantic_boundary = true;
+  }
+  impl.group_nodes.clear();
+  impl.group_start.clear();
+}
+
 // A shape finished on Program Output. Drawn on a layer it is a mask of that
 // layer, in the layer's own coordinates. Drawn on bare picture it is a new
 // Background card standing where it was drawn, facing the camera, on the

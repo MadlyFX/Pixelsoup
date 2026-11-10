@@ -124,6 +124,7 @@ void ViewportPanel::handle_press(Frame& f) {
         deep_select_open_ = false;
         deep_candidates_.clear();
         box_handle_ = TransformBoxHandle::None;
+        snap_box_.reset();
 
         // On Stage, Alt+left orbits and left added to a right or middle drag
         // pans: camera chords that never pick, or drag, what is underneath.
@@ -278,6 +279,7 @@ void ViewportPanel::handle_press(Frame& f) {
                                      : scene::translation_of(*world);
                     drag_source_vertex_.reset();
                     dragging_ = true;
+                    capture_snap(f, front->node);
                 }
             }
         }
@@ -422,14 +424,20 @@ void ViewportPanel::drag_element(Frame& f) {
             switch (drag_tool_) {
             case TransformTool::Move:
                 if (drag_axis_ == GizmoAxis::Screen) {
+                    // On Program the move lands on the canvas lines it
+                    // comes near; elsewhere it is the drag as it stands.
+                    float move_x = dx;
+                    float move_y = dy;
+                    snap_canvas_move(f, move_x, move_y);
                     delta.translation =
                         projection != nullptr && projection->project
                             ? scene::screen_drag_to_translation(
                                   press_world_, projection->forward,
-                                  projection->up, projection->project, dx, dy)
+                                  projection->up, projection->project, move_x,
+                                  move_y)
                             : scene::screen_drag_to_translation(
-                                  scene.camera, scene.canvas, press_world_, dx,
-                                  dy);
+                                  scene.camera, scene.canvas, press_world_,
+                                  move_x, move_y);
                 } else {
                     const float axis_pixels_squared =
                         axis_canvas_x_ * axis_canvas_x_ +
@@ -443,6 +451,9 @@ void ViewportPanel::drag_element(Frame& f) {
                     }
                 }
                 exact = snap_drag(ctx, scene, selection, frame, delta);
+                // Program lays out against the picture: its moves snap to
+                // canvas lines above, not to the Stage's world increments.
+                exact = exact || role_ == ViewportRole::Program;
                 break;
             case TransformTool::Rotate:
                 drag_turns_ += sweep_turns(drag_centre_x_, drag_centre_y_,

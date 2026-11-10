@@ -1,3 +1,4 @@
+#include <mediaserver/editor/canvas_snap.hpp>
 #include <mediaserver/editor/canvas_tool.hpp>
 #include <mediaserver/editor/fill_handles.hpp>
 #include <mediaserver/editor/transform_box.hpp>
@@ -1057,6 +1058,254 @@ void the_gradient_tool_drags_the_selected_cards_fill_and_nothing_else() {
     UI_CHECK(!bare.fill.has_value() && !bare.transform.has_value());
 }
 
+void a_moved_box_takes_the_nearest_line_within_reach() {
+    const std::array<float, 4U> lines{0.0F, 960.0F, 1920.0F, 700.0F};
+    // The middle is 4 from the canvas's middle and nothing else is near.
+    const editor::AxisSnap centre =
+        editor::snap_axis({856.0F, 956.0F, 1056.0F}, lines, 6.0F);
+    UI_CHECK(centre.line == 960.0F && near(centre.shift, 4.0F));
+    // The left edge is 2 past a guide and the right 5 short of the far
+    // edge: the nearer wins.
+    const editor::AxisSnap edge =
+        editor::snap_axis({702.0F, 1308.5F, 1915.0F}, lines, 6.0F);
+    UI_CHECK(edge.line == 700.0F && near(edge.shift, -2.0F));
+    // Exactly on the edge of reach still catches; a hair beyond does not.
+    UI_CHECK(editor::snap_axis({6.0F, 50.0F, 94.0F}, lines, 6.0F).line ==
+             0.0F);
+    const editor::AxisSnap none =
+        editor::snap_axis({6.5F, 50.0F, 93.5F}, lines, 6.0F);
+    UI_CHECK(!none.line.has_value() && none.shift == 0.0F);
+    UI_CHECK(!editor::snap_axis({1.0F, 2.0F, 3.0F}, {}, 6.0F).line.has_value());
+
+    // A box offers its two edges and its middle.
+    std::vector<float> offered;
+    editor::add_snap_lines(offered, 100.0F, 300.0F);
+    UI_CHECK(offered == (std::vector<float>{100.0F, 200.0F, 300.0F}));
+}
+
+void boxes_line_up_with_each_other_or_one_with_the_canvas() {
+    const std::array<editor::CanvasBox, 3U> boxes{
+        editor::CanvasBox{100.0F, 50.0F, 300.0F, 150.0F},
+        editor::CanvasBox{500.0F, 400.0F, 560.0F, 700.0F},
+        editor::CanvasBox{900.0F, 200.0F, 1300.0F, 260.0F}};
+    const editor::CanvasBox all = editor::bounds_of(boxes);
+    UI_CHECK(all == (editor::CanvasBox{100.0F, 50.0F, 1300.0F, 700.0F}));
+
+    const auto left = editor::align_boxes(boxes, all, editor::CanvasAlign::Left);
+    UI_CHECK(left[0U] == (editor::CanvasMove{0.0F, 0.0F}));
+    UI_CHECK(left[1U] == (editor::CanvasMove{-400.0F, 0.0F}));
+    UI_CHECK(left[2U] == (editor::CanvasMove{-800.0F, 0.0F}));
+    const auto bottom =
+        editor::align_boxes(boxes, all, editor::CanvasAlign::Bottom);
+    UI_CHECK(bottom[0U] == (editor::CanvasMove{0.0F, 550.0F}));
+    UI_CHECK(bottom[1U] == (editor::CanvasMove{0.0F, 0.0F}));
+    const auto middle =
+        editor::align_boxes(boxes, all, editor::CanvasAlign::CentreDown);
+    // The three middles all land on 375, half way down the box round them.
+    UI_CHECK(near(100.0F + middle[0U].y, 375.0F) &&
+             near(550.0F + middle[1U].y, 375.0F) &&
+             near(230.0F + middle[2U].y, 375.0F));
+
+    // One layer alone lines up with the picture.
+    const editor::CanvasBox canvas{0.0F, 0.0F, 1920.0F, 1080.0F};
+    const auto centred = editor::align_boxes(
+        std::span<const editor::CanvasBox>{boxes.data(), 1U}, canvas,
+        editor::CanvasAlign::CentreAcross);
+    UI_CHECK(centred.size() == 1U && near(centred[0U].x, 760.0F));
+    const auto right = editor::align_boxes(
+        std::span<const editor::CanvasBox>{boxes.data(), 1U}, canvas,
+        editor::CanvasAlign::Right);
+    UI_CHECK(near(right[0U].x, 1620.0F));
+
+    // Spaced evenly: the outer two stay, the one between goes half way,
+    // whatever order they were selected in.
+    const std::array<editor::CanvasBox, 3U> shuffled{boxes[2U], boxes[0U],
+                                                     boxes[1U]};
+    const auto across = editor::distribute_boxes(shuffled, true);
+    UI_CHECK(across[0U] == (editor::CanvasMove{}) &&
+             across[1U] == (editor::CanvasMove{}));
+    // Middles at 200 and 1100: the third belongs at 650, from 530.
+    UI_CHECK(near(across[2U].x, 120.0F) && across[2U].y == 0.0F);
+    const auto down = editor::distribute_boxes(shuffled, false);
+    // Middles down are 230, 100 and 550: the first belongs at 325.
+    UI_CHECK(near(down[0U].y, 95.0F) && down[0U].x == 0.0F);
+    // Two boxes have nothing to space.
+    const auto pair = editor::distribute_boxes(
+        std::span<const editor::CanvasBox>{boxes.data(), 2U}, true);
+    UI_CHECK(pair.size() == 2U && pair[0U] == (editor::CanvasMove{}) &&
+             pair[1U] == (editor::CanvasMove{}));
+}
+
+void ruler_ticks_are_round_numbers_far_enough_apart() {
+    // Half a panel unit to the pixel: 64 units apart needs 128 pixels, and
+    // the next round number up is 200.
+    UI_CHECK(near(editor::ruler_step(0.5F, 64.0F), 200.0F));
+    UI_CHECK(near(editor::ruler_step(1.0F, 64.0F), 100.0F));
+    UI_CHECK(near(editor::ruler_step(2.0F, 64.0F), 50.0F));
+    UI_CHECK(near(editor::ruler_step(4.0F, 80.0F), 20.0F));
+    // Zoomed far in, a tick is never less than a pixel.
+    UI_CHECK(near(editor::ruler_step(64.0F, 32.0F), 1.0F));
+}
+
+void a_dragged_layer_lands_on_the_middle_of_the_picture() {
+    Harness h;
+    // A unit to the right of where it started: off the middle.
+    h.scene.media[0U].world = scene::multiply(
+        scene::translation(scene::Vec3{1.0F, 0.0F, 0.0F}),
+        h.scene.media[0U].world);
+    const editor::CanvasBoxMetrics before = h.metrics();
+    UI_CHECK(before.x > 1000.0F);
+    const auto bounds = h.panel.canvas_box_bounds(h.scene, clip_node);
+    UI_CHECK(bounds.has_value());
+    UI_CHECK(near(bounds->centre_x(), before.x, 0.05F) &&
+             near(bounds->right - bounds->left, before.width, 0.05F));
+
+    const editor::ViewportFrame shown = h.at(10.0F, 10.0F);
+    const gui::UiPoint centre = shown.box.centre;
+    // How far the layer's middle is from the picture's, in panel units.
+    const float away = centre.x - 500.0F;
+    UI_CHECK(away > 20.0F);
+    UI_CHECK(h.at(centre.x, centre.y, true).picked == clip_node);
+    // Dragged to within four units of the middle: it takes the middle.
+    const editor::ViewportFrame near_middle =
+        h.at(centre.x - away + 4.0F, centre.y, true);
+    UI_CHECK(near_middle.transform.has_value());
+    UI_CHECK(near_middle.snap_x == 960.0F);
+    {
+        scene::Scene moved = h.scene;
+        moved.media[0U].world = scene::multiply(
+            scene::translation(near_middle.transform->translation),
+            moved.media[0U].world);
+        const auto landed = h.panel.canvas_box_metrics(moved, clip_node);
+        UI_CHECK(landed.has_value() && near(landed->x, 960.0F, 0.05F));
+    }
+    // Ctrl moves it exactly as dragged, four units short.
+    const editor::ViewportFrame free =
+        h.at(centre.x - away + 4.0F, centre.y, true, gui::KeyMods::Ctrl);
+    UI_CHECK(free.transform.has_value() && !free.snap_x.has_value());
+    {
+        scene::Scene moved = h.scene;
+        moved.media[0U].world = scene::multiply(
+            scene::translation(free.transform->translation),
+            moved.media[0U].world);
+        const auto landed = h.panel.canvas_box_metrics(moved, clip_node);
+        UI_CHECK(landed.has_value() &&
+                 near(landed->x, 960.0F + 4.0F * 1.92F, 0.1F));
+    }
+    // Twenty units off, nothing is in reach across the picture.
+    const editor::ViewportFrame far =
+        h.at(centre.x - away + 20.0F, centre.y, true);
+    UI_CHECK(!far.snap_x.has_value());
+    static_cast<void>(h.at(centre.x, centre.y, false));
+
+    // Switched off, the same drag is free; Ctrl then turns it on.
+    h.panel.set_canvas_snapping(false);
+    static_cast<void>(h.at(centre.x, centre.y, true));
+    UI_CHECK(!h.at(centre.x - away + 4.0F, centre.y, true).snap_x.has_value());
+    UI_CHECK(h.at(centre.x - away + 4.0F, centre.y, true, gui::KeyMods::Ctrl)
+                 .snap_x == 960.0F);
+    static_cast<void>(h.at(centre.x, centre.y, false));
+}
+
+void a_dragged_layer_lands_on_another_layers_edge() {
+    Harness h;
+    // A second clip, half the size, well to the left.
+    const doc::NodeId other{9U};
+    scene::MediaInstance second{};
+    second.world = scene::multiply(
+        scene::translation(scene::Vec3{-3.0F, 0.0F, 0.0F}),
+        scene::scaling(scene::Vec3{1.0F, 1.0F, 1.0F}));
+    second.source_node = other;
+    h.scene.media.push_back(second);
+    const auto fixed = h.panel.canvas_box_bounds(h.scene, other);
+    const auto moving = h.panel.canvas_box_bounds(h.scene, clip_node);
+    UI_CHECK(fixed.has_value() && moving.has_value());
+    UI_CHECK(fixed->right < moving->left);
+
+    const editor::ViewportFrame shown = h.at(10.0F, 10.0F);
+    const gui::UiPoint centre = shown.box.centre;
+    static_cast<void>(h.at(centre.x, centre.y, true));
+    // Dragged left until its left edge is three units short of the other's
+    // right edge: the edges meet.
+    const float gap = (moving->left - fixed->right) / 1.92F;
+    const editor::ViewportFrame dragged =
+        h.at(centre.x - gap + 3.0F, centre.y, true);
+    UI_CHECK(dragged.snap_x.has_value());
+    UI_CHECK(near(*dragged.snap_x, fixed->right, 0.01F));
+    scene::Scene moved = h.scene;
+    moved.media[0U].world = scene::multiply(
+        scene::translation(dragged.transform->translation),
+        moved.media[0U].world);
+    const auto landed = h.panel.canvas_box_bounds(moved, clip_node);
+    UI_CHECK(landed.has_value() && near(landed->left, fixed->right, 0.05F));
+}
+
+void guides_come_out_of_the_rulers_and_go_back_into_them() {
+    Harness h;
+    const gui::Rect plain = h.at(10.0F, 10.0F).image;
+    h.panel.set_rulers_shown(true);
+    const editor::ViewportFrame ruled = h.at(500.0F, 500.0F);
+    // The rulers take a strip off the top and the left of the pane.
+    UI_CHECK(ruled.image.x >= 36.0F && ruled.image.width < plain.width);
+    UI_CHECK(h.panel.guides_down().empty() && h.panel.guides_across().empty());
+
+    // Out of the top ruler, down to a point on the picture: a line across
+    // it at that canvas pixel, a whole one.
+    static_cast<void>(h.at(500.0F, 6.0F, true));
+    const editor::ViewportFrame pulling = h.at(500.0F, 500.0F, true);
+    UI_CHECK(!pulling.pressed && !pulling.picked.has_value());
+    const float wanted_y = std::round(pulling.pointer.y);
+    static_cast<void>(h.at(500.0F, 500.0F, false));
+    UI_CHECK(h.panel.guides_across().size() == 1U);
+    UI_CHECK(h.panel.guides_across()[0U] == wanted_y);
+    UI_CHECK(h.panel.guides_down().empty());
+
+    // Out of the left ruler: a line down the picture.
+    static_cast<void>(h.at(10.0F, 400.0F, true));
+    const editor::ViewportFrame second = h.at(300.0F, 400.0F, true);
+    const float wanted_x = std::round(second.pointer.x);
+    static_cast<void>(h.at(300.0F, 400.0F, false));
+    UI_CHECK(h.panel.guides_down().size() == 1U);
+    UI_CHECK(h.panel.guides_down()[0U] == wanted_x);
+
+    // Picked up where it lies and carried: it moves, and nothing else does.
+    static_cast<void>(h.at(300.0F, 300.0F, true));
+    const editor::ViewportFrame carried = h.at(340.0F, 300.0F, true);
+    UI_CHECK(!carried.picked.has_value() && !carried.transform.has_value());
+    static_cast<void>(h.at(340.0F, 300.0F, false));
+    UI_CHECK(h.panel.guides_down().size() == 1U);
+    UI_CHECK(h.panel.guides_down()[0U] == std::round(carried.pointer.x));
+    UI_CHECK(h.panel.guides_down()[0U] > wanted_x);
+
+    // A layer dragged near the guide lands on it.
+    const float guide_x = h.panel.guides_down()[0U];
+    const editor::ViewportFrame shown = h.at(10.0F, 30.0F);
+    const auto bounds = h.panel.canvas_box_bounds(h.scene, clip_node);
+    UI_CHECK(bounds.has_value() && bounds->left > guide_x);
+    const gui::UiPoint centre = shown.box.centre;
+    static_cast<void>(h.at(centre.x, centre.y, true));
+    const float gap =
+        (bounds->left - guide_x) * h.panel.canvas_scale();
+    const editor::ViewportFrame dragged =
+        h.at(centre.x - gap + 3.0F, centre.y, true);
+    UI_CHECK(dragged.snap_x == guide_x);
+    static_cast<void>(h.at(centre.x, centre.y, false));
+
+    // Carried back onto the ruler it came from, the guide is put away.
+    static_cast<void>(h.at(340.0F, 300.0F, true));
+    static_cast<void>(h.at(12.0F, 300.0F, true));
+    static_cast<void>(h.at(12.0F, 300.0F, false));
+    UI_CHECK(h.panel.guides_down().empty());
+    UI_CHECK(h.panel.guides_across().size() == 1U);
+
+    // With the rulers hidden the picture has its whole pane back.
+    h.panel.set_rulers_shown(false);
+    const gui::Rect again = h.at(10.0F, 10.0F).image;
+    UI_CHECK(again.x == plain.x && again.width == plain.width);
+    h.panel.clear_guides();
+    UI_CHECK(h.panel.guides_across().empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
@@ -1101,6 +1350,18 @@ constexpr Case cases[] = {
      &the_pen_places_points_curves_them_and_closes_on_the_first},
     {"a canvas pixel resolves to its point on a plane facing the camera",
      &a_canvas_pixel_resolves_to_its_point_on_a_plane_facing_the_camera},
+    {"a moved box takes the nearest line within reach",
+     &a_moved_box_takes_the_nearest_line_within_reach},
+    {"boxes line up with each other or one with the canvas",
+     &boxes_line_up_with_each_other_or_one_with_the_canvas},
+    {"ruler ticks are round numbers far enough apart",
+     &ruler_ticks_are_round_numbers_far_enough_apart},
+    {"a dragged layer lands on the middle of the picture",
+     &a_dragged_layer_lands_on_the_middle_of_the_picture},
+    {"a dragged layer lands on another layers edge",
+     &a_dragged_layer_lands_on_another_layers_edge},
+    {"guides come out of the rulers and go back into them",
+     &guides_come_out_of_the_rulers_and_go_back_into_them},
     {"a fills handles sit where the renderer puts the ramp",
      &a_fills_handles_sit_where_the_renderer_puts_the_ramp},
     {"dragging a fills handles writes the value that puts them there",

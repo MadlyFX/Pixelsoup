@@ -15,7 +15,8 @@ This file holds what is still to come.
 Done: the tool palette (Select, Hand, Zoom, Rectangle, Ellipse, Pen,
 Gradient), zoom and pan, the transform box, the options bar, the Canvas view,
 which follows the Stage into Preview, shapes drawn as masks or as new cards,
-mask editing on Program by selection rather than by tab, and gradient handles.
+mask editing on Program by selection rather than by tab, gradient handles,
+snapping, rulers and guides, safe areas, and Align and Distribute.
 
 - A tool is one entry in `canvas_tools()` (`engine/editor/canvas_tool.hpp`)
   and one branch of `ViewportPanel`'s pointer handling
@@ -63,16 +64,22 @@ mask editing on Program by selection rather than by tab, and gradient handles.
 - The Gradient tool does not turn a single-colour fill into a gradient, and
   has no handle for colour A's end separately from the middle.
 
-## Next: laying out precisely
+## Carried over from the third round
 
-- Snapping to the canvas edges and centre and to other layers, with guides
-  drawn as they catch.
-- Rulers, draggable guides and safe-area overlays.
-- Align and distribute for several layers.
-- An authored anchor point; today's movable pivot is the Stage's and is
-  forgotten when the selection changes.
+- Only a move snaps. Resizing by a handle, turning, drawing a shape and
+  placing a Pen point do not.
+- Snap lines are gathered at the press from at most 256 other layers, by the
+  upright box each covers; a turned layer offers its bounding box, not its
+  own edges.
+- Guides and the rulers, snap and safe-area switches are this editor's and
+  are not saved with the workspace or the project.
+- The safe areas are fixed at 93% and 90%.
+- Align has no icons and no shortcuts, and no "align to the key layer".
+- An authored anchor point is not started: today's movable pivot is the
+  Stage's and is forgotten when the selection changes. It needs a schema
+  field that is normalized, replicated and digested, so it is its own change.
 
-## Then: the viewer
+## Next: the viewer
 
 - Channel views (colour, alpha, matte) and solo for the selected layer.
 - A wipe between Program and Preview.

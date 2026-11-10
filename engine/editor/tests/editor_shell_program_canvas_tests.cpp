@@ -266,6 +266,30 @@ void program_tools() {
   check(near(edits.back().position.y, 0.0, 1.0e-3), "and none along Y");
   check(properties.empty(), "a move authors no scale or rotation");
 
+  // Align, at the right of the options bar: with one layer selected, Align
+  // left puts its left side on the picture's left edge, and moves it no
+  // other way.
+  const gui::UiPoint align_button{options.right() - 114.0F, options.y + 13.0F};
+  const gui::UiPoint align_left{options.right() - 120.0F, options.y + 40.0F};
+  move(align_button);
+  edits.clear();
+  properties.clear();
+  button(align_button, true);
+  button(align_button, false);
+  move(align_left);
+  button(align_left, true);
+  button(align_left, false);
+  frame();
+  check(!edits.empty() && edits.back().node == card.node,
+        "Align left moves the card");
+  // The card is two units wide, and the picture 1920 pixels.
+  check(near(edits.back().position.x, 1.0 - 960.0 / pixels_per_unit, 0.005),
+        "its left side is on the picture's left edge");
+  check(near(edits.back().position.y, 0.0, 1.0e-3) && properties.empty(),
+        "and nothing else about it changed");
+  for (const auto &edit : edits)
+    check(edit.gesture == edits.front().gesture, "one choice is one undo step");
+
   // The Gradient tool (G): the card is given a ramp from left to right,
   // whose end is the middle of its right-hand side. Dragged to the middle
   // of the bottom, the ramp runs top to bottom - its angle a quarter turn,

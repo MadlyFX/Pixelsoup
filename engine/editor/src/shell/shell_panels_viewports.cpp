@@ -778,7 +778,58 @@ void EditorShell::Frame::draw_program_options(
       picture_ok && tool == CanvasTool::Select && element != nullptr
           ? impl.program_panel.canvas_box_metrics(view, node, projection)
           : std::nullopt;
-  const gui::Rect row = gui::inset(bar, gui::Padding{8.0F, 3.0F, 8.0F, 4.0F});
+  gui::Rect row = gui::inset(bar, gui::Padding{8.0F, 3.0F, 8.0F, 4.0F});
+  // At the right end, whatever is selected: lining layers up, and what the
+  // picture is laid out against.
+  {
+    const gui::UiId tools = gui::ui_id("editor.program.layout");
+    const gui::Rect safe = gui::cut_right(row, 24.0F);
+    if (icon_button(ui, gui::ui_id(tools, 1U), safe, gui::Icon::Guides,
+                    "Safe areas: the action-safe and title-safe frames and "
+                    "the middle of the picture",
+                    impl.program_panel.safe_areas_shown())) {
+      impl.program_panel.set_safe_areas_shown(
+          !impl.program_panel.safe_areas_shown());
+    }
+    const gui::Rect rulers = gui::cut_right(row, 24.0F);
+    if (icon_button(ui, gui::ui_id(tools, 2U), rulers, gui::Icon::Measure,
+                    "Rulers and guides. Drag out of a ruler for a guide; "
+                    "drag a guide back onto one to remove it",
+                    impl.program_panel.rulers_shown())) {
+      impl.program_panel.set_rulers_shown(!impl.program_panel.rulers_shown());
+    }
+    const gui::Rect snap = gui::cut_right(row, 24.0F);
+    if (icon_button(ui, gui::ui_id(tools, 3U), snap, gui::Icon::Snap,
+                    "Snap a moved layer to the picture's edges and middle, "
+                    "to other layers and to guides. Hold Ctrl to move "
+                    "without it",
+                    impl.program_panel.canvas_snapping())) {
+      impl.program_panel.set_canvas_snapping(
+          !impl.program_panel.canvas_snapping());
+    }
+    static_cast<void>(gui::cut_right(row, 6.0F));
+    const gui::Rect align = gui::cut_right(row, 56.0F);
+    const bool can_align = picture_ok && !impl.scene_selection.empty() &&
+                           !switcher.rehearsal_locked && !color_sample_active;
+    const gui::UiId align_menu = gui::ui_id(tools, 5U);
+    ui.tooltip(align,
+               "Line the selected layers up with each other, or one layer "
+               "with the picture; or space three or more evenly");
+    if (chrome_button(ui, gui::ui_id(tools, 4U), align, "Align",
+                      ui.menu_open(align_menu), can_align)) {
+      ui.open_context_menu(align_menu, align.x, align.bottom());
+    }
+    constexpr std::array<std::string_view, 8U> align_options{
+        "Align left",       "Align centre",     "Align right",
+        "Align top",        "Align middle",     "Align bottom",
+        "Distribute across", "Distribute down"};
+    if (const auto chosen = ui.context_menu(align_menu, align_options)) {
+      if (can_align && *chosen < align_options.size()) {
+        align_selection(*chosen, authored, view, projection);
+      }
+    }
+    static_cast<void>(gui::cut_right(row, 8.0F));
+  }
   if (!metrics.has_value()) {
     std::string_view hint = "Select a layer to move, turn and resize it";
     if (tool == CanvasTool::Hand) {

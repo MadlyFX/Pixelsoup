@@ -380,6 +380,33 @@ pointer is the picture. These are the same Angle, Centre and Size that
 Properties shows; a fill of one colour has no handles until it is made a
 gradient there.
 
+**Snapping.** A layer dragged with Select lands on a line when it comes
+within a few pixels of one: the picture's edges and its middle, the edges and
+middle of every other layer, and any guide. Its own two edges and its middle
+each look for a line, across and down separately, and the line it took is
+drawn through the picture for as long as it holds. The magnet at the right of
+the options bar turns this off; holding **Ctrl** during a drag does the
+opposite of the magnet for that drag. Resizing and turning do not snap.
+
+**Rulers and guides.** The ruler button beside the magnet shows rulers along
+the top and left of the picture, numbered in the picture's own pixels, with a
+mark where the pointer is. Drag down out of the top ruler for a guide across
+the picture, or across out of the left ruler for one down it. With Select, drag
+a guide to move it, and drag it back onto a ruler to remove it. Guides sit on
+whole pixels, stay with the picture as it is zoomed and panned, and are hidden
+with the rulers. They belong to this editor's view and are not saved with the
+project.
+
+**Safe areas.** The frame button shows the action-safe (93%) and title-safe
+(90%) frames and a cross at the middle of the picture.
+
+**Align.** The Align menu lines the selected layers up by what each covers on
+the picture - left, centre, right, top, middle or bottom of the box round them
+all - or, with one layer selected, lines that layer up with the picture itself.
+Distribute across and Distribute down space three or more layers so their
+middles are evenly apart between the two outermost. Locked layers stay where
+they are, and each choice is one undo step.
+
 **The options bar** shows where the selected layer's middle is on the picture
 (`X`, `Y`), how long its sides are (`W`, `H`) and how far it is turned (`R`, in
 degrees clockwise), all in the pixels of the view shown. Drag a number or
