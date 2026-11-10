@@ -37,6 +37,28 @@ selection_action(bool ctrl, bool shift, bool ordered_range) noexcept {
   return SelectionAction::Replace;
 }
 
+// What a click on an element does on a canvas (Stage, Program Output), where
+// elements have no row order. Shift adds the element or takes it out; Alt
+// makes it the whole selection; a plain click selects an unselected element
+// alone, and keeps a larger selection it belongs to so that a drag moves all
+// of it. Ctrl is not a selection modifier on a canvas.
+enum class CanvasClick : core::u8 {
+  Toggle,
+  Replace,
+  Keep,
+};
+
+[[nodiscard]] constexpr CanvasClick
+canvas_click_action(bool shift, bool alt, bool already_selected) noexcept {
+  if (shift) {
+    return CanvasClick::Toggle;
+  }
+  if (alt || !already_selected) {
+    return CanvasClick::Replace;
+  }
+  return CanvasClick::Keep;
+}
+
 // Editor-local scene-node selection. Membership is always sorted and unique,
 // while primary remains an independent, selected node for Inspector focus and
 // the brighter row/outline treatment. A private range anchor lets repeated

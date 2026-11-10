@@ -136,6 +136,8 @@ struct ViewportFrame final {
     // object, clip, model, or light marker under it, or empty for bare canvas.
     bool pressed{};
     std::optional<doc::NodeId> picked{};
+    // The pick was an Alt click: it becomes the whole selection.
+    bool replace_pick{};
     EmptyCanvasInteraction empty_canvas{EmptyCanvasInteraction::None};
 
     // Projection surfaces are project calibration, not scene elements. Keep
@@ -834,6 +836,11 @@ class ViewportPanel final {
     float deep_press_pointer_x_{};
     float deep_press_pointer_y_{};
     std::vector<doc::NodeId> deep_candidates_;
+    // On Stage an Alt press is the camera's; the element under it is picked
+    // on release only if the pointer never moved.
+    std::optional<doc::NodeId> alt_pick_;
+    float alt_press_x_{};
+    float alt_press_y_{};
     // Draw observes only already-decoded immutable assets. Both residency
     // caches perform file/model work on their bounded background workers;
     // contention, a cold source, or a sticky failure therefore leaves the

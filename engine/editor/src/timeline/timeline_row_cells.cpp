@@ -2271,7 +2271,7 @@ void TimelinePanel::note_row_menu_press(RowContext &rc) {
 }
 
 // A press on a key: it becomes the active channel, the selection takes the
-// key (Ctrl toggles it, Shift adds it), and unless Ctrl just dropped it the
+// key (Shift or Ctrl toggles it), and unless the toggle just dropped it the
 // whole selection lifts for a shared-delta drag.
 void TimelinePanel::press_key(Pass &p, const SelectedKey &hit) {
   gui::UiContext &ctx = p.ctx;
@@ -2281,15 +2281,11 @@ void TimelinePanel::press_key(Pass &p, const SelectedKey &hit) {
   bool begin_drag = true;
   const auto selected_it =
       std::find(keys_.selected.begin(), keys_.selected.end(), hit);
-  if (ctx.ctrl_held()) {
+  if (ctx.shift_held() || ctx.ctrl_held()) {
     if (selected_it != keys_.selected.end()) {
       keys_.selected.erase(selected_it);
       begin_drag = false;
     } else {
-      keys_.selected.push_back(hit);
-    }
-  } else if (ctx.shift_held()) {
-    if (selected_it == keys_.selected.end()) {
       keys_.selected.push_back(hit);
     }
   } else if (selected_it == keys_.selected.end()) {

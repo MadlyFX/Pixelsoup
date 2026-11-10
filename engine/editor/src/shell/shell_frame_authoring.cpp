@@ -642,12 +642,15 @@ void EditorShell::Frame::handle_viewport(const ViewportFrame &viewport,
       // select_only()/toggle(). It is still an explicit choice of the Scene
       // history domain for the global undo/redo actions.
       impl.history_context = HistoryContext::Scene;
+      // Ctrl is not a selection modifier here; it is the snapping switch
+      // for the drag.
       const doc::NodeId picked = viewport.picked.value();
-      if (ui.ctrl_held()) {
+      const CanvasClick click = canvas_click_action(
+          ui.shift_held(), viewport.replace_pick || ui.alt_held(),
+          impl.is_selected(picked));
+      if (click == CanvasClick::Toggle) {
         impl.toggle(picked);
-      } else if (ui.shift_held() || !impl.is_selected(picked)) {
-        // A spatial viewport has no stable visible row order, so Shift is a
-        // plain replacement here. Only Ctrl is the exact membership toggle.
+      } else if (click == CanvasClick::Replace) {
         impl.select_only(picked);
       } else {
         impl.scene_selection.set_primary(picked);

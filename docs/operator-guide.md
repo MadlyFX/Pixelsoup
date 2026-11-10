@@ -305,7 +305,7 @@ the picture.
 
 | Tool | Key | What it does |
 | --- | --- | --- |
-| Select | V | Click a layer to select it; drag it to move it; use its box to resize and turn it |
+| Select | V | Click a layer to select it, Shift+click to add or remove one, Alt+click to select only it; drag it to move it; use its box to resize and turn it |
 | Hand | H | Drag to move the picture inside the panel |
 | Zoom | Z | Click to zoom in on a point, Alt+click to zoom out |
 | Rectangle | R | Drag out a rectangle |
@@ -2353,8 +2353,8 @@ the Track it plays on - into view and outlines it for a moment, and choosing
 a Scene Layer node scrolls the Timeline to its layer or track, opening the
 track if it was closed. Neither changes the other panel's selection.
 
-**Selecting and arranging.** Click a node to select it. **Ctrl**-click adds
-or removes one node, and **Shift**-click adds one. Drag on empty canvas for a
+**Selecting and arranging.** Click a node to select it. **Shift**-click adds
+or removes one node, and **Alt**-click makes it the whole selection. Drag on empty canvas for a
 rubber band: dragged rightwards it takes the nodes it wholly contains, and
 leftwards every node it touches; hold Shift to add to the selection or Ctrl
 to take from it. Dragging any selected node moves them all together as one
@@ -2723,7 +2723,12 @@ An imported model is measured on its own triangles once a moment has passed
 after it first appears; until then points land on its bounding box.
 
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
-Ctrl toggles membership and Shift selects a visible range; the Inspector shows
+In the Scene and Timeline lists, Ctrl toggles a row and Shift selects a visible
+range. On Stage and Program Output, Shift-click adds an element or takes it
+out, and Alt-click makes it the whole selection; a plain click on a member of
+a larger selection keeps the others so a drag moves them all. On Stage an Alt
+press that moves orbits the camera instead, and Alt on a gizmo duplicates.
+Ctrl does not change the selection on either view. The Inspector shows
 `MIXED` for disagreeing compatible values and applies an accepted edit only to
 unlocked compatible members. Select top-level elements, right-click one of
 them in the Scene panel and choose **Group** (or **Group Selection**) to create

@@ -122,6 +122,7 @@ void ViewportPanel::handle_press(Frame& f) {
         surface_dragging_ = false;
         deep_select_armed_ = false;
         deep_select_open_ = false;
+        alt_pick_.reset();
         deep_candidates_.clear();
         box_handle_ = TransformBoxHandle::None;
         snap_box_.reset();
@@ -147,7 +148,21 @@ void ViewportPanel::handle_press(Frame& f) {
             marquee_x_ = ctx.pointer_x();
             marquee_y_ = ctx.pointer_y();
         } else if (camera_chord) {
-            // Left to the shell's camera navigation.
+            // Left to the shell's camera navigation. An Alt press that is let
+            // go where it began is a click: it picks the element under it.
+            if (ctx.alt_held() && !other_buttons && !measuring_) {
+                const std::vector<scene::ScenePick> hits =
+                    scene_hits_under_pointer();
+                const auto front = std::find_if(
+                    hits.begin(), hits.end(), [](const scene::ScenePick& hit) {
+                        return !hit.crosses_camera;
+                    });
+                if (front != hits.end()) {
+                    alt_pick_ = front->node;
+                    alt_press_x_ = ctx.pointer_x();
+                    alt_press_y_ = ctx.pointer_y();
+                }
+            }
         } else if (measuring_) {
             if (measure_hover_.has_value()) {
                 measure_.click(*measure_hover_, ctx.shift_held());
@@ -515,6 +530,18 @@ void ViewportPanel::finish_gesture(Frame& f) {
         frame.marquee_adds = ctx.shift_held();
     }
 
+    if (it.released && alt_pick_.has_value()) {
+        // Within a few interface pixels counts as not moving, as a click.
+        constexpr float click_slop = 4.0F;
+        if (std::abs(ctx.pointer_x() - alt_press_x_) <= click_slop &&
+            std::abs(ctx.pointer_y() - alt_press_y_) <= click_slop) {
+            frame.pressed = true;
+            frame.picked = alt_pick_;
+            frame.replace_pick = true;
+            frame.empty_canvas = EmptyCanvasInteraction::None;
+        }
+        alt_pick_.reset();
+    }
     if (it.released) {
         frame.released = true;
         deep_select_armed_ = false;

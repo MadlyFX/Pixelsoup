@@ -2793,8 +2793,9 @@ void a_new_wire_is_held_until_the_graph_reports_it() {
   UI_CHECK(arriving.list.vertices().size() == arrived);
 }
 
-// Clicks that build a selection: Ctrl toggles one node, Shift adds one.
-void ctrl_and_shift_clicks_build_a_selection() {
+// Clicks that build a selection, as on any canvas: Shift adds a node or takes
+// it out, Alt makes it the whole selection, and Ctrl does neither.
+void shift_and_alt_clicks_build_a_selection() {
   compositor::CompositorGraph graph;
   graph.nodes.push_back(
       graph_node(1U, compositor::NodeKind::Brightness, 40.0F, 60.0F));
@@ -2803,9 +2804,15 @@ void ctrl_and_shift_clicks_build_a_selection() {
   graph.nodes.push_back(
       graph_node(3U, compositor::NodeKind::Blur, 40.0F, 300.0F));
   CompositorHarness harness;
-  const auto click = [&](float x, float y, gui::KeyMods mods) {
+  const auto press = [&](float x, float y, gui::KeyMods mods) {
     static_cast<void>(harness.frame(graph, x, y, true, {}, std::nullopt, mods));
+  };
+  const auto release = [&](float x, float y, gui::KeyMods mods) {
     static_cast<void>(harness.frame(graph, x, y, false, {}, std::nullopt, mods));
+  };
+  const auto click = [&](float x, float y, gui::KeyMods mods) {
+    press(x, y, mods);
+    release(x, y, mods);
   };
   const auto members = [&] {
     const auto span = harness.panel.selected_nodes();
@@ -2813,11 +2820,12 @@ void ctrl_and_shift_clicks_build_a_selection() {
   };
   // Bodies, below the titles: (80, 135), (340, 135), (80, 375).
   click(80.0F, 135.0F, gui::KeyMods::None);
-  click(340.0F, 135.0F, gui::KeyMods::Ctrl);
+  click(340.0F, 135.0F, gui::KeyMods::Shift);
   UI_CHECK(members() == (std::vector<doc::NodeId>{doc::NodeId{1U},
                                                   doc::NodeId{2U}}));
   UI_CHECK(harness.panel.selection().node == doc::NodeId{2U});
-  click(80.0F, 135.0F, gui::KeyMods::Ctrl);
+  // Shift on a selected node takes it out.
+  click(80.0F, 135.0F, gui::KeyMods::Shift);
   UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{2U}});
   click(80.0F, 375.0F, gui::KeyMods::Shift);
   UI_CHECK(members() == (std::vector<doc::NodeId>{doc::NodeId{2U},
@@ -2825,6 +2833,17 @@ void ctrl_and_shift_clicks_build_a_selection() {
   // A plain click on one member of several picks it out on its own.
   click(80.0F, 375.0F, gui::KeyMods::None);
   UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{3U}});
+  // Alt picks a member out at once, before any release.
+  click(340.0F, 135.0F, gui::KeyMods::Shift);
+  UI_CHECK(members() == (std::vector<doc::NodeId>{doc::NodeId{2U},
+                                                  doc::NodeId{3U}}));
+  press(340.0F, 135.0F, gui::KeyMods::Alt);
+  UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{2U}});
+  release(340.0F, 135.0F, gui::KeyMods::Alt);
+  UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{2U}});
+  // Ctrl is not a selection modifier: it selects as a plain click does.
+  click(80.0F, 135.0F, gui::KeyMods::Ctrl);
+  UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{1U}});
 }
 
 // A rubber band dragged rightwards takes the nodes it wholly contains;
@@ -4725,8 +4744,8 @@ constexpr std::array<Case, 139U> cases{{
      &drops_from_other_panels_find_compatible_inputs},
     {"a new wire is held until the graph reports it",
      &a_new_wire_is_held_until_the_graph_reports_it},
-    {"ctrl and shift clicks build a selection",
-     &ctrl_and_shift_clicks_build_a_selection},
+    {"shift and alt clicks build a selection",
+     &shift_and_alt_clicks_build_a_selection},
     {"a rubber band selects nodes",
      &a_rubber_band_selects_nodes},
     {"a selection moves and nudges together",
