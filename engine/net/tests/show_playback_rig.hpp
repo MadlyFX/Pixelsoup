@@ -558,8 +558,8 @@ private:
 
     static show::FrameBoundaryDriver make_driver(show::FrameCommitSink& sink) {
         show::FrameBoundaryDriverConfig config{};
-        config.clock = show::ShowClockConfig{
-            show_rate, show::ShowFrame{0U}, show::ShowFrame{99'999U}, false};
+        // As a real node builds it: a pacer, with no show range of its own.
+        config.clock = show::pacer_clock_config(show_rate);
         config.mailbox_capacity = 16U;
         config.max_commits_per_tick = 8U;
         auto created = show::FrameBoundaryDriver::create(config, sink, at(0ns));

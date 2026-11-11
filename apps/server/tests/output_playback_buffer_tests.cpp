@@ -410,7 +410,44 @@ void an_operator_anchor_still_restarts_immediately() {
     BUFFER_CHECK(selected.show_frame == show::ShowFrame{41U});
 }
 
-constexpr std::array<Case, 14U> cases{{
+void a_long_hold_is_ended_by_a_fresh_buffer_not_by_catching_up() {
+    // What a node does while its picture is held for a missing reference:
+    // boundaries pass, the control stream runs on, and no frame completes.
+    constexpr core::u64 headroom = 5U;
+    app::OutputPlaybackBuffer buffer{headroom};
+    const auto anchor = playing();
+    for (core::u64 control = 100U; control <= 140U; ++control) {
+        static_cast<void>(buffer.select(anchor, cmd::FrameNumber{control}, true));
+        buffer.observe(true);
+    }
+    BUFFER_CHECK(buffer.latency_frames(cmd::FrameNumber{140U}) == headroom);
+
+    for (core::u64 control = 141U; control <= 440U; ++control) {
+        static_cast<void>(buffer.select(anchor, cmd::FrameNumber{control}, true));
+        buffer.observe(false);
+    }
+    BUFFER_CHECK(buffer.latency_frames(cmd::FrameNumber{440U}) == 304U);
+
+    // Frames complete again. The buffer never skips, so it walks on from
+    // where it stood and the whole hold stays behind it as latency: this
+    // output would draw three hundred frames behind its neighbours for good.
+    for (core::u64 control = 441U; control <= 490U; ++control) {
+        static_cast<void>(buffer.select(anchor, cmd::FrameNumber{control}, true));
+        buffer.observe(true);
+    }
+    BUFFER_CHECK(buffer.latency_frames(cmd::FrameNumber{490U}) == 305U);
+
+    // Which is why the node starts a fresh one when the hold ends: it is back
+    // at its ordinary headroom, on the frame the anchor derives there.
+    app::OutputPlaybackBuffer restarted{headroom};
+    const auto selected =
+        restarted.select(anchor, cmd::FrameNumber{490U}, true);
+    BUFFER_CHECK(selected.control_frame == cmd::FrameNumber{485U});
+    BUFFER_CHECK(selected.show_frame == show::ShowFrame{1'385U});
+    BUFFER_CHECK(restarted.latency_frames(cmd::FrameNumber{490U}) == headroom);
+}
+
+constexpr std::array<Case, 15U> cases{{
     {"busy outputs preserve consecutive frames and completed neighbours",
      &busy_outputs_retry_without_skipping_or_resubmitting_their_neighbours},
     {"held outputs update after edits, publication and window replacement",
@@ -439,6 +476,8 @@ constexpr std::array<Case, 14U> cases{{
      &a_crossfade_travels_with_the_frame_it_belongs_to},
     {"an operator anchor still restarts immediately",
      &an_operator_anchor_still_restarts_immediately},
+    {"a long hold is ended by a fresh buffer, not by catching up",
+     &a_long_hold_is_ended_by_a_fresh_buffer_not_by_catching_up},
 }};
 
 } // namespace

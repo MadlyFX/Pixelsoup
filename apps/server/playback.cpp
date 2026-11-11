@@ -193,13 +193,8 @@ int run_node_playback(net::NodeSessionService &service,
     auto next_node_media_status_refresh = Clock::time_point::min();
 
     net::NodeServiceFrameCommitSink sink{service, node};
-    show::FrameBoundaryDriverConfig config{};
-    config.clock = clock_config(options);
-    config.mailbox_capacity = 16U;
-    config.max_commits_per_tick = 8U;
-
-    auto created =
-        show::FrameBoundaryDriver::create(config, sink, Clock::now());
+    auto created = show::FrameBoundaryDriver::create(
+        node_pacer_config(options), sink, Clock::now());
     if (!created) {
         std::cerr << "invalid node frame-boundary driver configuration\n";
         return 1;
@@ -326,6 +321,9 @@ int run_node_playback(net::NodeSessionService &service,
     // every refresh.
     core::u64 barrier_loss_transitions{};
     show::VideoReferenceSample latest_video_reference{};
+    // The picture is being held because the reference the sync policy asks
+    // for is not supplying frames.
+    bool node_reference_hold{};
 
     const auto publish_runtime_adoption = [&]() noexcept {
         try {
@@ -674,6 +672,7 @@ int run_node_playback(net::NodeSessionService &service,
 
     show::FrameWaiter frame_waiter;
     show::BoundaryLateness boundary_lateness;
+    core::u64 pacer_restarts = 0U;
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
         boundary_lateness.observe(now);
@@ -702,6 +701,27 @@ int run_node_playback(net::NodeSessionService &service,
         }
 
         const auto report = std::move(ticked).value();
+        // Nothing on a node pauses its pacer, and everything below is gated on
+        // the boundaries it reports: commits, acknowledgements, checkpoint
+        // adoption and the status line. A pacer found stopped is therefore
+        // restarted and reported, never left to go quiet. Its frame number
+        // means nothing here, so it is rewound to keep it clear of its end.
+        // Restarting also gives the wait at the bottom of this loop a future
+        // boundary again; a stopped pacer's hint is a time already past, which
+        // would spin a core.
+        if (driver.clock().state() != show::TransportState::Playing) {
+            const auto parked_at = driver.clock().frame().value();
+            const bool restarted =
+                driver.seek(driver.clock().config().first_frame, now)
+                    .has_value() &&
+                driver.play(now).has_value();
+            if (pacer_restarts++ == 0U) {
+                std::cerr << "node frame pacer stopped at its frame "
+                          << parked_at
+                          << (restarted ? "; restarted it\n"
+                                        : "; could not restart it\n");
+            }
+        }
         if (!service.running()) {
             const auto session_status = service.snapshot();
             if (session_status.state == net::NodeSessionServiceState::Faulted) {
@@ -711,6 +731,49 @@ int run_node_playback(net::NodeSessionService &service,
                              "can report and restart it\n";
                 return 1;
             }
+        }
+        // The sync policy asks for an external reference and it is not
+        // supplying frames. The boundaries in this report came from the system
+        // clock, so everything below still runs - this node commits,
+        // acknowledges, adopts checkpoints, follows the document and reports -
+        // and the one thing withheld is a new picture. That is what lets the
+        // edit that relaxes the policy, or redeploys an output, reach a node
+        // whose reference has gone.
+        const bool reference_hold = report.unreferenced;
+        const bool paced_by_reference =
+            driver.config().timing_authority ==
+            show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference;
+        if (paced_by_reference) {
+            // What the driver made of the reading, not the reading itself: a
+            // source that answers with a counter that stopped is not locked.
+            latest_video_reference.state = report.reference;
+        }
+        if (reference_hold != node_reference_hold) {
+            node_reference_hold = reference_hold;
+            // One line per change, and the Director is told at once.
+            std::cerr << "node " << options.node_index;
+            if (reference_hold) {
+                std::cerr << " is holding its picture: video reference "
+                          << video_reference_label(report.reference);
+            } else if (paced_by_reference) {
+                std::cerr << " is drawing again: video reference "
+                          << video_reference_label(report.reference);
+            } else {
+                std::cerr << " is drawing again: the sync policy no longer "
+                             "asks for a video reference";
+            }
+            std::cerr << '\n';
+            if (!reference_hold) {
+                // No output frame completed during the hold, so the playback
+                // buffer's cursor stood still while the control stream ran
+                // on. Left alone it would walk forward from there at normal
+                // speed and this node would draw that far behind its
+                // neighbours from now on. It starts again at its ordinary
+                // headroom, as it does for a new document stream.
+                output_playback_buffer = OutputPlaybackBuffer{
+                    options.active_preferences.output_buffer_frames};
+            }
+            publish_output_sync(false);
         }
         boundaries += report.boundaries;
         last_outcome = report.last_outcome;
@@ -744,8 +807,13 @@ int run_node_playback(net::NodeSessionService &service,
         // Director's asset cohort. Any other output is never sent a retry, so
         // it holds no activation: it shows a set as soon as its own renderer
         // has it.
+        //
+        // Nor is one held while the picture is held for the reference: the
+        // renderer reveals a set by drawing it, so a retained activation
+        // would never be let go, and this node would stop reading the very
+        // frames that could end the hold.
         const auto asset_frame =
-            !node_checkpoint_waiting &&
+            !node_checkpoint_waiting && !reference_hold &&
                     active_deployment.render_server != doc::NodeId{}
                 ? held_asset_activation(node_renderer_readiness.assets,
                                         node_asset_commit,
@@ -778,7 +846,11 @@ int run_node_playback(net::NodeSessionService &service,
             // is drained below, away from the boundary.
             static_cast<void>(retired.retire(std::move(presented.root)));
             presented = std::move(incoming);
-            ++presented_frames;
+            // A frame followed while the picture is held never reached an
+            // output, so it is not counted as presented.
+            if (!reference_hold) {
+                ++presented_frames;
+            }
         }
 
         if (!node_sync_loaded ||
@@ -1323,10 +1395,18 @@ int run_node_playback(net::NodeSessionService &service,
             }
         }
 
-        if (node_checkpoint_waiting) {
+        if (node_checkpoint_waiting || reference_hold) {
             // The checkpoint's root is staged state, not an image permit.
             // Keep the last complete connector image until a frame from the
             // replacement stream has actually been committed and published.
+            //
+            // Without its reference a node has no frame it may draw either:
+            // every output repeats its last complete image, and each boundary
+            // that passes is counted as held by policy.
+            if (reference_hold && at_boundary) {
+                policy_held_boundaries += report.boundaries;
+                missed_boundaries += report.boundaries;
+            }
             for (NodeOutputPresenter &slot : output_presenters) {
                 if (slot.presenter->hold() == show::PresenterStatus::Closed) {
                     status = show::PresenterStatus::Closed;
@@ -1517,7 +1597,9 @@ int run_node_playback(net::NodeSessionService &service,
             break;
         case show::PresenterStatus::Presented:
         case show::PresenterStatus::Skipped:
-            if (node_present_failure.ongoing) {
+            // A picture held for the reference is not a frame drawn, so it
+            // does not end a failure that was going on when the hold began.
+            if (node_present_failure.ongoing && !reference_hold) {
                 node_present_failure.ongoing = false;
                 std::cerr << "node " << options.node_index
                           << " is drawing its frames again after "
@@ -1621,6 +1703,9 @@ int run_node_playback(net::NodeSessionService &service,
             }
             std::cout << boundary_wake_text(boundary_lateness.take());
             std::cout << " sync=" << sync_mode_label(node_sync_policy.mode)
+                      << " reference="
+                      << video_reference_label(latest_video_reference.state)
+                      << (reference_hold ? "/holding" : "")
                       << " barrier="
                       << runtime_barrier_label(node_output_sync.barrier) << '/'
                       << node_output_sync.joined_outputs << 'x'
@@ -1649,12 +1734,18 @@ int run_node_playback(net::NodeSessionService &service,
             break;
         }
         if (driver.config().timing_authority ==
-            show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference) {
+                show::FrameBoundaryDriverConfig::TimingAuthority::
+                    VideoReference &&
+            !reference_hold) {
             // This is merely a responsive poll for the hardware counter, not
-            // a pacing source. The counter above remains the only way a frame
-            // boundary is created in external-reference mode.
+            // a pacing source. While the reference is counting, the counter
+            // above is the only way a frame boundary is created.
             frame_waiter.sleep_for(std::chrono::milliseconds{1});
         } else {
+            // On the system clock - always, or for as long as the reference
+            // supplies no frames - the next boundary is known, so the loop
+            // sleeps until it. The reference is read again on that wake,
+            // which is soon enough to notice it return.
             boundary_lateness.arm(driver.clock().next_boundary_at());
             sleep_until_boundary(frame_waiter,
                                  driver.clock().next_boundary_at());
@@ -1912,11 +2003,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // Where the show is, is not a clock reading at all. It is the replicated
     // anchor evaluated at the control-frame ordinal, which is what makes the
     // Director and every node compute the same position from the same state.
-    auto paced = show::ShowClock::create(
-        show::ShowClockConfig{
-            options.rate, show::ShowFrame{0U},
-            show::ShowFrame{std::numeric_limits<core::u64>::max() - 1U}, false},
-        start);
+    auto paced =
+        show::ShowClock::create(show::pacer_clock_config(options.rate), start);
     auto created = show::TransportAuthority::create(clock_config(options),
                                                     scheduler.sealed_through());
     if (!paced || !created) {
@@ -1935,8 +2023,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // wall hitches together - with every node reporting itself perfectly
     // locked while it happens.
     sync::DirectorClockStatus director_clock{};
-    bool director_reference_seen = false;
-    core::u32 director_last_reference_frame = 0U;
+    show::VideoReferenceCadence director_reference;
 
     auto transport = std::move(created).value();
     bool restored_recovered_transport = false;
@@ -2486,8 +2573,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .workspace_layout_file = workspace_layout_file,
         .pacer = pacer,
         .director_clock = director_clock,
-        .director_reference_seen = director_reference_seen,
-        .director_last_reference_frame = director_last_reference_frame,
+        .director_reference = director_reference,
         .transport = transport,
         .tracked = tracked,
         .operator_commands = operator_commands,

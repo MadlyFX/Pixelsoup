@@ -431,13 +431,14 @@ unmet condition (`RENDERER PROFILE STALE`, `RENDERER BACKEND MISMATCH`,
 `DISPLAY TIMING MISMATCH`) instead of a generic green state, and Program
 promotion is refused.
 
-Two vendor seams remain unimplemented: `net::ClusterSyncStatusProvider` for a
-real sync device (NVIDIA G-Sync via the NVAPI GSync topology/status functions,
-and the AMD equivalent), and `rhi::PresentBarrierBackend` to join the native
-D3D12 swapchain to an NVAPI present barrier. The D3D12 path now owns and
-presents that swapchain but does not claim vendor swap-group membership.
-SDL_GPU still exposes no native swapchain handle, which is why the barrier
-seam remains a separate installable backend. PTP remains useful
+Both vendor seams have an NVIDIA implementation, built only with
+`MEDIASERVER_ENABLE_NVAPI`: `net::ClusterSyncStatusProvider` reads Quadro Sync
+through the NVAPI GSync topology/status functions
+(`apps/server/nvapi_sync_device.cpp`), and `rhi::PresentBarrierBackend` joins
+the native D3D12 swapchain to an NVAPI present barrier and reads the
+swap-group frame counter (`apps/server/nvapi_present_barrier.cpp`). No other
+vendor has either. SDL_GPU still exposes no native swapchain handle, which is
+why the barrier seam remains a separate installable backend. PTP remains useful
 for clock correlation, tracking timestamps, scheduled deadlines, and
 telemetry, and replaces neither genlock nor swap lock.
 

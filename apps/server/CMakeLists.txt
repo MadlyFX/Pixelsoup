@@ -199,6 +199,15 @@ if(BUILD_TESTING)
     # The memory fields on the node status line: formatting only, plus a
     # live read of this process's private bytes on Windows.
     mediaserver_server_test(status_memory)
+    # The node's frame pacer is a metronome, not the timeline: built from
+    # launch options, it has to run past the show range they carry.
+    mediaserver_server_test(node_pacer)
+    if(WIN32 AND MEDIASERVER_ENABLE_NVAPI)
+        # Drives the real NVIDIA driver, so it checks something only on a
+        # machine whose adapter has no present barrier, and says why it
+        # skipped anywhere else.
+        mediaserver_server_test(nvapi_present_barrier)
+    endif()
     mediaserver_server_test(proxy_generation_service)
     mediaserver_server_test(proxy_playback)
     # The render machine's stored path - what a launch with no arguments

@@ -231,6 +231,40 @@ void a_non_looping_show_parks_on_its_last_frame() {
     SHOW_CHECK(clock.frame() == show::ShowFrame{4U});
 }
 
+void a_pacer_never_reaches_an_end() {
+    constexpr show::FrameRate film_23976{24'000U, 1'001U};
+    const auto config = show::pacer_clock_config(film_23976);
+    SHOW_CHECK(config.rate == film_23976);
+    SHOW_CHECK(show::ShowClock::valid_configuration(config));
+
+    auto created = show::ShowClock::create(config, at(0ns));
+    SHOW_CHECK(created.has_value());
+    auto clock = std::move(created).value();
+    SHOW_CHECK(clock.play(at(0ns)).has_value());
+
+    // An hour in one observation, the longest the clock accepts: far more
+    // boundaries than any timeline in this file, and none of them is the last.
+    // 3600 s at 24000/1001 is 86 313.69 frames.
+    const auto hour = clock.advance_to(at(3600s));
+    SHOW_CHECK(hour.has_value());
+    SHOW_CHECK(hour.value().advanced == 86'313U);
+    SHOW_CHECK(!hour.value().reached_end);
+    SHOW_CHECK(!hour.value().wrapped);
+    SHOW_CHECK(hour.value().state == show::TransportState::Playing);
+
+    // The reference-counted path takes the same route to the end of a range.
+    // Over a thousand years of 24 fps still leaves the pacer running.
+    constexpr mediaserver::core::u64 far = 1'000'000'000'000ULL;
+    const auto counted = clock.advance_by(far, at(3600s));
+    SHOW_CHECK(counted.has_value());
+    SHOW_CHECK(counted.value().advanced == far);
+    SHOW_CHECK(!counted.value().reached_end);
+    SHOW_CHECK(clock.state() == show::TransportState::Playing);
+    SHOW_CHECK(clock.frame() == show::ShowFrame{86'313U + far});
+    // Still playing means there is a future boundary to sleep until.
+    SHOW_CHECK(clock.next_boundary_at() > at(3600s));
+}
+
 void a_looping_show_wraps_to_its_first_frame() {
     auto clock = make(pal_50, show::ShowFrame{10U}, show::ShowFrame{14U}, true);
     SHOW_CHECK(clock.play(at(0ns)).has_value());
@@ -348,7 +382,7 @@ void timecode_follows_the_labelled_rate() {
     SHOW_CHECK(zero == mediaserver::show::Timecode{});
 }
 
-constexpr std::array<mediaserver::show::test::Case, 18U> cases{{
+constexpr std::array<mediaserver::show::test::Case, 19U> cases{{
     {"invalid configurations", &invalid_configurations_are_refused},
     {"new clock is stopped", &a_new_clock_is_stopped_on_the_first_frame},
     {"one frame per period", &playback_advances_exactly_one_frame_per_period},
@@ -363,6 +397,7 @@ constexpr std::array<mediaserver::show::test::Case, 18U> cases{{
     {"exact seek", &an_exact_seek_repositions_and_reanchors},
     {"seek out of range", &a_seek_outside_the_show_range_is_refused},
     {"non-looping end", &a_non_looping_show_parks_on_its_last_frame},
+    {"pacer never ends", &a_pacer_never_reaches_an_end},
     {"looping wrap", &a_looping_show_wraps_to_its_first_frame},
     {"stop rewinds", &stop_returns_to_the_first_frame},
     {"regression and overflow", &time_regression_and_overflow_are_refused},

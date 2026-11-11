@@ -599,6 +599,37 @@ void a_rate_change_reanchors_the_node_pacer() {
     SHOW_CHECK(boundary.value().boundaries == 1U);
 }
 
+void a_pacer_keeps_committing_past_the_length_of_the_show() {
+    Show cluster{1U};
+    auto& node = cluster.node(0U);
+    show::LocalNodeCommitSink sink{node};
+    auto config = driver_config();
+    config.clock = show::pacer_clock_config(pal_50);
+    auto driver = make_driver(sink, config);
+    SHOW_CHECK(driver.play(at(0ns)).has_value());
+
+    // The show authored in this file is 10 000 frames long. A node's pacer is
+    // not the show: it has to go on reporting a boundary per period for as
+    // long as the process runs, wherever the playhead is.
+    constexpr mediaserver::core::u64 run = 10'500U;
+    for (mediaserver::core::u64 index = 1U; index <= run; ++index) {
+        const auto tick = driver.tick(at(index * frame_period));
+        SHOW_CHECK(tick.has_value());
+        SHOW_CHECK(tick.value().boundaries == 1U);
+        SHOW_CHECK(!tick.value().tick.reached_end);
+    }
+    SHOW_CHECK(driver.counters().boundaries == run);
+    SHOW_CHECK(driver.clock().state() == show::TransportState::Playing);
+
+    // Which is what keeps an approved frame committable after all that time.
+    cluster.publish(show::ShowFrame{321U}, show::TransportState::Playing);
+    const auto late = driver.tick(at((run + 1U) * frame_period));
+    SHOW_CHECK(late.has_value());
+    SHOW_CHECK(late.value().committed == 1U);
+    SHOW_CHECK(node.committed_through() == cmd::FrameNumber{1U});
+    SHOW_CHECK(drain(driver).show_frame == show::ShowFrame{321U});
+}
+
 void a_video_reference_counter_is_the_only_external_clock_authority() {
     Show cluster{2U};
     show::LocalNodeCommitSink sink_a{cluster.node(0U)};
@@ -611,19 +642,23 @@ void a_video_reference_counter_is_the_only_external_clock_authority() {
     SHOW_CHECK(driver_a.play(at(0ns)).has_value());
     SHOW_CHECK(driver_b.play(at(0ns)).has_value());
 
-    // A wall-clock observation without a source does not advance either node,
-    // no matter how much time passed locally.
+    // A wall-clock observation without a source supplies no frame for the
+    // picture, no matter how much time passed locally: the boundaries it
+    // reports are marked unreferenced.
     const auto waiting = driver_a.tick(at(20s));
     SHOW_CHECK(waiting.has_value());
-    SHOW_CHECK(waiting.value().boundaries == 0U);
+    SHOW_CHECK(waiting.value().unreferenced);
     SHOW_CHECK(waiting.value().reference == show::VideoReferenceState::Waiting);
+    SHOW_CHECK(waiting.value().boundaries == 1'000U);
 
     // The first counter establishes an epoch. The next common source frame
     // advances both nodes even though their local observations differ by many
     // seconds, proving steady_clock is not participating in the cadence.
-    SHOW_CHECK(driver_a.tick_from_video_reference(
-                   at(21s), {show::VideoReferenceState::Locked, 77U})
-                   .has_value());
+    const auto epoch_a = driver_a.tick_from_video_reference(
+        at(21s), {show::VideoReferenceState::Locked, 77U});
+    SHOW_CHECK(epoch_a.has_value());
+    SHOW_CHECK(!epoch_a.value().unreferenced);
+    SHOW_CHECK(epoch_a.value().boundaries == 0U);
     SHOW_CHECK(driver_b.tick_from_video_reference(
                    at(47s), {show::VideoReferenceState::Locked, 77U})
                    .has_value());
@@ -634,22 +669,239 @@ void a_video_reference_counter_is_the_only_external_clock_authority() {
         at(48s), {show::VideoReferenceState::Locked, 78U});
     SHOW_CHECK(advanced_a.has_value());
     SHOW_CHECK(advanced_b.has_value());
+    // A second passed on each node's own clock - fifty frames of it - and the
+    // reference counted one.
     SHOW_CHECK(advanced_a.value().boundaries == 1U);
     SHOW_CHECK(advanced_b.value().boundaries == 1U);
+    SHOW_CHECK(!advanced_a.value().unreferenced);
+    SHOW_CHECK(!advanced_b.value().unreferenced);
+    SHOW_CHECK(driver_a.counters().unreferenced_boundaries == 1'000U);
+    SHOW_CHECK(driver_b.counters().unreferenced_boundaries == 0U);
     SHOW_CHECK(drain(driver_a).control_frame == cmd::FrameNumber{1U});
     SHOW_CHECK(drain(driver_b).control_frame == cmd::FrameNumber{1U});
 
+    // Losing the source takes the picture's frames away and nothing else. The
+    // frame the Director approved meanwhile is still committed, on the system
+    // clock, and is marked so the caller repeats its previous picture.
     cluster.publish(show::ShowFrame{2U}, show::TransportState::Playing);
     const auto lost = driver_a.tick_from_video_reference(
         at(23s), {show::VideoReferenceState::Lost, 0U});
     SHOW_CHECK(lost.has_value());
-    SHOW_CHECK(lost.value().boundaries == 0U);
+    SHOW_CHECK(lost.value().unreferenced);
     SHOW_CHECK(lost.value().reference == show::VideoReferenceState::Lost);
+    SHOW_CHECK(lost.value().boundaries == 50U);
+    SHOW_CHECK(lost.value().committed == 1U);
     SHOW_CHECK(driver_a.counters().reference_losses == 1U);
-    SHOW_CHECK(driver_a.mailbox().empty());
+    SHOW_CHECK(cluster.node(0U).committed_through() == cmd::FrameNumber{2U});
+    // Node B still has its reference, has seen no new count, and has not moved.
+    SHOW_CHECK(cluster.node(1U).committed_through() == cmd::FrameNumber{1U});
 }
 
-constexpr std::array<mediaserver::show::test::Case, 14U> cases{{
+void a_node_without_its_reference_keeps_its_control_side_running() {
+    Show cluster{1U};
+    auto& node = cluster.node(0U);
+    show::LocalNodeCommitSink sink{node};
+    auto config = driver_config();
+    config.clock = show::pacer_clock_config(pal_50);
+    config.timing_authority =
+        show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference;
+    auto driver = make_driver(sink, config);
+    SHOW_CHECK(driver.play(at(0ns)).has_value());
+
+    // A machine with no sync hardware at all, asked for an external
+    // reference: the source never answers with a count. Every frame the
+    // Director approves is still committed on the boundary after it arrives.
+    constexpr show::VideoReferenceSample none{
+        show::VideoReferenceState::Unsupported, 0U};
+    constexpr mediaserver::core::u64 run = 300U;
+    show::PublishedFrame followed{};
+    for (mediaserver::core::u64 index = 1U; index <= run; ++index) {
+        cluster.publish(
+            show::ShowFrame{700U + index}, show::TransportState::Playing);
+        const auto tick =
+            driver.tick_from_video_reference(at(index * frame_period), none);
+        SHOW_CHECK(tick.has_value());
+        SHOW_CHECK(tick.value().unreferenced);
+        SHOW_CHECK(
+            tick.value().reference == show::VideoReferenceState::Unsupported);
+        SHOW_CHECK(tick.value().boundaries == 1U);
+        SHOW_CHECK(tick.value().committed == 1U);
+        // The document goes on being handed over, so whatever reads it - the
+        // sync policy included - stays current while the picture is held.
+        followed = drain(driver);
+    }
+    SHOW_CHECK(node.committed_through() == cmd::FrameNumber{run});
+    SHOW_CHECK(driver.counters().committed_frames == run);
+    SHOW_CHECK(driver.counters().published_frames == run);
+    SHOW_CHECK(driver.counters().unreferenced_boundaries == run);
+    SHOW_CHECK(driver.counters().reference_losses == run);
+    SHOW_CHECK(followed.control_frame == cmd::FrameNumber{run});
+    SHOW_CHECK(followed.show_frame == show::ShowFrame{700U + run});
+
+    // A wake between two boundaries is still told to hold the picture.
+    const auto between = driver.tick_from_video_reference(
+        at(run * frame_period + frame_period / 2), none);
+    SHOW_CHECK(between.has_value());
+    SHOW_CHECK(between.value().boundaries == 0U);
+    SHOW_CHECK(between.value().unreferenced);
+
+    // A checkpoint staged while the reference is away is met at the next
+    // boundary, which is where a session-backed sink adopts it.
+    cluster.publish(show::ShowFrame{2'000U}, show::TransportState::Playing);
+    auto staged = node.prepare_checkpoint(cluster.director().checkpoint());
+    SHOW_CHECK(staged.has_value());
+    const auto pending = driver.tick_from_video_reference(
+        at((run + 1U) * frame_period), none);
+    SHOW_CHECK(pending.has_value());
+    SHOW_CHECK(pending.value().boundaries == 1U);
+    SHOW_CHECK(
+        pending.value().last_outcome
+        == show::FrameCommitOutcome::CheckpointPending);
+    SHOW_CHECK(node.activate_prepared_checkpoint(staged.value()));
+    SHOW_CHECK(node.committed_through() == cmd::FrameNumber{run + 1U});
+
+    // The edit that drops the reference requirement arrives as a committed
+    // frame like any other, and ends the hold on the very next tick.
+    SHOW_CHECK(driver
+                   .set_timing_authority(
+                       show::FrameBoundaryDriverConfig::TimingAuthority::
+                           SystemClock,
+                       at((run + 1U) * frame_period))
+                   .has_value());
+    cluster.publish(show::ShowFrame{2'001U}, show::TransportState::Playing);
+    const auto relaxed = driver.tick(at((run + 2U) * frame_period));
+    SHOW_CHECK(relaxed.has_value());
+    SHOW_CHECK(!relaxed.value().unreferenced);
+    SHOW_CHECK(relaxed.value().boundaries == 1U);
+    SHOW_CHECK(relaxed.value().committed == 1U);
+    SHOW_CHECK(drain(driver).show_frame == show::ShowFrame{2'001U});
+}
+
+void a_locked_reference_that_stops_counting_is_not_a_reference() {
+    Show cluster{1U};
+    auto& node = cluster.node(0U);
+    show::LocalNodeCommitSink sink{node};
+    auto config = driver_config();
+    config.clock = show::pacer_clock_config(pal_50);
+    config.timing_authority =
+        show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference;
+    auto driver = make_driver(sink, config);
+    SHOW_CHECK(driver.play(at(0ns)).has_value());
+
+    constexpr auto locked = show::VideoReferenceState::Locked;
+    SHOW_CHECK(driver.tick_from_video_reference(at(0ms), {locked, 9'000U})
+                   .has_value());
+    cluster.publish(show::ShowFrame{41U}, show::TransportState::Playing);
+    const auto counted =
+        driver.tick_from_video_reference(at(20ms), {locked, 9'001U});
+    SHOW_CHECK(counted.has_value());
+    SHOW_CHECK(counted.value().boundaries == 1U);
+    SHOW_CHECK(counted.value().committed == 1U);
+
+    // The source goes on answering Locked with the same count. A fifth of a
+    // second of that is the gap between two polls and nothing more.
+    cluster.publish(show::ShowFrame{42U}, show::TransportState::Playing);
+    const auto quiet =
+        driver.tick_from_video_reference(at(220ms), {locked, 9'001U});
+    SHOW_CHECK(quiet.has_value());
+    SHOW_CHECK(!quiet.value().unreferenced);
+    SHOW_CHECK(quiet.value().reference == locked);
+    SHOW_CHECK(quiet.value().boundaries == 0U);
+    SHOW_CHECK(node.committed_through() == cmd::FrameNumber{1U});
+
+    // Past a quarter of a second it is a counter that stopped. The driver
+    // reports it lost and runs the control side on its own clock from there,
+    // so the frame that was waiting is committed.
+    const auto stalled =
+        driver.tick_from_video_reference(at(280ms), {locked, 9'001U});
+    SHOW_CHECK(stalled.has_value());
+    SHOW_CHECK(stalled.value().unreferenced);
+    SHOW_CHECK(stalled.value().reference == show::VideoReferenceState::Lost);
+    SHOW_CHECK(stalled.value().boundaries == 3U);
+    SHOW_CHECK(stalled.value().committed == 1U);
+    SHOW_CHECK(node.committed_through() == cmd::FrameNumber{2U});
+
+    // When it counts again the frames it appears to have skipped are not
+    // frames: the first moving count is a new start, the next one a boundary.
+    const auto resumed =
+        driver.tick_from_video_reference(at(290ms), {locked, 9'037U});
+    SHOW_CHECK(resumed.has_value());
+    SHOW_CHECK(!resumed.value().unreferenced);
+    SHOW_CHECK(resumed.value().reference == locked);
+    SHOW_CHECK(resumed.value().boundaries == 0U);
+    cluster.publish(show::ShowFrame{43U}, show::TransportState::Playing);
+    const auto next =
+        driver.tick_from_video_reference(at(310ms), {locked, 9'038U});
+    SHOW_CHECK(next.has_value());
+    SHOW_CHECK(next.value().boundaries == 1U);
+    SHOW_CHECK(next.value().committed == 1U);
+    SHOW_CHECK(driver.counters().unreferenced_boundaries == 3U);
+    SHOW_CHECK(driver.counters().reference_discontinuities == 0U);
+}
+
+void a_reset_reference_counter_is_a_new_start_not_a_burst() {
+    Show cluster{1U};
+    show::LocalNodeCommitSink sink{cluster.node(0U)};
+    auto config = driver_config();
+    config.clock = show::pacer_clock_config(pal_50);
+    config.timing_authority =
+        show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference;
+    auto driver = make_driver(sink, config);
+    SHOW_CHECK(driver.play(at(0ns)).has_value());
+
+    constexpr auto locked = show::VideoReferenceState::Locked;
+    SHOW_CHECK(driver.tick_from_video_reference(at(0ms), {locked, 5'000U})
+                   .has_value());
+    const auto first =
+        driver.tick_from_video_reference(at(20ms), {locked, 5'001U});
+    SHOW_CHECK(first.has_value());
+    SHOW_CHECK(first.value().boundaries == 1U);
+
+    // Something reset the shared counter. Differenced modulo 2^32 that reads
+    // as some four billion frames, which no twenty milliseconds contains.
+    const auto reset = driver.tick_from_video_reference(at(40ms), {locked, 3U});
+    SHOW_CHECK(reset.has_value());
+    SHOW_CHECK(!reset.value().unreferenced);
+    SHOW_CHECK(reset.value().boundaries == 0U);
+    SHOW_CHECK(driver.counters().reference_discontinuities == 1U);
+    const auto after = driver.tick_from_video_reference(at(60ms), {locked, 4U});
+    SHOW_CHECK(after.has_value());
+    SHOW_CHECK(after.value().boundaries == 1U);
+
+    // A caller that was merely late is still credited every frame it missed:
+    // 0.6 s at 50 fps is thirty frames, and thirty were counted.
+    const auto late =
+        driver.tick_from_video_reference(at(660ms), {locked, 34U});
+    SHOW_CHECK(late.has_value());
+    SHOW_CHECK(late.value().boundaries == 30U);
+    SHOW_CHECK(driver.counters().reference_discontinuities == 1U);
+    SHOW_CHECK(driver.counters().boundaries == 32U);
+
+    // And the documented wrap of the 32-bit counter is two frames, not a reset.
+    SHOW_CHECK(driver
+                   .set_timing_authority(
+                       show::FrameBoundaryDriverConfig::TimingAuthority::
+                           SystemClock,
+                       at(660ms))
+                   .has_value());
+    SHOW_CHECK(driver
+                   .set_timing_authority(
+                       show::FrameBoundaryDriverConfig::TimingAuthority::
+                           VideoReference,
+                       at(660ms))
+                   .has_value());
+    SHOW_CHECK(driver
+                   .tick_from_video_reference(
+                       at(680ms), {locked, 0xffff'ffffU})
+                   .has_value());
+    const auto wrapped =
+        driver.tick_from_video_reference(at(720ms), {locked, 1U});
+    SHOW_CHECK(wrapped.has_value());
+    SHOW_CHECK(wrapped.value().boundaries == 2U);
+    SHOW_CHECK(driver.counters().reference_discontinuities == 1U);
+}
+
+constexpr std::array<mediaserver::show::test::Case, 18U> cases{{
     {"invalid configuration", &invalid_driver_configurations_are_refused},
     {"two nodes converge", &two_nodes_reach_the_same_show_frame},
     {"boundary is allocation-free",
@@ -667,8 +919,16 @@ constexpr std::array<mediaserver::show::test::Case, 14U> cases{{
      &an_empty_frame_still_advances_the_derived_show_position},
     {"rate changes reanchor the node pacer",
      &a_rate_change_reanchors_the_node_pacer},
+    {"a pacer outlasts the show",
+     &a_pacer_keeps_committing_past_the_length_of_the_show},
     {"video reference drives the node pacer",
      &a_video_reference_counter_is_the_only_external_clock_authority},
+    {"no reference keeps the control side running",
+     &a_node_without_its_reference_keeps_its_control_side_running},
+    {"a stopped reference counter is not a reference",
+     &a_locked_reference_that_stops_counting_is_not_a_reference},
+    {"a reset reference counter is not a burst of frames",
+     &a_reset_reference_counter_is_a_new_start_not_a_burst},
 }};
 
 } // namespace

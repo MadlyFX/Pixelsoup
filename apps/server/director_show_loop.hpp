@@ -287,8 +287,7 @@ struct DirectorShowLoop final {
     std::optional<std::filesystem::path> &workspace_layout_file;
     show::ShowClock &pacer;
     sync::DirectorClockStatus &director_clock;
-    bool &director_reference_seen;
-    core::u32 &director_last_reference_frame;
+    show::VideoReferenceCadence &director_reference;
     show::TransportAuthority &transport;
     std::deque<net::DirectorFrameBarrierId> &tracked;
     std::vector<show::PresenterCommand> &operator_commands;

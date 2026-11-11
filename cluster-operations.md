@@ -165,6 +165,35 @@ unloaded machine the maximum stays near a millisecond. A sustained higher
 figure means the loop's own work, or competing load on the machine, is
 delaying frame sealing or rendering.
 
+A node's frame pacer runs for the life of the process, whatever the transport
+is doing and wherever the playhead is, so `boundaries=` on its status line
+climbs by one status interval per line even while the show is paused, stopped
+or disconnected. A node whose `boundaries=` stops climbing, or whose status
+lines stop, has a stalled frame loop: it commits and acknowledges nothing, and
+the Director's `release-lag` for it grows until it is demoted. The pacer takes
+only its rate from the show; `--show-range` and `--show-loop` do not affect
+it. If a node ever finds its pacer stopped it restarts it and prints `node
+frame pacer stopped at its frame N; restarted it` once.
+
+An external reference that is not supplying frames does not stall a node
+either; it stops the picture and nothing else. Under `EXTERNAL GENLOCK` a node
+draws on the frames its reference counter counts. While that counter is
+absent, lost, or answering with a count that has not moved for four frame
+periods (a quarter of a second at least), the node repeats its last complete
+picture on every output and runs everything else on its own clock: it commits
+and acknowledges frames, adopts checkpoints, follows the document and reports.
+On its status line `boundaries=` and `control-frame=` keep climbing,
+`presented=` stops, `reference=` names the state followed by `/holding`, and
+each boundary is counted in `missed=` and `policy-held=`. It prints `node N is
+holding its picture: video reference lost` when the hold starts, naming the
+state it found, and `node N is drawing again: ...` when it ends, saying
+whether the reference came back or the sync policy stopped asking for one.
+Output Monitor shows the node as `SHOW CLOCK REFERENCE LOST` or `SHOW CLOCK
+REFERENCE UNAVAILABLE`.
+Because the node still follows the document, changing the sync mode in
+Hardware Map, or redeploying its outputs, reaches it and ends the hold without
+a restart.
+
 Each node's status line also samples memory at the same interval, in MiB:
 `gpu-local-mib=U/B` is the video memory the process uses (U) against the
 budget the OS currently allows it (B); `gpu-system-mib` is system memory held
@@ -445,9 +474,9 @@ a service's configuration is exactly its command line.
 | --- | --- | --- |
 | Show-frame synchronization | Nodes rendering different timeline frames | Implemented (sealed frames, durable release, commit permits, lockstep release within two frames) |
 | PTP / clock correlation | Clock and timestamp drift | Not implemented; owned by the operating system or a timing interface, not the document protocol |
-| Genlock (external reference) | Scan-out timing drifting between machines | Modelled, authored, reported, and gated; no vendor device provider yet |
-| Frame lock | GPU output heads drifting relative to each other | Modelled, authored, reported, and gated; no vendor device provider yet |
-| Swap group / present barrier | Genlocked outputs showing different frame numbers | Seam implemented (`rhi::PresentBarrierBackend`); no native D3D12/Vulkan backend yet, so SDL_GPU reports UNSUPPORTED |
+| Genlock (external reference) | Scan-out timing drifting between machines | Modelled, authored, reported, and gated; NVIDIA Quadro Sync read through NVAPI in builds with `MEDIASERVER_ENABLE_NVAPI`, no other vendor |
+| Frame lock | GPU output heads drifting relative to each other | Modelled, authored, reported, and gated; same NVIDIA provider, no other vendor |
+| Swap group / present barrier | Genlocked outputs showing different frame numbers | Seam implemented (`rhi::PresentBarrierBackend`); NVAPI backend for the native D3D12 swapchain in builds with `MEDIASERVER_ENABLE_NVAPI`; SDL_GPU swapchains and other vendors report UNSUPPORTED |
 | LED processor sync | Processor re-timing or tearing after the GPU | Not monitored; needs a device integration and measured validation |
 
 Genlock and frame lock align raster boundaries. A present barrier is what makes
@@ -473,7 +502,16 @@ Hardware Map, `SYNC POLICY` in the left rail:
   does not own.
 - **ON FAILURE** - `STRICT` refuses to promote Program while any required
   condition is unproven. `DEGRADED` promotes but keeps the surface in a
-  permanent warning state. Neither ever shows a generic green online state.
+  permanent warning state. Neither ever shows a generic green online state,
+  and neither changes what a render node does without its reference under
+  `EXTERNAL GENLOCK`: it holds its picture (see Health and diagnostics).
+
+An output that cannot join a present barrier at all, because its adapter
+offers none, is not stopped by `FRAMELOCK`: it goes on drawing as an ordinary
+output and is reported as `SWAP BARRIER UNSUPPORTED`, which `STRICT` refuses
+Program on. An output that could join and failed to, or joined and was
+dropped, does hold its last picture, because showing it out of step beside
+locked outputs is the fault the barrier exists to prevent.
 - **LATE FRAME** - `HOLD GROUP` repeats the previous complete frame on every
   output a render process owns when one of them has no complete frame.
   `ADVANCE INDEPENDENTLY` lets each output advance on its own. Hold is the
@@ -521,6 +559,16 @@ them:
   buffer rewritten after an earlier draw in the same frame used it). A change
   of cause or of failing/drawing is sent at once; the count rides the status
   cadence. Output Monitor shows it as `FRAMES FAILING`.
+- The render process also reports the **show clock reference**: the frame
+  counter its picture is paced from under `EXTERNAL GENLOCK` (`reference=` on
+  its status line). On NVIDIA it is the Quadro Sync swap-group frame counter.
+  `locked` means that counter is counting. It does not say the board is
+  following house sync - that is the lifecycle agent's reference reading
+  above, and `EXTERNAL GENLOCK` needs both. A counter that answers but has
+  stopped reads `lost`; an adapter with no swap groups, which includes every
+  GeForce, reads `unsupported`. A counter that is reset, or jumps further than
+  the elapsed time allows, is taken as a new starting point and never as that
+  many frames; the Director reads its own counter by the same rule.
 
 Anything unmeasured stays Unknown or Unsupported. There is no default that
 means "probably locked", and an unanswered query is never treated as a lock.
@@ -545,7 +593,11 @@ its frame accounting. The verdicts, in the order the gate checks them:
 | `SYNC DEVICE MISSING` | The device answered and there is no sync board | Physical card and driver |
 | `REFERENCE LOST` | No usable house reference at the sync device | Reference cable, generator, termination |
 | `REFERENCE NOT IN USE` | Reference present but not disciplined to | Sync device configuration |
+| `DIRECTOR CLOCK UNREFERENCED` | The Director is sealing frames on its own clock, not the reference counter | The Director's own output and sync board |
+| `SHOW CLOCK REFERENCE LOST` | A node's reference frame counter stopped or failed; that node is holding its picture | That node's sync board and reference cabling |
+| `SHOW CLOCK REFERENCE UNAVAILABLE` | A node has no reference frame counter to read; that node is holding its picture | Whether that machine has sync hardware; otherwise choose another sync mode |
 | `OUTPUTS UNLOCKED` | Group outputs are not all locked | Per-display lock state and timing |
+| `SWAP BARRIER UNSUPPORTED` | A render machine's adapter or build offers no present barrier (every GeForce; any non-NVIDIA adapter). Its outputs keep drawing, unsynchronised | Use a card with swap groups for swap lock, or set the mode to `UNSYNCED` |
 | `SWAP BARRIER INCOMPLETE` | Swapchains have not all joined the barrier | Presentation backend; barrier/group ids |
 | `SYNC SIMULATED` | Every fact came from a simulated provider | Turn the simulation off before a show |
 | `SYNC VERIFIED` | Every required condition is proven | - |
@@ -572,13 +624,15 @@ satisfied a policy demanding it.
 
 ### What is still missing before a physical claim is credible
 
-1. A vendor sync-device provider implementing
-   `net::ClusterSyncStatusProvider` - NVIDIA G-Sync through the NVAPI GSync
-   topology/status functions, and the AMD equivalent.
-2. A native D3D12 (or Vulkan) presentation path implementing
-   `rhi::PresentBarrierBackend` so swapchains can join an NVAPI present
-   barrier. SDL_GPU owns its own swapchains and exposes no native handle for
-   one, which is why the barrier backend is installable from outside the RHI.
+1. A sync-device provider (`net::ClusterSyncStatusProvider`) for vendors
+   other than NVIDIA. The NVIDIA one reads Quadro Sync through the NVAPI GSync
+   topology/status functions (`apps/server/nvapi_sync_device.cpp`) and is
+   built only with `MEDIASERVER_ENABLE_NVAPI`.
+2. A present barrier (`rhi::PresentBarrierBackend`) for anything but the
+   native D3D12 swapchain on NVIDIA (`apps/server/nvapi_present_barrier.cpp`,
+   same build option). SDL_GPU owns its own swapchains and exposes no native
+   handle for one, which is why the barrier backend is installable from
+   outside the RHI.
 3. A platform time provider for PTP/IEEE 1588 clock correlation. PTP is useful
    for tracking timestamps, scheduled deadlines, and telemetry; it replaces
    neither genlock nor swap lock.

@@ -397,42 +397,32 @@ PaceOutcome DirectorShowLoop::pace(ControlTick &tick) {
     // source of drift.
     director_clock.requires_reference =
         director_sync.policy.requires_external_reference();
-    const show::VideoReferenceSample director_reference =
-        director_clock.requires_reference ? director_video_reference
-                                          : show::VideoReferenceSample{};
-    director_clock.reference =
-        show_clock_reference_state(director_reference.state);
-
-    core::u64 reference_boundaries = 0U;
-    const bool paced_by_reference =
-        director_clock.requires_reference &&
-        director_reference.state == show::VideoReferenceState::Locked;
-    if (paced_by_reference) {
-        if (!director_reference_seen) {
-            director_reference_seen = true;
-        } else {
-            // Unsigned subtraction intentionally implements the source's
-            // documented modulo-2^32 counter wrap, exactly as the node
-            // boundary driver does.
-            reference_boundaries = static_cast<core::u32>(
-                director_reference.frame_counter
-                - director_last_reference_frame);
-        }
-        director_last_reference_frame = director_reference.frame_counter;
+    // What the reading is worth is decided by the one rule the node boundary
+    // driver uses too, so the cohort agrees: a counter that answers but has
+    // stopped is not a reference, and one that jumps is a new starting point
+    // rather than that many frames to seal.
+    show::VideoReferenceStep reference_step{};
+    if (director_clock.requires_reference) {
+        reference_step = director_reference.observe(
+            director_video_reference, now, pacer.config().rate);
     } else {
-        director_reference_seen = false;
+        director_reference.reset();
     }
+    director_clock.reference =
+        show_clock_reference_state(reference_step.state);
+    const bool paced_by_reference = reference_step.referenced;
+    const core::u64 reference_boundaries = reference_step.boundaries;
 
     // Referenced: advance by exactly the frames house reference counted.
     // Unreferenced: fall back to the system clock rather than holding.
     //
-    // A node without a reference holds, and that is right for a node - the
-    // previous frame stays on the wall. A Director that held would seal no
-    // control frames at all, and the operator command that recovers from a
-    // reference fault is itself a control frame. Holding would make the
-    // fault unrecoverable without a restart. So the pacer keeps running and
-    // the drift is reported instead of hidden - and the readiness gate
-    // refuses Program on it, so falling back is never mistaken for being
+    // A node without a reference holds its picture - the previous frame stays
+    // on the wall - and keeps committing on its own clock. A Director that
+    // stopped would seal no control frames at all, and the operator command
+    // that recovers from a reference fault is itself a control frame: the
+    // fault would be unrecoverable without a restart. So the pacer keeps
+    // running and the drift is reported instead of hidden - and the readiness
+    // gate refuses Program on it, so falling back is never mistaken for being
     // locked.
     auto paced_tick = paced_by_reference
         ? pacer.advance_by(reference_boundaries, now)

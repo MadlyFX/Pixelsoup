@@ -85,6 +85,25 @@ outcome_label(show::FrameCommitOutcome outcome) noexcept {
 }
 
 [[nodiscard]] const char *
+video_reference_label(show::VideoReferenceState state) noexcept {
+    switch (state) {
+    case show::VideoReferenceState::Unknown:
+        return "unknown";
+    case show::VideoReferenceState::Unsupported:
+        return "unsupported";
+    case show::VideoReferenceState::Waiting:
+        return "waiting";
+    case show::VideoReferenceState::Locked:
+        return "locked";
+    case show::VideoReferenceState::Lost:
+        return "lost";
+    case show::VideoReferenceState::Failed:
+        return "failed";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] const char *
 runtime_barrier_label(net::RuntimeBarrierState state) noexcept {
     switch (state) {
     case net::RuntimeBarrierState::Unknown:
@@ -128,6 +147,15 @@ presenter_error_text(show::PresenterError error) noexcept {
 clock_config(const PlaybackOptions &options) noexcept {
     return show::ShowClockConfig{options.rate, options.first_frame,
                                  options.last_frame, options.loop};
+}
+
+[[nodiscard]] show::FrameBoundaryDriverConfig
+node_pacer_config(const PlaybackOptions &options) noexcept {
+    show::FrameBoundaryDriverConfig config{};
+    config.clock = show::pacer_clock_config(options.rate);
+    config.mailbox_capacity = 16U;
+    config.max_commits_per_tick = 8U;
+    return config;
 }
 
 // Per-frame presentation cost, reported only where there is one to report.

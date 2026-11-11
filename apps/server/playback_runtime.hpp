@@ -58,6 +58,8 @@ void sleep_until_boundary(show::FrameWaiter &waiter,
 outcome_label(show::FrameCommitOutcome outcome) noexcept;
 
 [[nodiscard]] const char *sync_mode_label(sync::SyncMode mode) noexcept;
+[[nodiscard]] const char *
+video_reference_label(show::VideoReferenceState state) noexcept;
 
 [[nodiscard]] const char *
 runtime_barrier_label(net::RuntimeBarrierState state) noexcept;
@@ -65,8 +67,16 @@ runtime_barrier_label(net::RuntimeBarrierState state) noexcept;
 [[nodiscard]] const char *
 presenter_error_text(show::PresenterError error) noexcept;
 
+// The transport's configuration: the show range and looping the operator
+// sees. Never a pacer's; see show::pacer_clock_config.
 [[nodiscard]] show::ShowClockConfig
 clock_config(const PlaybackOptions &options) noexcept;
+
+// The node's frame-boundary driver. Its clock is a pacer, so it takes only
+// the rate from the options: the show range and looping belong to the
+// transport, which a node reads from the committed document.
+[[nodiscard]] show::FrameBoundaryDriverConfig
+node_pacer_config(const PlaybackOptions &options) noexcept;
 
 // How late this loop woke for the boundaries since the last status line.
 [[nodiscard]] std::string
