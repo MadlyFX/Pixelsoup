@@ -8,7 +8,7 @@
 #include "scene_renderer_internal.hpp"
 
 #include <mediaserver/render/geometry_visibility.hpp>
-#include <mediaserver/render/particle_pass.hpp>
+#include <mediaserver/render/particle_types.hpp>
 
 #include <array>
 #include <optional>

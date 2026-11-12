@@ -876,17 +876,7 @@ Result SceneRenderer::create(
     // Particles, where the device can simulate them. Like occlusion, a device
     // that cannot keeps a working renderer; a scene that places an effect is
     // then refused readiness with the reason.
-    if (mode == SceneRendererMode::AdvancedLinear) {
-        auto particles = ParticlePass::create(device, color_format, limits.particles);
-        if (particles) {
-            renderer.particle_pass_ = std::make_unique<ParticlePass>(std::move(particles).value());
-            renderer.particle_packages_ = std::make_unique<ParticlePackageCache>(ajfx::gpu::ShaderFormat::Dxil);
-        } else {
-            renderer.particles_unsupported_ = std::move(particles).error().message;
-        }
-    } else {
-        renderer.particles_unsupported_ = "particle effects need the Advanced renderer";
-    }
+    renderer.adopt_particle_runtime(device, color_format, mode, limits.particles);
     // The local-light shadow atlas, and the light table that indexes it.
     // Allocated once at construction like the cascades: every node runs the
     // same build and therefore reserves the same bytes whatever a show
@@ -1062,7 +1052,6 @@ Result SceneRenderer::create(
     renderer.video_decode_offer_ = offer_video_decode_device(device);
     renderer.retired_models_.reserve(
         limits.max_model_refresh_generations);
-    renderer.retired_particles_.reserve(max_retired_particles);
     renderer.pending_model_integrations_.reserve(
         limits.max_model_refresh_generations);
     renderer.object_velocity_ = std::move(object_velocity);

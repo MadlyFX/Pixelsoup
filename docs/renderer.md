@@ -352,6 +352,15 @@ per-panel calibration stays on the LED processor.
 
 ## Particle effects
 
+Particle effects are played by the ajfx runtime, which is optional and still
+in development. A build configured without it (the default;
+`MEDIASERVER_AJFX_SOURCE_DIR` empty) keeps the scene schema, replication and
+digests for `scene.particle_effect`, but compiles none of the classes below:
+the scene renderer counts every started effect in
+`RenderStats::particles_unsupported`, gives "this build does not include
+particle effects" as `particle_issue`, and refuses readiness. The rest of this
+section describes a build with ajfx (`render::particle_runtime_built`).
+
 A `scene.particle_effect` places an `.ajfx` package exported by ajfx Studio.
 `render::ParticlePackageCache` reads and
 checks packages on a worker, and the scene renderer creates at most one new

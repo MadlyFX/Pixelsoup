@@ -4583,7 +4583,9 @@ void stage_status_names_what_particle_effects_are_waiting_for() {
   // Refusals are failures with what to do about them.
   auto shown = status([](auto& g) { g.particles_unsupported = 1U; });
   UI_CHECK(!shown.loading && shown.headline == "STAGE ASSET LOAD FAILED");
-  UI_CHECK(shown.detail.find("Advanced renderer") != std::string::npos);
+  UI_CHECK(shown.detail.find(mediaserver::render::particle_runtime_built
+                                 ? "Advanced renderer"
+                                 : "does not include particle effects") != std::string::npos);
   shown = status([](auto& g) { g.particles_failed = 2U; });
   UI_CHECK(!shown.loading && shown.detail.find("Rescan in Library") != std::string::npos);
   // Loading and catching up are waits.

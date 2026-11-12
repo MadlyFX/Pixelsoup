@@ -174,6 +174,13 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
           }
         }
       }
+#if !defined(MEDIASERVER_HAS_AJFX)
+      if (element->kind == ElementKind::ParticleEffect) {
+        // Nothing here can read a package, so its parameters stay unlisted.
+        inspector_elements.back().particle_status =
+            "This build does not include particle effects";
+      }
+#else
       if (element->kind == ElementKind::ParticleEffect) {
         // Read on the cache's worker; the section fills in when it lands.
         const render::ParticlePackageObservation observed =
@@ -196,6 +203,7 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
               : "The package could not be read: " + observed.error;
         }
       }
+#endif
       if (element->kind == ElementKind::Model && !element->linked) {
         const auto observed = impl.inspector_model_cache.observe(element->source,
             impl.inspector_model_cache.publication_epoch());

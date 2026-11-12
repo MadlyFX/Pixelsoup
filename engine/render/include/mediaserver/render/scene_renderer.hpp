@@ -20,8 +20,11 @@
 #include <mediaserver/render/shadow_atlas.hpp>
 #include <mediaserver/render/environment_cache.hpp>
 #include <mediaserver/render/ies_profile.hpp>
+#include <mediaserver/render/particle_types.hpp>
+#if defined(MEDIASERVER_HAS_AJFX)
 #include <mediaserver/render/particle_package_cache.hpp>
 #include <mediaserver/render/particle_pass.hpp>
+#endif
 #include <mediaserver/render/ltc_asset.hpp>
 #include <mediaserver/render/baked_lighting.hpp>
 #include <mediaserver/render/environment_prefilter.hpp>
@@ -958,6 +961,12 @@ private:
     // Releases retired models no outstanding recording uses: their arena
     // slots, textures and retirement slots.
     void reclaim_retired_models() noexcept;
+    // Makes the particle pass and package cache where this build and device
+    // can play effects; elsewhere records why they cannot, for readiness.
+    void adopt_particle_runtime(rhi::Device& device, rhi::TextureFormat color_format, SceneRendererMode mode,
+                                const ParticleSettings& settings);
+    // Whether this frame draws a particle effect over the scene.
+    [[nodiscard]] bool draws_particles() const noexcept;
     // Brings every started effect's simulation to this show frame (within the
     // step budget) and lists the ones to draw; counts the rest into stats_
     // and readiness.
@@ -1052,6 +1061,10 @@ private:
     rhi::Texture object_id_;
     rhi::Texture normal_;
     std::optional<AmbientOcclusion> occlusion_;
+    // Why this renderer plays no particle effects, where it does not: the
+    // build has no particle runtime, or the renderer or device cannot run it.
+    std::string particles_unsupported_;
+#if defined(MEDIASERVER_HAS_AJFX)
     // Particle effects, on an Advanced renderer whose device can run them.
     // The pass is declared before the slots so it outlives their instances.
     struct ParticleSlot final {
@@ -1074,7 +1087,6 @@ private:
         std::shared_ptr<const ajfx::ActionProvider> actions;
     };
     std::unique_ptr<ParticlePass> particle_pass_;
-    std::string particles_unsupported_;
     std::unique_ptr<ParticlePackageCache> particle_packages_;
     std::unordered_map<doc::NodeId, ParticleSlot> particle_slots_;
     // Instances replaced (a new package or seed) or removed while submitted
@@ -1086,6 +1098,7 @@ private:
     std::vector<ParticleInstance> retired_particles_;
     std::vector<std::pair<ParticleInstance*, scene::Mat4>> particle_draws_;
     core::u64 particle_generation_{};
+#endif
     // Particle lights for the lit pass: max_particle_lights records, the
     // first `particle_lights_used_` written this frame (Advanced only).
     rhi::StorageBuffer particle_light_buffer_;

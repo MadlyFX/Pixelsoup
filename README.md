@@ -7,8 +7,9 @@ authored state locally. Windows offers an Advanced D3D12 renderer and an SDL
 GPU Basic fallback. The engine modules also build headless; the media-server
 application needs a GUI build.
 
-MediaServer plays the `.ajfx` particle packages exported by ajfx Studio.
-The ajfx runtime and Studio live in the separate ajfx repository.
+Particle effects are not available yet. They are played by ajfx, a separate
+runtime that is still in development and is not needed to build MediaServer.
+A scene that places a particle effect reports it as unsupported.
 
 This is an unreleased prototype. Project and wire schemas may change;
 breaking changes are acceptable without migration support.
@@ -18,8 +19,6 @@ breaking changes are acceptable without migration support.
 Requirements: CMake 3.28+, Ninja, a C++20 compiler (MSVC 2022, Clang 18+,
 or Apple Clang), and vcpkg in manifest mode. Set `VCPKG_ROOT` to the vcpkg
 checkout. On Windows, use a Visual Studio developer shell with Ninja on PATH.
-For GUI builds, place the ajfx checkout beside this checkout as `../ajfx`
-or configure with `-DMEDIASERVER_AJFX_SOURCE_DIR=<path-to-ajfx>`.
 
 ```powershell
 cmake --preset windows-msvc-debug-gui

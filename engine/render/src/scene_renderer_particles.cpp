@@ -100,6 +100,26 @@ std::shared_ptr<const ajfx::ParameterProvider> placed_parameters(const scene::Pa
 
 } // namespace
 
+void SceneRenderer::adopt_particle_runtime(rhi::Device& device, rhi::TextureFormat color_format,
+                                           SceneRendererMode mode, const ParticleSettings& settings) {
+    retired_particles_.reserve(max_retired_particles);
+    if (mode != SceneRendererMode::AdvancedLinear) {
+        particles_unsupported_ = "particle effects need the Advanced renderer";
+        return;
+    }
+    auto particles = ParticlePass::create(device, color_format, settings);
+    if (particles) {
+        particle_pass_ = std::make_unique<ParticlePass>(std::move(particles).value());
+        particle_packages_ = std::make_unique<ParticlePackageCache>(ajfx::gpu::ShaderFormat::Dxil);
+    } else {
+        particles_unsupported_ = std::move(particles).error().message;
+    }
+}
+
+bool SceneRenderer::draws_particles() const noexcept {
+    return !particle_draws_.empty();
+}
+
 void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::Scene& scene,
                                       const SceneRenderOptions& options) {
     particle_draws_.clear();

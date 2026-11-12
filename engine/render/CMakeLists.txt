@@ -28,7 +28,6 @@ add_library(mediaserver_render STATIC
     src/scene_renderer_environment.cpp
     src/scene_renderer_gather.cpp
     src/scene_renderer_lighting.cpp
-    src/scene_renderer_particles.cpp
     src/scene_renderer_passes.cpp
     src/scene_renderer_render.cpp
     src/scene_renderer_residency.cpp
@@ -84,9 +83,6 @@ add_library(mediaserver_render STATIC
     src/bloom.cpp
     src/bloom_chain.cpp
     src/froxel_grid.cpp
-    src/particle_device.cpp
-    src/particle_package_cache.cpp
-    src/particle_pass.cpp
     src/volumetric_fog.cpp
     src/shadow_atlas.cpp
     src/slice_apron.cpp
@@ -136,15 +132,10 @@ target_link_libraries(mediaserver_render
         MediaServer::Compositor
         MediaServer::Output
         MediaServer::Rhi
-        # The particle device implements ajfx's GPU interface, so ajfx's
-        # headers are part of this library's own.
-        ajfx::ajfx
     PRIVATE
         MediaServer::Assets
         MediaServer::Net
         MediaServer::Shaders
-        # Rigid physics emitters, stepped off the frame path by ParticlePass.
-        ajfx::rigid
         Threads::Threads
         mikktspace::mikktspace
         mediaserver_bc7enc
@@ -152,6 +143,33 @@ target_link_libraries(mediaserver_render
         OpenEXR::OpenEXR
         OpenColorIO::OpenColorIO
 )
+
+# Particle effects need the ajfx runtime, which only some builds have (see the
+# root CMakeLists.txt). With it the renderer hosts ajfx on this RHI; without
+# it the same renderer entry points count every placed effect as unsupported.
+# MEDIASERVER_HAS_AJFX is PUBLIC because the renderer's own header differs.
+if(TARGET ajfx::ajfx)
+    target_sources(mediaserver_render PRIVATE
+        src/scene_renderer_particles.cpp
+        src/particle_device.cpp
+        src/particle_package_cache.cpp
+        src/particle_pass.cpp
+    )
+    target_compile_definitions(mediaserver_render PUBLIC MEDIASERVER_HAS_AJFX=1)
+    target_link_libraries(mediaserver_render
+        PUBLIC
+            # The particle device implements ajfx's GPU interface, so ajfx's
+            # headers are part of this library's own.
+            ajfx::ajfx
+        PRIVATE
+            # Rigid physics emitters, stepped off the frame path by ParticlePass.
+            ajfx::rigid
+    )
+else()
+    target_sources(mediaserver_render PRIVATE
+        src/scene_renderer_particles_unavailable.cpp
+    )
+endif()
 
 mediaserver_set_project_options(mediaserver_render)
 mediaserver_set_deterministic_float_options(mediaserver_render)
@@ -831,6 +849,29 @@ if(BUILD_TESTING)
             ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
         )
         set_target_properties(mediaserver_render_scene_particle_tests PROPERTIES
+            FOLDER "tests"
+        )
+    endif()
+
+    # A build without ajfx: started effects are refused readiness with the
+    # reason, and nothing else about the renderer changes.
+    if(NOT TARGET ajfx::ajfx)
+        add_executable(mediaserver_render_scene_particle_unavailable_tests
+            tests/scene_particle_unavailable_tests.cpp
+        )
+        target_link_libraries(mediaserver_render_scene_particle_unavailable_tests
+            PRIVATE MediaServer::Render
+        )
+        mediaserver_set_project_options(mediaserver_render_scene_particle_unavailable_tests)
+        add_test(
+            NAME mediaserver.render_scene_particles_unavailable
+            COMMAND mediaserver_render_scene_particle_unavailable_tests
+        )
+        set_tests_properties(mediaserver.render_scene_particles_unavailable PROPERTIES
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+        )
+        set_target_properties(mediaserver_render_scene_particle_unavailable_tests PROPERTIES
             FOLDER "tests"
         )
     endif()

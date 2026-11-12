@@ -37,8 +37,10 @@ struct EditorShell::Impl final {
   // one Accept asked for reaches the Director - and undoes - together.
   std::vector<AssetRevisionIntent> pending_revisions;
   render::ModelCache inspector_model_cache;
+#if defined(MEDIASERVER_HAS_AJFX)
   // What each selected particle package publishes, for the Inspector.
   render::ParticlePackageCache inspector_particle_cache{ajfx::gpu::ShaderFormat::Dxil};
+#endif
   core::AssetPublicationGate asset_gate;
   core::AssetSetReadiness assets{};
   std::optional<rhi::Texture> visible_program;

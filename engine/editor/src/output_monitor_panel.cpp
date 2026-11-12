@@ -1427,7 +1427,9 @@ StageAssetStatus stage_asset_status(const render::RenderStats& geometry,
   if (!geometry.baked_ready && geometry.baked_state == render::ProbeCacheState::Failed)
     return failed("Baked lighting could not load. Check its path or rebake the scene.");
   if (geometry.particles_unsupported != 0U)
-    return failed("Particle effects play only in the Advanced renderer. Choose it in Renderer settings.");
+    return failed(render::particle_runtime_built
+        ? "Particle effects play only in the Advanced renderer. Choose it in Renderer settings."
+        : "This build does not include particle effects. Remove the effect to continue.");
   // The package's own reason (a missing texture, kernels from another
   // version) tells the operator what to fix.
   if (geometry.particles_failed != 0U)

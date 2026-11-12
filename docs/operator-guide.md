@@ -1292,7 +1292,12 @@ for is a single Undo. Thumbnails and proxies are keyed by the fingerprint, so
 they regenerate for the new revision. A file that has gone missing is not
 offered; it is reported as missing instead.
 
-**Particle effects** are `.ajfx` packages, exported by ajfx Studio. A
+**Particle effects** are `.ajfx` packages, exported by ajfx Studio. They are
+not available yet: ajfx is still in development, and builds without it can
+import and place a package but do not play it. The Stage status then reads
+"This build does not include particle effects", and the show is not ready
+until the effect is removed. The rest of this section describes a build that
+includes ajfx. A
 package holds an effect, its precompiled GPU kernels, and any textures its
 sprites use. Smoke and other see-through effects draw back to front from
 every camera, so they layer correctly as you orbit, and the parts of one

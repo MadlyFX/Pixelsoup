@@ -300,7 +300,7 @@ bool SceneRenderer::record_lit_pass(Frame& f) {
         ? advanced_fragment_textures
         : basic_fragment_textures;
     draw.store_depth =
-        !composite_draws_.empty() || !depth_only_media_.empty() || !particle_draws_.empty();
+        !composite_draws_.empty() || !depth_only_media_.empty() || draws_particles();
 
     // The ordinary clear is the sky, so an empty scene still reads as a frame.
     // Isolated compositor layers instead retain transparent uncovered pixels.
@@ -385,7 +385,7 @@ bool SceneRenderer::record_composites(Frame& f) {
             std::span<const rhi::DrawBatch>{&occluder_batch, 1U};
         occluder_draw.load = true;
         occluder_draw.store_depth = index + 1U < depth_only_media_.size() ||
-            !composite_draws_.empty() || !particle_draws_.empty();
+            !composite_draws_.empty() || draws_particles();
         if (!graph_.draw_pulled(commands, core::RenderPass::Media,
                 color_, clear, depth_, 0.0F, occluder_draw)) {
             return false;
@@ -487,7 +487,7 @@ bool SceneRenderer::record_composites(Frame& f) {
     }
     for (std::size_t index = 0U; index < composite_draws_.size(); ++index) {
         if (!record_composite(composite_draws_[index], false,
-                index + 1U < composite_draws_.size() || !particle_draws_.empty())) {
+                index + 1U < composite_draws_.size() || draws_particles())) {
             return false;
         }
     }

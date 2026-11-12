@@ -34,7 +34,10 @@
 #include <mediaserver/render/compositor_scene_executor.hpp>
 #include <mediaserver/render/inspection_view.hpp>
 #include <mediaserver/render/mapped_scene.hpp>
+#include <mediaserver/render/particle_types.hpp>
+#if defined(MEDIASERVER_HAS_AJFX)
 #include <mediaserver/render/particle_package_cache.hpp>
+#endif
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/render/model_loader.hpp>
 #include <mediaserver/render/output_transform.hpp>

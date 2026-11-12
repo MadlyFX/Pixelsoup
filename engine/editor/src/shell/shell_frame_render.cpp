@@ -639,7 +639,9 @@ void EditorShell::Frame::render_views() {
   else if (program_geometry.texture_streaming.state != render::TextureStreamState::Ready)
     loading_detail = "Preparing material textures on the GPU.";
   else if (program_geometry.particles_unsupported != 0U)
-    loading_detail = "Particle effects play only in the Advanced renderer. Choose it in Renderer settings.";
+    loading_detail = render::particle_runtime_built
+        ? "Particle effects play only in the Advanced renderer. Choose it in Renderer settings."
+        : "This build does not include particle effects. Remove the effect to continue.";
   else if (program_geometry.particles_failed != 0U)
     loading_detail = program_geometry.particle_issue.empty()
         ? "A particle effect could not load. Check its source path, then Rescan in Library."

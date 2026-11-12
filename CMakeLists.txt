@@ -116,14 +116,17 @@ add_subdirectory(engine/compositor)
 # now means "this build has SDL3" rather than "this build opens windows": a
 # headless node can drive a GPU output target without ever creating one.
 if(MEDIASERVER_ENABLE_GUI)
-    # A standalone MediaServer build supplies ajfx for particle playback.
-    # Studio's build has already added the runtime before it adds MediaServer.
-    if(NOT TARGET ajfx::ajfx)
-        set(MEDIASERVER_AJFX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../ajfx"
-            CACHE PATH "Path to the ajfx source checkout")
+    # Particle effects are played by the ajfx runtime, which is a separate,
+    # optional project. A build has it when ajfx Studio added it before adding
+    # MediaServer, or when MEDIASERVER_AJFX_SOURCE_DIR names a checkout. Any
+    # other build compiles the renderer without it (engine/render), and a
+    # scene that places an effect is refused readiness with that reason.
+    set(MEDIASERVER_AJFX_SOURCE_DIR "" CACHE PATH
+        "Optional ajfx source checkout; empty builds without particle effects")
+    if(NOT TARGET ajfx::ajfx AND MEDIASERVER_AJFX_SOURCE_DIR)
         if(NOT EXISTS "${MEDIASERVER_AJFX_SOURCE_DIR}/lib/include/ajfx/effect.hpp")
-            message(FATAL_ERROR "MediaServer GUI needs an ajfx checkout. "
-                "Place it beside MediaServer or set MEDIASERVER_AJFX_SOURCE_DIR.")
+            message(FATAL_ERROR "MEDIASERVER_AJFX_SOURCE_DIR is not an ajfx checkout: "
+                "${MEDIASERVER_AJFX_SOURCE_DIR}. Clear it to build without particle effects.")
         endif()
         block(SCOPE_FOR VARIABLES)
             set(BUILD_TESTING OFF)
