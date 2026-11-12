@@ -3295,6 +3295,47 @@ void effect_delete_planning_cascades_only_its_animation_channels() {
     MODEL_CHECK(drawable.error() == scene::EffectDeletePlanError::NotAnEffect);
 }
 
+void element_delete_takes_its_effects_and_their_animation_with_it() {
+    doc::Root root;
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(
+        effect_node(200U, 100U, schema::brightness_kind, 0, 2.0));
+    root = root.set(channel_node(
+        201U, 200U, schema::brightness,
+        {{10, 3.0, schema::interp_linear}}));
+    root = root.set(channel_node(
+        202U, 100U, schema::opacity, {{0, 0.5, schema::interp_hold}}));
+    // A neighbour and its effect are not this element's to delete.
+    root = root.set(node(
+        110U, schema::object_type, {text(schema::primitive, "box")}));
+    root = root.set(effect_node(300U, 110U, schema::blur_kind, 1, 8.0));
+
+    const auto planned = scene::plan_delete_element(root, doc::NodeId{100U});
+    MODEL_CHECK(planned.has_value());
+    const std::vector<doc::NodeId> expected{
+        doc::NodeId{200U}, doc::NodeId{201U}, doc::NodeId{202U},
+        doc::NodeId{100U}};
+    MODEL_CHECK(planned.value().erases == expected);
+
+    // Applying it leaves no record pointing at the deleted id, so an element
+    // later given id 100 starts with no effects.
+    for (const doc::NodeId id : planned.value().erases) {
+        auto erased = root.erase(id);
+        MODEL_CHECK(static_cast<bool>(erased));
+        root = std::move(*erased);
+    }
+    root = root.set(node(
+        100U, schema::object_type, {text(schema::primitive, "box")}));
+    MODEL_CHECK(!root.contains(doc::NodeId{200U}));
+    MODEL_CHECK(!root.contains(doc::NodeId{201U}));
+    MODEL_CHECK(!root.contains(doc::NodeId{202U}));
+    MODEL_CHECK(root.contains(doc::NodeId{300U}));
+
+    const auto missing = scene::plan_delete_element(root, doc::NodeId{999U});
+    MODEL_CHECK(!missing.has_value());
+}
+
 
 void a_placed_clip_is_on_air_only_inside_its_own_span() {
     scene::SceneModel model;
@@ -6114,6 +6155,23 @@ void ungroup_preserves_world_and_rejects_lossy_inverse_operations() {
     MODEL_CHECK(deleted.has_value());
     MODEL_CHECK(!deleted.value().after.contains(doc::NodeId{10U}));
     MODEL_CHECK(deleted.value().puts.empty());
+
+    // A mask cutting the group goes with it; the child's own mask stays.
+    const doc::Root masked_root =
+        root.set(node(40U, schema::mask_type,
+                      {whole(schema::scene_id, 1),
+                       whole(schema::mask_target, 10)}))
+            .set(node(41U, schema::mask_type,
+                      {whole(schema::scene_id, 1),
+                       whole(schema::mask_target, 20)}));
+    const auto masked = scene::plan_ungroup_nodes(
+        masked_root, doc::NodeId{1U}, doc::NodeId{10U});
+    MODEL_CHECK(masked.has_value());
+    MODEL_CHECK(masked.value().erases
+                == (std::vector<doc::NodeId>{doc::NodeId{10U},
+                                             doc::NodeId{40U}}));
+    MODEL_CHECK(!masked.value().after.contains(doc::NodeId{40U}));
+    MODEL_CHECK(masked.value().after.contains(doc::NodeId{41U}));
 }
 
 void environment_channels_evaluate_per_scene_without_overwriting_base_values() {
@@ -6145,7 +6203,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 97U> cases{{
+constexpr std::array<Case, 98U> cases{{
     {"an updated model is the model a rebuild would be",
      &an_updated_model_is_the_model_a_rebuild_would_be},
     {"a solo draws only what it shows",
@@ -6324,6 +6382,8 @@ constexpr std::array<Case, 97U> cases{{
      &scene_delete_planning_cascades_owned_content_and_dependencies},
     {"effect delete planning cascades only its animation channels",
      &effect_delete_planning_cascades_only_its_animation_channels},
+    {"element_delete_takes_its_effects_and_their_animation_with_it",
+     &element_delete_takes_its_effects_and_their_animation_with_it},
     {"groups compose local transforms and inherit lock visibility",
      &groups_compose_local_transforms_and_inherit_lock_visibility},
     {"invalid group graphs are omitted and diagnosed deterministically",

@@ -666,6 +666,54 @@ core::Result<EffectDeletePlan, EffectDeletePlanError> plan_delete_effect(
     }
 }
 
+core::Result<ElementDeletePlan, EffectDeletePlanError> plan_delete_element(
+    const doc::Root& root,
+    doc::NodeId element) {
+    using Result = core::Result<ElementDeletePlan, EffectDeletePlanError>;
+    if (root.get(element) == nullptr) {
+        return Result::failure(EffectDeletePlanError::EffectNotFound);
+    }
+
+    try {
+        const std::map<doc::NodeId, doc::Node> all = document_nodes(root);
+        std::set<doc::NodeId> selected{element};
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const auto& [id, node] : all) {
+                if (selected.contains(id)) {
+                    continue;
+                }
+                std::optional<doc::NodeId> target;
+                if (node.type == schema::effect_type) {
+                    target = referenced_id(node, schema::effect_target);
+                } else if (node.type == schema::channel_type) {
+                    target = referenced_id(node, schema::channel_target);
+                } else if (node.type == schema::mask_type) {
+                    target = referenced_id(node, schema::mask_target);
+                } else if (node.type == schema::mask_point_type) {
+                    target = referenced_id(node, schema::mask_id);
+                } else if (node.type == selection_set_schema::member_type) {
+                    target = referenced_id(
+                        node, selection_set_schema::target_id);
+                }
+                if (target.has_value() && selected.contains(*target)) {
+                    selected.insert(id);
+                    changed = true;
+                }
+            }
+        }
+
+        ElementDeletePlan plan{};
+        selected.erase(element);
+        plan.erases.assign(selected.begin(), selected.end());
+        plan.erases.push_back(element);
+        return Result::success(std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result::failure(EffectDeletePlanError::AllocationFailed);
+    }
+}
+
 core::Result<GroupEditPlan, GroupEditError> plan_group_nodes(
     const doc::Root& root,
     SceneId scene,
@@ -961,16 +1009,13 @@ core::Result<GroupEditPlan, GroupEditError> plan_ungroup_nodes(
                       return left.id < right.id;
                   });
 
-        for (const auto& [id, node] : nodes) {
-            if (node.type != schema::channel_type) {
-                continue;
-            }
-            const auto target = referenced_id(node, schema::channel_target);
-            if (target.has_value() && *target == group_id) {
-                plan.erases.push_back(id);
-            }
+        // The group's animation, masks and selection-set memberships go with
+        // it. Left behind they would point at an id a later node can be given.
+        const auto dependents = plan_delete_element(root, group_id);
+        if (!dependents) {
+            return Result::failure(GroupEditError::AllocationFailed);
         }
-        plan.erases.push_back(group_id);
+        plan.erases = dependents.value().erases;
         std::sort(plan.erases.begin(), plan.erases.end());
         plan.after = apply_group_plan(root, plan.puts, plan.erases);
         return Result::success(std::move(plan));

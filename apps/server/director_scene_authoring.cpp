@@ -19,6 +19,7 @@
 #include <mediaserver/scene/linked_scene.hpp>
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene_model.hpp>
+#include <mediaserver/scene/scene_project.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <array>
@@ -1592,10 +1593,27 @@ bool schedule_asset_library_edit(
         return static_cast<bool>(scheduler.schedule_document_replace(plan.value(),
             cmd::UndoContextId{2U}, cmd::TransactionId{gesture}, apply_at));
     }
-    auto scheduled = scheduler.schedule_edit(
-        cmd::EraseNode{node}, cmd::PutNode{*existing}, cmd::UndoContextId{2U},
-        cmd::TransactionId{gesture}, apply_at);
-    return static_cast<bool>(scheduled);
+    // The element's effects, masks, channels and set memberships go with it,
+    // in the same undo step. Left behind they would point at an id that a
+    // later element can be given, and bring their old look back with it.
+    const auto planned =
+        scene::plan_delete_element(scheduler.projected_document(), node);
+    if (!planned) {
+        return planned.error() != scene::EffectDeletePlanError::AllocationFailed;
+    }
+    for (const doc::NodeId id : planned.value().erases) {
+        const auto *const stored = scheduler.projected_document().get(id);
+        if (stored == nullptr) {
+            continue;
+        }
+        if (!scheduler.schedule_edit(
+                cmd::EraseNode{id}, cmd::PutNode{*stored},
+                cmd::UndoContextId{2U}, cmd::TransactionId{gesture},
+                apply_at)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Authors one operator move as an ordinary command: read the node's current
