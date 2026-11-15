@@ -67,9 +67,12 @@ using NvDispGetDisplayIdByDisplayName = NvStatus (__cdecl *)(
 using NvSysGetPhysicalGpuFromDisplayId = NvStatus (__cdecl *)(
     NvU32, NvPhysicalGpuHandle*);
 
+// MAKE_NVAPI_VERSION: the structure size in the low word, the structure
+// revision in the high word. The driver refuses a size that does not belong
+// to the stated revision, so each layout below carries its own revision.
 template <typename Value>
 [[nodiscard]] constexpr NvU32 nv_version() noexcept {
-    return static_cast<NvU32>(sizeof(Value)) | (1U << 16U);
+    return static_cast<NvU32>(sizeof(Value)) | (Value::nvapi_revision << 16U);
 }
 
 // Interface identifiers are published in NVIDIA's nvapi_interface.h.
@@ -83,7 +86,9 @@ constexpr NvU32 nvapi_gsync_get_status_parameters_id = 0x70d404ecU;
 constexpr NvU32 nvapi_gsync_get_control_parameters_id = 0x16de1c6aU;
 constexpr NvU32 nvapi_sys_get_physical_gpu_from_display_id_id = 0x9ea74659U;
 
+// NV_GSYNC_GPU, revision 1.
 struct NvGSyncGpu final {
+    static constexpr NvU32 nvapi_revision = 1U;
     NvU32 version{};
     NvPhysicalGpuHandle physical_gpu{};
     NvU32 connector{};
@@ -91,7 +96,9 @@ struct NvGSyncGpu final {
     NvU32 flags{};
 };
 
+// NV_GSYNC_DISPLAY_V2 (the 96-byte layout with reserved2[20]), revision 2.
 struct NvGSyncDisplay final {
+    static constexpr NvU32 nvapi_revision = 2U;
     NvU32 version{};
     NvU32 display_id{};
     NvU32 flags{};
@@ -99,14 +106,27 @@ struct NvGSyncDisplay final {
     std::array<NvU32, 20U> reserved{};
 };
 
+// NV_GSYNC_DISPLAY_V1, revision 1. Drivers that predate V2 accept only this.
+struct NvGSyncDisplayV1 final {
+    static constexpr NvU32 nvapi_revision = 1U;
+    NvU32 version{};
+    NvU32 display_id{};
+    NvU32 flags{};
+    NvU32 sync_state{};
+};
+
+// NV_GSYNC_STATUS, revision 1.
 struct NvGSyncStatus final {
+    static constexpr NvU32 nvapi_revision = 1U;
     NvU32 version{};
     NvU32 synchronized{};
     NvU32 stereo_synchronized{};
     NvU32 signal_available{};
 };
 
+// NV_GSYNC_STATUS_PARAMS_V2 (with the bInternalSlave word), revision 2.
 struct NvGSyncStatusParameters final {
+    static constexpr NvU32 nvapi_revision = 2U;
     NvU32 version{};
     NvU32 refresh_rate{};
     std::array<NvU32, 2U> rj45_io{};
@@ -124,7 +144,9 @@ struct NvGSyncDelay final {
     NvU32 minimum_pixels{};
 };
 
+// NV_GSYNC_CONTROL_PARAMS_V2 (with the multiply/divide fields), revision 2.
 struct NvGSyncControlParameters final {
+    static constexpr NvU32 nvapi_revision = 2U;
     NvU32 version{};
     NvU32 polarity{};
     NvU32 video_mode{};
@@ -137,7 +159,21 @@ struct NvGSyncControlParameters final {
     std::uint8_t multiply_divide_value{};
 };
 
+// The revision-1 layouts of the status and control parameters are prefixes of
+// revision 2, so an older driver is asked again with the same storage and the
+// smaller version stamp.
+constexpr NvU32 nv_status_parameters_v1 = 32U | (1U << 16U);
+constexpr NvU32 nv_control_parameters_v1 = 64U | (1U << 16U);
+
+static_assert(sizeof(NvGSyncGpu) == 40U);
+static_assert(sizeof(NvGSyncDisplayV1) == 16U);
+static_assert(offsetof(NvGSyncStatusParameters, flags) == 32U);
+static_assert(offsetof(NvGSyncControlParameters, multiply_divide_mode) == 64U);
 static_assert(sizeof(NvGSyncDisplay) == 96U);
+static_assert(nv_version<NvGSyncDisplay>() == 0x00020060U);
+static_assert(nv_version<NvGSyncStatusParameters>() == 0x00020024U);
+static_assert(nv_version<NvGSyncControlParameters>() == 0x00020048U);
+static_assert(nv_version<NvGSyncStatus>() == 0x00010010U);
 static_assert(sizeof(NvGSyncStatus) == 16U);
 static_assert(sizeof(NvGSyncStatusParameters) == 36U);
 static_assert(sizeof(NvGSyncControlParameters) == 72U);
@@ -421,10 +457,14 @@ private:
              ++device_index) {
             NvU32 gpu_count{};
             NvU32 display_count{};
-            if (api_.get_topology(devices[device_index], &gpu_count, nullptr,
-                                  &display_count, nullptr) != nv_ok) {
-                return failed_status(sample_generation,
-                                     "NVAPI could not query Quadro Sync topology");
+            const NvStatus counted = api_.get_topology(
+                devices[device_index], &gpu_count, nullptr, &display_count,
+                nullptr);
+            if (counted != nv_ok) {
+                return failed_status(
+                    sample_generation,
+                    "NVAPI could not query Quadro Sync topology (status " +
+                        std::to_string(counted) + ")");
             }
 
             const bool truncated_gpus = gpu_count > maximum_gsync_gpus;
@@ -442,23 +482,68 @@ private:
             for (NvU32 index = 0U; index < display_count; ++index) {
                 displays[index].version = nv_version<NvGSyncDisplay>();
             }
-            if (api_.get_topology(devices[device_index], &gpu_count, gpus.data(),
-                                  &display_count, displays.data()) != nv_ok) {
-                return failed_status(sample_generation,
-                                     "NVAPI could not read Quadro Sync topology");
+            const NvU32 requested_gpus = gpu_count;
+            const NvU32 requested_displays = display_count;
+            NvStatus read = api_.get_topology(devices[device_index], &gpu_count,
+                                              gpus.data(), &display_count,
+                                              displays.data());
+            if (read != nv_ok) {
+                // A driver that predates NV_GSYNC_DISPLAY_V2 refuses the
+                // 96-byte layout; ask again with the 16-byte revision 1.
+                std::array<NvGSyncDisplayV1, maximum_gsync_displays> legacy{};
+                for (NvU32 index = 0U; index < requested_displays; ++index) {
+                    legacy[index].version = nv_version<NvGSyncDisplayV1>();
+                }
+                gpu_count = requested_gpus;
+                display_count = requested_displays;
+                read = api_.get_topology(devices[device_index], &gpu_count,
+                                         gpus.data(), &display_count,
+                                         legacy.data());
+                if (read == nv_ok) {
+                    display_count = std::min(display_count, requested_displays);
+                    for (NvU32 index = 0U; index < display_count; ++index) {
+                        displays[index].display_id = legacy[index].display_id;
+                        displays[index].flags = legacy[index].flags;
+                        displays[index].sync_state = legacy[index].sync_state;
+                    }
+                }
             }
+            if (read != nv_ok) {
+                return failed_status(
+                    sample_generation,
+                    "NVAPI could not read Quadro Sync topology (status " +
+                        std::to_string(read) + ")");
+            }
+            gpu_count = std::min(gpu_count, requested_gpus);
+            display_count = std::min(display_count, requested_displays);
 
             NvGSyncStatusParameters status_parameters{};
             status_parameters.version = nv_version<NvGSyncStatusParameters>();
+            NvStatus status_read = api_.get_status_parameters(
+                devices[device_index], &status_parameters);
+            if (status_read != nv_ok) {
+                status_parameters = NvGSyncStatusParameters{};
+                status_parameters.version = nv_status_parameters_v1;
+                status_read = api_.get_status_parameters(devices[device_index],
+                                                         &status_parameters);
+            }
             NvGSyncControlParameters controls{};
             controls.version = nv_version<NvGSyncControlParameters>();
-            if (api_.get_status_parameters(devices[device_index],
-                                           &status_parameters) != nv_ok ||
-                api_.get_control_parameters(devices[device_index], &controls) !=
-                    nv_ok) {
+            NvStatus control_read =
+                api_.get_control_parameters(devices[device_index], &controls);
+            if (control_read != nv_ok) {
+                controls = NvGSyncControlParameters{};
+                controls.version = nv_control_parameters_v1;
+                control_read = api_.get_control_parameters(
+                    devices[device_index], &controls);
+            }
+            if (status_read != nv_ok || control_read != nv_ok) {
                 return failed_status(
                     sample_generation,
-                    "NVAPI could not query Quadro Sync reference state");
+                    "NVAPI could not query Quadro Sync reference state (status " +
+                        std::to_string(status_read != nv_ok ? status_read
+                                                            : control_read) +
+                        ")");
             }
 
             bool board_has_gpu = false;

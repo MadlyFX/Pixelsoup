@@ -1,6 +1,7 @@
 #include <mediaserver/ui/sdl_presenter.hpp>
 
 #include <mediaserver/core/idle_report.hpp>
+#include <mediaserver/core/refresh_rate.hpp>
 #include <mediaserver/render/compositor_scene_executor.hpp>
 #include <mediaserver/render/icvfx.hpp>
 #include <mediaserver/render/icvfx_stage.hpp>
@@ -705,6 +706,28 @@ namespace {
     return found;
 }
 
+[[nodiscard]] bool exact_display_mode_rate(
+    const SDL_DisplayMode &mode, const SdlPresenterConfig &config) noexcept {
+    return mode.refresh_rate_numerator ==
+               static_cast<int>(config.refresh_numerator) &&
+           mode.refresh_rate_denominator ==
+               static_cast<int>(config.refresh_denominator);
+}
+
+// The display mode runs the saved rate as an operator names it: 23.976,
+// 23.98 and the driver's own fraction for that signal are one rate.
+[[nodiscard]] bool display_mode_rate_matches(
+    const SDL_DisplayMode &mode, const SdlPresenterConfig &config) noexcept {
+    if (mode.refresh_rate_numerator <= 0 ||
+        mode.refresh_rate_denominator <= 0) {
+        return false;
+    }
+    return core::same_refresh_rate(
+        static_cast<core::u32>(mode.refresh_rate_numerator),
+        static_cast<core::u32>(mode.refresh_rate_denominator),
+        config.refresh_numerator, config.refresh_denominator);
+}
+
 } // namespace
 
 show::PresenterResult
@@ -837,19 +860,26 @@ SdlPresenter::create(const SdlPresenterConfig &config) noexcept {
                 display != 0U
                     ? SDL_GetFullscreenDisplayModes(display, &mode_count)
                     : nullptr;
+            // The exact saved fraction wins. Otherwise the display's own
+            // mode at the same named rate is taken: a genlocked 23.976 is
+            // reported as the driver's pixel-clock fraction, never as the
+            // 24000/1001 an operator typed, and it is the same signal.
             const SDL_DisplayMode *selected{};
             for (int index = 0; modes != nullptr && index < mode_count;
                  ++index) {
                 const SDL_DisplayMode *const candidate = modes[index];
-                if (candidate != nullptr &&
-                    candidate->w == static_cast<int>(config.width) &&
-                    candidate->h == static_cast<int>(config.height) &&
-                    candidate->refresh_rate_numerator ==
-                        static_cast<int>(config.refresh_numerator) &&
-                    candidate->refresh_rate_denominator ==
-                        static_cast<int>(config.refresh_denominator)) {
+                if (candidate == nullptr ||
+                    candidate->w != static_cast<int>(config.width) ||
+                    candidate->h != static_cast<int>(config.height) ||
+                    !display_mode_rate_matches(*candidate, config)) {
+                    continue;
+                }
+                if (exact_display_mode_rate(*candidate, config)) {
                     selected = candidate;
                     break;
+                }
+                if (selected == nullptr) {
+                    selected = candidate;
                 }
             }
             const bool selected_ok =
@@ -873,10 +903,7 @@ SdlPresenter::create(const SdlPresenterConfig &config) noexcept {
             if (applied == nullptr ||
                 applied->w != static_cast<int>(config.width) ||
                 applied->h != static_cast<int>(config.height) ||
-                applied->refresh_rate_numerator !=
-                    static_cast<int>(config.refresh_numerator) ||
-                applied->refresh_rate_denominator !=
-                    static_cast<int>(config.refresh_denominator)) {
+                !display_mode_rate_matches(*applied, config)) {
                 return fail(show::PresenterError::ExactDisplayModeUnavailable);
             }
         }

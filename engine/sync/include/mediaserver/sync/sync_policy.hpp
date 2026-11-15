@@ -68,8 +68,10 @@ struct SyncTiming final {
 
 [[nodiscard]] bool same_raster(const SyncTiming& left,
                                const SyncTiming& right) noexcept;
-// Exact rational equality. 60/1 and 60000/1001 are deliberately not equal:
-// mixing them is precisely the configuration that drifts.
+// The same display rate within core::refresh_tolerance_millihertz, so 23.976,
+// 23.98 and a driver's pixel-clock fraction for that signal are equal. 60/1
+// and 60000/1001 are deliberately not equal: mixing them is precisely the
+// configuration that drifts.
 [[nodiscard]] bool same_refresh(const SyncTiming& left,
                                 const SyncTiming& right) noexcept;
 [[nodiscard]] bool same_timing(const SyncTiming& left,

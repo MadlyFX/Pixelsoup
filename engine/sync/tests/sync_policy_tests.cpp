@@ -167,12 +167,21 @@ void removing_the_policy_node_returns_to_unsynced() {
     SYNC_CHECK(model.counters().policies == 0U);
 }
 
-void refresh_comparison_is_exact_rational() {
+void refresh_comparison_is_the_named_display_rate() {
     const sync::SyncTiming integral{1920U, 1080U, 60U, 1U};
     const sync::SyncTiming fractional{1920U, 1080U, 60000U, 1001U};
     const sync::SyncTiming scaled{1920U, 1080U, 120U, 2U};
     SYNC_CHECK(sync::same_refresh(integral, scaled));
     SYNC_CHECK(!sync::same_refresh(integral, fractional));
+    // A typed 23.976, an abbreviated 23.98 and a driver's pixel-clock
+    // fraction for the same genlocked signal are one rate; 24 is not.
+    const sync::SyncTiming typed{15360U, 2160U, 24000U, 1001U};
+    const sync::SyncTiming abbreviated{15360U, 2160U, 2398U, 100U};
+    const sync::SyncTiming driver{15360U, 2160U, 148351648U, 6187500U};
+    SYNC_CHECK(sync::same_refresh(typed, abbreviated));
+    SYNC_CHECK(sync::same_refresh(typed, driver));
+    SYNC_CHECK(!sync::same_refresh(typed,
+                                   sync::SyncTiming{15360U, 2160U, 24U, 1U}));
     SYNC_CHECK(sync::same_raster(integral, fractional));
     SYNC_CHECK(!sync::same_timing(integral, fractional));
     SYNC_CHECK(!sync::same_refresh(integral, sync::SyncTiming{1920U, 1080U,
@@ -221,8 +230,8 @@ constexpr std::array<Case, 8U> cases{{
      &the_lowest_policy_node_wins_deterministically},
     {"removing the policy node returns to unsynced",
      &removing_the_policy_node_returns_to_unsynced},
-    {"refresh comparison is exact rational",
-     &refresh_comparison_is_exact_rational},
+    {"refresh comparison is the named display rate",
+     &refresh_comparison_is_the_named_display_rate},
     {"every authored field contributes to the digest",
      &every_authored_field_contributes_to_the_digest},
 }};

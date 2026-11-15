@@ -6,6 +6,7 @@
 #include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/rect_cut.hpp>
 #include <mediaserver/topology/hardware_map_schema.hpp>
+#include <mediaserver/topology/hardware_signal.hpp>
 
 #include <algorithm>
 #include <array>
@@ -351,9 +352,10 @@ bool HardwareMappingPanel::draw_server_outputs(
             topology::HardwareWindowMode::Fullscreen ||
         (observed->width == binding->width &&
          observed->height == binding->height &&
-         observed->refresh_numerator == binding->refresh_numerator &&
-         std::max(observed->refresh_denominator, core::u32{1U}) ==
-             binding->refresh_denominator);
+         topology::same_refresh_rate(
+             observed->refresh_numerator,
+             std::max(observed->refresh_denominator, core::u32{1U}),
+             binding->refresh_numerator, binding->refresh_denominator));
     const std::string label =
         "PORT " + std::to_string(binding->logical_port) +
         "  FEED " + std::to_string(binding->feed_index) +

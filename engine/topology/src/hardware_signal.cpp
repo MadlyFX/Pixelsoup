@@ -24,11 +24,7 @@ namespace {
 
 core::u32 refresh_millihertz(core::u32 numerator,
                              core::u32 denominator) noexcept {
-  if (denominator == 0U) {
-    return 0U;
-  }
-  const core::u64 scaled = static_cast<core::u64>(numerator) * 1000U;
-  return static_cast<core::u32>((scaled + denominator / 2U) / denominator);
+  return core::refresh_millihertz(numerator, denominator);
 }
 
 HardwareRefresh refresh_from_millihertz(core::u32 millihertz) noexcept {

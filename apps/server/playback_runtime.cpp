@@ -132,7 +132,7 @@ presenter_error_text(show::PresenterError error) noexcept {
     case show::PresenterError::AllocationFailed:
         return "allocation failed";
     case show::PresenterError::ExactDisplayModeUnavailable:
-        return "the selected display does not support the exact saved "
+        return "the selected display does not offer the saved "
                "resolution and refresh rate";
     case show::PresenterError::DisplayTargetUnavailable:
         return "the display this output is bound to is not one this machine "

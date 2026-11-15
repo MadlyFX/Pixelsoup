@@ -1882,8 +1882,12 @@ a full-canvas Feed Mapping region. Repeat for each display driven by the same
 render process. Select a binding row to tune its exact Feed index, Window mode,
 Width, Height and Refresh. Refresh, on bindings, cards and the sync policy
 alike, is one field in hertz: type `23.976`, `29.97`, `59.94` or `50`, and the
-NTSC rates are kept as their exact fractions (24000/1001 and so on), which is
-what the GPU and the sync check compare. Disconnecting the graph
+NTSC rates are kept as their exact fractions (24000/1001 and so on). Rates
+within 0.01 Hz are the same rate everywhere they are compared: a typed
+`23.976`, a processor's `23.98` and the fraction a genlocked GPU reports for
+that signal all match, and a fullscreen output takes the display's own mode at
+that rate. Neighbouring rates (23.976 and 24, 59.94 and 60) never match.
+Disconnecting the graph
 cable removes its generated binding and region; a region shared by another
 binding is retained. Feed indices refer to the numbered rows in Feed Mapping
 and are never inferred from physical display order.

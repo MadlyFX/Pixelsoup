@@ -1,6 +1,7 @@
 #include <mediaserver/sync/sync_policy.hpp>
 
 #include <mediaserver/core/fnv1a.hpp>
+#include <mediaserver/core/refresh_rate.hpp>
 
 namespace mediaserver::sync {
 namespace {
@@ -16,19 +17,12 @@ bool same_raster(const SyncTiming& left, const SyncTiming& right) noexcept {
 }
 
 bool same_refresh(const SyncTiming& left, const SyncTiming& right) noexcept {
-    if (left.refresh_numerator == 0U || left.refresh_denominator == 0U ||
-        right.refresh_numerator == 0U || right.refresh_denominator == 0U) {
-        return false;
-    }
-    // Cross-multiplied in 64 bits. Both factors are bounded by the authoring
-    // limits, so this cannot overflow.
-    const core::u64 left_scaled =
-        static_cast<core::u64>(left.refresh_numerator) *
-        static_cast<core::u64>(right.refresh_denominator);
-    const core::u64 right_scaled =
-        static_cast<core::u64>(right.refresh_numerator) *
-        static_cast<core::u64>(left.refresh_denominator);
-    return left_scaled == right_scaled;
+    // One display rate however it is written: a typed 23.976 (24000/1001),
+    // a processor's 23.98 and a driver's pixel-clock fraction for the same
+    // genlocked signal all match; 24 does not.
+    return core::same_refresh_rate(
+        left.refresh_numerator, left.refresh_denominator,
+        right.refresh_numerator, right.refresh_denominator);
 }
 
 bool same_timing(const SyncTiming& left, const SyncTiming& right) noexcept {

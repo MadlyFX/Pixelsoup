@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <new>
 #include <string_view>
@@ -119,6 +120,30 @@ constexpr std::size_t maximum_backbuffers = 4U;
            handle.value != nullptr;
 }
 
+// One line in the node log naming the NVAPI step that refused and its status,
+// written only when the step or status changes so a retrying join cannot fill
+// the log. The node's stderr is the log file (process_log.cpp).
+class BarrierFailureReport final {
+public:
+    void operator()(const char* step, NvStatus status) noexcept {
+        const core::u64 key =
+            (static_cast<core::u64>(reinterpret_cast<std::uintptr_t>(step))
+             << 32U) ^
+            static_cast<core::u32>(status);
+        if (last_.exchange(key, std::memory_order_relaxed) == key) {
+            return;
+        }
+        std::fprintf(stderr, "present barrier: %s failed (NVAPI status %d)\n",
+                     step, static_cast<int>(status));
+        std::fflush(stderr);
+    }
+
+    void clear() noexcept { last_.store(0U, std::memory_order_relaxed); }
+
+private:
+    std::atomic<core::u64> last_{};
+};
+
 class NvapiPresentBarrierBackend final : public rhi::PresentBarrierBackend {
 public:
     NvapiPresentBarrierBackend() noexcept {
@@ -190,10 +215,12 @@ public:
         }
 
         if (Client* const existing = find(target.swapchain.value)) {
-            if (existing->status.load(std::memory_order_acquire) ==
-                    rhi::PresentBarrierStatus::Joined &&
+            const rhi::PresentBarrierStatus current =
+                existing->status.load(std::memory_order_acquire);
+            if ((current == rhi::PresentBarrierStatus::Joined ||
+                 current == rhi::PresentBarrierStatus::Joining) &&
                 existing->desc == desc) {
-                return rhi::PresentBarrierStatus::Joined;
+                return current;
             }
             destroy_client(*existing);
         }
@@ -219,8 +246,10 @@ public:
         bool supported = false;
         NvU32 max_groups{};
         NvU32 max_barriers{};
-        if (api_.query_present_barrier_support(client->device, &supported) !=
-            nv_ok) {
+        const NvStatus support_status =
+            api_.query_present_barrier_support(client->device, &supported);
+        if (support_status != nv_ok) {
+            report_("NvAPI_D3D12_QueryPresentBarrierSupport", support_status);
             fail_client(*client);
             return rhi::PresentBarrierStatus::Failed;
         }
@@ -232,23 +261,22 @@ public:
                                  std::memory_order_release);
             return rhi::PresentBarrierStatus::Unsupported;
         }
-        if (api_.query_max_swap_group(client->device, &max_groups,
-                                      &max_barriers) != nv_ok ||
-            desc.group > max_groups || desc.barrier > max_barriers ||
-            api_.join_swap_group(client->device, client->swapchain, desc.group,
-                                 FALSE) != nv_ok) {
+        const NvStatus max_status = api_.query_max_swap_group(
+            client->device, &max_groups, &max_barriers);
+        if (max_status != nv_ok) {
+            report_("NvAPI_D3D1x_QueryMaxSwapGroup", max_status);
             fail_client(*client);
             return rhi::PresentBarrierStatus::Failed;
         }
-        client->legacy_joined = true;
-        if (api_.bind_swap_barrier(client->device, desc.group, desc.barrier) !=
-                nv_ok ||
-            api_.create_present_barrier_client(
-                client->device, client->swapchain, &client->barrier_client) !=
-                nv_ok ||
-            FAILED(client->device->CreateFence(
-                0U, D3D12_FENCE_FLAG_NONE,
-                IID_PPV_ARGS(&client->fence)))) {
+        if (desc.group > max_groups || desc.barrier > max_barriers) {
+            std::fprintf(stderr,
+                         "present barrier: swap group %u / barrier %u exceeds "
+                         "the driver maximum %u / %u\n",
+                         static_cast<unsigned>(desc.group),
+                         static_cast<unsigned>(desc.barrier),
+                         static_cast<unsigned>(max_groups),
+                         static_cast<unsigned>(max_barriers));
+            std::fflush(stderr);
             fail_client(*client);
             return rhi::PresentBarrierStatus::Failed;
         }
@@ -257,20 +285,47 @@ public:
             client->images[index] = static_cast<ID3D12Resource*>(
                 target.images[index].value);
         }
-        if (api_.register_present_barrier_resources(
-                client->barrier_client, client->fence, client->images.data(),
-                client->image_count) != nv_ok) {
+
+        // The D3D12 present barrier and the older D3D1x swap group are two
+        // ways to put one swapchain under the same Quadro Sync barrier, and a
+        // driver refuses the present barrier for a swapchain already in a swap
+        // group. Try the present barrier on its own first; a driver or
+        // swapchain that refuses it still gets the swap group and barrier.
+        if (join_modern(*client)) {
+            report_.clear();
+            std::fprintf(stderr,
+                         "present barrier: joined the D3D12 present barrier\n");
+            std::fflush(stderr);
+            client->modern_joined = true;
+            // Joined, but not yet flipping in step with the barrier: the
+            // driver reports that on the presents that follow.
+            client->status.store(rhi::PresentBarrierStatus::Joining,
+                                 std::memory_order_release);
+            return rhi::PresentBarrierStatus::Joining;
+        }
+        release_modern(*client);
+
+        const NvStatus group_status = api_.join_swap_group(
+            client->device, client->swapchain, desc.group, FALSE);
+        if (group_status != nv_ok) {
+            report_("NvAPI_D3D1x_JoinSwapGroup", group_status);
             fail_client(*client);
             return rhi::PresentBarrierStatus::Failed;
         }
-        NvJoinPresentBarrierParams parameters{};
-        parameters.dwVersion = nv_version<NvJoinPresentBarrierParams>();
-        if (api_.join_present_barrier(client->barrier_client, &parameters) !=
-                nv_ok) {
+        client->legacy_joined = true;
+        const NvStatus bind_status =
+            api_.bind_swap_barrier(client->device, desc.group, desc.barrier);
+        if (bind_status != nv_ok) {
+            report_("NvAPI_D3D1x_BindSwapBarrier", bind_status);
             fail_client(*client);
             return rhi::PresentBarrierStatus::Failed;
         }
-        client->modern_joined = true;
+        report_.clear();
+        std::fprintf(stderr,
+                     "present barrier: joined swap group %u barrier %u\n",
+                     static_cast<unsigned>(client->desc.group),
+                     static_cast<unsigned>(client->desc.barrier));
+        std::fflush(stderr);
         client->status.store(rhi::PresentBarrierStatus::Joined,
                              std::memory_order_release);
         return rhi::PresentBarrierStatus::Joined;
@@ -348,25 +403,53 @@ public:
             // readiness gate already reports as missing.
             return rhi::PresentBarrierPresentResult::PassThrough;
         }
-        if (state != rhi::PresentBarrierStatus::Joined) {
+        if (state != rhi::PresentBarrierStatus::Joined &&
+            !(client->modern_joined &&
+              state == rhi::PresentBarrierStatus::Joining)) {
             // A member that failed to join, or was dropped, holds: showing
             // it unsynchronised beside members that are locked is the fault
             // the barrier exists to prevent.
             return rhi::PresentBarrierPresentResult::Failed;
         }
-        if (api_.present(static_cast<IUnknown*>(device.value), client->swapchain,
-                         static_cast<UINT>(sync_interval),
-                         static_cast<UINT>(flags)) != nv_ok) {
+        if (client->modern_joined) {
+            const HRESULT presented = client->swapchain->Present(
+                static_cast<UINT>(sync_interval), static_cast<UINT>(flags));
+            if (presented == DXGI_ERROR_WAS_STILL_DRAWING ||
+                presented == DXGI_STATUS_OCCLUDED) {
+                // DO_NOT_WAIT found no free flip slot, or the window is
+                // hidden: nothing was queued and nothing failed. The RHI's
+                // own Present path knows how to treat both.
+                return rhi::PresentBarrierPresentResult::PassThrough;
+            }
+            if (FAILED(presented)) {
+                report_("IDXGISwapChain::Present",
+                        static_cast<NvStatus>(presented));
+                client->status.store(rhi::PresentBarrierStatus::Failed,
+                                     std::memory_order_release);
+                ++client->leave_events;
+                return rhi::PresentBarrierPresentResult::Failed;
+            }
+            update_statistics(*client);
+            const rhi::PresentBarrierStatus after =
+                client->status.load(std::memory_order_acquire);
+            return after == rhi::PresentBarrierStatus::Joined ||
+                    after == rhi::PresentBarrierStatus::Joining
+                ? rhi::PresentBarrierPresentResult::Presented
+                : rhi::PresentBarrierPresentResult::Failed;
+        }
+        const NvStatus present_status = api_.present(
+            static_cast<IUnknown*>(device.value), client->swapchain,
+            static_cast<UINT>(sync_interval), static_cast<UINT>(flags));
+        if (present_status != nv_ok) {
+            report_("NvAPI_D3D1x_Present", present_status);
             client->status.store(rhi::PresentBarrierStatus::Failed,
                                  std::memory_order_release);
             ++client->leave_events;
             return rhi::PresentBarrierPresentResult::Failed;
         }
-        update_statistics(*client);
-        return client->status.load(std::memory_order_acquire) ==
-                rhi::PresentBarrierStatus::Joined
-            ? rhi::PresentBarrierPresentResult::Presented
-            : rhi::PresentBarrierPresentResult::Failed;
+        // A swap-group member has no present-barrier statistics; it stays
+        // joined until a present through the group fails.
+        return rhi::PresentBarrierPresentResult::Presented;
     }
 
     [[nodiscard]] rhi::PresentBarrierStatus refresh(
@@ -412,6 +495,8 @@ public:
     }
 
 private:
+    BarrierFailureReport report_{};
+
     struct Api final {
         NvInitialize initialize{};
         NvUnload unload{};
@@ -440,6 +525,10 @@ private:
         rhi::PresentBarrierDesc desc{};
         bool legacy_joined{};
         bool modern_joined{};
+        // Set at the first present the driver reports in system or cluster
+        // sync; presents made before it are not counted against the barrier.
+        bool reached_sync{};
+        NvU32 presents_before_sync{};
         std::atomic<rhi::PresentBarrierStatus> status{
             rhi::PresentBarrierStatus::NotJoined};
         std::atomic<core::u64> presents{};
@@ -548,29 +637,114 @@ private:
     void update_statistics(Client& client) noexcept {
         NvPresentBarrierFrameStatistics statistics{};
         statistics.dwVersion = nv_version<NvPresentBarrierFrameStatistics>();
-        if (api_.query_statistics(client.barrier_client, &statistics) != nv_ok) {
+        const NvStatus queried =
+            api_.query_statistics(client.barrier_client, &statistics);
+        if (queried != nv_ok) {
+            report_("NvAPI_QueryPresentBarrierFrameStatistics", queried);
             client.status.store(rhi::PresentBarrierStatus::Failed,
                                 std::memory_order_release);
             ++client.leave_events;
             return;
         }
-        client.presents.store(statistics.present_count, std::memory_order_relaxed);
-        client.presents_in_sync.store(statistics.present_in_sync_count,
-                                      std::memory_order_relaxed);
-        client.flips_in_sync.store(statistics.flip_in_sync_count,
-                                   std::memory_order_relaxed);
         const bool synchronized = statistics.sync_mode ==
                                       present_barrier_sync_system ||
                                   statistics.sync_mode ==
                                       present_barrier_sync_cluster;
-        // A joined client that is no longer counted as synchronized is a real
-        // loss, even before a later API call formally removes it.
-        if (statistics.sync_mode == present_barrier_not_joined || !synchronized ||
-            (statistics.present_count != 0U &&
-             statistics.present_in_sync_count < statistics.present_count)) {
+        if (statistics.sync_mode == present_barrier_not_joined ||
+            (client.reached_sync && !synchronized)) {
+            // The driver dropped the client, or a client that was flipping
+            // in step fell back to composition: a real loss.
+            report_("present barrier sync (driver mode)",
+                    static_cast<NvStatus>(statistics.sync_mode));
             client.status.store(rhi::PresentBarrierStatus::Left,
                                 std::memory_order_release);
             ++client.leave_events;
+            return;
+        }
+        if (!synchronized) {
+            // PresentCount runs from the join, PresentInSyncCount only from
+            // the first synchronized flip, so the first presents of every
+            // join are out of sync by definition. Until the driver reports
+            // system or cluster sync the member is still joining; one that
+            // stays composited never gets there and reads as incomplete.
+            client.presents.store(0U, std::memory_order_relaxed);
+            client.presents_in_sync.store(0U, std::memory_order_relaxed);
+            client.flips_in_sync.store(0U, std::memory_order_relaxed);
+            return;
+        }
+        if (!client.reached_sync) {
+            client.reached_sync = true;
+            client.presents_before_sync =
+                statistics.present_count >= statistics.present_in_sync_count
+                ? statistics.present_count - statistics.present_in_sync_count
+                : 0U;
+            std::fprintf(stderr,
+                         "present barrier: flipping in sync (%s)\n",
+                         statistics.sync_mode == present_barrier_sync_cluster
+                             ? "cluster"
+                             : "system");
+            std::fflush(stderr);
+            client.status.store(rhi::PresentBarrierStatus::Joined,
+                                std::memory_order_release);
+        }
+        const NvU32 since_sync =
+            statistics.present_count >= client.presents_before_sync
+            ? statistics.present_count - client.presents_before_sync
+            : 0U;
+        client.presents.store(since_sync, std::memory_order_relaxed);
+        client.presents_in_sync.store(statistics.present_in_sync_count,
+                                      std::memory_order_relaxed);
+        client.flips_in_sync.store(statistics.flip_in_sync_count,
+                                   std::memory_order_relaxed);
+    }
+
+    // Creates, registers and joins a D3D12 present-barrier client. Logs the
+    // step that refused; the caller tears the partial client down.
+    [[nodiscard]] bool join_modern(Client& client) noexcept {
+        const NvStatus client_status = api_.create_present_barrier_client(
+            client.device, client.swapchain, &client.barrier_client);
+        if (client_status != nv_ok) {
+            report_("NvAPI_D3D12_CreatePresentBarrierClient", client_status);
+            return false;
+        }
+        const HRESULT fence_result = client.device->CreateFence(
+            0U, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&client.fence));
+        if (FAILED(fence_result)) {
+            report_("ID3D12Device::CreateFence",
+                    static_cast<NvStatus>(fence_result));
+            return false;
+        }
+        const NvStatus register_status =
+            api_.register_present_barrier_resources(
+                client.barrier_client, client.fence, client.images.data(),
+                client.image_count);
+        if (register_status != nv_ok) {
+            report_("NvAPI_D3D12_RegisterPresentBarrierResources",
+                    register_status);
+            return false;
+        }
+        NvJoinPresentBarrierParams parameters{};
+        parameters.dwVersion = nv_version<NvJoinPresentBarrierParams>();
+        const NvStatus join_status =
+            api_.join_present_barrier(client.barrier_client, &parameters);
+        if (join_status != nv_ok) {
+            report_("NvAPI_JoinPresentBarrier", join_status);
+            return false;
+        }
+        return true;
+    }
+
+    // Undoes a present-barrier attempt that did not join, leaving the
+    // swapchain free for the swap group.
+    void release_modern(Client& client) noexcept {
+        if (client.barrier_client != nullptr) {
+            static_cast<void>(api_.destroy_present_barrier_client(
+                client.barrier_client));
+            client.barrier_client = nullptr;
+        }
+        if (client.fence != nullptr) {
+            client.fence->Release();
+            client.fence = nullptr;
         }
     }
 
@@ -598,6 +772,8 @@ private:
         client.image_count = 0U;
         client.legacy_joined = false;
         client.modern_joined = false;
+        client.reached_sync = false;
+        client.presents_before_sync = 0U;
     }
 
     void fail_client(Client& client) noexcept {

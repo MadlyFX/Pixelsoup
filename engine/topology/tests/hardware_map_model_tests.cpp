@@ -926,6 +926,16 @@ void decimal_rates_become_exact_fractions() {
   // And back: the fraction is the rate the processor reported.
   TOPOLOGY_CHECK(topology::refresh_millihertz(24'000U, 1'001U) == 23'976U);
 
+  // One named rate however it is written: typed 23.976, abbreviated 23.98
+  // and a genlocked GPU's pixel-clock fraction all match; 24 and a missing
+  // rate do not.
+  TOPOLOGY_CHECK(topology::same_refresh_rate(24'000U, 1'001U, 2'398U, 100U));
+  TOPOLOGY_CHECK(
+      topology::same_refresh_rate(148'351'648U, 6'187'500U, 24'000U, 1'001U));
+  TOPOLOGY_CHECK(!topology::same_refresh_rate(24'000U, 1'001U, 24U, 1U));
+  TOPOLOGY_CHECK(!topology::same_refresh_rate(60'000U, 1'001U, 60U, 1U));
+  TOPOLOGY_CHECK(!topology::same_refresh_rate(24'000U, 1'001U, 24'000U, 0U));
+
   // Typed hertz take the same path, held to a sane range.
   TOPOLOGY_CHECK(topology::refresh_from_hertz(23.976) ==
                  (Refresh{24'000U, 1'001U}));

@@ -1758,10 +1758,15 @@ PresentBarrierStatus Swapchain::join_present_barrier(
         barrier_status_ = PresentBarrierStatus::Unsupported;
         return barrier_status_;
     }
-    if (barrier_status_ == PresentBarrierStatus::Joined && barrier_ == desc) {
+    // Joining is a member the driver has accepted but not yet reported in
+    // sync; asking again must not tear it down and start over.
+    const bool member = barrier_status_ == PresentBarrierStatus::Joined ||
+                        barrier_status_ == PresentBarrierStatus::Joining;
+    if (member && barrier_ == desc) {
+        barrier_status_ = backend->status(native_handle());
         return barrier_status_;
     }
-    if (barrier_status_ == PresentBarrierStatus::Joined) {
+    if (member) {
         backend->leave(native_handle());
     }
 

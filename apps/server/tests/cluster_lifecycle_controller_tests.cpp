@@ -1319,7 +1319,7 @@ void program_gate_requires_exact_store_runtime_and_projected_configuration() {
         manifest, wired(map), project_generation, barrier));
 }
 
-void program_gate_requires_bound_display_identity_and_exact_fullscreen_mode() {
+void program_gate_requires_bound_display_identity_and_fullscreen_rate() {
     auto config = controller_config();
     config.machine_info_poll_interval = 1h;
     app::ClusterLifecycleController controller{
@@ -1379,6 +1379,16 @@ void program_gate_requires_bound_display_identity_and_exact_fullscreen_mode() {
     CONTROLLER_CHECK(wait_idle(controller));
     CONTROLLER_CHECK(!controller.program_ready(
         manifest, wired(incompatible), generation, barrier));
+
+    // The same named rate written as another fraction (a pixel-clock 60.0006)
+    // is the display's mode, not a mismatch.
+    auto same_rate = map;
+    same_rate.output_bindings[0U].refresh_numerator = 2'000'000U;
+    same_rate.output_bindings[0U].refresh_denominator = 33'333U;
+    controller.sync(wired(same_rate), manifest, generation);
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(controller.program_ready(
+        manifest, wired(same_rate), generation, barrier));
 
     auto borderless = incompatible;
     borderless.output_bindings[0U].window_mode =
@@ -1970,7 +1980,7 @@ int main() {
         {"Program gate requires exact store runtime and configuration",
          &program_gate_requires_exact_store_runtime_and_projected_configuration},
         {"Program gate requires bound display identity and mode",
-         &program_gate_requires_bound_display_identity_and_exact_fullscreen_mode},
+         &program_gate_requires_bound_display_identity_and_fullscreen_rate},
         {"hardware revision fences in-flight store readiness",
          &hardware_revision_fences_an_in_flight_store_reply},
         {"Program gate empty and invalid cluster semantics",

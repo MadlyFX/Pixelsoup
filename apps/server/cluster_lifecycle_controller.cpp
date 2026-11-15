@@ -3,6 +3,7 @@
 #include <mediaserver/net/director_frame_barrier.hpp>
 
 #include <mediaserver/core/fnv1a.hpp>
+#include <mediaserver/topology/hardware_signal.hpp>
 
 #include <mediaserver/net/director_frame_barrier.hpp>
 
@@ -476,9 +477,10 @@ struct ControllerEntry final {
                 topology::HardwareWindowMode::Fullscreen &&
             (observed->width != binding.width ||
              observed->height != binding.height ||
-             observed->refresh_numerator != binding.refresh_numerator ||
-             std::max(observed->refresh_denominator, core::u32{1U}) !=
-                 binding.refresh_denominator)) {
+             !topology::same_refresh_rate(
+                 observed->refresh_numerator,
+                 std::max(observed->refresh_denominator, core::u32{1U}),
+                 binding.refresh_numerator, binding.refresh_denominator))) {
             return false;
         }
     }

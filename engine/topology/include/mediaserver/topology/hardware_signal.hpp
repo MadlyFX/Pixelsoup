@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mediaserver/core/refresh_rate.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/topology/hardware_map.hpp>
@@ -36,7 +37,17 @@ enum class HardwareSignalIssue : core::u8 {
 
 // Rates within this of each other are the same rate: a processor reports
 // 59.94 for 60000/1001, never 59.9400599.
-inline constexpr core::u32 refresh_tolerance_millihertz = 10U;
+inline constexpr core::u32 refresh_tolerance_millihertz =
+    core::refresh_tolerance_millihertz;
+
+// Whether two exact fractions are the same display rate (23.976 = 23.98 =
+// 24000/1001 = a driver's pixel-clock fraction for that signal).
+[[nodiscard]] constexpr bool same_refresh_rate(
+    core::u32 left_numerator, core::u32 left_denominator,
+    core::u32 right_numerator, core::u32 right_denominator) noexcept {
+  return core::same_refresh_rate(left_numerator, left_denominator,
+                                 right_numerator, right_denominator);
+}
 
 // A rate in thousandths of a hertz as an exact fraction: the NTSC family
 // (23.976, 29.97, 59.94...) becomes n*1000/1001, a whole rate n/1, and
