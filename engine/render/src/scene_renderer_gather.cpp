@@ -463,7 +463,7 @@ bool SceneRenderer::gather_media(Frame& f) {
             ? ResolvedMediaFrame{} : media_cache.resolve(
             *device_, commands, media_source, clip.frame_index,
             MediaLoopWindow{clip.loop_first, clip.loop_count},
-            clip.source_node.value(), clip.asset.value());
+            clip.stream_id(), clip.asset.value());
         if (!media_frame) {
             media_frame = ResolvedMediaFrame{&offline_media_};
         }
@@ -511,7 +511,7 @@ bool SceneRenderer::gather_media(Frame& f) {
             media_decode_source(upcoming.source, upcoming.resolution),
             upcoming.frame_index,
             MediaLoopWindow{upcoming.loop_first, upcoming.loop_count},
-            upcoming.source_node.value());
+            upcoming.stream_id());
     }
     return true;
 }

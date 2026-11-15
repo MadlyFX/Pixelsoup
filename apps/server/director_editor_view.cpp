@@ -14,6 +14,7 @@
 #include "timeline_playback_cache.hpp"
 
 #include <mediaserver/assets/asset_registry.hpp>
+#include <mediaserver/assets/asset_schema.hpp>
 #include <mediaserver/assets/derivative.hpp>
 #include <mediaserver/assets/derivative_cache.hpp>
 #include <mediaserver/assets/derivative_profile_id.hpp>
@@ -362,6 +363,22 @@ namespace mediaserver::app {
         info.effective_visible =
             info.effective_visible && parent->effective_visible;
     };
+    // A vehicle track's slot screens, by slot; the lower node id where two
+    // claim one, as evaluation has it.
+    const auto slot_screens_of = [&lanes](doc::NodeId track) {
+        std::array<doc::NodeId, scene::vehicle_slot_count> screens{};
+        for (const scene::TimelineLane &lane : lanes) {
+            if (lane.parent != track || track == doc::NodeId{} ||
+                lane.slot >= scene::vehicle_slot_count) {
+                continue;
+            }
+            doc::NodeId &screen = screens[lane.slot];
+            if (screen == doc::NodeId{} || lane.id < screen) {
+                screen = lane.id;
+            }
+        }
+        return screens;
+    };
     // Every authored clip placement, on air or not. A clip the playhead has
     // moved past is still the operator's to select, drag, and trim, so the
     // authored list rather than the evaluated Scene is what the panels get.
@@ -385,13 +402,46 @@ namespace mediaserver::app {
             };
             info.plateset = doc::NodeId{static_cast<core::u64>(
                 std::max<std::int64_t>(whole(scene::schema::plateset_asset), 0))};
-            info.plateset_take = whole(scene::schema::plateset_take);
-            const auto slot =
-                plate->properties.find(scene::schema::plateset_slot);
-            if (slot != plate->properties.end()) {
-                if (const auto *const key =
-                        std::get_if<std::string>(&slot->second)) {
-                    info.plateset_slot = *key;
+            // A take: one clip that names a front plate and plays every
+            // plate of its set.
+            info.take = info.plateset != doc::NodeId{} &&
+                        plate->properties.contains(
+                            scene::schema::plate_property(
+                                0U, scene::schema::plate_source_suffix));
+            if (info.take) {
+                // The car it is on, and which of its walls it has a plate
+                // for, so a panel can draw the rig without the track list.
+                const auto on = std::find_if(
+                    lanes.begin(), lanes.end(),
+                    [&](const scene::TimelineLane &value) {
+                        return value.id == clip.lane && value.vehicle;
+                    });
+                if (on != lanes.end()) {
+                    info.vehicle_track = on->id;
+                    info.slot_screens = slot_screens_of(on->id);
+                }
+                for (std::size_t slot = 0U; slot < info.plates.size();
+                     ++slot) {
+                    info.plates[slot] = plate->properties.contains(
+                        scene::schema::plate_property(
+                            slot, scene::schema::plate_source_suffix));
+                }
+            }
+            // It reads by its plateset's name unless the operator gave it
+            // one: the front plate's file name says one wall of nine.
+            if (info.take &&
+                !plate->properties.contains(scene::schema::group_name)) {
+                if (const doc::Node *const set =
+                        scheduler.projected_document().get(info.plateset)) {
+                    const auto named =
+                        set->properties.find(assets::schema::display_name);
+                    if (named != set->properties.end()) {
+                        if (const auto *const name =
+                                std::get_if<std::string>(&named->second);
+                            name != nullptr && !name->empty()) {
+                            info.display_name = *name;
+                        }
+                    }
                 }
             }
         }
@@ -408,10 +458,12 @@ namespace mediaserver::app {
                 info.screen_name = lane->name;
             }
         }
+        // A take is on air as its plates, each its slot screen's picture:
+        // the first of them, the front where it has one, stands for it.
         const auto evaluated =
             std::find_if(scene.media.begin(), scene.media.end(),
                          [&clip](const scene::MediaInstance &value) noexcept {
-                             return value.source_node == clip.node;
+                             return value.placed_by() == clip.node;
                          });
         info.on_air = evaluated != scene.media.end();
         if (info.on_air) {
@@ -662,6 +714,13 @@ namespace mediaserver::app {
         info.raster_height = lane.raster_height;
         info.aspect_locked = lane.aspect_locked;
         info.locked = lane.locked;
+        info.vehicle = lane.vehicle;
+        info.vehicle_track = lane.parent;
+        info.vehicle_slot = lane.slot;
+        info.time_offset = lane.time_offset;
+        if (lane.vehicle) {
+            info.slot_screens = slot_screens_of(lane.id);
+        }
         // Muting a track is what hiding it means, so one control reads and
         // writes one state rather than the timeline and the Inspector each
         // owning half of it.
@@ -929,17 +988,26 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
                                     stage_view_proxies.waiting_total_frames,
                                     all_proxies.made_frames,
                                     all_proxies.total_frames});
-        auto editor_frame = editor->frame(
-            scene_frame, timeline, keyframes, elements, effects,
-            hardware_map, feed_map, switcher_view, asset_registry,
-            thumbnail_observations, compositor_graph, project_view,
-            output_monitor, hardware_runtime, director_sync.policy,
-            preferences_view, project_settings_view, library_proxy_runtime,
-            stage_lanes, clip_clipboard.span_duration(),
-            selection_set_summaries, key_scale_preview,
-            filmstrip_observations, live_data_view,
-            authored_tracking_sources, stage_markers, inputs.asset_viewer,
-            history_state);
+        // Drawing the panels and rendering Program and Stage is the slow part
+        // of an editor wake, and it borrows only this iteration's projection
+        // and Director-local views - nothing the sealing thread writes. So it
+        // runs outside the gate, and a slow frame here no longer holds back
+        // the control frames every node is waiting for.
+        const auto draw_editor = [&] {
+            const AuthorityGate::Away drawing{authority_gate};
+            return editor->frame(
+                scene_frame, timeline, keyframes, elements, effects,
+                hardware_map, feed_map, switcher_view, asset_registry,
+                thumbnail_observations, compositor_graph, project_view,
+                output_monitor, hardware_runtime, director_sync.policy,
+                preferences_view, project_settings_view,
+                library_proxy_runtime, stage_lanes,
+                clip_clipboard.span_duration(), selection_set_summaries,
+                key_scale_preview, filmstrip_observations, live_data_view,
+                authored_tracking_sources, stage_markers, inputs.asset_viewer,
+                history_state);
+        };
+        auto editor_frame = draw_editor();
         ++editor_frame_calls;
         // Shown again next frame only while the panel keeps asking.
         asset_viewer_request = editor_frame.asset_viewer;
@@ -986,11 +1054,17 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
         if (const PhaseExit exit = request_library_thumbnails(editor_frame)) {
             return exit;
         }
-        if (const PhaseExit exit = apply_preferences_request(editor_frame)) {
-            return exit;
-        }
-        if (const PhaseExit exit = apply_proxy_cache_clear(editor_frame)) {
-            return exit;
+        {
+            // Settings files and the proxy cache on disk: neither refers to
+            // the authority.
+            const AuthorityGate::Away filing{authority_gate};
+            if (const PhaseExit exit =
+                    apply_preferences_request(editor_frame)) {
+                return exit;
+            }
+            if (const PhaseExit exit = apply_proxy_cache_clear(editor_frame)) {
+                return exit;
+            }
         }
         if (editor_frame.output_lifecycle.has_value() &&
             lifecycle_controller) {
@@ -1276,6 +1350,13 @@ void DirectorShowLoop::project_switcher_and_links(DirectorTick &tick,
         preview_link && preview_link->connected, blender_scene_states, blender_bound_names,
         publication_default_storage,recent_project_paths,
         changed_library_assets};
+    // Offered once the start-up project is in place, so the answer applies
+    // to the project the operator is looking at.
+    if (project_recovery.has_value() && !project_load_pending()) {
+        project_view.recovery_available = true;
+        project_view.recovery_project = project_recovery->project_path;
+        project_view.recovery_saved_at = project_recovery->saved_at;
+    }
 }
 
 PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
@@ -1283,7 +1364,7 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
     const auto &control_frame = tick.control_frame;
     auto &scene_frame = tick.scene_frame;
     auto &hardware_map = tick.hardware_map;
-    auto &asset_manifest = tick.asset_manifest;
+    const ProjectAssetManifest &asset_manifest = editor_asset_manifest;
     auto &timeline = inputs.timeline;
     auto &switcher_view = inputs.switcher_view;
     auto &output_nodes = inputs.output_nodes;
@@ -1301,6 +1382,27 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
         } catch (const std::bad_alloc &) {
             std::cerr << "could not build hardware runtime snapshot\n";
             return 1;
+        }
+    }
+    // Reported whatever the sync policy: a node that cannot draw its frames
+    // holds its picture on an unsynced wall too. Filled before the headline
+    // below reads it.
+    for (auto &row : output_nodes) {
+        row.present_failure = {};
+        row.present_failure_map.clear();
+        net::RuntimeOutputSync runtime{};
+        if (!barrier.runtime_output_sync(row.node_index, runtime)) {
+            continue;
+        }
+        row.present_failure = runtime.present_failure;
+        const auto failed_map = row.present_failure.map_node;
+        for (const output::OutputMap &map : tick.feed_map.maps) {
+            if (failed_map != 0U && map.node.value() == failed_map) {
+                const std::string viewport =
+                    "viewport " + std::to_string(map.order + 1);
+                row.present_failure_map =
+                    map.name.empty() ? viewport : map.name + ", " + viewport;
+            }
         }
     }
     if (options.lifecycle_discovery_port != 0U) {
@@ -1369,7 +1471,9 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
     // render nodes is an external concern in this build, so a node that
     // cannot yet prove it holds every file is a warning on the Output
     // Monitor rather than a hold on the switcher.
-    bool assets_adopted = director_asset_availability.render_ready();
+    // Only an answer counts: while the check for this manifest is still
+    // out, what the Director holds is an assumption.
+    bool assets_adopted = asset_check.render_ready();
     if (assets_adopted && lifecycle_controller) {
         assets_adopted = lifecycle_controller->program_ready(
             asset_manifest, hardware_map, project_generation, barrier);
@@ -1450,9 +1554,17 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
     // The label is a view over a literal, which is what this field holds; the
     // row beside it already names which node, so the headline carries the
     // reason alone rather than owning a composed string for one frame.
+    // Next, a node that is connected but failing every frame it draws: it
+    // holds its last picture, so the cohort headline would blame loading.
+    const bool frames_failing = std::any_of(
+        output_nodes.begin(), output_nodes.end(),
+        [](const editor::OutputMonitorState::Node& row) noexcept {
+            return row.frames_failing();
+        });
     output_monitor.cluster.renderer_headline =
         failed_output != output_nodes.end()
         ? editor::output_node_deployment_label(*failed_output)
+        : frames_failing ? std::string_view{"A NODE CANNOT DRAW ITS FRAMES"}
         : director_asset_cohort.digest != 0 && !director_asset_cohort.visible
             ? director_asset_cohort.some_visible
                 ? core::asset_commit_confirmation_expired(last_asset_commit_frame, control_frame.value())
@@ -1745,10 +1857,17 @@ void DirectorShowLoop::observe_timeline_playback(DirectorTick &tick,
         // a source the asset overlay moved - and its numbering in that file.
         for (const scene::MediaInstance &instance :
              tick.stage_scene_frame.media) {
+            // A take's clip is its front plate's: the other plates decode
+            // other files, which the clip's own numbering says nothing of.
+            if (instance.placement != doc::NodeId{} &&
+                instance.stream !=
+                    scene::plate_stream(instance.placement, 0U)) {
+                continue;
+            }
             const auto clip = std::find_if(
                 stage_clips.begin(), stage_clips.end(),
                 [&](const scene::ClipPlacement &candidate) noexcept {
-                    return candidate.node == instance.source_node;
+                    return candidate.node == instance.placed_by();
                 });
             if (clip == stage_clips.end() || instance.offline) {
                 continue;
@@ -2039,7 +2158,7 @@ void DirectorShowLoop::project_asset_viewer(EditorViewInputs &inputs) {
 PhaseExit DirectorShowLoop::project_output_media(DirectorTick &tick) {
     const auto &now = tick.now;
     auto &hardware_map = tick.hardware_map;
-    auto &asset_manifest = tick.asset_manifest;
+    const ProjectAssetManifest &asset_manifest = editor_asset_manifest;
     assets::AssetRegistry &asset_registry = director_asset_registry;
     if (now >= next_output_media_projection) {
         try {
@@ -2111,9 +2230,11 @@ PhaseExit DirectorShowLoop::apply_editor_services(
     }
     if (editor_frame.save_workspace_layout.has_value() &&
         workspace_layout_file.has_value()) {
-        const auto saved_layout = persist::save_workspace_layout(
-            *workspace_layout_file,
-            *editor_frame.save_workspace_layout);
+        const auto saved_layout = [&] {
+            const AuthorityGate::Away filing{authority_gate};
+            return persist::save_workspace_layout(
+                *workspace_layout_file, *editor_frame.save_workspace_layout);
+        }();
         if (!saved_layout) {
             std::cerr
                 << "could not save workspace layout (code "

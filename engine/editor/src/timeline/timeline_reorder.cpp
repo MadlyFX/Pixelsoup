@@ -69,29 +69,9 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
   auto &lane_drop_targets = p.lane_drop_targets;
   lane_drop_targets.reserve(lanes.size());
   for (std::size_t index = 0U; index < rows.size(); ++index) {
-    // A take row stands for its run of tracks, open or closed: a reorder
-    // dropped on it lands in front of the run or behind it, whole. Over an
-    // open row's own tracks, theirs - pushed after it - win.
-    if (rows[index].kind == Row::Kind::PlatesetHeader) {
-      const PlatesetGroup &group = p.built.platesets[rows[index].plateset];
-      const float top = std::max(
-          rows_bounds.y + row_top(rows, index) - row_scroll_, rows_bounds.y);
-      const float bottom =
-          std::min(rows_bounds.y + row_top(rows, rows[index].end) - row_scroll_,
-                   rows_bounds.bottom());
-      if (bottom > top && !group.lanes.empty()) {
-        LaneDropTarget target{
-            group.lanes.front(),
-            gui::Rect{rows_bounds.x, top, rows_bounds.width, bottom - top},
-            rows[index].label, rows[index].locked};
-        target.block = true;
-        target.front = group.lanes.front();
-        target.back = group.lanes.back();
-        lane_drop_targets.push_back(target);
-      }
-      continue;
-    }
-    if (rows[index].kind != Row::Kind::LaneHeader) {
+    // A slot screen is a wall of its car, not a place in the stack: nothing
+    // is reordered against it and no clip is filed on it.
+    if (rows[index].kind != Row::Kind::LaneHeader || rows[index].slot_screen) {
       continue;
     }
     const doc::NodeId lane = rows[index].node;
@@ -107,7 +87,7 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
     if (bottom > top) {
       lane_drop_targets.push_back(LaneDropTarget{
           lane, gui::Rect{rows_bounds.x, top, rows_bounds.width, bottom - top},
-          rows[index].label, rows[index].locked, false, lane, lane});
+          rows[index].label, rows[index].locked, lane, lane});
     }
   }
 
@@ -134,7 +114,7 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
   // will become a child of that track. Keeping these feedback vocabularies
   // separate prevents a reorder from looking like nesting.
   scratch.clip_move_feedback =
-      clip_drag_active && clip_.drag == ClipDrag::Move && !clip_.take;
+      clip_drag_active && clip_.drag == ClipDrag::Move;
   p.clip_drop_hovered = nullptr;
   auto &clip_drop_hovered = p.clip_drop_hovered;
   if (scratch.clip_move_feedback && clip_.drop_lane.has_value() &&
@@ -142,8 +122,7 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
     const auto target = std::find_if(
         lane_drop_targets.begin(), lane_drop_targets.end(),
         [&](const LaneDropTarget &candidate) {
-          return !candidate.locked && !candidate.block &&
-                 candidate.lane == *clip_.drop_lane;
+          return !candidate.locked && candidate.lane == *clip_.drop_lane;
         });
     if (target != lane_drop_targets.end()) {
       clip_drop_hovered = &*target;
@@ -174,14 +153,14 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
         std::optional<doc::NodeId> assignment;
         if (source->kind == ElementKind::Media &&
             rows_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
-          assignment = clip_lane_under_pointer(p, gesture_y);
+          assignment = clip_lane_under_pointer(p, gesture_y, source->take);
           if (assignment.has_value() && *assignment != source->timeline_lane) {
             scratch.layer_assignment_feedback = true;
             if (*assignment != doc::NodeId{}) {
               const auto target = std::find_if(
                   lane_drop_targets.begin(), lane_drop_targets.end(),
                   [&](const LaneDropTarget &candidate) {
-                    return !candidate.locked && !candidate.block &&
+                    return !candidate.locked &&
                            candidate.lane == *assignment;
                   });
               if (target != lane_drop_targets.end()) {
@@ -378,7 +357,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
   // strongly.
   const auto outline_targets = [&](const LaneDropTarget *hovered) {
     for (const LaneDropTarget &target : lane_drop_targets) {
-      if (target.locked || target.block) {
+      if (target.locked) {
         continue;
       }
       const bool under = &target == hovered;
@@ -445,7 +424,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
     const auto band = std::find_if(
         lane_drop_targets.begin(), lane_drop_targets.end(),
         [&](const LaneDropTarget &target) {
-          return !target.block && target.lane == track_.destination;
+          return target.lane == track_.destination;
         });
     if (dragged != stack.end() && destination != stack.end() &&
         band != lane_drop_targets.end()) {

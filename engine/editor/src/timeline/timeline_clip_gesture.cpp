@@ -36,17 +36,8 @@ void TimelinePanel::resolve_clip_gesture(Pass &p) {
   const auto snap_targets = [&](doc::NodeId exclude) {
     std::vector<core::i64> targets{first_i, last_i + 1,
                                    signed_frame(timeline.show_frame)};
-    // The other plates of a take travel with the one dragged, so their ends
-    // are where it already is, not something to snap to.
-    const ElementInfo *const dragged = find_element(elements, exclude);
     for (const ElementInfo &element : elements) {
       if (element.node == exclude || !editable_clip(element)) {
-        continue;
-      }
-      if (dragged != nullptr && dragged->plateset_take != 0 &&
-          element.plateset_take == dragged->plateset_take &&
-          element.timing.start == clip_.origin.start &&
-          element.timing.duration == clip_.origin.duration) {
         continue;
       }
       targets.push_back(element.timing.start);
@@ -86,19 +77,17 @@ void TimelinePanel::resolve_clip_gesture(Pass &p) {
   p.clip_drag_active =
       clip_.drag != ClipDrag::None && clip_.moved;
   auto &clip_drag_active = p.clip_drag_active;
-  // A take's bar changes the take's time only: its plates stay on their
-  // own tracks, in their own places in the stack.
-  if (clip_.drag == ClipDrag::Move && clip_.take) {
-    clip_.drop_lane.reset();
-    clip_landing_.reset();
-  } else if (clip_.drag == ClipDrag::Move) {
-    clip_.drop_lane = clip_drag_active ? clip_lane_under_pointer(p, clip_pointer.y)
-                                       : std::optional<doc::NodeId>{};
+  if (clip_.drag == ClipDrag::Move) {
+    const ElementInfo *const dragged = find_element(elements, clip_.node);
+    clip_.drop_lane =
+        clip_drag_active
+            ? clip_lane_under_pointer(p, clip_pointer.y,
+                                      dragged != nullptr && dragged->take)
+            : std::optional<doc::NodeId>{};
     // Up or down within its own track - or among the loose layers, for a
     // clip on none - the bar is lifted to another place in the stack, as a
     // clip is dragged between video tracks in an editor.
     clip_landing_.reset();
-    const ElementInfo *const dragged = find_element(elements, clip_.node);
     if (clip_drag_active && dragged != nullptr &&
         clip_.drop_lane == std::optional{dragged->timeline_lane}) {
       clip_landing_ =
@@ -405,11 +394,6 @@ void TimelinePanel::resolve_clip_gesture(Pass &p) {
           break;
         }
       }
-      // A take bar that was dragged was not clicked, so the next press on
-      // it starts a gesture of its own rather than completing a double-click.
-      if (clip_.take && clip_.moved) {
-        clicks_.reset();
-      }
       clip_.drag = ClipDrag::None;
       clip_.node = doc::NodeId{};
       clip_.peer = doc::NodeId{};
@@ -420,7 +404,6 @@ void TimelinePanel::resolve_clip_gesture(Pass &p) {
       clip_.moved = false;
       clip_.drop_lane.reset();
       clip_.snap_guide.reset();
-      clip_.take = false;
       clip_landing_.reset();
     }
   }
@@ -489,7 +472,6 @@ TimelinePanel::layer_landing(Pass &p, const ElementInfo &source, float x,
     }
     std::size_t end = index + 1U;
     while (end < rows.size() && rows[end].kind != Row::Kind::LaneHeader &&
-           rows[end].kind != Row::Kind::PlatesetHeader &&
            (rows[end].kind != Row::Kind::Layer ||
             rows[end].indent > row.indent)) {
       ++end;
@@ -705,7 +687,7 @@ void TimelinePanel::resolve_track_gesture(Pass &p) {
 }
 
 std::optional<doc::NodeId>
-TimelinePanel::clip_lane_under_pointer(Pass &p, float pointer_y) {
+TimelinePanel::clip_lane_under_pointer(Pass &p, float pointer_y, bool take) {
   const std::span<const scene::TimelineLane> lanes = p.input.lanes;
   const gui::Rect &rows_bounds = p.layout.rows;
   std::vector<Row> &rows = p.built.rows;
@@ -719,23 +701,24 @@ TimelinePanel::clip_lane_under_pointer(Pass &p, float pointer_y) {
     return std::nullopt;
   }
   const std::optional<std::size_t> row_index = row_at(rows, local);
-  // A take row is the plates' tracks folded up, not a place of its own.
-  if (row_index.has_value() &&
-      rows[*row_index].kind == Row::Kind::PlatesetHeader) {
-    return std::nullopt;
-  }
   const doc::NodeId target =
       row_index.has_value() && rows[*row_index].lane_member
           ? rows[*row_index].lane_owner
           : doc::NodeId{};
   if (target == doc::NodeId{}) {
-    return target;
+    // A take plays on a car's screens: off every track it has nowhere to.
+    return take ? std::nullopt : std::optional<doc::NodeId>{target};
   }
   const auto lane = std::find_if(
       lanes.begin(), lanes.end(), [&](const scene::TimelineLane &candidate) {
         return !candidate.implicit && candidate.id == target;
       });
   if (lane == lanes.end() || lane->locked) {
+    return std::nullopt;
+  }
+  // A take goes on a vehicle track and nothing else does; a slot screen
+  // shows its car's take and holds no clip of its own.
+  if (lane->parent != doc::NodeId{} || lane->vehicle != take) {
     return std::nullopt;
   }
   return target;

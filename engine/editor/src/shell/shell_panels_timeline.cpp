@@ -70,7 +70,6 @@ void EditorShell::Frame::draw_timeline_panel(const gui::Rect &bounds) {
           .filmstrips = filmstrips,
           .markers = timeline_markers,
           .moments = timeline_moments,
-          .platesets = timeline_platesets,
       });
   result.filmstrip_requests = timeline_frame.filmstrip_requests;
   route_marker_edits(timeline_frame.marker_edits);
@@ -154,11 +153,7 @@ void EditorShell::Frame::draw_timeline_panel(const gui::Rect &bounds) {
       impl.stage_surface_selection.reset();
       switch (request.action) {
       case SelectionAction::Replace:
-        if (request.members.empty()) {
-          impl.select_only(request.node);
-        } else {
-          impl.select_set(request.members, request.node);
-        }
+        impl.select_only(request.node);
         break;
       case SelectionAction::Toggle:
         impl.toggle(request.node);
@@ -213,31 +208,6 @@ void EditorShell::Frame::draw_timeline_panel(const gui::Rect &bounds) {
     for (const TimelineClipEdit &edit : timeline_frame.clip_edits) {
       result.clip_timings.push_back(ClipTimingEdit{
           edit.clip, edit.timing, impl.clip_edit_gesture, edit.lane});
-      // The other plates of a take move, trim and fade with this one:
-      // the same change to start, length and source in, the same ramps.
-      const ElementInfo *const edited = find_element(elements, edit.clip);
-      if (edited == nullptr) {
-        continue;
-      }
-      for (const ElementInfo *const plate : take_siblings(*edited)) {
-        if (std::any_of(timeline_frame.clip_edits.begin(),
-                        timeline_frame.clip_edits.end(),
-                        [plate](const TimelineClipEdit &other) {
-                          return other.clip == plate->node;
-                        })) {
-          continue;
-        }
-        scene::ClipTiming timing = plate->timing;
-        timing.start += edit.timing.start - edited->timing.start;
-        timing.duration = edit.timing.duration;
-        timing.source_in = std::max<core::i64>(
-            0, timing.source_in + edit.timing.source_in -
-                   edited->timing.source_in);
-        timing.fade_in = edit.timing.fade_in;
-        timing.fade_out = edit.timing.fade_out;
-        result.clip_timings.push_back(ClipTimingEdit{
-            plate->node, timing, impl.clip_edit_gesture, std::nullopt});
-      }
     }
   }
   // A clip or track bar dragged to a new time and a new place in the
@@ -258,19 +228,6 @@ void EditorShell::Frame::draw_timeline_panel(const gui::Rect &bounds) {
     for (const TimelineClipSplit &split : timeline_frame.clip_splits) {
       result.clip_splits.push_back(
           ClipSplitIntent{split.clip, split.frame, gesture});
-      // A razor through one plate cuts its whole take.
-      if (const ElementInfo *const cut = find_element(elements, split.clip)) {
-        for (const ElementInfo *const plate : take_siblings(*cut)) {
-          if (std::none_of(timeline_frame.clip_splits.begin(),
-                           timeline_frame.clip_splits.end(),
-                           [plate](const TimelineClipSplit &other) {
-                             return other.clip == plate->node;
-                           })) {
-            result.clip_splits.push_back(
-                ClipSplitIntent{plate->node, split.frame, gesture});
-          }
-        }
-      }
     }
   }
   for (const TimelineRename &rename : timeline_frame.renames) {
@@ -339,18 +296,6 @@ void EditorShell::Frame::draw_timeline_panel(const gui::Rect &bounds) {
       result.timeline_edits.push_back(TimelineEditIntent{
           authored_stage.id, request, show_rate, timeline.show_frame,
           transaction});
-      // A slip of one plate slips its take.
-      if (const auto *const slip = std::get_if<TimelineSlipRequest>(&request)) {
-        if (const ElementInfo *const slipped =
-                find_element(elements, slip->clip)) {
-          for (const ElementInfo *const plate : take_siblings(*slipped)) {
-            result.timeline_edits.push_back(TimelineEditIntent{
-                authored_stage.id,
-                TimelineSlipRequest{plate->node, slip->delta}, show_rate,
-                timeline.show_frame, transaction});
-          }
-        }
-      }
     }
     impl.history_context = HistoryContext::Scene;
   }

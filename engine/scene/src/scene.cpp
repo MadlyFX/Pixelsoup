@@ -559,7 +559,7 @@ void mix(core::u64& state, const LayerStyle& value) noexcept {
     }
     mix(state, static_cast<core::u64>(value.effects.blur_enabled));
     mix(state, value.effects.blur_radius);
-    if (!value.effects.inline_operations.empty()) {
+    {
         mix(state, static_cast<core::u64>(
                        value.effects.inline_operations.size()));
         for (const InlineEffectOperation& operation :
@@ -583,7 +583,7 @@ void mix(core::u64& state, const LayerStyle& value) noexcept {
             }
         }
     }
-    if (!value.effects.spatial_operations.empty()) {
+    {
         mix(state, static_cast<core::u64>(
                        value.effects.spatial_operations.size()));
         for (const SpatialEffectOperation& operation :
@@ -608,12 +608,11 @@ void mix(core::u64& state, const Camera& value) noexcept {
     mix(state, value.target);
     mix(state, value.up);
     mix(state, value.field_of_view);
-    // Conditional so every existing turn-based camera retains its historical
-    // digest. Once authored, all calibration data participates because it
-    // changes the tracked projection and entrance-pupil position.
+    // All calibration data participates because it changes the tracked
+    // projection and entrance-pupil position.
+    mix(state, static_cast<core::u64>(value.lens_profile.has_value()));
     if (value.lens_profile.has_value()) {
         const LensProfile profile = clamped(*value.lens_profile);
-        mix(state, 0x4C45'4E53'5052'4F46ULL); // "LENSPROF"
         mix(state, profile.sensor_width_mm);
         mix(state, profile.sensor_height_mm);
         mix(state, profile.focal_length_mm);
@@ -644,12 +643,8 @@ void mix(core::u64& state, const Camera& value) noexcept {
     mix(state, value.shutter_seconds);
     mix(state, value.iso);
     mix(state, value.exposure_compensation_ev);
-    // Conditional, like the lens profile, so every perspective camera keeps
-    // its historical digest.
-    if (orthographic(value)) {
-        mix(state, 0x4F52'5448'4F47'5241ULL); // "ORTHOGRA"
-        mix(state, value.orthographic_height);
-    }
+    mix(state, static_cast<core::u64>(orthographic(value)));
+    mix(state, value.orthographic_height);
 }
 
 void mix(core::u64& state, const TrackedCamera& value) noexcept {
@@ -801,62 +796,55 @@ const CanvasRect* Scene::slice_for(core::u32 node_index) const noexcept {
     return nullptr;
 }
 
+AmbientFill ambient_fill(const Scene& scene) noexcept {
+    const auto& environment = scene.environment;
+    const bool lit =
+        !scene.directional_lights.empty() || !scene.point_lights.empty();
+    if (lit && !environment.fill_with_lights) {
+        return {};
+    }
+    return {environment.fill_sky_color, environment.ground_color,
+            environment.ambient};
+}
+
 core::u64 digest(const Scene& scene) noexcept {
     auto state = core::fnv1a_offset;
     if (!scene.wall_colors.empty()) mix(state, asset_set_digest(scene));
 
     mix(state, scene.id.value());
-    if (scene.document_version.value() != 0U) {
-        mix(state, 0x444F'4356'4552'7631ULL); // "DOCVERv1"
-        mix(state, scene.document_version.value());
-    }
+    mix(state, scene.document_version.value());
     mix(state, scene.show_frame);
-    if (scene.temporal_document_digest) {
-        mix(state, 0x54454D50444F4301ULL);
-        mix(state, *scene.temporal_document_digest);
-    }
+    mix(state, static_cast<core::u64>(scene.temporal_document_digest.has_value()));
+    mix(state, scene.temporal_document_digest.value_or(0U));
     mix(state, static_cast<core::u64>(scene.canvas.width));
     mix(state, static_cast<core::u64>(scene.canvas.height));
     mix(state, scene.camera);
-    // Preserve historical hand-built scene digests while making an authored
-    // camera cut part of replicated scene identity.
-    if (scene.camera_source.value() != 0U) {
-        mix(state, 0x4341'4D45'5241'4944ULL); // "CAMERAID"
-        mix(state, scene.camera_source.value());
-    }
-    // Conditional, so a project that binds no camera digests exactly as it did
-    // before the inner frustum existed. Once cameras are bound the whole stack
-    // participates - which camera, which feed, how each plate is drawn, in the
-    // order they are composited - because all of it decides the picture and
-    // two nodes have to agree on every part of it.
+    mix(state, scene.camera_source.value());
+    // The whole tracked stack participates - which camera, which feed, how
+    // each plate is drawn, in the order they are composited - because all of
+    // it decides the picture and two nodes have to agree on every part of it.
     //
     // The order matters as much as the contents: two nodes that composited the
     // same plates in different orders would disagree wherever two overlap, so
     // the sequence is digested as a sequence rather than as a set.
-    if (!scene.tracked_cameras.empty()) {
-        mix(state, 0x5452'4B53'5441'434BULL); // "TRKSTACK"
-        mix(state, static_cast<core::u64>(scene.tracked_cameras.size()));
-        for (const TrackedCameraView& view : scene.tracked_cameras) {
-            mix(state, view.camera.value());
-            mix(state, view.source.value());
-            mix(state, view.authored);
-            mix(state, view.icvfx);
-            if (view.pose.valid) {
-                mix(state, 0x5452'4143'4B43'414DULL); // "TRACKCAM"
-                mix(state, view.pose);
-                // Encoders alter the image only when a calibrated lens exists.
-                // Keeping this conditional means a tracked turn-based camera
-                // digests without them while any lens disagreement is still
-                // caught.
-                if (view.authored.lens_profile.has_value()) {
-                    mix(state, 0x4C45'4E53'454E'434FULL); // "LENSENCO"
-                    mix(state, view.encoders);
-                }
+    mix(state, static_cast<core::u64>(scene.tracked_cameras.size()));
+    for (const TrackedCameraView& view : scene.tracked_cameras) {
+        mix(state, view.camera.value());
+        mix(state, view.source.value());
+        mix(state, view.authored);
+        mix(state, view.icvfx);
+        // An invalid pose draws the authored camera, and encoders move the
+        // image only through a calibrated lens; neither feeds the picture
+        // otherwise.
+        mix(state, static_cast<core::u64>(view.pose.valid));
+        if (view.pose.valid) {
+            mix(state, view.pose);
+            if (view.authored.lens_profile.has_value()) {
+                mix(state, view.encoders);
             }
         }
     }
-    if (scene.environment.baked != BakedLighting{}) {
-        mix(state, core::u64{0x42414b4544474931ULL});
+    {
         mix(state, static_cast<core::u64>(scene.environment.baked.enabled));
         mix(state, scene.environment.baked.minimum.x);
         mix(state, scene.environment.baked.minimum.y);
@@ -872,9 +860,8 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, scene.environment.baked.strength);
         mix(state, scene.environment.baked.source);
         mix(state, scene.environment.baked.content);
-        if (!scene.environment.baked.input_revision.empty()) mix(state, scene.environment.baked.input_revision);
+        mix(state, scene.environment.baked.input_revision);
         for (const auto& probe : scene.environment.baked.reflections) {
-            if (probe == ReflectionProbe{}) continue;
             mix(state, probe.source.value());
             mix(state, static_cast<core::u64>(probe.enabled));
             mix(state, static_cast<core::u64>(probe.sphere));
@@ -882,27 +869,25 @@ core::u64 digest(const Scene& scene) noexcept {
             mix(state, probe.blend); mix(state, probe.intensity);
         }
     }
-    if (scene.environment.planar != PlanarReflection{}) {
+    {
         const auto& p = scene.environment.planar;
-        mix(state, core::u64{0x504c414e4152});
         mix(state, static_cast<core::u64>(p.enabled)); mix(state, p.receiver.value());
         mix(state, p.point); mix(state, p.normal); mix(state, p.strength);
     }
-    if (scene.asset_refresh_generation != 0) { mix(state, core::u64{0x415353455447454eULL}); mix(state, scene.asset_refresh_generation); }
-    if (scene.asset_commit.digest != 0) {
-        mix(state, scene.asset_commit.digest);
-        mix(state, scene.asset_commit.control_frame);
-        mix(state, scene.asset_commit.show_frame);
-    }
+    mix(state, scene.asset_refresh_generation);
+    mix(state, scene.asset_commit.digest);
+    mix(state, scene.asset_commit.control_frame);
+    mix(state, scene.asset_commit.show_frame);
     mix(state, scene.environment.sky_color);
+    mix(state, scene.environment.fill_sky_color);
     mix(state, scene.environment.ground_color);
     mix(state, scene.environment.ambient);
+    mix(state, static_cast<core::u64>(scene.environment.fill_with_lights));
     mix(state, scene.environment.map_source);
     mix(state, scene.environment.map_intensity);
     mix(state, scene.environment.map_rotation);
-    if (scene.environment.physical_sky != PhysicalSky{}) {
+    {
         const auto& sky = scene.environment.physical_sky;
-        mix(state, core::u64{0x504859534b593031ULL});
         mix(state, static_cast<core::u64>(sky.enabled));
         mix(state, sky.time_of_day); mix(state, sky.latitude);
         mix(state, sky.north_rotation); mix(state, sky.haze);
@@ -912,27 +897,13 @@ core::u64 digest(const Scene& scene) noexcept {
     mix(state, scene.environment.fog_density);
     mix(state, scene.environment.fog_color);
     mix(state, scene.environment.fog_anisotropy);
-    // Conditional so a scene that authored uniform air digests exactly as it
-    // did before height falloff existed.
-    if (scene.environment.fog_height != 0.0F
-        || scene.environment.fog_height_falloff != 0.0F) {
-        mix(state, core::u64{0x464F'4748'4549'4748ULL}); // "FOGHEIGH"
-        mix(state, scene.environment.fog_height);
-        mix(state, scene.environment.fog_height_falloff);
-    }
-    if (scene.environment.fog_background_distance != 0.0F) {
-        mix(state, core::u64{0x464F'4742'4744'4953ULL}); // "FOGBGDIS"
-        mix(state, scene.environment.fog_background_distance);
-    }
+    mix(state, scene.environment.fog_height);
+    mix(state, scene.environment.fog_height_falloff);
+    mix(state, scene.environment.fog_background_distance);
 
-    // Keep the historical digest of a group-free scene stable. Once hierarchy
-    // exists, every authored/effective group value participates so checkpoint
-    // and streamed projections compare the same complete carrier.
-    if (!scene.groups.empty() || !scene.group_diagnostics.empty()) {
-        // Domain marker: the conditional extension preserves old group-free
-        // digests without making an invalid-hierarchy payload ambiguous with
-        // the next legacy vector count.
-        mix(state, core::u64{0x4752'4F55'5053'7631ULL}); // "GROUPSv1"
+    // Every authored/effective group value participates so checkpoint and
+    // streamed projections compare the same complete carrier.
+    {
         mix(state, static_cast<core::u64>(scene.groups.size()));
         for (const SceneGroup& group : scene.groups) {
             mix(state, group.node.value());
@@ -954,12 +925,7 @@ core::u64 digest(const Scene& scene) noexcept {
             mix(state, static_cast<core::u64>(group.visible));
             mix(state, static_cast<core::u64>(group.effective_locked));
             mix(state, static_cast<core::u64>(group.effective_visible));
-            // Conditional, so a folder digests exactly as it did before
-            // groups had a kind.
-            if (group.kind != GroupKind::Folder) {
-                mix(state, core::u64{0x4B49'4E44ULL}); // "KIND"
-                mix(state, static_cast<core::u64>(group.kind));
-            }
+            mix(state, static_cast<core::u64>(group.kind));
         }
         mix(state,
             static_cast<core::u64>(scene.group_diagnostics.size()));
@@ -971,10 +937,7 @@ core::u64 digest(const Scene& scene) noexcept {
         }
     }
 
-    // Screens extend the digest only when a document has tracks, keeping the
-    // digest of every project authored before they existed exactly as it was.
-    if (!scene.screens.empty()) {
-        mix(state, core::u64{0x5343'5245'454E'7631ULL}); // "SCREENv1"
+    {
         mix(state, static_cast<core::u64>(scene.screens.size()));
         for (const SceneScreen& screen : scene.screens) {
             mix(state, screen.node.value());
@@ -992,9 +955,7 @@ core::u64 digest(const Scene& scene) noexcept {
         }
     }
 
-    if (!scene.masks.empty() || !scene.mask_programs.empty()
-        || !scene.mask_diagnostics.empty()) {
-        mix(state, core::u64{0x4D41'534B'5376'3031ULL}); // "MASKSv01"
+    {
         mix(state, static_cast<core::u64>(scene.masks.size()));
         for (const MaskInstance& mask : scene.masks) {
             mix(state, mask);
@@ -1028,17 +989,11 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, instance.material);
         mix(state, instance.source.value());
         mix(state, instance.style);
-        if (!instance.bake_static) mix(state, core::u64{0x42414b454f4646ULL});
+        mix(state, static_cast<core::u64>(instance.bake_static));
         mix(state, static_cast<core::u64>(instance.locked));
-        if (instance.parent_group.has_value()
-            || instance.group_order != 0) {
-            mix(state, static_cast<core::u64>(
-                           instance.parent_group.has_value()));
-            if (instance.parent_group.has_value()) {
-                mix(state, instance.parent_group->value());
-            }
-            mix(state, static_cast<core::u64>(instance.group_order));
-        }
+        mix(state, static_cast<core::u64>(instance.parent_group.has_value()));
+        mix(state, instance.parent_group.value_or(doc::NodeId{}).value());
+        mix(state, static_cast<core::u64>(instance.group_order));
     }
 
     mix(state, static_cast<core::u64>(scene.media.size()));
@@ -1055,14 +1010,9 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, clip.compositing_order);
         mix(state, clip.style);
         mix(state, static_cast<core::u64>(clip.locked));
-        if (clip.parent_group.has_value() || clip.group_order != 0) {
-            mix(state, static_cast<core::u64>(
-                           clip.parent_group.has_value()));
-            if (clip.parent_group.has_value()) {
-                mix(state, clip.parent_group->value());
-            }
-            mix(state, static_cast<core::u64>(clip.group_order));
-        }
+        mix(state, static_cast<core::u64>(clip.parent_group.has_value()));
+        mix(state, clip.parent_group.value_or(doc::NodeId{}).value());
+        mix(state, static_cast<core::u64>(clip.group_order));
     }
 
     mix(state, static_cast<core::u64>(scene.models.size()));
@@ -1071,37 +1021,24 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, model.normal);
         mix(state, model.source);
         mix(state, model.source_node.value());
-        if (model.motion_source.value()) mix(state, model.motion_source.value());
+        mix(state, model.motion_source.value());
         mix(state, model.material);
-        if (model.material_override_mask) {
-            mix(state, core::u64{0x4c494e4b4d4154ULL});
-            mix(state, static_cast<core::u64>(model.material_override_mask));
-        }
+        mix(state, static_cast<core::u64>(model.material_override_mask));
         mix(state, model.style);
-        if (!model.bake_static) mix(state, core::u64{0x42414b454f4646ULL});
-        if (model.animation != ModelAnimation{}) {
-            mix(state,core::u64{0x414e494d415445ULL});
-            mix(state,static_cast<core::u64>(model.animation.enabled));
-            mix(state,static_cast<core::u64>(model.animation.clip));
-            mix(state,static_cast<core::u64>(model.animation.loop));
-            mix(state,model.animation.start_frame); mix(state,model.animation.wind);
-            mix(state,static_cast<core::u64>(model.animation.wind_period_frames));
-        }
+        mix(state, static_cast<core::u64>(model.bake_static));
+        mix(state, static_cast<core::u64>(model.animation.enabled));
+        mix(state, static_cast<core::u64>(model.animation.clip));
+        mix(state, static_cast<core::u64>(model.animation.loop));
+        mix(state, model.animation.start_frame);
+        mix(state, model.animation.wind);
+        mix(state, static_cast<core::u64>(model.animation.wind_period_frames));
         mix(state, static_cast<core::u64>(model.locked));
-        if (model.parent_group.has_value() || model.group_order != 0) {
-            mix(state, static_cast<core::u64>(
-                           model.parent_group.has_value()));
-            if (model.parent_group.has_value()) {
-                mix(state, model.parent_group->value());
-            }
-            mix(state, static_cast<core::u64>(model.group_order));
-        }
+        mix(state, static_cast<core::u64>(model.parent_group.has_value()));
+        mix(state, model.parent_group.value_or(doc::NodeId{}).value());
+        mix(state, static_cast<core::u64>(model.group_order));
     }
 
-    // Tagged and mixed only when present, so scenes without particles keep
-    // the digest they had before particles existed.
-    if (!scene.particle_effects.empty()) {
-        mix(state, core::u64{0x5041525449434c45ULL});
+    {
         mix(state, static_cast<core::u64>(scene.particle_effects.size()));
         for (const auto& effect : scene.particle_effects) {
             mix(state, effect.world);
@@ -1180,7 +1117,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, light.color);
         mix(state, light.intensity);
         mix(state, light.source.value());
-        if (!light.bake_indirect) mix(state, core::u64{0x42414b454f4646ULL});
+        mix(state, static_cast<core::u64>(light.bake_indirect));
         mix(state, static_cast<core::u64>(light.locked));
         mix(state, static_cast<core::u64>(light.unit));
         mix(state, light.angular_radius);
@@ -1197,7 +1134,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, light.intensity);
         mix(state, light.range);
         mix(state, light.source.value());
-        if (!light.bake_indirect) mix(state, core::u64{0x42414b454f4646ULL});
+        mix(state, static_cast<core::u64>(light.bake_indirect));
         mix(state, static_cast<core::u64>(light.locked));
         mix(state, static_cast<core::u64>(light.kind));
         mix(state, static_cast<core::u64>(light.unit));
@@ -1230,8 +1167,7 @@ core::u64 digest(const Scene& scene) noexcept {
     mix(state, scene.effect_settings.brightness_gamma);
     mix(state, scene.effect_settings.graph_texture_budget_gb);
 
-    if (scene.renderer_settings != RendererSettings{}) {
-        mix(state, core::u64{0x5245'4E44'4552'7631ULL}); // "RENDERv1"
+    {
         mix(state, static_cast<core::u64>(scene.renderer_settings.backend));
         mix(state, static_cast<core::u64>(scene.renderer_settings.required));
         mix(state, static_cast<core::u64>(scene.renderer_settings.quality));
@@ -1259,8 +1195,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, scene.renderer_settings.occlusion_radius);
         mix(state, scene.renderer_settings.occlusion_strength);
         mix(state, scene.renderer_settings.bloom_strength);
-        if (scene.renderer_settings.photometric_scale != RendererSettings{}.photometric_scale)
-            mix(state, scene.renderer_settings.photometric_scale);
+        mix(state, scene.renderer_settings.photometric_scale);
         mix(state, static_cast<core::u64>(
                        scene.renderer_settings.taa_sequence_length));
         mix(state, static_cast<core::u64>(
@@ -1276,29 +1211,20 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, static_cast<core::u64>(
                        scene.renderer_settings.shadow_cascades));
         mix(state, scene.renderer_settings.gi_strength);
-    if (!scene.renderer_settings.frustum_culling || !scene.renderer_settings.geometry_instancing || !scene.renderer_settings.model_lod) {
-        mix(state, core::u64{0x42414b4544474931ULL});
-    mix(state, core::u64{0x4745'4F4D'4554'5259ULL});
         mix(state, static_cast<core::u64>(scene.renderer_settings.frustum_culling));
         mix(state, static_cast<core::u64>(scene.renderer_settings.geometry_instancing));
         mix(state, static_cast<core::u64>(scene.renderer_settings.model_lod));
-    }
         mix(state, static_cast<core::u64>(scene.renderer_settings.texture_streaming));
         mix(state, static_cast<core::u64>(scene.renderer_settings.texture_budget_mib));
-        if (scene.renderer_settings.frame_budget_us != 0U) {
-            mix(state, 0x425544474554ULL);
-            mix(state, static_cast<core::u64>(scene.renderer_settings.frame_budget_us));
-        }
+        mix(state, static_cast<core::u64>(scene.renderer_settings.frame_budget_us));
         mix(state, static_cast<core::u64>(scene.renderer_settings.texture_mip_bias));
-        mix(state, core::u64{0x5341'4D50'4C45'0001ULL}); // Sampling contract v1.
-    mix(state, core::u64{0x5445'4D50'4F52'0002ULL}); // Depth-aware temporal contract v2.
         mix(state, static_cast<core::u64>(scene.renderer_settings.texture_anisotropy));
         mix(state, scene.renderer_settings.texture_lod_bias);
-        // Conditional, like the profile digest: a project that never touched
-        // colour keeps the digest it had before the output stage was authored.
-        if (scene.renderer_settings.color != ColorSettings{}) {
-            mix_color(state, scene.renderer_settings.color);
-        }
+        mix_color(state, scene.renderer_settings.color);
+        // The profile digest covers the rest of the authored policy - the
+        // tracked-camera prediction and plate defaults among it - so a field
+        // added there cannot be left out of replicated scene identity.
+        mix(state, renderer_settings_digest(scene.renderer_settings));
     }
 
     return state;
@@ -1735,10 +1661,7 @@ core::u64 renderer_settings_digest(const RendererSettings& source) noexcept {
     mix(state, core::u64{0x5445'584D'4950'3031ULL});
     mix(state, static_cast<core::u64>(value.texture_streaming));
     mix(state, static_cast<core::u64>(value.texture_budget_mib));
-    if (value.frame_budget_us != 0U) {
-        mix(state, 0x425544474554ULL);
-        mix(state, static_cast<core::u64>(value.frame_budget_us));
-    }
+    mix(state, static_cast<core::u64>(value.frame_budget_us));
     mix(state, static_cast<core::u64>(value.texture_mip_bias));
     mix(state, core::u64{0x5341'4D50'4C45'0001ULL}); // Sampling contract v1.
     mix(state, core::u64{0x5445'4D50'4F52'0002ULL}); // Depth-aware temporal contract v2.
@@ -1762,13 +1685,10 @@ core::u64 renderer_settings_digest(const RendererSettings& source) noexcept {
         // for a different picture than one gathered under another.
         mix(state, value.icvfx.camera_defaults);
     }
-    // Colour joins the profile once anything about it is authored, for the
-    // same reason as the inner frustum above: a node that gathered evidence
-    // under one display transform answered for a different picture than one
-    // under another - and until then the profile digest is unchanged.
-    if (value.color != ColorSettings{}) {
-        mix_color(state, value.color);
-    }
+    // Colour is in the profile for the same reason as the inner frustum
+    // above: a node that gathered evidence under one display transform
+    // answered for a different picture than one under another.
+    mix_color(state, value.color);
     return state;
 }
 
@@ -2379,6 +2299,18 @@ double particle_parameter_at(const ParticleParameter& parameter, core::i64 frame
         }
     }
     return parameter.base;
+}
+
+core::u64 plate_stream(doc::NodeId clip, core::u8 slot) noexcept {
+    // SplitMix64 over the take and the slot: integer-only, so every machine
+    // derives the same identity, and spread so it does not land on the node
+    // id an ordinary clip of the same file is known by.
+    core::u64 x = clip.value() * 0x9e3779b97f4a7c15ULL
+        + (static_cast<core::u64>(slot) + 1U) * 0xd6e8feb86659fd93ULL;
+    x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+    x ^= x >> 31U;
+    return x != 0U ? x : 1U;
 }
 
 core::u32 particle_instance_seed(const ParticleEffect& effect) noexcept {

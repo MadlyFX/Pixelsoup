@@ -32,6 +32,12 @@ add_library(mediaserver_editor STATIC
     src/viewport/viewport_pointer.cpp
     src/viewport/viewport_chrome.cpp
     src/viewport/viewport_masks.cpp
+    src/viewport/viewport_canvas.cpp
+    src/viewport/viewport_layout.cpp
+    src/canvas_snap.cpp
+    src/canvas_tool.cpp
+    src/transform_box.cpp
+    src/fill_handles.cpp
     src/gizmo.cpp
     src/model_surface_cache.cpp
     src/stage_placement.cpp
@@ -249,6 +255,21 @@ if(BUILD_TESTING)
         TIMEOUT 30 RUN_SERIAL TRUE)
     set_target_properties(mediaserver_editor_shell_transform_tests PROPERTIES FOLDER "tests")
 
+    # The Program view's box, options bar and tool keys through the real
+    # shell and window.
+    add_executable(mediaserver_editor_shell_program_canvas_tests
+        tests/editor_shell_program_canvas_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_shell_program_canvas_tests
+        PRIVATE MediaServer::Editor SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_editor_shell_program_canvas_tests)
+    add_test(NAME mediaserver.editor_shell_program_canvas
+        COMMAND mediaserver_editor_shell_program_canvas_tests)
+    set_tests_properties(mediaserver.editor_shell_program_canvas PROPERTIES
+        TIMEOUT 30 RUN_SERIAL TRUE)
+    set_target_properties(mediaserver_editor_shell_program_canvas_tests PROPERTIES FOLDER "tests")
+
     add_executable(mediaserver_editor_workspace_layout_tests
         tests/workspace_layout_tests.cpp
     )
@@ -387,6 +408,22 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_measurement_tests
     )
     set_target_properties(mediaserver_editor_measurement_tests PROPERTIES FOLDER "tests")
+
+    # The Program view as a 2D canvas: its tools, its zoom and pan, and the
+    # transform box round the selected layer.
+    add_executable(mediaserver_editor_program_canvas_tests
+        tests/program_canvas_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_program_canvas_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_program_canvas_tests)
+    add_test(
+        NAME mediaserver.editor_program_canvas
+        COMMAND mediaserver_editor_program_canvas_tests
+    )
+    set_target_properties(mediaserver_editor_program_canvas_tests PROPERTIES FOLDER "tests")
 
     # The transform gizmo's own geometry: where its axes project, which
     # handle a pointer is on, and which half of a ring faces the camera.

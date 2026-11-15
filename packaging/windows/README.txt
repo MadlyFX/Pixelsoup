@@ -114,6 +114,14 @@ REQUIREMENTS / LIMITATIONS
 - This package is unsigned. Windows SmartScreen may show an Unknown Publisher
   warning on machines that have not seen the executable before.
 
+CRASH AND HANG REPORTS
+
+media-server.pdb and media-bake.pdb are the debug symbols for exactly these
+executables. Keep them with the folder: a dump file (Task Manager > Details >
+right-click media-server.exe > Create memory dump file) can only be read
+against the symbols of the build that wrote it. Send the dump together with
+the logs from %LOCALAPPDATA%\MediaServer\logs.
+
 For the complete command-line reference:
 
   .\media-server.exe --help

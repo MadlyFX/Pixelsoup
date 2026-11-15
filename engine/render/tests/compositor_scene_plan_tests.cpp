@@ -368,6 +368,58 @@ void led_car_process_accepts_unpopulated_plate_sockets() {
     PLAN_CHECK(built.value().layers[1U].scene_node == doc::NodeId{108U});
 }
 
+// A vehicle take's plates are drawn as their slot screens: each plate's
+// source_node is the screen itself, so a screen's Scene Layer meets its own
+// track id twice. That is one layer owning one source, not two layers
+// competing for it, and the rig must plan.
+void a_slot_screen_layer_owns_a_plate_drawn_as_the_screen() {
+    std::vector<doc::Node> nodes{
+        node(60U, scene::schema::timeline_lane_type),
+        layer(10U, 60U),
+        node(68U, scene::schema::timeline_lane_type),
+        layer(18U, 68U),
+        node(30U, schema::led_car_process_type),
+        node(31U, schema::output_type),
+        edge(40U, 10U, 0U, 30U, 0U),
+        edge(48U, 18U, 0U, 30U, 8U),
+        edge(51U, 30U, 0U, 31U, 0U),
+    };
+    const auto graph = graph_of(nodes);
+    PLAN_CHECK(graph.valid());
+
+    scene::Scene source{};
+    for (const core::u64 id : {60U, 68U}) {
+        scene::SceneScreen screen{};
+        screen.node = doc::NodeId{id};
+        screen.world = scene::identity();
+        source.screens.push_back(screen);
+        scene::MediaInstance plate{};
+        plate.source_node = screen.node;
+        plate.placement = doc::NodeId{500U};
+        plate.timeline_lane = screen.node;
+        plate.world = screen.world;
+        plate.normal = scene::identity();
+        source.media.push_back(plate);
+    }
+    const auto built = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(built.has_value());
+    PLAN_CHECK(built.value().layers.size() == 2U);
+    PLAN_CHECK(built.value().layers[0U].scene_node == doc::NodeId{60U});
+    PLAN_CHECK(built.value().layers[0U].scene_nodes ==
+               std::vector<doc::NodeId>{doc::NodeId{60U}});
+    PLAN_CHECK(built.value().layers[1U].scene_node == doc::NodeId{68U});
+    PLAN_CHECK(built.value().layers[1U].scene_nodes ==
+               std::vector<doc::NodeId>{doc::NodeId{68U}});
+
+    // Two layers claiming one drawable still cannot plan: the ceiling
+    // screen's plate drawn as the front screen belongs to the front layer.
+    source.media.back().source_node = doc::NodeId{60U};
+    const auto contested = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(!contested.has_value());
+    PLAN_CHECK(contested.error() ==
+               render::CompositorScenePlanError::UnsupportedTopology);
+}
+
 void output_can_explicitly_replace_the_whole_scene() {
     auto nodes = flat_graph_nodes();
     nodes[8U].properties.emplace(std::string{schema::replace_scene},
@@ -1449,7 +1501,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 36U> cases{{
+constexpr std::array<Case, 37U> cases{{
     {"a Matte takes a Scene Layer or a Background as its matte",
      &a_matte_takes_a_scene_layer_or_a_background_as_its_matte},
     {"a Merge lands its layers on its base as one image",
@@ -1470,6 +1522,8 @@ constexpr std::array<Case, 36U> cases{{
      &led_car_process_arranges_nine_additive_plate_layers},
     {"LED car process accepts unpopulated plate sockets",
      &led_car_process_accepts_unpopulated_plate_sockets},
+    {"A slot screen layer owns a plate drawn as the screen",
+     &a_slot_screen_layer_owns_a_plate_drawn_as_the_screen},
     {"Output can explicitly replace the whole scene",
      &output_can_explicitly_replace_the_whole_scene},
     {"a nested Composite lands as one image",

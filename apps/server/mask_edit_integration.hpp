@@ -26,4 +26,11 @@ using MaskEditIntegrationResult = core::Result<
     const doc::Root& document, const editor::MaskEditIntent& edit,
     core::u64 next_node);
 
+// A shape drawn on bare picture: `card`, a new element not yet in `document`,
+// and the mask it is born with as one replacement document, so the card and
+// its shape arrive, and undo, together. The plan's `mask` is the new mask.
+[[nodiscard]] MaskEditIntegrationResult plan_shape_card(
+    const doc::Root& document, doc::Node card, scene::SceneId scene,
+    scene::MaskShape mask, core::u64 next_node);
+
 } // namespace mediaserver::app

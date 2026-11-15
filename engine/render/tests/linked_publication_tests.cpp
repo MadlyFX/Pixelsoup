@@ -50,7 +50,10 @@ int main(int argc,char** argv) {
                << " \"Linked prop\" \"\" " << std::quoted(uuid(2)) << " \"\" \"origin\" 1 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\n"; }
         auto ingested=render::ingest_linked_scene((run/"scene.mslink").string()); check(ingested.diagnostic.empty(),ingested.diagnostic);
         doc::Root root; root=root.set(stage(10,"Program")).set(stage(20,"Blender Preview"));
-        root=root.set({doc::NodeId{21},std::string{ss::camera_type},{{"scene_id",core::i64{20}},{"eye_z",5.0},{"eye_y",1.5},{"target_y",0.0}}});
+        scene::Camera aim{}; aim.eye=scene::Vec3{0.0F,1.5F,5.0F}; aim.target=scene::Vec3{0.0F,0.0F,-1.0F};
+        const scene::Vec3 turns=scene::camera_rotation(aim);
+        root=root.set({doc::NodeId{21},std::string{ss::camera_type},{{"scene_id",core::i64{20}},{"position_y",1.5},{"position_z",5.0},
+            {"rotation_yaw",(static_cast<double>(turns.x)+0.0)},{"rotation_pitch",(static_cast<double>(turns.y)+0.0)},{"rotation_roll",(static_cast<double>(turns.z)+0.0)}}});
         root=root.set(show::make_switcher_node({doc::NodeId{10},doc::NodeId{20},doc::NodeId{10},doc::NodeId{10},{},0}));
         auto planned=render::plan_linked_manifest(root,ingested.manifest,doc::NodeId{20}); check(bool(planned),"link Preview"); root=planned.value();
         const auto initial=root;

@@ -712,6 +712,10 @@ void CommandList::end_gpu_pass(core::u32 token) noexcept {
 core::u64 CommandList::upload_bytes() const noexcept {
     return backend_ == BackendKind::D3d12 ? detail::d3d12_upload_bytes(handle_) : 0U;
 }
+core::GpuRefusal CommandList::first_refusal() const noexcept {
+    return backend_ == BackendKind::D3d12 ? detail::d3d12_first_refusal(handle_)
+                                          : core::GpuRefusal::None;
+}
 
 void SubmittedWork::release() noexcept {
     if (device_ != nullptr && handle_ != nullptr) {
@@ -847,11 +851,12 @@ bool CommandList::upload(
         || data.size() > static_cast<std::size_t>(buffer.bytes_)) {
         return false;
     }
-    if (data.empty()) {
-        return true;
-    }
+    // D3D12 records even an empty write: see d3d12_upload_buffer.
     if (backend_ == BackendKind::D3d12) {
         return detail::d3d12_upload_buffer(handle_, buffer.handle_, data);
+    }
+    if (data.empty()) {
+        return true;
     }
 
     auto* const device = as_device(device_->backend_handle());
@@ -1941,6 +1946,8 @@ core::Result<Device, RhiError> Device::create(const DeviceConfig& config) noexce
     // SDL remains the Basic renderer backend. Attachment format support does
     // not make the native D3D12 Advanced command path callable through it.
     capabilities.advanced_scene_raster = false;
+    // Not exposed through SDL_GPU, and only the Advanced lit stage needs it.
+    capabilities.pixel_barycentrics = false;
     capabilities.offscreen = true;
     capabilities.rgba16_float = format_supports(
         TextureFormat::Rgba16Float,

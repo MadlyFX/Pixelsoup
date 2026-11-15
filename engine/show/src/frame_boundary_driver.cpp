@@ -122,7 +122,7 @@ core::Result<FrameBoundaryReport, ShowClockError> FrameBoundaryDriver::tick(
         return TickResult::failure(advanced.error());
     }
     return process_tick(std::move(advanced).value(),
-                        VideoReferenceState::Unknown);
+                        VideoReferenceState::Unknown, false);
 }
 
 core::Result<FrameBoundaryReport, ShowClockError>
@@ -137,40 +137,38 @@ FrameBoundaryDriver::tick_from_video_reference(
     }
 
     ++counters_.reference_samples;
-    if (reference.state != VideoReferenceState::Locked) {
-        reference_seen_ = false;
-        if (reference.state == VideoReferenceState::Lost ||
-            reference.state == VideoReferenceState::Failed ||
-            reference.state == VideoReferenceState::Unsupported) {
+    const VideoReferenceStep step =
+        reference_.observe(reference, now, config_.clock.rate);
+    if (step.discontinuity) {
+        ++counters_.reference_discontinuities;
+    }
+    if (!step.referenced) {
+        if (step.state == VideoReferenceState::Lost ||
+            step.state == VideoReferenceState::Failed ||
+            step.state == VideoReferenceState::Unsupported) {
             ++counters_.reference_losses;
         } else {
             ++counters_.reference_holds;
         }
-        // Record the caller's monotonic timestamp without allowing elapsed
-        // operating-system time to advance show position.
-        auto held = clock_.advance_by(0U, now);
-        if (!held) {
-            return TickResult::failure(held.error());
+        // The reference supplies no frames, so the system clock supplies the
+        // boundaries the control side runs on. They are marked unreferenced:
+        // the caller commits, acknowledges and adopts on them as usual, and
+        // repeats its previous picture.
+        auto unreferenced = clock_.advance_to(now);
+        if (!unreferenced) {
+            return TickResult::failure(unreferenced.error());
         }
-        return process_tick(std::move(held).value(), reference.state);
+        return process_tick(std::move(unreferenced).value(), step.state, true);
     }
 
-    core::u64 boundaries{};
-    if (!reference_seen_) {
-        reference_seen_ = true;
-        last_reference_frame_ = reference.frame_counter;
-    } else {
-        // Unsigned subtraction intentionally implements the source's
-        // documented modulo-2^32 counter wrap.
-        boundaries = static_cast<core::u32>(
-            reference.frame_counter - last_reference_frame_);
-        last_reference_frame_ = reference.frame_counter;
-    }
-    auto advanced = clock_.advance_by(boundaries, now);
+    // Advancing by a count records the caller's timestamp and discards any
+    // partial frame, so elapsed operating-system time never becomes a frame
+    // while the reference is counting.
+    auto advanced = clock_.advance_by(step.boundaries, now);
     if (!advanced) {
         return TickResult::failure(advanced.error());
     }
-    return process_tick(std::move(advanced).value(), reference.state);
+    return process_tick(std::move(advanced).value(), step.state, false);
 }
 
 core::Result<ShowTick, ShowClockError>
@@ -181,24 +179,29 @@ FrameBoundaryDriver::set_timing_authority(
         return clock_.advance_by(0U, at);
     }
     config_.timing_authority = authority;
-    reference_seen_ = false;
+    reference_.reset();
     return clock_.advance_by(0U, at);
 }
 
 core::Result<FrameBoundaryReport, ShowClockError>
 FrameBoundaryDriver::process_tick(
     ShowTick tick,
-    VideoReferenceState reference) noexcept {
+    VideoReferenceState reference,
+    bool unreferenced) noexcept {
     using TickResult = core::Result<FrameBoundaryReport, ShowClockError>;
 
     FrameBoundaryReport report{};
     report.tick = tick;
     report.reference = reference;
+    report.unreferenced = unreferenced;
     report.boundaries = report.tick.advanced;
     report.committed_through = sink_->committed_through();
 
     ++counters_.ticks;
     counters_.boundaries += report.boundaries;
+    if (unreferenced) {
+        counters_.unreferenced_boundaries += report.boundaries;
+    }
 
     if (report.boundaries == 0U) {
         report.last_outcome = FrameCommitOutcome::Idle;

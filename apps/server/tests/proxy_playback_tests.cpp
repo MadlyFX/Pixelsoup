@@ -1,3 +1,4 @@
+#include "playback_media.hpp"
 #include "proxy_playback.hpp"
 #include "project_asset_import.hpp"
 
@@ -784,12 +785,46 @@ void view_summaries_count_each_placement_once_and_only_waiting_fallbacks() {
     PLAYBACK_CHECK(made.waiting_total_frames == 1'030U + 1'040U);
 }
 
+void editor_proxies_cover_every_video_larger_than_the_proxy() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "source.mov";
+    write_file(source, bytes("source-bytes"));
+    const auto make = [&](core::u64 id, core::u32 width, core::u32 height,
+                          core::u32 frames) {
+        auto asset = media_asset(source, assets::ProxyPlaybackPolicy::Source,
+                                 id, frames);
+        asset.dimensions = assets::PixelDimensions{width, height};
+        return asset;
+    };
+    assets::AssetRegistry authored{};
+    authored.assets = {
+        assets::Asset{make(1U, 1'920U, 1'080U, 240U)},
+        assets::Asset{make(2U, 3'840U, 2'160U, 240U)},
+        assets::Asset{make(3U, 1'280U, 720U, 240U)},
+        assets::Asset{make(4U, 1'920U, 1'080U, 1U)},
+    };
+    const assets::AssetRegistry working = app::editor_playback_registry(authored);
+    const auto proxied = [&](std::size_t index) {
+        const auto& media = std::get<assets::MediaAsset>(working.assets[index]);
+        return media.requested_proxy_profile ==
+                   assets::DerivativeProfileId::Proxy720pCfrH264 &&
+               media.proxy_playback_policy ==
+                   assets::ProxyPlaybackPolicy::PreferProxy;
+    };
+    PLAYBACK_CHECK(proxied(0U));
+    PLAYBACK_CHECK(proxied(1U));
+    PLAYBACK_CHECK(!proxied(2U));
+    PLAYBACK_CHECK(!proxied(3U));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 11U> cases{{
+constexpr std::array<Case, 12U> cases{{
+    {"editor proxies cover every video larger than the proxy",
+     &editor_proxies_cover_every_video_larger_than_the_proxy},
     {"published segments play until the whole proxy is ready",
      &published_segments_play_until_the_whole_proxy_is_ready},
     {"upcoming proxies materialize before air without holding Program",

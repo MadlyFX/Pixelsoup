@@ -517,7 +517,15 @@ bool SdlPresenter::build_gpu_resources(
         platform.device.emplace(std::move(created).value());
         const auto format = config.output_bit_depth == 10U ? rhi::TextureFormat::Rgb10A2Unorm
             : config.output_bit_depth == 16U ? rhi::TextureFormat::Rgba16Float : rhi::TextureFormat::Rgba8Unorm;
-        auto claimed = platform.device->claim_window(platform.window, rhi::PresentMode::Immediate, format);
+        // Flip on the display's refresh so a frame never changes mid-scanout.
+        // Native D3D12 presents never wait: admission comes from the
+        // frame-latency object and a busy queue skips the present. SDL GPU
+        // blocks while acquiring under vsync, so it takes mailbox instead and
+        // falls back to immediate only where the platform offers nothing else.
+        // A joined present barrier still flips on house sync, not vsync.
+        const auto mode = backend == rhi::BackendKind::D3d12 ? rhi::PresentMode::Vsync
+                                                             : rhi::PresentMode::Mailbox;
+        auto claimed = platform.device->claim_window(platform.window, mode, format);
         if (!claimed) {
             platform.device.reset();
             return false;
@@ -1282,6 +1290,21 @@ SdlPresenter::renderer_readiness() const noexcept {
     return result;
 }
 
+show::PresenterMemory SdlPresenter::memory() const noexcept {
+    if (platform_ == nullptr || !platform_->device) {
+        return {};
+    }
+    const rhi::VideoMemory video = platform_->device->video_memory();
+    if (!video.known()) {
+        return {};
+    }
+    return show::PresenterMemory{true,
+                                 video.usage,
+                                 video.budget,
+                                 video.system_usage,
+                                 platform_->device->committed_bytes()};
+}
+
 show::PresenterPlateStats SdlPresenter::plates() const noexcept {
     show::PresenterPlateStats stats{};
     if (platform_ == nullptr) {
@@ -1391,6 +1414,19 @@ bool SdlPresenter::retire_pending() noexcept {
     return true;
 }
 
+show::PresenterStatus SdlPresenter::fail(const core::PresentStep step,
+                                         const core::GpuRefusal refusal) noexcept {
+    ++failure_.failed_frames;
+    failure_.step = step;
+    failure_.refusal = refusal;
+    failure_.map_node = step == core::PresentStep::DrawMap ||
+                                step == core::PresentStep::MapProjection
+                            ? drawing_map_ : 0U;
+    failure_.show_frame = drawing_frame_;
+    failure_.ongoing = true;
+    return show::PresenterStatus::Failed;
+}
+
 show::PresenterStatus
 SdlPresenter::present_recorded(const RecordFrame &record,
                                const bool *media_complete, const scene::Scene *asset_scene,
@@ -1430,13 +1466,17 @@ SdlPresenter::present_recorded(const RecordFrame &record,
     platform.last_presented = platform.visible_program_valid ? &*platform.visible_program : nullptr;
     if (asset_scene) platform.assets = {scene::asset_set_digest(*asset_scene), false, platform.asset_gate.visible_commit()};
     const auto cpu_record_begin = std::chrono::steady_clock::now();
+    drawing_frame_ = asset_scene ? asset_scene->show_frame : 0U;
+    drawing_map_ = 0U;
     const rhi::Texture *presented = record(commands);
     platform.pending_record_ns = static_cast<core::u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - cpu_record_begin).count());
     platform.pending_profile_digest = asset_scene ? scene::renderer_settings_digest(asset_scene->renderer_settings) : 0U;
     ++platform.recording_sequence;
     if (presented == nullptr) {
-        return show::PresenterStatus::Failed;
+        return fail(drawing_map_ != 0U ? core::PresentStep::DrawMap
+                                       : core::PresentStep::Draw,
+                    commands.first_refusal());
     }
 
     auto next_asset_gate = platform.asset_gate;
@@ -1479,7 +1519,7 @@ SdlPresenter::present_recorded(const RecordFrame &record,
         // remains from the previous complete scene.
         auto submitted = platform.device->submit(std::move(commands));
         if (!submitted) {
-            return show::PresenterStatus::Failed;
+            return fail(core::PresentStep::Submit);
         }
         platform.pending = std::move(submitted).value();
         ++timing_.frames;
@@ -1511,15 +1551,16 @@ SdlPresenter::present_recorded(const RecordFrame &record,
             return show::PresenterStatus::Failed;
         }
     } else {
-        // The window is not showing. The frame was still composited, which
-        // keeps the offscreen target and the timing honest.
+        // The window is not showing, or the display has not taken the
+        // previous flip yet. The frame was still composited, which keeps the
+        // offscreen target and the timing honest.
         ++timing_.skipped_presents;
         status = show::PresenterStatus::Skipped;
     }
 
     auto submitted = platform.device->submit(std::move(commands));
     if (!submitted) {
-        return show::PresenterStatus::Failed;
+        return fail(core::PresentStep::Submit);
     }
     platform.pending = std::move(submitted).value();
     platform.asset_gate = next_asset_gate;
@@ -1528,6 +1569,7 @@ SdlPresenter::present_recorded(const RecordFrame &record,
     platform.assets.visible_commit = platform.assets.digest == platform.asset_gate.visible_digest() ? platform.asset_gate.visible_commit() : 0;
     ++timing_.frames;
     record_present();
+    failure_.ongoing = false;
     return status;
 }
 
@@ -1734,6 +1776,7 @@ show::PresenterStatus SdlPresenter::present(
                 return nullptr;
             }
             for (const output::OutputMap &map : maps) {
+                drawing_map_ = map.node.value();
                 const rhi::Texture *scene_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
@@ -1762,6 +1805,10 @@ show::PresenterStatus SdlPresenter::present(
             return &platform.output_transform->target();
         },
         &media_complete, &frame);
+    // The fault pattern was drawn and shown, but the frame is still wrong.
+    if (mapping_unavailable && status != show::PresenterStatus::Failed) {
+        return fail(core::PresentStep::MapProjection);
+    }
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
@@ -1806,6 +1853,7 @@ show::PresenterStatus SdlPresenter::present(
                 return nullptr;
             }
             for (const output::OutputMap &map : maps) {
+                drawing_map_ = map.node.value();
                 const rhi::Texture *scene_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
@@ -1839,6 +1887,10 @@ show::PresenterStatus SdlPresenter::present(
             return &platform.output_transform->target();
         },
         &media_complete, &frame);
+    // The fault pattern was drawn and shown, but the frame is still wrong.
+    if (mapping_unavailable && status != show::PresenterStatus::Failed) {
+        return fail(core::PresentStep::MapProjection);
+    }
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
@@ -1883,6 +1935,7 @@ show::PresenterStatus SdlPresenter::present(
                 return nullptr;
             }
             for (const output::OutputMap &map : maps) {
+                drawing_map_ = map.node.value();
                 const rhi::Texture *const from_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
@@ -1915,6 +1968,10 @@ show::PresenterStatus SdlPresenter::present(
             return &platform.output_transform->target();
         },
         &media_complete, &from, &to);
+    // The fault pattern was drawn and shown, but the frame is still wrong.
+    if (mapping_unavailable && status != show::PresenterStatus::Failed) {
+        return fail(core::PresentStep::MapProjection);
+    }
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 
@@ -1964,6 +2021,7 @@ show::PresenterStatus SdlPresenter::present(
                 return nullptr;
             }
             for (const output::OutputMap &map : maps) {
+                drawing_map_ = map.node.value();
                 const rhi::Texture *from_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
@@ -2009,6 +2067,10 @@ show::PresenterStatus SdlPresenter::present(
             return &platform.output_transform->target();
         },
         &media_complete, &from, &to);
+    // The fault pattern was drawn and shown, but the frame is still wrong.
+    if (mapping_unavailable && status != show::PresenterStatus::Failed) {
+        return fail(core::PresentStep::MapProjection);
+    }
     return mapping_unavailable ? show::PresenterStatus::Failed : status;
 }
 

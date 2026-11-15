@@ -299,10 +299,6 @@ Result SceneRenderer::create(
     if (!blobs.present) {
         return Result::failure(RenderError::ShaderFormatUnsupported);
     }
-    // Every scene renderer names its device as a candidate for video decode.
-    // A scene is the only thing that samples media, so this is the complete
-    // set the decoder has to agree with.
-    offer_video_decode_device(device);
     if (width == 0U || height == 0U || limits.max_instances == 0U
         || limits.max_history_slots == 0U
         || limits.max_model_refresh_generations == 0U
@@ -1059,6 +1055,11 @@ Result SceneRenderer::create(
     renderer.layer_order_.reserve(limits.max_instances);
     renderer.layer_placed_.reserve(limits.max_instances);
     renderer.depth_only_media_.reserve(scene::max_scene_media);
+    // Every scene renderer names its device as a candidate for video decode,
+    // for as long as it exists. A scene is the only thing that samples media,
+    // so the live renderers are the complete set the decoder has to agree
+    // with - and one that failed to build above never counted.
+    renderer.video_decode_offer_ = offer_video_decode_device(device);
     renderer.retired_models_.reserve(
         limits.max_model_refresh_generations);
     renderer.retired_particles_.reserve(max_retired_particles);

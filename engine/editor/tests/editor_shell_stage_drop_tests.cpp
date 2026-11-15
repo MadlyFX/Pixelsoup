@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -80,6 +81,15 @@ void stage_drop() {
   media.source = "T:/dropped.mov";
   media.dimensions = mediaserver::assets::PixelDimensions{2000U, 1000U};
   registry.assets.emplace_back(media);
+  // Sorts after the plain video, so the existing rows keep their positions.
+  mediaserver::assets::MediaAsset film;
+  film.id = doc::NodeId{72U};
+  film.display_name = "Dropped video at 24";
+  film.source = "T:/dropped24.mov";
+  film.dimensions = mediaserver::assets::PixelDimensions{2000U, 1000U};
+  film.frame_count = 100U;
+  film.frame_rate = mediaserver::assets::MediaFrameRate{24U, 1U};
+  registry.assets.emplace_back(film);
   mediaserver::assets::ModelAsset model;
   model.id = doc::NodeId{81U};
   model.display_name = "Dropped model";
@@ -224,6 +234,85 @@ void stage_drop() {
         "the dropped particle effect, placed from its asset");
   check(effect.position.has_value() && near(effect.position->y, 0.5F),
         "the particle effect's origin rests on the platform");
+
+  // A video at 24 FPS on a 50 FPS timeline is held while the operator is
+  // asked whether the timeline should follow it. Dismissing the question
+  // keeps the timeline and still adds the clip, exactly once.
+  const float film_y = library.y + 186.0F;
+  std::size_t film_adds = 0U;
+  editor::AddIntent film_add{};
+  bool rate_asked_unprompted = false;
+  const auto gather = [&](const editor::EditorFrame &result) {
+    rate_asked_unprompted = rate_asked_unprompted || result.show_rate.has_value();
+    for (const editor::AddIntent &add : result.adds) {
+      film_add = add;
+      ++film_adds;
+    }
+  };
+  gather(pointer(asset_x, film_y, true));
+  gather(pointer(drop_x, drop_y, true));
+  gather(pointer(drop_x, drop_y, false));
+  check(film_adds == 0U, "a clip at another rate waits for the answer");
+  // Click away to dismiss the question.
+  gather(pointer(1.0F, 1.0F, true));
+  gather(pointer(1.0F, 1.0F, false));
+  for (int settle = 0; settle < 4; ++settle) {
+    gather(frame());
+  }
+  check(!rate_asked_unprompted, "dismissing keeps the timeline rate");
+  check(film_adds == 1U && film_add.asset == film.id,
+        "the dismissed question still adds the clip once");
+  check(film_add.frame_rate.has_value() && film_add.frame_rate->numerator == 24U,
+        "the clip keeps its own frame rate");
+
+  // Choosing the first entry asks for 24 FPS. The clip waits until the
+  // timeline reports that rate, so its length is measured against it.
+  const auto key = [&](SDL_Keycode code) {
+    SDL_Event event{};
+    event.type = SDL_EVENT_KEY_DOWN;
+    event.key.windowID = window_id;
+    event.key.key = code;
+    event.key.down = true;
+    check(SDL_PushEvent(&event), "push key");
+    const auto pressed = frame();
+    event.type = SDL_EVENT_KEY_UP;
+    event.key.down = false;
+    check(SDL_PushEvent(&event), "release key");
+    return pressed;
+  };
+  film_adds = 0U;
+  std::optional<editor::ShowRateRequest> requested;
+  const auto watch = [&](const editor::EditorFrame &result) {
+    if (result.show_rate.has_value()) {
+      check(!requested.has_value(), "the rate is requested once");
+      requested = result.show_rate;
+    }
+    film_adds += result.adds.size();
+  };
+  watch(pointer(asset_x, film_y, true));
+  watch(pointer(drop_x, drop_y, true));
+  watch(pointer(drop_x, drop_y, false));
+  watch(key(SDLK_DOWN));
+  watch(key(SDLK_RETURN));
+  for (int settle = 0; settle < 3; ++settle) {
+    watch(frame());
+  }
+  check(requested.has_value() &&
+            *requested == editor::ShowRateRequest{24U, 1U},
+        "the timeline is asked to run at the clip's 24 FPS");
+  check(film_adds == 0U, "the clip waits for the timeline's new rate");
+  timeline.rate_numerator = 24U;
+  timeline.rate_denominator = 1U;
+  watch(frame());
+  check(film_adds == 1U, "the clip goes in once the timeline runs at 24 FPS");
+  watch(frame());
+  check(film_adds == 1U, "and only once");
+  // At the timeline's own rate the same video goes straight in.
+  film_adds = 0U;
+  watch(pointer(asset_x, film_y, true));
+  watch(pointer(drop_x, drop_y, true));
+  watch(pointer(drop_x, drop_y, false));
+  check(film_adds == 1U, "a clip at the timeline's rate is not held");
 
   // Without the platform, the stage floor carries it.
   show.instances.clear();

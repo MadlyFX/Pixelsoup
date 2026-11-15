@@ -187,8 +187,8 @@ void CompositorPanel::interact_nodes(Frame &f) {
     const doc::NodeId pressed_node = visual.node->node;
     if (interaction.pressed) {
       selection_pressed = true;
-      // With Alt or Ctrl, a press on an input acts on that input's wire
-      // instead of moving the node: Alt breaks it, Ctrl lifts it to move.
+      // With Alt or Ctrl, a press on a wired input acts on that wire instead
+      // of moving the node: Alt breaks it, Ctrl lifts it to move.
       const auto input = std::find_if(
           inputs.begin(), inputs.end(), [&](const CompositorPortVisual &port) {
             return port.endpoint.node == visual.node->node &&
@@ -208,30 +208,26 @@ void CompositorPanel::interact_nodes(Frame &f) {
         relink_ = Relink{{lifted_edge->node}, false, input->endpoint};
         connecting_from_ = lifted_edge->from;
         connecting_type_ = input->descriptor->type;
-      } else if (ctx.ctrl_held()) {
-        // Ctrl-click toggles one node in or out of the selection.
-        if (f.is_selected(pressed_node)) {
-          std::erase(selected_nodes_, pressed_node);
-          selection_ = selected_nodes_.empty()
-                           ? CompositorSelection{}
-                           : CompositorSelection{CompositorSelectionKind::Node,
-                                                 selected_nodes_.front()};
-        } else {
-          f.add_to_selection(pressed_node);
-          selection_ =
-              CompositorSelection{CompositorSelectionKind::Node, pressed_node};
-        }
+      } else if (ctx.shift_held() && f.is_selected(pressed_node)) {
+        // Shift-click on a selected node takes it out of the selection.
+        std::erase(selected_nodes_, pressed_node);
+        selection_ = selected_nodes_.empty()
+                         ? CompositorSelection{}
+                         : CompositorSelection{CompositorSelectionKind::Node,
+                                               selected_nodes_.front()};
       } else {
         // A press on a node already in a multiple selection keeps it, so the
-        // whole selection can be dragged; Shift adds the node to it.
+        // whole selection can be dragged. Shift adds the node to it, and Alt
+        // makes it the whole selection.
         const bool already = f.is_selected(pressed_node);
-        press_was_selected_ = already && selected_nodes_.size() > 1U;
+        press_was_selected_ =
+            already && selected_nodes_.size() > 1U && !ctx.alt_held();
         if (selection_.kind != CompositorSelectionKind::Node) {
           selected_nodes_.clear();
         }
         if (ctx.shift_held()) {
           f.add_to_selection(pressed_node);
-        } else if (!already) {
+        } else if (ctx.alt_held() || !already) {
           selected_nodes_.assign(1U, pressed_node);
         }
         selection_ =

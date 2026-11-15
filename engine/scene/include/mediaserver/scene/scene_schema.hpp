@@ -1,7 +1,9 @@
 #pragma once
 
-#include <string_view>
 #include <array>
+#include <cstddef>
+#include <string>
+#include <string_view>
 
 // The document's scene vocabulary, in one place.
 //
@@ -216,6 +218,33 @@ inline constexpr std::string_view lane_raster_height = "lane_raster_height";
 // than in the authoring path: a gizmo drag, a keyframe, and a typed field all
 // have to obey it, and only evaluation sees all three.
 inline constexpr std::string_view lane_aspect_locked = "lane_aspect_locked";
+// What the track is. Absent is an ordinary track: one screen its clips play
+// on. A vehicle track is one car's worth of screens - it owns no plane itself,
+// and a take placed on it plays each of its plates on the slot screen for that
+// plate. Any other word is a damaged node.
+inline constexpr std::string_view lane_kind = "lane_kind";
+inline constexpr std::string_view lane_kind_vehicle = "vehicle";
+// A slot screen: the vehicle track it belongs to and which of that track's
+// slots it is (one of `vehicle_slot_keys`). It is a screen like any track's -
+// placed, graded, keyed and wired the same way - but it takes no clips of its
+// own: what plays on it is the plate of whichever take is on its vehicle
+// track. The two properties are authored together or not at all.
+inline constexpr std::string_view lane_parent = "lane_parent";
+inline constexpr std::string_view lane_slot = "lane_slot";
+// Source frames a slot screen's plate plays ahead of (positive) or behind
+// (negative) where its take would put it. It belongs to the screen, so it
+// stays when the take on the track is swapped for another.
+inline constexpr std::string_view lane_time_offset = "lane_time_offset";
+
+// The slots of a vehicle track, in LED Car Process input port order: eight
+// wall plates clockwise from the front, then the ceiling reflection. The
+// index is the port, and the word is the Library plateset's key for the slot.
+inline constexpr std::size_t vehicle_slot_count = 9U;
+inline constexpr std::array<std::string_view, vehicle_slot_count>
+    vehicle_slot_keys{
+        "front", "front_right", "right",      "back_right", "back",
+        "back_left", "left",    "front_left", "ceiling",
+    };
 
 // ---------------------------------------------------------------------------
 // scene.timeline_marker
@@ -241,19 +270,8 @@ inline constexpr std::string_view marker_loop_fade = "marker_loop_fade_ms";
 //
 // A camera is placed like every other element: position_x..z and
 // rotation_yaw/pitch/roll (see scene.object), with the rotation turning a
-// camera that looks down -Z with +Y up. The eye/target/up names below are
-// read only, as the fallback for a camera authored before cameras had a
-// rotation, and are never written.
+// camera that looks down -Z with +Y up.
 
-inline constexpr std::string_view eye_x = "eye_x";
-inline constexpr std::string_view eye_y = "eye_y";
-inline constexpr std::string_view eye_z = "eye_z";
-inline constexpr std::string_view target_x = "target_x";
-inline constexpr std::string_view target_y = "target_y";
-inline constexpr std::string_view target_z = "target_z";
-inline constexpr std::string_view up_x = "up_x";
-inline constexpr std::string_view up_y = "up_y";
-inline constexpr std::string_view up_z = "up_z";
 // Vertical field of view, as a fraction of a full turn. 0.125 is 45 degrees.
 inline constexpr std::string_view fov_turns = "fov_turns";
 // The tracking source node feeding this camera, or absent for an ordinary
@@ -460,13 +478,33 @@ inline constexpr std::string_view mask_point_out_y = "mask_point_out_y";
 // overlaps whose starts are equal, with node id as the final stable tie-break.
 inline constexpr std::string_view lane_id = "lane_id";
 inline constexpr std::string_view clip_order = "clip_order";
-// A clip placed as one plate of a vehicle process plateset: the Library
-// plateset it came from, the slot it plays in, and the take it belongs to.
-// Clips sharing a take, a start and a length are edited as one; none of
-// these change what is drawn, so they stay out of the scene digest.
+// The Library plateset a clip came from. It changes nothing that is drawn -
+// the plates below do - so it stays out of the scene digest.
 inline constexpr std::string_view plateset_asset = "plateset_asset";
-inline constexpr std::string_view plateset_slot = "plateset_slot";
-inline constexpr std::string_view plateset_take = "plateset_take";
+// A take: one clip on a vehicle track that plays every plate of a plateset.
+// It is an ordinary clip of its front plate - `source`, `sequence_count`, the
+// rate and `source_in` are the front plate's - which also names the plate for
+// each slot it fills: `plate_<slot>_source`, and with it `_asset` (the Library
+// media asset), `_count` (its frames) and `_offset` (the source frames it
+// skips so every plate starts on the same instant). The plates are read only
+// from a clip that carries `plateset_asset`; every plate shares the clip's
+// rate, timing, fades and decode size.
+inline constexpr std::string_view plate_prefix = "plate_";
+inline constexpr std::string_view plate_source_suffix = "_source";
+inline constexpr std::string_view plate_asset_suffix = "_asset";
+inline constexpr std::string_view plate_count_suffix = "_count";
+inline constexpr std::string_view plate_offset_suffix = "_offset";
+// `plate_<slot key>` + `suffix`; empty for a slot past the last.
+[[nodiscard]] inline std::string plate_property(std::size_t slot,
+                                                std::string_view suffix) {
+    if (slot >= vehicle_slot_count) {
+        return {};
+    }
+    std::string name{plate_prefix};
+    name += vehicle_slot_keys[slot];
+    name += suffix;
+    return name;
+}
 
 // ---------------------------------------------------------------------------
 // scene.effect
@@ -802,8 +840,7 @@ inline constexpr std::string_view tracking_sensor_aspect =
 inline constexpr std::string_view tracking_fallback_focal_mm =
     "tracking_fallback_focal_mm";
 // Where this tracking system's numbers sit relative to the stage. Absent means
-// the tracker already reports in stage space, which is the old behaviour and
-// the right default for a project authored before any of this existed.
+// the tracker already reports in stage space.
 inline constexpr std::string_view tracking_axes = "tracking_axes";
 inline constexpr std::string_view tracking_axes_stage = "stage";
 inline constexpr std::string_view tracking_axes_z_up = "z_up";
@@ -831,8 +868,9 @@ inline constexpr std::string_view asset_id = "asset_id";
 // once it reaches the end.
 inline constexpr std::string_view sequence_start = "sequence_start";
 inline constexpr std::string_view sequence_count = "sequence_count";
-// Optional exact native video rate. Both fields must be present and positive.
-// Their absence is the backward-compatible image-sequence/legacy 1:1 cadence.
+// Exact native video rate, recorded when a video is imported. Both fields
+// must be present and positive. An image sequence has none and shows one file
+// per show frame.
 inline constexpr std::string_view source_rate_numerator =
     "source_rate_numerator";
 inline constexpr std::string_view source_rate_denominator =

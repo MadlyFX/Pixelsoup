@@ -683,14 +683,14 @@ void a_protocol_is_a_processor_property_in_the_digest() {
                  topology::HardwareProcessorProtocol::NovastarCoex);
   TOPOLOGY_CHECK(topology::digest(generic) != topology::digest(coex));
 
-  // A map that never authored a protocol hashes as it always did.
-  doc::Root legacy;
-  legacy = legacy.set(node(2U, schema::device_type,
-                           {text(schema::kind, schema::led_processor_kind),
-                            text(schema::name, "Processor")}));
-  topology::HardwareMapModel legacy_model;
-  legacy_model.reset(legacy);
-  TOPOLOGY_CHECK(topology::digest(legacy_model.evaluate()) ==
+  // An absent protocol is Generic.
+  doc::Root unset;
+  unset = unset.set(node(2U, schema::device_type,
+                         {text(schema::kind, schema::led_processor_kind),
+                          text(schema::name, "Processor")}));
+  topology::HardwareMapModel unset_model;
+  unset_model.reset(unset);
+  TOPOLOGY_CHECK(topology::digest(unset_model.evaluate()) ==
                  topology::digest(generic));
 
   // Only a processor keeps a protocol.

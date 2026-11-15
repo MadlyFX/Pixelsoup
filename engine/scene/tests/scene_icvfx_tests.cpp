@@ -320,8 +320,8 @@ void icvfx_policy_is_clamped_once_and_digested() {
     ICVFX_CHECK(scene::clamped(show).latency_frames
                 == scene::max_icvfx_latency_frames);
 
-    // A project with no inner frustum authored digests exactly as it did
-    // before the policy existed.
+    // The show-wide prediction fields are in the profile whether or not
+    // plates are on; the per-camera defaults only while they are.
     scene::RendererSettings plain{};
     const auto baseline = scene::renderer_settings_digest(plain);
     for (int field = 0; field < 4; ++field) {
@@ -416,8 +416,7 @@ struct Case final {
 // unrelated to the wall - which on a stage reads as a broken plate rather than
 // a missing setting, and is why this exists.
 void a_tracker_pose_is_mapped_into_stage_space() {
-    // Stage-native is the identity, so a project authored before calibration
-    // existed renders exactly as it did.
+    // Stage-native is the identity.
     const scene::TrackerCalibration native{};
     const scene::Vec3 raw{1.0F, 2.0F, 3.0F};
     ICVFX_CHECK(scene::stage_position_from_tracker(raw, native) == raw);

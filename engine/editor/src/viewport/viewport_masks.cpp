@@ -367,6 +367,7 @@ void ViewportPanel::press_mask(MaskFrame& f) {
     const auto find_mask = [&f](doc::NodeId id) {
         return f.find_mask(id);
     };
+    frame.pressed_away = interaction.pressed && pick.mask == nullptr;
     if (interaction.pressed && pick.mask != nullptr) {
         if (frame.selection.mask != pick.mask->source ||
             frame.selection.point != pick.point) {
@@ -629,7 +630,7 @@ void ViewportPanel::draw_mask_overlay(MaskFrame& f) {
     auto& masks = f.masks;
     auto& coverage_button = f.coverage_button;
     auto& coverage_interaction = f.coverage_interaction;
-    ctx.push_clip(frame.image);
+    ctx.push_clip(shown_image(frame.image));
     gui::UiDrawList& list = ctx.draw_list();
     const float canvas_scale =
         0.5F * (frame.image.width / static_cast<float>(mask_canvas.width) +
@@ -747,7 +748,14 @@ void ViewportPanel::draw_mask_overlay(MaskFrame& f) {
     // A Masks tab changes what clicking the picture means. Keep that mode
     // visible in both Stage and Program Output instead of making a failed
     // object-selection click feel like a broken picker.
-    constexpr std::string_view selection_notice = "Can't select while masking";
+    // Program edits a mask only once one is selected, and goes back to the
+    // layer on a click away; Stage is in this domain for as long as the Masks
+    // tab is in front.
+    const std::string_view selection_notice =
+        role_ == ViewportRole::Program
+            ? std::string_view{"Editing a mask - click away or press Esc "
+                               "to finish"}
+            : std::string_view{"Can't select while masking"};
     // Centred along the image's foot, 6 above it, sized to its words.
     gui::Rect foot = gui::inset(frame.image, gui::Padding{8.0F, 0.0F, 8.0F, 6.0F});
     foot = gui::cut_bottom(foot, 23.0F);

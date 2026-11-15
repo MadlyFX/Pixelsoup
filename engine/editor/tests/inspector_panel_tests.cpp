@@ -1,3 +1,4 @@
+#include <mediaserver/compositor/compositor_schema.hpp>
 #include <mediaserver/editor/inspector_panel.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/text.hpp>
@@ -11,6 +12,7 @@
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <map>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1448,6 +1450,224 @@ void a_clip_on_a_screen_offers_no_transform_of_its_own() {
              == scene::TransformChannel::PositionX);
 }
 
+// What a click at each point of the panel asked for, each from a panel of
+// its own so one click cannot fold a section out from under the next.
+struct Clicks final {
+    // Every node a click selected, and where the first such click was.
+    std::map<doc::NodeId, std::pair<float, float>> selected;
+    std::optional<doc::NodeId> opened;
+    std::size_t edits{};
+};
+
+[[nodiscard]] Clicks click_everywhere(const editor::ElementInfo& element) {
+    Clicks clicks;
+    for (float y = 30.0F; y < 330.0F; y += 9.0F) {
+        for (float x = 12.0F; x < 292.0F; x += 9.0F) {
+            Harness h;
+            h.element = element;
+            static_cast<void>(h.frame(x, y, false));
+            static_cast<void>(h.frame(x, y, true));
+            const editor::InspectorFrame released = h.frame(x, y, false);
+            if (released.select_node.has_value()) {
+                clicks.selected.try_emplace(*released.select_node, x, y);
+            }
+            if (released.open_asset.has_value()) {
+                clicks.opened = released.open_asset;
+            }
+            clicks.edits += released.named_edits.size() +
+                            released.component_edits.size();
+        }
+    }
+    return clicks;
+}
+
+const doc::NodeId front_wall{70U};
+const doc::NodeId left_wall{71U};
+const doc::NodeId right_wall{73U};
+const doc::NodeId ceiling_wall{72U};
+
+// A vehicle track owns no plane, so it offers no transform and no raster:
+// what it has is the car from above, and each wall the car has a screen for
+// is a button that selects that screen.
+void a_vehicle_track_shows_its_car_and_selects_a_wall() {
+    editor::ElementInfo car = make_track();
+    car.display_name = "Vehicle";
+    car.vehicle = true;
+    car.slot_screens[0U] = front_wall;
+    car.slot_screens[6U] = left_wall;
+    car.slot_screens[8U] = ceiling_wall;
+
+    const Clicks clicks = click_everywhere(car);
+    UI_CHECK(clicks.selected.size() == 3U);
+    UI_CHECK(clicks.selected.contains(front_wall) &&
+             clicks.selected.contains(left_wall) &&
+             clicks.selected.contains(ceiling_wall));
+    // Seen from above with the front up: the front wall is above the
+    // ceiling, which is over the car in the middle, and the left wall is to
+    // its left.
+    UI_CHECK(clicks.selected.at(front_wall).second <
+             clicks.selected.at(ceiling_wall).second);
+    UI_CHECK(clicks.selected.at(left_wall).first <
+             clicks.selected.at(ceiling_wall).first);
+    // Nowhere on it is a field that would move or resize a plane it does
+    // not have.
+    UI_CHECK(clicks.edits == 0U);
+    UI_CHECK(!clicks.opened.has_value());
+
+    // An ordinary track has no car to show.
+    UI_CHECK(click_everywhere(make_track()).selected.empty());
+}
+
+// A slot screen is a screen like any track's, with one more field: how far
+// its plate plays ahead of its take. Whole frames, one per pixel of scrub.
+void a_slot_screen_sets_its_plates_time_offset() {
+    Harness h;
+    h.element = make_track();
+    h.element.vehicle_track = doc::NodeId{20U};
+    h.element.vehicle_slot = 6U;
+    h.element.time_offset = 3;
+    constexpr float time_offset_y = screen_aspect_y + 26.0F;
+    static_cast<void>(h.frame(raster_width_x, time_offset_y, false));
+    static_cast<void>(h.frame(raster_width_x, time_offset_y, true));
+    const editor::InspectorFrame dragged =
+        h.frame(raster_width_x + 40.0F, time_offset_y, true);
+    UI_CHECK(dragged.named_edits.size() == 1U);
+    UI_CHECK(dragged.named_edits.front().node == subject);
+    UI_CHECK(dragged.named_edits.front().property ==
+             scene::schema::lane_time_offset);
+    UI_CHECK(near(dragged.named_edits.front().value, 43.0));
+
+    // Behind its take is as good as ahead of it.
+    Harness back;
+    back.element = h.element;
+    static_cast<void>(back.frame(raster_width_x, time_offset_y, false));
+    static_cast<void>(back.frame(raster_width_x, time_offset_y, true));
+    const editor::InspectorFrame earlier =
+        back.frame(raster_width_x - 20.0F, time_offset_y, true);
+    UI_CHECK(earlier.named_edits.size() == 1U);
+    UI_CHECK(near(earlier.named_edits.front().value, -17.0));
+
+    // A track that is nobody's wall has no plate to time, and no field.
+    Harness plain;
+    plain.element = make_track();
+    static_cast<void>(plain.frame(raster_width_x, time_offset_y, false));
+    static_cast<void>(plain.frame(raster_width_x, time_offset_y, true));
+    const editor::InspectorFrame nothing =
+        plain.frame(raster_width_x + 40.0F, time_offset_y, true);
+    for (const editor::NamedEdit& edit : nothing.named_edits) {
+        UI_CHECK(edit.property != scene::schema::lane_time_offset);
+    }
+}
+
+// A vehicle track whose screens feed a rig shows that rig's layout: where the
+// car stands, how it is turned, how far out and how large its walls are, how
+// they blend, and its ceiling. Each field edits the rig, not the track.
+void a_vehicle_track_edits_its_rigs_layout() {
+    const doc::NodeId rig{640U};
+    editor::ElementInfo car = make_track();
+    car.display_name = "Vehicle";
+    car.vehicle = true;
+    car.slot_screens[0U] = front_wall;
+    car.vehicle_rig = rig;
+    car.rig.position = scene::Vec3{1.5F, 0.25F, -2.0F};
+    car.rig.yaw = 0.125F;
+    car.rig.array_scale = 6.0F;
+    car.rig.plate_scale = 1.75F;
+    car.rig.horizontal_blend = 0.1F;
+    car.rig.reflection_height = 3.0F;
+    car.rig.reflection_scale = 2.5F;
+
+    // Scrub the first field of every row down the panel a tenth of a pixel
+    // short of nothing: what each row edits, and from what value.
+    std::map<std::string, double> starts;
+    for (float y = 30.0F; y < 520.0F; y += 5.0F) {
+        Harness h;
+        h.element = car;
+        static_cast<void>(h.frame(field_x0, y, false));
+        static_cast<void>(h.frame(field_x0, y, true));
+        const editor::InspectorFrame dragged =
+            h.frame(field_x0 + 100.0F, y, true);
+        // The car still fades as one; nothing else of it is a transform.
+        for (const editor::ComponentEdit& edit : dragged.component_edits) {
+            UI_CHECK(edit.component == scene::PropertyChannel::Opacity);
+        }
+        for (const editor::NamedEdit& edit : dragged.named_edits) {
+            UI_CHECK(edit.node == rig);
+            starts.try_emplace(edit.property, edit.value);
+        }
+    }
+    namespace names = mediaserver::compositor::schema;
+    // A hundred pixels of scrub at each row's own speed.
+    UI_CHECK(starts.size() == 7U);
+    UI_CHECK(near(starts.at(std::string{names::position_x}), 1.5 + 1.0));
+    UI_CHECK(near(starts.at(std::string{names::rotation_yaw_turns}),
+                  0.125 + 0.2));
+    UI_CHECK(near(starts.at(std::string{names::array_scale}), 6.0 + 5.0));
+    UI_CHECK(near(starts.at(std::string{names::plate_scale}), 1.75 + 5.0));
+    // A blend stops at half a wall.
+    UI_CHECK(near(starts.at(std::string{names::horizontal_blend}), 0.5));
+    UI_CHECK(near(starts.at(std::string{names::reflection_height}),
+                  3.0 + 5.0));
+    UI_CHECK(near(starts.at(std::string{names::reflection_scale}),
+                  2.5 + 5.0));
+
+    // Scrubbed the other way a size stops at nothing rather than going
+    // inside out.
+    bool sized = false;
+    for (float y = 30.0F; y < 520.0F; y += 5.0F) {
+        Harness h;
+        h.element = car;
+        static_cast<void>(h.frame(field_x0, y, false));
+        static_cast<void>(h.frame(field_x0, y, true));
+        const editor::InspectorFrame dragged =
+            h.frame(field_x0 - 100.0F, y, true);
+        for (const editor::NamedEdit& edit : dragged.named_edits) {
+            if (edit.property == names::plate_scale) {
+                UI_CHECK(near(edit.value, 0.0));
+                sized = true;
+            }
+        }
+    }
+    UI_CHECK(sized);
+
+    // A locked car's layout is read-only, like the rest of it.
+    car.locked = true;
+    for (float y = 30.0F; y < 520.0F; y += 5.0F) {
+        Harness h;
+        h.element = car;
+        static_cast<void>(h.frame(field_x0, y, false));
+        static_cast<void>(h.frame(field_x0, y, true));
+        UI_CHECK(h.frame(field_x0 + 100.0F, y, true).named_edits.empty());
+    }
+}
+
+// A take shows the car it is on: a wall with a screen selects that screen
+// whether or not this take has a plate for it, a plate with no screen is
+// shown but selects nothing, and one button opens the take's plateset.
+void a_take_shows_its_car_and_opens_its_plateset() {
+    editor::ElementInfo take = make_clip_on_screen();
+    take.display_name = "Chicago drive";
+    take.screen_name = "Vehicle";
+    take.take = true;
+    take.plateset = doc::NodeId{300U};
+    take.vehicle_track = doc::NodeId{9U};
+    take.slot_screens[0U] = front_wall;
+    take.slot_screens[2U] = right_wall;
+    take.plates[0U] = true;
+    // A left plate the car has no screen for.
+    take.plates[6U] = true;
+
+    const Clicks clicks = click_everywhere(take);
+    UI_CHECK(clicks.selected.size() == 2U);
+    UI_CHECK(clicks.selected.contains(front_wall) &&
+             clicks.selected.contains(right_wall));
+    UI_CHECK(clicks.opened == std::optional{doc::NodeId{300U}});
+
+    // An ordinary clip on a screen has neither.
+    const Clicks ordinary = click_everywhere(make_clip_on_screen());
+    UI_CHECK(ordinary.selected.empty() && !ordinary.opened.has_value());
+}
+
 // A camera is placed like every other element - a position and a rotation,
 // the same transform properties and channels - with no scale, since it has no
 // size. There is no target to aim at.
@@ -2162,7 +2382,7 @@ void an_imported_surface_without_its_mesh_authors_nothing() {
     UI_CHECK(!dragged.surface_edit.has_value());
 }
 
-constexpr std::array<Case, 60U> cases{{
+constexpr std::array<Case, 64U> cases{{
     {"a changed value resets to its default", &a_changed_value_resets_to_its_default},
     {"a video clip chooses the size it is held at", &a_video_clip_chooses_the_size_it_is_held_at},
     {"a surface diamond keys its position at the playhead",
@@ -2210,6 +2430,14 @@ constexpr std::array<Case, 60U> cases{{
      &the_aspect_lock_is_one_control_on_the_track},
     {"a clip on a screen offers no transform of its own",
      &a_clip_on_a_screen_offers_no_transform_of_its_own},
+    {"a vehicle track shows its car and selects a wall",
+     &a_vehicle_track_shows_its_car_and_selects_a_wall},
+    {"a vehicle track edits its rig's layout",
+     &a_vehicle_track_edits_its_rigs_layout},
+    {"a slot screen sets its plate's time offset",
+     &a_slot_screen_sets_its_plates_time_offset},
+    {"a take shows its car and opens its plateset",
+     &a_take_shows_its_car_and_opens_its_plateset},
     {"a scrub emits the component the field belongs to",
      &a_scrub_emits_the_component_the_field_belongs_to},
     {"a scrub measures from where it began not from the document",

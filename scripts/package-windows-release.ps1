@@ -3,9 +3,9 @@
   Creates a portable Windows x64 Media Server test package.
 
 .DESCRIPTION
-  Copies the optimized executable, app-local dependency DLLs, VC++ runtime,
-  demo launchers, and operator notes into a versioned folder, then emits a ZIP
-  and SHA-256 checksum.
+  Copies the optimized executable and its PDB symbols, app-local dependency
+  DLLs, VC++ runtime, demo launchers, and operator notes into a versioned
+  folder, then emits a ZIP and SHA-256 checksum.
 
   Before packaging it builds windows-msvc-debug-gui and
   windows-msvc-release-gui and runs the full CTest suite for both, and stops
@@ -81,6 +81,18 @@ if (-not (Test-Path -LiteralPath $bakeExecutable -PathType Leaf)) {
     throw "Build media-bake before packaging: $bakeExecutable"
 }
 Copy-Item -LiteralPath $bakeExecutable -Destination $packageRoot
+
+# Symbols travel with the executables they were linked with. A crash or hang
+# dump from a stage machine is only readable against the PDB of that exact
+# build, and the build directory is rebuilt long before anyone opens the dump.
+# Beside the executable is where WinDbg and Visual Studio look first.
+foreach ($binary in $executable, $bakeExecutable) {
+    $symbols = [System.IO.Path]::ChangeExtension($binary, '.pdb')
+    if (-not (Test-Path -LiteralPath $symbols -PathType Leaf)) {
+        throw "Symbols not found at $symbols. Reconfigure the release preset so the build writes PDBs: cmake --preset windows-msvc-release-gui --fresh"
+    }
+    Copy-Item -LiteralPath $symbols -Destination $packageRoot
+}
 $runtimeDir = Split-Path -Parent $executable
 Get-ChildItem -LiteralPath $runtimeDir -Filter '*.dll' -File |
     Copy-Item -Destination $packageRoot

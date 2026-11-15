@@ -144,6 +144,9 @@ int run_node_playback(net::NodeSessionService &service,
         DeployedOutput output;
         std::unique_ptr<show::Presenter> presenter;
         OutputFrameSubmission submission{};
+        // This presenter's failure count when the node last looked, so a new
+        // failure is attributed to the output that had it.
+        core::u64 seen_failures{};
     };
     std::vector<NodeOutputPresenter> output_presenters;
     output_presenters.push_back(NodeOutputPresenter{
@@ -156,7 +159,6 @@ int run_node_playback(net::NodeSessionService &service,
         std::move(presenter)});
     OutputDeployment active_deployment{};
     active_deployment.node_index = options.node_index;
-    active_deployment.legacy_single_output = true;
     active_deployment.outputs.push_back(output_presenters.front().output);
     bool node_deployment_runtime_ready = true;
     // Reported separately from readiness so the Director can say which
@@ -191,13 +193,8 @@ int run_node_playback(net::NodeSessionService &service,
     auto next_node_media_status_refresh = Clock::time_point::min();
 
     net::NodeServiceFrameCommitSink sink{service, node};
-    show::FrameBoundaryDriverConfig config{};
-    config.clock = clock_config(options);
-    config.mailbox_capacity = 16U;
-    config.max_commits_per_tick = 8U;
-
-    auto created =
-        show::FrameBoundaryDriver::create(config, sink, Clock::now());
+    auto created = show::FrameBoundaryDriver::create(
+        node_pacer_config(options), sink, Clock::now());
     if (!created) {
         std::cerr << "invalid node frame-boundary driver configuration\n";
         return 1;
@@ -239,6 +236,9 @@ int run_node_playback(net::NodeSessionService &service,
     core::u64 node_missed_poses = 0U;
     core::u64 since_status = 0U;
     core::u64 present_failures = 0U;
+    // The latest failed frame's cause, reported to the Director so the
+    // Output Monitor can say why this node is holding its picture.
+    core::PresentFailure node_present_failure{};
     auto last_outcome = show::FrameCommitOutcome::Idle;
     auto closed = false;
 
@@ -267,7 +267,16 @@ int run_node_playback(net::NodeSessionService &service,
     core::u64 node_asset_registry_digest = 0U;
     core::u64 node_asset_manifest_digest = 0U;
     bool node_assets_loaded = false;
-    ProjectAssetAvailability node_asset_availability;
+    // Whether this machine can open what the show needs is asked on a thread
+    // of its own: the present loop below hands the manifest over and adopts
+    // the answer on the frame that finds it, and never waits on a disk or a
+    // file server. It is asked when the manifest changes and when the
+    // operator presses RESCAN, and at no other time.
+    ProjectAssetReadiness node_asset_check;
+    const ProjectAssetAvailability &node_asset_availability =
+        node_asset_check.availability();
+    // The RESCAN generation last seen in the committed document.
+    std::optional<core::u64> node_asset_refresh_generation;
 
     // Output-window placement is authored in the replicated Hardware Mapping
     // document. It is evaluated on version changes and only rebuilds the
@@ -312,6 +321,9 @@ int run_node_playback(net::NodeSessionService &service,
     // every refresh.
     core::u64 barrier_loss_transitions{};
     show::VideoReferenceSample latest_video_reference{};
+    // The picture is being held because the reference the sync policy asks
+    // for is not supplying frames.
+    bool node_reference_hold{};
 
     const auto publish_runtime_adoption = [&]() noexcept {
         try {
@@ -513,6 +525,7 @@ int run_node_playback(net::NodeSessionService &service,
         sync.missed_frames = missed_boundaries;
         sync.late_frames = late_boundaries;
         sync.held_frames = policy_held_boundaries;
+        sync.present_failure = node_present_failure;
         if (previous == net::RuntimeBarrierState::Joined &&
             sync.barrier != net::RuntimeBarrierState::Joined) {
             ++barrier_loss_transitions;
@@ -540,7 +553,17 @@ int run_node_playback(net::NodeSessionService &service,
             node_output_sync.barrier_presents_in_sync !=
                 published_output_sync.barrier_presents_in_sync ||
             node_output_sync.reference_clock !=
-                published_output_sync.reference_clock;
+                published_output_sync.reference_clock ||
+            // A node starting or stopping failing, or failing differently,
+            // is told at once; the running count rides the status cadence.
+            node_output_sync.present_failure.ongoing !=
+                published_output_sync.present_failure.ongoing ||
+            node_output_sync.present_failure.step !=
+                published_output_sync.present_failure.step ||
+            node_output_sync.present_failure.refusal !=
+                published_output_sync.present_failure.refusal ||
+            node_output_sync.present_failure.map_node !=
+                published_output_sync.present_failure.map_node;
         if (!force && !changed) {
             return;
         }
@@ -649,6 +672,7 @@ int run_node_playback(net::NodeSessionService &service,
 
     show::FrameWaiter frame_waiter;
     show::BoundaryLateness boundary_lateness;
+    core::u64 pacer_restarts = 0U;
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
         boundary_lateness.observe(now);
@@ -677,6 +701,27 @@ int run_node_playback(net::NodeSessionService &service,
         }
 
         const auto report = std::move(ticked).value();
+        // Nothing on a node pauses its pacer, and everything below is gated on
+        // the boundaries it reports: commits, acknowledgements, checkpoint
+        // adoption and the status line. A pacer found stopped is therefore
+        // restarted and reported, never left to go quiet. Its frame number
+        // means nothing here, so it is rewound to keep it clear of its end.
+        // Restarting also gives the wait at the bottom of this loop a future
+        // boundary again; a stopped pacer's hint is a time already past, which
+        // would spin a core.
+        if (driver.clock().state() != show::TransportState::Playing) {
+            const auto parked_at = driver.clock().frame().value();
+            const bool restarted =
+                driver.seek(driver.clock().config().first_frame, now)
+                    .has_value() &&
+                driver.play(now).has_value();
+            if (pacer_restarts++ == 0U) {
+                std::cerr << "node frame pacer stopped at its frame "
+                          << parked_at
+                          << (restarted ? "; restarted it\n"
+                                        : "; could not restart it\n");
+            }
+        }
         if (!service.running()) {
             const auto session_status = service.snapshot();
             if (session_status.state == net::NodeSessionServiceState::Faulted) {
@@ -686,6 +731,49 @@ int run_node_playback(net::NodeSessionService &service,
                              "can report and restart it\n";
                 return 1;
             }
+        }
+        // The sync policy asks for an external reference and it is not
+        // supplying frames. The boundaries in this report came from the system
+        // clock, so everything below still runs - this node commits,
+        // acknowledges, adopts checkpoints, follows the document and reports -
+        // and the one thing withheld is a new picture. That is what lets the
+        // edit that relaxes the policy, or redeploys an output, reach a node
+        // whose reference has gone.
+        const bool reference_hold = report.unreferenced;
+        const bool paced_by_reference =
+            driver.config().timing_authority ==
+            show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference;
+        if (paced_by_reference) {
+            // What the driver made of the reading, not the reading itself: a
+            // source that answers with a counter that stopped is not locked.
+            latest_video_reference.state = report.reference;
+        }
+        if (reference_hold != node_reference_hold) {
+            node_reference_hold = reference_hold;
+            // One line per change, and the Director is told at once.
+            std::cerr << "node " << options.node_index;
+            if (reference_hold) {
+                std::cerr << " is holding its picture: video reference "
+                          << video_reference_label(report.reference);
+            } else if (paced_by_reference) {
+                std::cerr << " is drawing again: video reference "
+                          << video_reference_label(report.reference);
+            } else {
+                std::cerr << " is drawing again: the sync policy no longer "
+                             "asks for a video reference";
+            }
+            std::cerr << '\n';
+            if (!reference_hold) {
+                // No output frame completed during the hold, so the playback
+                // buffer's cursor stood still while the control stream ran
+                // on. Left alone it would walk forward from there at normal
+                // speed and this node would draw that far behind its
+                // neighbours from now on. It starts again at its ordinary
+                // headroom, as it does for a new document stream.
+                output_playback_buffer = OutputPlaybackBuffer{
+                    options.active_preferences.output_buffer_frames};
+            }
+            publish_output_sync(false);
         }
         boundaries += report.boundaries;
         last_outcome = report.last_outcome;
@@ -719,8 +807,13 @@ int run_node_playback(net::NodeSessionService &service,
         // Director's asset cohort. Any other output is never sent a retry, so
         // it holds no activation: it shows a set as soon as its own renderer
         // has it.
+        //
+        // Nor is one held while the picture is held for the reference: the
+        // renderer reveals a set by drawing it, so a retained activation
+        // would never be let go, and this node would stop reading the very
+        // frames that could end the hold.
         const auto asset_frame =
-            !node_checkpoint_waiting &&
+            !node_checkpoint_waiting && !reference_hold &&
                     active_deployment.render_server != doc::NodeId{}
                 ? held_asset_activation(node_renderer_readiness.assets,
                                         node_asset_commit,
@@ -753,7 +846,11 @@ int run_node_playback(net::NodeSessionService &service,
             // is drained below, away from the boundary.
             static_cast<void>(retired.retire(std::move(presented.root)));
             presented = std::move(incoming);
-            ++presented_frames;
+            // A frame followed while the picture is held never reached an
+            // output, so it is not counted as presented.
+            if (!reference_hold) {
+                ++presented_frames;
+            }
         }
 
         if (!node_sync_loaded ||
@@ -881,10 +978,9 @@ int run_node_playback(net::NodeSessionService &service,
                         // the next tick rather than assuming the replacement
                         // inherited the old window's membership.
                         node_sync_request_pending = true;
-                        // Explicit feed references are verified against the
-                        // evaluated Feed Map later in this same render tick.
-                        node_feed_bindings_runtime_ready =
-                            active_deployment.legacy_single_output;
+                        // Feed references are verified against the evaluated
+                        // Feed Map later in this same render tick.
+                        node_feed_bindings_runtime_ready = false;
                     }
                     publish_runtime_adoption();
                 }
@@ -1021,7 +1117,6 @@ int run_node_playback(net::NodeSessionService &service,
                 !node_assets_loaded ||
                 presented.version.value() != node_asset_version;
             bool digest_changed = false;
-            bool rechecked = false;
             if (document_changed) {
                 node_asset_model.reset(presented.root);
                 node_asset_registry = node_asset_model.evaluate();
@@ -1054,33 +1149,45 @@ int run_node_playback(net::NodeSessionService &service,
                                  manifest.digest != node_asset_manifest_digest;
                 if (digest_changed) {
                     node_asset_manifest_digest = manifest.digest;
-                    node_asset_availability = scan_project_assets(manifest);
+                    // Asked, not answered. Until it is, what was already
+                    // known stands and anything new is taken to be there;
+                    // readiness for this manifest is not claimed.
+                    static_cast<void>(node_asset_check.require(manifest));
+                    node_asset_runtime_ready = false;
+                    if (!node_asset_check.checking()) {
+                        std::cerr << "node " << options.node_index
+                                  << " could not queue its asset check\n";
+                    }
                     node_media_status_count = 0U;
                     if (options.output) {
                         node_decode_support.replace(manifest.digest,
                                                     node_asset_registry);
                     }
                     next_node_media_status_refresh = Clock::time_point::min();
-                    rechecked = true;
                 }
                 node_asset_version = presented.version.value();
                 node_assets_loaded = true;
             }
-            if (rechecked) {
-                const bool ready = node_asset_availability.render_ready();
+            // The scanner's answer, on whichever frame it is found. One for a
+            // question since replaced - an older manifest, or the check a
+            // RESCAN superseded - carries another ticket and is dropped.
+            if (const auto answer = node_asset_check.poll()) {
+                const bool first_answer = answer->first_for_manifest;
+                const bool ready = node_asset_check.render_ready();
                 const bool readiness_changed =
                     ready != node_asset_runtime_ready;
                 node_asset_runtime_ready = ready;
+                next_node_media_status_refresh = Clock::time_point::min();
                 // The report carries the digest it answers, so a new manifest
                 // has to be republished even when this node was already ready:
                 // otherwise the Director keeps comparing against the digest
                 // this node last named and the Program gate never opens.
-                if (digest_changed || readiness_changed) {
+                if (first_answer || readiness_changed) {
                     publish_runtime_adoption();
                 }
                 // One line per actual change, not per retry. The ongoing state
                 // belongs on the Output Monitor, not in a five-second log.
-                if (!node_asset_availability.ready() && (digest_changed || readiness_changed)) {
+                if (!node_asset_availability.ready() && (first_answer || readiness_changed)) {
                     for (const ProjectAssetPresence &presence :
                          node_asset_availability.assets) {
                         if (!presence.present) {
@@ -1141,13 +1248,15 @@ int run_node_playback(net::NodeSessionService &service,
         }
         if (render_scene) {
             if (!scene_loaded || presented.version.value() != scene_version) {
-                scene_model.reset(presented.root);
+                // The node parses only what the committed edit changed, and
+                // ends where a rebuild would: see SceneModel::update.
+                scene_model.update(presented.root);
                 scene_version = presented.version.value();
                 scene_loaded = true;
             }
             if (!compositor_loaded ||
                 presented.version.value() != compositor_version) {
-                compositor_model.reset(presented.root);
+                compositor_model.update(presented.root, scene_model);
                 compositor_version = presented.version.value();
                 compositor_loaded = true;
             }
@@ -1190,9 +1299,9 @@ int run_node_playback(net::NodeSessionService &service,
                         switcher_progress.from);
                     transition_to_graph = compositor_model.evaluate(
                         switcher_progress.to);
-                    // Older documents may contain a dissolve authored before
-                    // canvas compatibility was enforced. Never hand an
-                    // impossible pair to Presenter; promote Program as a cut.
+                    // A canvas edited while a dissolve runs can leave an
+                    // impossible pair, exactly as the Director sees it. Never
+                    // hand one to Presenter; promote Program as a cut.
                     if (!show::dissolve_canvases_compatible(
                             transition_from_frame.canvas,
                             transition_to_frame.canvas)) {
@@ -1233,6 +1342,19 @@ int run_node_playback(net::NodeSessionService &service,
                     active_deployment.render_server != doc::NodeId{};
             }
             node_asset_commit = scene_frame.asset_commit;
+            // RESCAN reaches a node as a generation on the committed stage.
+            // The operator asked for the files to be looked at again, so
+            // this machine looks too - a file copied over after the show was
+            // loaded is found now, and one that went away is reported.
+            // What is known stands until the answer arrives.
+            if (node_asset_refresh_generation.has_value() &&
+                *node_asset_refresh_generation !=
+                    scene_frame.asset_refresh_generation &&
+                node_assets_loaded) {
+                static_cast<void>(node_asset_check.recheck());
+            }
+            node_asset_refresh_generation =
+                scene_frame.asset_refresh_generation;
             scene_frame.publication_verified=node_publication_verification.observe(presented.root,scene_frame.id);
 
             // The pose this node was given for the frame it is drawing.
@@ -1273,10 +1395,18 @@ int run_node_playback(net::NodeSessionService &service,
             }
         }
 
-        if (node_checkpoint_waiting) {
+        if (node_checkpoint_waiting || reference_hold) {
             // The checkpoint's root is staged state, not an image permit.
             // Keep the last complete connector image until a frame from the
             // replacement stream has actually been committed and published.
+            //
+            // Without its reference a node has no frame it may draw either:
+            // every output repeats its last complete image, and each boundary
+            // that passes is counted as held by policy.
+            if (reference_hold && at_boundary) {
+                policy_held_boundaries += report.boundaries;
+                missed_boundaries += report.boundaries;
+            }
             for (NodeOutputPresenter &slot : output_presenters) {
                 if (slot.presenter->hold() == show::PresenterStatus::Closed) {
                     status = show::PresenterStatus::Closed;
@@ -1293,7 +1423,6 @@ int run_node_playback(net::NodeSessionService &service,
                 scene::SceneTime{input.show_frame.value(), input.rate.numerator,
                                  input.rate.denominator});
             const bool feeds_ready =
-                active_deployment.legacy_single_output ||
                 std::all_of(
                     active_deployment.outputs.begin(),
                     active_deployment.outputs.end(),
@@ -1425,12 +1554,42 @@ int run_node_playback(net::NodeSessionService &service,
             publish_runtime_adoption();
             closed = true;
             break;
-        case show::PresenterStatus::Failed:
+        case show::PresenterStatus::Failed: {
             ++present_failures;
             if (at_boundary) {
                 missed_boundaries += report.boundaries;
             }
+            // The output whose own count moved had the failure and knows
+            // where. None moving means it refused before drawing anything:
+            // the output was not set up for what it was given.
+            core::PresentFailure latest{};
+            latest.step = core::PresentStep::Setup;
+            for (NodeOutputPresenter &slot : output_presenters) {
+                const core::PresentFailure seen =
+                    slot.presenter->present_failure();
+                if (seen.failed_frames != slot.seen_failures) {
+                    slot.seen_failures = seen.failed_frames;
+                    latest = seen;
+                }
+            }
+            latest.failed_frames = present_failures;
+            latest.ongoing = true;
+            const bool changed =
+                !node_present_failure.ongoing ||
+                latest.step != node_present_failure.step ||
+                latest.refusal != node_present_failure.refusal ||
+                latest.map_node != node_present_failure.map_node;
+            node_present_failure = latest;
+            if (changed) {
+                // One line per change, not per frame: a refusal repeats on
+                // every frame that asks for the same work.
+                std::cerr << "node " << options.node_index
+                          << " cannot draw its frames: "
+                          << core::present_failure_text(latest) << '\n';
+                publish_output_sync(false);
+            }
             break;
+        }
         case show::PresenterStatus::Deferred:
             if (at_boundary) {
                 missed_boundaries += report.boundaries;
@@ -1438,6 +1597,16 @@ int run_node_playback(net::NodeSessionService &service,
             break;
         case show::PresenterStatus::Presented:
         case show::PresenterStatus::Skipped:
+            // A picture held for the reference is not a frame drawn, so it
+            // does not end a failure that was going on when the hold began.
+            if (node_present_failure.ongoing && !reference_hold) {
+                node_present_failure.ongoing = false;
+                std::cerr << "node " << options.node_index
+                          << " is drawing its frames again after "
+                          << node_present_failure.failed_frames
+                          << " failed\n";
+                publish_output_sync(false);
+            }
             break;
         }
         if (render_output && transport.has_value()) {
@@ -1519,9 +1688,24 @@ int run_node_playback(net::NodeSessionService &service,
             if (!output_presenters.empty()) {
                 std::cout << gpu_timing_text(
                     output_presenters.front().presenter->timing());
+                // The OS reports local and system usage for the whole
+                // process, so any presenter's sample covers every output;
+                // the renderer's committed count is per device and is summed.
+                auto memory = output_presenters.front().presenter->memory();
+                for (std::size_t index = 1U; index < output_presenters.size();
+                     ++index) {
+                    memory.committed +=
+                        output_presenters[index].presenter->memory().committed;
+                }
+                std::cout << memory_text(memory, process_private_bytes());
+            } else {
+                std::cout << memory_text({}, process_private_bytes());
             }
             std::cout << boundary_wake_text(boundary_lateness.take());
             std::cout << " sync=" << sync_mode_label(node_sync_policy.mode)
+                      << " reference="
+                      << video_reference_label(latest_video_reference.state)
+                      << (reference_hold ? "/holding" : "")
                       << " barrier="
                       << runtime_barrier_label(node_output_sync.barrier) << '/'
                       << node_output_sync.joined_outputs << 'x'
@@ -1550,12 +1734,18 @@ int run_node_playback(net::NodeSessionService &service,
             break;
         }
         if (driver.config().timing_authority ==
-            show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference) {
+                show::FrameBoundaryDriverConfig::TimingAuthority::
+                    VideoReference &&
+            !reference_hold) {
             // This is merely a responsive poll for the hardware counter, not
-            // a pacing source. The counter above remains the only way a frame
-            // boundary is created in external-reference mode.
+            // a pacing source. While the reference is counting, the counter
+            // above is the only way a frame boundary is created.
             frame_waiter.sleep_for(std::chrono::milliseconds{1});
         } else {
+            // On the system clock - always, or for as long as the reference
+            // supplies no frames - the next boundary is known, so the loop
+            // sleeps until it. The reference is read again on that wake,
+            // which is soon enough to notice it return.
             boundary_lateness.arm(driver.clock().next_boundary_at());
             sleep_until_boundary(frame_waiter,
                                  driver.clock().next_boundary_at());
@@ -1581,7 +1771,9 @@ int run_node_playback(net::NodeSessionService &service,
                           ? "closed"
                           : "headless")
                   << gpu_timing_text(
-                         output_presenters.front().presenter->timing());
+                         output_presenters.front().presenter->timing())
+                  << memory_text(output_presenters.front().presenter->memory(),
+                                 process_private_bytes());
     }
     std::cout << " last=" << outcome_label(last_outcome) << '\n' << std::flush;
     return 0;
@@ -1811,11 +2003,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // Where the show is, is not a clock reading at all. It is the replicated
     // anchor evaluated at the control-frame ordinal, which is what makes the
     // Director and every node compute the same position from the same state.
-    auto paced = show::ShowClock::create(
-        show::ShowClockConfig{
-            options.rate, show::ShowFrame{0U},
-            show::ShowFrame{std::numeric_limits<core::u64>::max() - 1U}, false},
-        start);
+    auto paced =
+        show::ShowClock::create(show::pacer_clock_config(options.rate), start);
     auto created = show::TransportAuthority::create(clock_config(options),
                                                     scheduler.sealed_through());
     if (!paced || !created) {
@@ -1834,8 +2023,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // wall hitches together - with every node reporting itself perfectly
     // locked while it happens.
     sync::DirectorClockStatus director_clock{};
-    bool director_reference_seen = false;
-    core::u32 director_last_reference_frame = 0U;
+    show::VideoReferenceCadence director_reference;
 
     auto transport = std::move(created).value();
     bool restored_recovered_transport = false;
@@ -2032,10 +2220,11 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     bool pending_editor_coalescing_close{};
     HistoryDescriptions history_descriptions;
     editor::HistoryState history_state;
-    // Startup validates the recent project before the frame loop, then hands
-    // the already-decoded root to the ordinary frame-boundary staging path.
-    // Manual Open requests leave this empty and continue to read at the
-    // boundary, so both paths share transport/switcher/WAL validation.
+    // Startup validates the recent project before the frame loops, then hands
+    // the already-decoded root to the ordinary staging path. Manual Open
+    // requests leave this empty and the project loader reads the file on its
+    // own thread; both then share transport/switcher/WAL validation on the
+    // frame that stages the prepared document.
     std::optional<doc::Root> pending_preloaded_project;
     std::optional<std::filesystem::path> recent_project_settings_file;
     std::vector<std::string> recent_project_paths;
@@ -2162,35 +2351,38 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             }
         }
     }
-    if (options.edit && recovered_session) {
+    // Work a previous run changed and never saved. The copy is looked for
+    // here, before the frame loop, and from then on only the autosave thread
+    // touches the recovery folder.
+    std::unique_ptr<ProjectAutosave> project_autosave;
+    std::optional<ProjectRecovery> project_recovery;
+    if (options.edit && recent_project_settings_file.has_value()) {
         try {
-            MediaRateEnrichment enrichment =
-                enrich_media_frame_rates(scheduler.projected_document());
-            if (enrichment.updated_nodes != 0U) {
-                const cmd::FrameNumber at{scheduler.sealed_through().value() +
-                                          1U};
-                auto scheduled = scheduler.schedule_document_replace(
-                    enrichment.project, cmd::UndoContextId{7U},
-                    cmd::TransactionId{at.value()}, at);
-                if (scheduled) {
-                    project_explicitly_dirty = true;
-                    project_message =
-                        "RECOVERED PROJECT - MEDIA FPS UPDATED (" +
-                        std::to_string(enrichment.updated_nodes) + ')';
-                    std::cerr << "enriched " << enrichment.updated_nodes
-                              << " recovered media node(s) with native FPS; "
-                                 "save the project to persist metadata\n";
-                } else {
-                    std::cerr << "could not schedule recovered media FPS "
-                                 "metadata enrichment\n";
-                }
+            const std::filesystem::path recovery_directory =
+                recent_project_settings_file->parent_path() / "recovery";
+            const std::string &opening = pending_project_load.has_value()
+                                             ? pending_project_load->path
+                                             : project_path;
+            const doc::Root *const saved =
+                pending_preloaded_project.has_value()
+                    ? &*pending_preloaded_project
+                    : !project_path.empty() ? &saved_project_snapshot
+                                            : nullptr;
+            project_recovery =
+                find_project_recovery(recovery_directory, opening, saved);
+            if (project_recovery.has_value()) {
+                std::cerr << "found unsaved changes from "
+                          << project_recovery->saved_at << " for "
+                          << (project_recovery->project_path.empty()
+                                  ? std::string{"an untitled project"}
+                                  : project_recovery->project_path)
+                          << '\n';
             }
-        } catch (const std::bad_alloc &) {
-            std::cerr << "could not enrich recovered media FPS metadata: "
-                         "allocation failed\n";
-        } catch (const std::length_error &) {
-            std::cerr << "could not enrich recovered media FPS metadata: "
-                         "project limits exceeded\n";
+            project_autosave =
+                std::make_unique<ProjectAutosave>(recovery_directory);
+        } catch (const std::exception &error) {
+            std::cerr << "project recovery is unavailable: " << error.what()
+                      << '\n';
         }
     }
     // The next id to try for a created element; advanced past any occupied id
@@ -2381,8 +2573,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .workspace_layout_file = workspace_layout_file,
         .pacer = pacer,
         .director_clock = director_clock,
-        .director_reference_seen = director_reference_seen,
-        .director_last_reference_frame = director_last_reference_frame,
+        .director_reference = director_reference,
         .transport = transport,
         .tracked = tracked,
         .operator_commands = operator_commands,
@@ -2493,6 +2684,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .saved_project_snapshot = saved_project_snapshot,
         .project_explicitly_dirty = project_explicitly_dirty,
         .project_generation = project_generation,
+        .project_autosave = project_autosave,
+        .project_recovery = project_recovery,
         .linked_ingest = linked_ingest,
         .blender_links = blender_links,
         .blender_store_project = blender_store_project,

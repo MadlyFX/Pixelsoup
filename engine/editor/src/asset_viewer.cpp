@@ -56,6 +56,7 @@ scene::Scene asset_viewer_media_scene(const assets::MediaAsset &asset,
   viewer.renderer_settings.quality = project.quality;
   viewer.renderer_settings.color = project.color;
   viewer.environment.sky_color = scene::Vec3{0.0F, 0.0F, 0.0F};
+  viewer.environment.fill_sky_color = scene::Vec3{0.0F, 0.0F, 0.0F};
   viewer.environment.ground_color = scene::Vec3{0.0F, 0.0F, 0.0F};
 
   const assets::PixelDimensions pixels = asset_viewer_pixels(asset);
@@ -341,13 +342,25 @@ scene::Scene asset_viewer_model_scene(const assets::ModelAsset &asset,
     if (stage != nullptr) {
       viewer.environment = stage->environment;
       viewer.directional_lights = stage->directional_lights;
+      // The fill the stage itself is lit by, which depends on all of its
+      // lights - including the local ones the viewer leaves behind.
+      {
+        const scene::AmbientFill fill = scene::ambient_fill(*stage);
+        viewer.environment.fill_sky_color = fill.sky;
+        viewer.environment.ground_color = fill.ground;
+        viewer.environment.ambient = fill.strength;
+        viewer.environment.fill_with_lights = true;
+      }
       break;
     }
     [[fallthrough]];
   case AssetViewerEnvironment::Studio:
+    // A soft fill designed to sit under the three lights below.
     viewer.environment.sky_color = scene::Vec3{0.20F, 0.21F, 0.23F};
+    viewer.environment.fill_sky_color = viewer.environment.sky_color;
     viewer.environment.ground_color = scene::Vec3{0.08F, 0.08F, 0.08F};
     viewer.environment.ambient = 1.0F;
+    viewer.environment.fill_with_lights = true;
     viewer.directional_lights.push_back(
         studio_light(scene::Vec3{-0.55F, 0.75F, 0.60F},
                      scene::Vec3{1.0F, 0.96F, 0.90F}, 1.6F, view.look.rig_yaw));
@@ -360,6 +373,7 @@ scene::Scene asset_viewer_model_scene(const assets::ModelAsset &asset,
     break;
   case AssetViewerEnvironment::Hdri:
     viewer.environment.sky_color = scene::Vec3{};
+    viewer.environment.fill_sky_color = scene::Vec3{};
     viewer.environment.ground_color = scene::Vec3{};
     viewer.environment.map_source = view.look.hdri_source;
     viewer.environment.map_intensity = 1.0F;

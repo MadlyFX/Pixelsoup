@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <limits>
 #include <set>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 
@@ -46,6 +47,43 @@ Nodes nodes(const doc::Root& root) {
     for (const auto& c : doc::diff({}, root).changes) result.emplace(c.id, *c.after);
     return result;
 }
+// Every node of a document by id, read where it lies. `nodes` above copies
+// each one, which a caller that goes on to edit them needs; reading the link
+// records does not, and it runs on every machine whenever a linked placement
+// moves, where the copy was most of its cost. Entries are named as a map's
+// are, so code written against either reads the same.
+class NodeView final {
+  public:
+    struct Entry final {
+        doc::NodeId first;
+        const doc::Node& second;
+    };
+    using Entries = std::vector<Entry>;
+
+    // A document enumerates in ascending id order, which is what find()
+    // searches by.
+    explicit NodeView(const doc::Root& root) : contents_(doc::diff({}, root)) {
+        entries_.reserve(contents_.changes.size());
+        for (const auto& c : contents_.changes) entries_.push_back(Entry{c.id, *c.after});
+    }
+    [[nodiscard]] Entries::const_iterator begin() const noexcept { return entries_.begin(); }
+    [[nodiscard]] Entries::const_iterator end() const noexcept { return entries_.end(); }
+    [[nodiscard]] Entries::const_iterator find(doc::NodeId id) const noexcept {
+        const auto found = std::lower_bound(entries_.begin(), entries_.end(), id,
+            [](const Entry& entry, doc::NodeId wanted) noexcept { return entry.first < wanted; });
+        return found != entries_.end() && found->first == id ? found : entries_.end();
+    }
+    [[nodiscard]] const doc::Node& at(doc::NodeId id) const {
+        const auto found = find(id);
+        if (found == entries_.end()) throw std::out_of_range{"no such document node"};
+        return found->second;
+    }
+
+  private:
+    // Holds the nodes the entries refer to.
+    doc::Delta contents_;
+    Entries entries_;
+};
 bool uuid_valid(std::string_view id) {
     if (id.size() != 36) return false;
     bool nonzero = false;
@@ -184,7 +222,7 @@ std::string link_instance_uuid(doc::NodeId id) {
 }
 
 LinkedStateResult read_linked_scene(const doc::Root& root) {
-    const auto all = nodes(root);
+    const NodeView all{root};
     const auto error = [](doc::NodeId id, std::string message) { return LinkedStateResult::failure({id, std::move(message)}); };
     std::set<std::tuple<std::string, doc::NodeId, std::string>> identities;
     std::map<std::pair<doc::NodeId, doc::NodeId>, doc::NodeId> placements;

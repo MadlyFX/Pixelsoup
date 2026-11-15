@@ -197,11 +197,14 @@ ProjectAssetManifest collect_project_asset_manifest(
 }
 
 ProjectAssetAvailability check_project_assets(
-    const ProjectAssetManifest& manifest) {
+    const ProjectAssetManifest& manifest, std::stop_token stop) {
     ProjectAssetAvailability availability{};
     availability.digest = manifest.digest;
     availability.assets.reserve(manifest.assets.size());
     for (const RequiredProjectAsset& required : manifest.assets) {
+        if (stop.stop_requested()) {
+            break;
+        }
         ProjectAssetPresence presence{};
         presence.asset = required.asset;
         presence.kind = required.kind;
@@ -258,9 +261,12 @@ ProjectAssetAvailability check_project_assets(
 }
 
 std::vector<ChangedLibrarySource> find_changed_library_sources(
-    const assets::AssetRegistry& registry) {
+    const assets::AssetRegistry& registry, std::stop_token stop) {
     std::vector<ChangedLibrarySource> changed;
     for (const assets::Asset& asset : registry.assets) {
+        if (stop.stop_requested()) {
+            break;
+        }
         const std::optional<assets::ContentFingerprint>& recorded =
             assets::asset_fingerprint(asset);
         if (!recorded.has_value()) {
@@ -296,11 +302,14 @@ std::vector<doc::NodeId> still_changed_library_sources(
 }
 
 ProjectAssetAvailability scan_project_assets(
-    const ProjectAssetManifest& manifest) {
+    const ProjectAssetManifest& manifest, std::stop_token stop) {
     ProjectAssetAvailability availability{};
     availability.digest = manifest.digest;
     availability.assets.reserve(manifest.assets.size());
     for (const RequiredProjectAsset& required : manifest.assets) {
+        if (stop.stop_requested()) {
+            break;
+        }
         ProjectAssetPresence presence{};
         presence.asset = required.asset;
         presence.kind = required.kind;
@@ -316,6 +325,195 @@ ProjectAssetAvailability scan_project_assets(
         availability.assets.push_back(std::move(presence));
     }
     return availability;
+}
+
+ProjectAssetAvailability provisional_asset_availability(
+    const ProjectAssetManifest& manifest,
+    const ProjectAssetAvailability& previous) {
+    ProjectAssetAvailability availability{};
+    availability.digest = manifest.digest;
+    availability.assets.reserve(manifest.assets.size());
+    for (const RequiredProjectAsset& required : manifest.assets) {
+        const auto known = std::find_if(
+            previous.assets.begin(), previous.assets.end(),
+            [&](const ProjectAssetPresence& presence) {
+                return presence.asset == required.asset &&
+                       presence.kind == required.kind &&
+                       presence.source == required.source &&
+                       presence.expected_fingerprint ==
+                           required.expected_fingerprint;
+            });
+        ProjectAssetPresence presence{};
+        if (known != previous.assets.end()) {
+            presence = *known;
+        } else {
+            presence.asset = required.asset;
+            presence.kind = required.kind;
+            presence.source = required.source;
+            presence.expected_fingerprint = required.expected_fingerprint;
+            presence.present = true;
+            presence.state = ProjectAssetPresence::State::Ready;
+        }
+        switch (presence.state) {
+        case ProjectAssetPresence::State::Ready:
+            break;
+        case ProjectAssetPresence::State::Missing:
+            increment(availability.missing);
+            break;
+        case ProjectAssetPresence::State::ByteLengthMismatch:
+        case ProjectAssetPresence::State::Sha256Mismatch:
+            increment(availability.mismatched);
+            break;
+        case ProjectAssetPresence::State::VerificationFailed:
+            increment(availability.verification_failed);
+            break;
+        }
+        availability.assets.push_back(std::move(presence));
+    }
+    return availability;
+}
+
+ProjectAssetScanner::ProjectAssetScanner()
+    : worker_([this](std::stop_token stop) { run(stop); }) {}
+
+ProjectAssetScanner::~ProjectAssetScanner() {
+    worker_.request_stop();
+    wake_.notify_all();
+}
+
+core::u64 ProjectAssetScanner::request(
+    const ProjectAssetManifest& manifest, ProjectAssetScanDepth depth,
+    const assets::AssetRegistry& library) noexcept {
+    try {
+        // Copied before the lock, which the worker takes only to pick a job
+        // up or to hand an answer back - never while it is on the disk.
+        Job job{0U, depth, manifest,
+                depth == ProjectAssetScanDepth::Fingerprints
+                    ? library
+                    : assets::AssetRegistry{}};
+        core::u64 ticket{};
+        {
+            const std::lock_guard lock{mutex_};
+            ticket = next_ticket_++;
+            job.ticket = ticket;
+            if (queued_.has_value()) {
+                superseded_.fetch_add(1U, std::memory_order_relaxed);
+            }
+            queued_ = std::move(job);
+        }
+        wake_.notify_one();
+        return ticket;
+    } catch (...) {
+        return 0U;
+    }
+}
+
+std::optional<ProjectAssetScanResult> ProjectAssetScanner::take() noexcept {
+    const std::unique_lock lock{mutex_, std::try_to_lock};
+    if (!lock.owns_lock() || !finished_.has_value()) {
+        return std::nullopt;
+    }
+    std::optional<ProjectAssetScanResult> taken = std::move(finished_);
+    finished_.reset();
+    return taken;
+}
+
+void ProjectAssetScanner::drain() {
+    std::unique_lock lock{mutex_};
+    idle_.wait(lock, [this] { return !queued_.has_value() && !busy_; });
+}
+
+void ProjectAssetScanner::run(std::stop_token stop) {
+    for (;;) {
+        Job job;
+        {
+            std::unique_lock lock{mutex_};
+            busy_ = false;
+            if (!queued_.has_value()) {
+                idle_.notify_all();
+            }
+            wake_.wait(lock, stop, [this] { return queued_.has_value(); });
+            if (stop.stop_requested()) {
+                return;
+            }
+            job = std::move(*queued_);
+            queued_.reset();
+            busy_ = true;
+        }
+        ProjectAssetScanResult result{};
+        result.ticket = job.ticket;
+        result.depth = job.depth;
+        try {
+            if (job.depth == ProjectAssetScanDepth::Fingerprints) {
+                result.availability = check_project_assets(job.manifest, stop);
+                result.changed_library_sources =
+                    find_changed_library_sources(job.library, stop);
+            } else {
+                result.availability = scan_project_assets(job.manifest, stop);
+            }
+        } catch (...) {
+            // No answer is better than a partial one: the caller keeps what
+            // it had, and the next request asks again.
+            continue;
+        }
+        if (stop.stop_requested()) {
+            return;
+        }
+        const std::lock_guard lock{mutex_};
+        finished_ = std::move(result);
+    }
+}
+
+bool ProjectAssetReadiness::ask(const assets::AssetRegistry& library) {
+    ticket_ = scanner_.request(manifest_, wanted_, library);
+    return ticket_ != 0U;
+}
+
+bool ProjectAssetReadiness::require(const ProjectAssetManifest& manifest,
+                                    const assets::AssetRegistry& library) {
+    if (held_ && manifest.digest == manifest_.digest) {
+        return false;
+    }
+    availability_ = provisional_asset_availability(manifest, availability_);
+    manifest_ = manifest;
+    held_ = true;
+    static_cast<void>(ask(library));
+    return true;
+}
+
+bool ProjectAssetReadiness::recheck(ProjectAssetScanDepth depth,
+                                    const assets::AssetRegistry& library) {
+    if (!held_) {
+        return false;
+    }
+    if (depth == ProjectAssetScanDepth::Fingerprints) {
+        wanted_ = depth;
+    }
+    return ask(library);
+}
+
+std::optional<ProjectAssetReadiness::Answer> ProjectAssetReadiness::poll() {
+    if (ticket_ == 0U) {
+        return std::nullopt;
+    }
+    auto scanned = scanner_.take();
+    if (!scanned.has_value() || scanned->ticket != ticket_ ||
+        scanned->availability.digest != manifest_.digest) {
+        return std::nullopt;
+    }
+    ticket_ = 0U;
+    Answer answer{};
+    answer.depth = scanned->depth;
+    answer.first_for_manifest = !answered();
+    answer.changed_library_sources =
+        std::move(scanned->changed_library_sources);
+    availability_ = std::move(scanned->availability);
+    answered_digest_ = manifest_.digest;
+    answered_any_ = true;
+    if (answer.depth == ProjectAssetScanDepth::Fingerprints) {
+        wanted_ = ProjectAssetScanDepth::Presence;
+    }
+    return answer;
 }
 
 } // namespace mediaserver::app

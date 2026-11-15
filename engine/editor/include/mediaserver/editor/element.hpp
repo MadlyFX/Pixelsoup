@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mediaserver/compositor/compositor_graph.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
@@ -182,12 +183,11 @@ struct ElementInfo final {
     // Node id zero denotes the implicit lane and is never authored.
     doc::NodeId timeline_lane{};
     core::i64 clip_order{};
-    // Clip-only: the Library plateset this clip is a plate of, the slot it
-    // plays in, and its take. Plates of one take that share a start and a
-    // length are edited as one.
+    // Clip-only: the Library plateset this clip came from.
     doc::NodeId plateset{};
-    std::string plateset_slot;
-    core::i64 plateset_take{};
+    // Clip-only: a take - one clip on a vehicle track that plays every plate
+    // of `plateset` on that track's slot screens.
+    bool take{};
     // False for a clip the current show frame does not include. It is still a
     // real, editable placement - the Timeline needs its row and its bar - so it
     // is marked rather than omitted.
@@ -220,6 +220,28 @@ struct ElementInfo final {
     core::u32 raster_width{scene::default_raster_width};
     core::u32 raster_height{scene::default_raster_height};
     bool aspect_locked{true};
+    // Track-only: a vehicle track, which owns no plane - its takes play on
+    // its slot screens.
+    bool vehicle{};
+    // A slot screen's vehicle track, and a take's: the car it belongs to.
+    // Zero for everything else.
+    doc::NodeId vehicle_track{};
+    // A slot screen's slot, an index into `scene::schema::vehicle_slot_keys`.
+    core::u8 vehicle_slot{scene::no_vehicle_slot};
+    // A slot screen's: source frames its plate plays ahead of its take.
+    core::i64 time_offset{};
+    // A vehicle track's and a take's: the car's slot screens, by slot; zero
+    // where it has none.
+    std::array<doc::NodeId, scene::vehicle_slot_count> slot_screens{};
+    // A take's: the slots it has a plate for.
+    std::array<bool, scene::vehicle_slot_count> plates{};
+    // A vehicle track's: the LED Car Process its screens feed, and how that
+    // rig is laid out - where the car stands, how far out and how large its
+    // walls are, its ceiling. Zero when the screens feed none, and then there
+    // is no layout to show. Supplied by the shell from the Stage scene's
+    // compositor graph.
+    doc::NodeId vehicle_rig{};
+    compositor::LedCarProcessParameters rig{};
 
     // Camera-only lens and exposure. A camera stands at `position` and is
     // turned by `rotation` like every other element.

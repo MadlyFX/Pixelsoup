@@ -50,10 +50,11 @@ struct RowsState final {
   // Tracks start open; a closed track lists only its header, which then
   // summarises its clips.
   std::set<doc::NodeId> collapsed_lanes;
-  // A placed plateset's plate tracks fold under one take row, which starts
-  // closed so the set reads as one track; these are the rows opened, by the
-  // row's own id (its lowest track id).
-  std::set<doc::NodeId> expanded_platesets;
+  // A vehicle track reads as one track: its slot screens are listed under
+  // it only for the tracks named here, and each screen starts closed - the
+  // ones named in `open_screens` list their Properties.
+  std::set<doc::NodeId> listed_screens;
+  std::set<doc::NodeId> open_screens;
   // How tall a placed clip's row is, so its filmstrip and waveform can be
   // read: every clip row's height, and the rows the operator sized alone.
   float clip_row_height{24.0F};
@@ -367,10 +368,6 @@ struct TimelineSelectionRequest final {
   // Physical surfaces share document ids with scene layers but belong to the
   // Stage/Mapping selection domain rather than the Inspector's scene domain.
   bool surface{};
-  // A Replace of several clips at once - every plate of a plateset take -
-  // with `node`, one of them, as the primary the Inspector shows. Empty for
-  // an ordinary one-node request.
-  std::vector<doc::NodeId> members;
 
   bool operator==(const TimelineSelectionRequest &) const = default;
 };
@@ -674,25 +671,16 @@ struct TimelineTimeAxis final {
   bool operator==(const TimelineTimeAxis &) const = default;
 };
 
-// A kept plateset moment where the scene plays it: the show frame its front
-// plate reaches that source frame. Derived each frame from the plateset and
+// A kept plateset moment where the scene plays it: the show frame its take
+// reaches that front plate frame. Derived each frame from the plateset and
 // the placement, so it moves with the footage and is never authored here.
 struct TimelineMoment final {
   core::i64 frame{};
   assets::PlatesetMomentKind kind{assets::PlatesetMomentKind::Stopped};
-  // The placed front plate it rides on.
+  // The take it rides on.
   doc::NodeId clip{};
 
   bool operator==(const TimelineMoment &) const = default;
-};
-
-// A Library plateset's name, for the take row its placed plates fold into.
-// A set the Library no longer names is called after its tracks instead.
-struct TimelinePlateset final {
-  doc::NodeId asset{};
-  std::string name;
-
-  bool operator==(const TimelinePlateset &) const = default;
 };
 
 // Everything the Timeline draws from in one frame. Show time, the scene's
@@ -716,7 +704,6 @@ struct TimelineDrawInput final {
   std::span<const TimelineWaveformObservation> waveforms;
   std::span<const scene::TimelineMarker> markers;
   std::span<const TimelineMoment> moments;
-  std::span<const TimelinePlateset> platesets;
 };
 
 // A clip to open in the Asset Viewer: from its menu, at its first source
@@ -724,7 +711,7 @@ struct TimelineDrawInput final {
 struct TimelineViewClipRequest final {
   doc::NodeId clip{};
   bool at_playhead{};
-  // Open the plateset the clip is a plate of, rather than its footage.
+  // Open the plateset the clip is a take of, rather than its footage.
   bool plateset{};
 
   bool operator==(const TimelineViewClipRequest &) const = default;
@@ -846,11 +833,6 @@ public:
   [[nodiscard]] std::span<const ReplacementTarget> replacement_targets() const noexcept {
     return replacement_targets_;
   }
-  // The lead plate of the plateset take under (x, y) on a take row, as of
-  // the last draw: the take whose bar holds the point, or else the row's
-  // first take. A plateset let go there swaps that take.
-  [[nodiscard]] std::optional<doc::NodeId> take_at(float x,
-                                                   float y) const noexcept;
 
   // Replaces only the Timeline's typed key selection after the Director has
   // accepted an atomic plan. Addresses remain unique and sorted; no Scene
@@ -1071,11 +1053,6 @@ private:
   // A track's own bar, from its first clip's head to its last clip's tail,
   // which edits the track as though it were one clip.
   void track_bar_cell(RowContext &rc);
-  // A placed plateset's take row: its name, plate count and twirl in the
-  // list, and a bar per take in the lane, which edits the take by its lead
-  // plate - the shell carries the edit to the other plates.
-  void plateset_header_list_cell(RowContext &rc);
-  void plateset_takes_cell(RowContext &rc);
   // Each draws into its part of the bar: the whole bar on a short row, or
   // on a tall one the pictures above and the waveform below.
   bool draw_clip_filmstrip(RowContext &rc, bool live, const gui::Rect &area);
@@ -1115,14 +1092,13 @@ private:
   core::i64 razor_frame(Pass &p, float px);
   core::i64 shown_marker_frame(const scene::TimelineMarker &marker) const;
   void update_key_drag(Pass &p);
-  std::optional<doc::NodeId> clip_lane_under_pointer(Pass &p, float pointer_y);
+  // The track a dragged clip would land on under the pointer: zero for off
+  // every track, nothing where it cannot go. `take` says the clip is a take,
+  // which lands only on a vehicle track - where nothing else may.
+  std::optional<doc::NodeId> clip_lane_under_pointer(Pass &p, float pointer_y,
+                                                     bool take);
 
   std::vector<ReplacementTarget> replacement_targets_;
-  struct TakeTarget final {
-    doc::NodeId lead{};
-    gui::Rect bounds{};
-  };
-  std::vector<TakeTarget> take_targets_;
 
   // Which part of a clip bar a drag grabbed. Move slides the placement;
   // TrimIn and TrimOut change one edge while the source stays put under the
@@ -1244,8 +1220,7 @@ private:
     float lane_start_y{};
     bool lane_moved{};
     doc::NodeId lane_destination{};
-    // Every track the drag carries, `lane_node` among them: that one alone,
-    // or a take row's run of tracks, which land together in their order.
+    // Every track the drag carries, `lane_node` among them.
     std::vector<doc::NodeId> lane_block;
     std::string lane_block_label;
     // Objects, models, lights, loose clips, groups, and clips inside one
@@ -1370,9 +1345,6 @@ private:
     // A press on a clip that did its work on the press - a razor cut - and
     // must not turn into a scrub while the button stays down.
     bool press_consumed{};
-    // The gesture began on a plateset take's bar: it changes the take's
-    // time and never its tracks or its place in a stack.
-    bool take{};
   };
   ClipGesture clip_;
 
@@ -1423,9 +1395,6 @@ private:
   };
   TrackGesture track_;
   void press_track_bar(RowContext &rc, ClipDrag part);
-  // A press on take `take`'s bar in a plateset row: the take selected, and
-  // its lead plate lifted, cut or slipped. A double-click opens the row.
-  void press_take_bar(RowContext &rc, ClipDrag part, std::size_t take);
   // Starts a clip gesture of `drag` on `node`, as it stood at `timing`, from
   // this frame's press.
   void lift_clip(Pass &p, ClipDrag drag, doc::NodeId node,

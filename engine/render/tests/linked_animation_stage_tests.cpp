@@ -40,8 +40,11 @@ int main(int argc,char** argv) {
         auto stage=*root.get(preview);stage.properties["scene_name"]=std::string{"Animation Preview"};
         stage.properties["canvas_width"]=core::i64{640};stage.properties["canvas_height"]=core::i64{360};stage.properties["ambient"]=0.6;
         root=root.set(stage).set({program,std::string{ss::stage_type},{{"scene_name",std::string{"Program"}}}});
+        scene::Camera aim{}; aim.eye=scene::Vec3{3.0F,2.0F,8.0F}; aim.target=scene::Vec3{3.0F,0.5F,-1.0F};
+        const scene::Vec3 turns=scene::camera_rotation(aim);
         root=root.set({doc::NodeId{10002},std::string{ss::camera_type},{{"scene_id",static_cast<core::i64>(preview.value())},
-            {"eye_x",3.0},{"eye_y",2.0},{"eye_z",8.0},{"target_x",3.0},{"target_y",0.5},{"fov_turns",0.17}}});
+            {"position_x",3.0},{"position_y",2.0},{"position_z",8.0},{"rotation_yaw",(static_cast<double>(turns.x)+0.0)},
+            {"rotation_pitch",(static_cast<double>(turns.y)+0.0)},{"rotation_roll",(static_cast<double>(turns.z)+0.0)},{"fov_turns",0.17}}});
         root=root.set({doc::NodeId{10003},std::string{ss::settings_type},{{"renderer_backend",std::string{"advanced"}}}});
         auto links=scene::read_linked_scene(root);check(bool(links),links ? "" : links.error().message);
         check(links.value().occurrences.size()==1,"one assembly occurrence");

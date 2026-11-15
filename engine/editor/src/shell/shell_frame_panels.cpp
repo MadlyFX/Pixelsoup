@@ -14,11 +14,12 @@ void EditorShell::Frame::prepare_panels() {
   // can land on its slots.
   plateset_editor_drawn = false;
   // The thumbnails its slot tiles show, kept and made like the Library's.
-  // Kept plateset moments where the Stage scene plays them: each placed
-  // front plate's moments, through its clip's trim and rate, inside it.
+  // Kept plateset moments where the Stage scene plays them: each take's
+  // moments - they are in front plate frames, which is what a take's own
+  // trim counts in - through its trim and rate, inside it.
   for (const ElementInfo &plate : elements) {
     if (plate.kind != ElementKind::Media || plate.plateset == doc::NodeId{} ||
-        plate.plateset_slot != "front" || !plate.timing.placed()) {
+        !plate.take || !plate.timing.placed()) {
       continue;
     }
     const assets::Asset *const asset = asset_registry.asset(plate.plateset);
@@ -52,24 +53,6 @@ void EditorShell::Frame::prepare_panels() {
           TimelineMoment{show, moment.kind, plate.node});
     }
   }
-  // The Library's names for the platesets placed plates come from, for the
-  // Timeline's take rows.
-  for (const ElementInfo &plate : elements) {
-    if (plate.kind != ElementKind::Media || plate.plateset == doc::NodeId{} ||
-        std::any_of(timeline_platesets.begin(), timeline_platesets.end(),
-                    [&](const TimelinePlateset &named) {
-                      return named.asset == plate.plateset;
-                    })) {
-      continue;
-    }
-    const assets::Asset *const asset = asset_registry.asset(plate.plateset);
-    if (const auto *const set =
-            asset != nullptr ? std::get_if<assets::PlatesetAsset>(asset)
-                             : nullptr) {
-      timeline_platesets.push_back(
-          TimelinePlateset{plate.plateset, set->display_name});
-    }
-  }
   // Files dragged in from the desktop that the Library imported itself.
   library_took_files = false;
   compositor_panel_drawn = false;
@@ -84,6 +67,25 @@ void EditorShell::Frame::prepare_panels() {
     view.panel.set_precise_work(precise_media_work);
   }
   impl.program_panel.set_precise_work(precise_media_work);
+  // A mask drawn a moment ago is selected the first frame it is here.
+  if (impl.pending_mask_selection.has_value()) {
+    const MasksPanelSelection &wanted = *impl.pending_mask_selection;
+    const bool arrived =
+        wanted.scene == authored_stage.id &&
+        std::any_of(authored_stage.masks.begin(), authored_stage.masks.end(),
+                    [&](const scene::MaskInstance &mask) {
+                      return mask.source == wanted.mask &&
+                             mask.target == wanted.target;
+                    });
+    if (arrived) {
+      impl.mask_selection = wanted;
+      impl.pending_mask_selection.reset();
+    } else if (impl.pending_mask_frames == 0U) {
+      impl.pending_mask_selection.reset();
+    } else {
+      --impl.pending_mask_frames;
+    }
+  }
   const ElementInfo *const mask_target_element =
       find_element(elements, impl.anchor());
   const bool mask_target_supported =
@@ -110,32 +112,32 @@ void EditorShell::Frame::prepare_panels() {
   // layer the picture does not contain would be authored somewhere nobody is
   // looking. A running dissolve is excluded outright - the picture is a mix of
   // two committed scenes and belongs to neither.
-  mask_program_active = mask_stage_active && authored_stage.id == switcher.program_scene &&
+  // The Canvas view of a Preview scene shows the Stage's own scene, so there
+  // the two panels agree again.
+  //
+  // Program is in the mask's domain only while one of the target's masks is
+  // selected and Select is the tool: choosing a layer and shaping its mask
+  // are then two states of one tool rather than two modes of the panel, and
+  // Esc or a click away from the mask goes back to the layer. A shape tool
+  // draws new masks instead of editing the selected one.
+  // With no Stage scene of its own the Stage is showing Program's.
+  const bool stage_shows_program =
+      switcher.stage_scene == nullptr ||
+      authored_stage.id == switcher.program_scene;
+  const bool target_mask_selected =
+      mask_target_supported && impl.mask_selection.mask != doc::NodeId{} &&
+      impl.mask_selection.scene == mask_target.scene &&
+      impl.mask_selection.target == mask_target.target;
+  mask_program_active =
+      target_mask_selected &&
+      impl.program_panel.canvas_tool() == CanvasTool::Select &&
+      (stage_shows_program || program_canvas_stage) &&
       !switcher.transition_active;
   // Compositor nodes are scene-scoped, so the graph on screen is the graph of
   // the scene on the Stage and editing it never reaches Program. The one thing
   // that still has to hold is a running dissolve: both of its inputs are
   // already committed pictures, so no graph edit may land mid-transition.
   compositor_locked = switcher.rehearsal_locked;
-}
-
-// The other plates of `clip`'s take: the same take, start and length.
-// A plate moved or trimmed on its own has left its take.
-std::vector<const ElementInfo *>
-EditorShell::Frame::take_siblings(const ElementInfo &clip) {
-  std::vector<const ElementInfo *> plates;
-  if (clip.plateset_take == 0) {
-    return plates;
-  }
-  for (const ElementInfo &other : elements) {
-    if (other.node != clip.node && other.kind == ElementKind::Media &&
-        other.plateset_take == clip.plateset_take &&
-        other.timing.start == clip.timing.start &&
-        other.timing.duration == clip.timing.duration && !other.locked) {
-      plates.push_back(std::addressof(other));
-    }
-  }
-  return plates;
 }
 
 void EditorShell::Frame::queue_mask_edit(MaskEditRequest request) {
@@ -263,7 +265,7 @@ void EditorShell::Frame::open_clip_in_viewer(
     return;
   }
   impl.show_panel(panel_asset_viewer);
-  // A take row opens the set its plates come from, rig and all.
+  // A take opens the set its plates come from, rig and all.
   if (request.plateset && clip->plateset != doc::NodeId{}) {
     impl.asset_viewer_panel.open(clip->plateset);
     return;

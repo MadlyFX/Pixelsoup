@@ -1,6 +1,7 @@
 #include <mediaserver/compositor/compositor_model.hpp>
 
 #include <mediaserver/compositor/compositor_schema.hpp>
+#include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
@@ -1329,6 +1330,129 @@ void led_car_setup_takes_effects_and_filters_apart() {
     COMPOSITOR_CHECK(!crossed.evaluate().valid());
 }
 
+void led_car_setup_places_a_takes_plates_by_their_slot_screens() {
+    namespace s = scene::schema;
+    // A vehicle track (20) with a front (21) and a right (22) slot screen,
+    // each wired through its own Scene Layer to its socket on the rig, and
+    // one take on the track that fills both. The right screen has a grade of
+    // its own in the graph, and the setup has one for the whole car.
+    const auto slot_screen = [](core::u64 id, std::string_view slot) {
+        return node(id, s::timeline_lane_type,
+                    {text(s::lane_name, slot), whole(s::lane_parent, 20),
+                     text(s::lane_slot, slot)});
+    };
+    doc::Node take = node(
+        2U, s::media_type,
+        {text(s::source, "front.mov"), whole(s::sequence_count, 100),
+         whole(s::lane_id, 20), whole(s::clip_start, 0),
+         whole(s::clip_duration, 50), whole(s::plateset_asset, 900)});
+    const auto add_plate = [&take](std::size_t slot, std::string_view source,
+                                   std::int64_t asset) {
+        take.properties.insert_or_assign(
+            s::plate_property(slot, s::plate_source_suffix),
+            doc::PropertyValue{std::string{source}});
+        take.properties.insert_or_assign(
+            s::plate_property(slot, s::plate_asset_suffix),
+            doc::PropertyValue{asset});
+        take.properties.insert_or_assign(
+            s::plate_property(slot, s::plate_count_suffix),
+            doc::PropertyValue{std::int64_t{100}});
+    };
+    add_plate(0U, "front.mov", 501);
+    add_plate(2U, "right.mov", 502);
+    const std::vector<doc::Node> nodes{
+        stage(100U, 1'920U, 1'080U),
+        node(20U, s::timeline_lane_type,
+             {text(s::lane_name, "Car"),
+              text(s::lane_kind, s::lane_kind_vehicle)}),
+        slot_screen(21U, "front"),
+        slot_screen(22U, "right"),
+        take,
+        scene_layer(31U, 21U),
+        scene_layer(32U, 22U),
+        node(40U, schema::led_car_process_type),
+        node(41U, schema::output_type),
+        node(42U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        node(43U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        edge(50U, 31U, 0U, 40U, 0U),
+        edge(51U, 32U, 0U, 40U, 2U),
+        edge(52U, 40U, 0U, 41U, 0U),
+        edge(53U, 42U, 0U, 40U, 9U),
+        edge(54U, 43U, 0U, 32U, 0U),
+    };
+    const doc::Root root = root_of(nodes);
+
+    scene::SceneModel scene_model;
+    scene_model.reset(root);
+    COMPOSITOR_CHECK(scene_model.counters().rejected == 0U);
+    const scene::Scene evaluated = scene_model.evaluate(
+        doc::NodeId{100U}, scene::SceneTime{10U, 60U, 1U});
+    COMPOSITOR_CHECK(evaluated.media.size() == 2U);
+
+    compositor::CompositorModel model;
+    model.reset(root);
+    const compositor::CompositorGraph graph = model.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    const scene::Scene applied = compositor::apply(graph, evaluated);
+    COMPOSITOR_CHECK(applied.media.size() == 2U);
+
+    const auto plate = [&applied](core::u64 screen) -> const scene::MediaInstance& {
+        const auto found = std::find_if(
+            applied.media.begin(), applied.media.end(),
+            [screen](const scene::MediaInstance& value) {
+                return value.timeline_lane == doc::NodeId{screen};
+            });
+        COMPOSITOR_CHECK(found != applied.media.end());
+        return *found;
+    };
+    const scene::MediaInstance& front = plate(21U);
+    const scene::MediaInstance& right = plate(22U);
+    COMPOSITOR_CHECK(front.source == "front.mov");
+    COMPOSITOR_CHECK(right.source == "right.mov");
+    COMPOSITOR_CHECK(front.placement == doc::NodeId{2U});
+    COMPOSITOR_CHECK(right.placement == doc::NodeId{2U});
+
+    // Each plate stands at its own socket of the rig, on its default four
+    // metre radius: the front straight ahead at +Z, the right a quarter turn
+    // round on the car's right. Facing +Z with +Y up in this right-handed
+    // scene, that right is -X: the cross product of forward and up.
+    const auto about = [](float value, float expected) {
+        return std::abs(value - expected) <= 1.0e-4F;
+    };
+    COMPOSITOR_CHECK(about(front.world.at(0U, 3U), 0.0F));
+    COMPOSITOR_CHECK(about(front.world.at(2U, 3U), 4.0F));
+    const scene::Vec3 forward{0.0F, 0.0F, 1.0F};
+    const scene::Vec3 up{0.0F, 1.0F, 0.0F};
+    const scene::Vec3 car_right{forward.y * up.z - forward.z * up.y,
+                                forward.z * up.x - forward.x * up.z,
+                                forward.x * up.y - forward.y * up.x};
+    COMPOSITOR_CHECK(about(right.world.at(0U, 3U), 4.0F * car_right.x));
+    COMPOSITOR_CHECK(about(right.world.at(2U, 3U), 0.0F));
+    // Both walls face the car: a plate's local +Z points at the centre.
+    COMPOSITOR_CHECK(front.world.at(2U, 2U) < 0.0F);
+    COMPOSITOR_CHECK(right.world.at(0U, 2U) * car_right.x < 0.0F);
+    COMPOSITOR_CHECK(about(right.world.at(2U, 2U), 0.0F));
+    // And the screens an operator picks stand where their plates do.
+    for (const scene::SceneScreen& screen : applied.screens) {
+        COMPOSITOR_CHECK(screen.world ==
+                         plate(screen.node.value()).world);
+    }
+
+    // The right screen's own grade lands on its plate once - the screen is
+    // the plate's layer and its track both, and is not folded as each - and
+    // the setup's follows it. The front has only the setup's.
+    const auto& front_grade = front.style.effects.inline_operations;
+    const auto& right_grade = right.style.effects.inline_operations;
+    COMPOSITOR_CHECK(front_grade.size() == 1U);
+    COMPOSITOR_CHECK(front_grade[0U].kind == scene::EffectKind::Brightness);
+    COMPOSITOR_CHECK(right_grade.size() == 2U);
+    COMPOSITOR_CHECK(right_grade[0U].kind == scene::EffectKind::Saturation);
+    COMPOSITOR_CHECK(right_grade[1U].kind == scene::EffectKind::Brightness);
+    // Wall plates take the rig's edge feather.
+    COMPOSITOR_CHECK(front.style.horizontal_blend > 0.0F);
+    COMPOSITOR_CHECK(right.style.horizontal_blend > 0.0F);
+}
+
 void duplicate_active_scene_layer_sources_are_diagnosed() {
     compositor::CompositorModel duplicate;
     duplicate.reset(root_of({
@@ -2370,6 +2494,108 @@ void comment_boxes_are_layout_in_their_scene() {
     COMPOSITOR_CHECK(with.counters().nodes == without.counters().nodes);
 }
 
+// The frame loop's update() must leave the model a rebuild would: every node
+// of a graph with a comment box is edited, broken, erased and restored in
+// turn, and each time the updated model's graph is the rebuilt one's.
+void an_updated_model_is_the_model_a_rebuild_would_be() {
+    std::vector<doc::Node> authored = saturation_graph(2.25);
+    authored.push_back(stage(5U, 1920U, 1080U));
+    authored.push_back(node(40U, schema::comment_type,
+                            {whole(schema::scene_id, 5),
+                             text(schema::label, "Plates"),
+                             real(schema::comment_width, 400.0),
+                             real(schema::comment_height, 240.0)}));
+    const doc::Root full = root_of(authored);
+
+    compositor::CompositorModel updated;
+    // The same again the way a frame loop does it, reading the canvas and
+    // effect settings from the scene model the loop already keeps.
+    scene::SceneModel scenes;
+    compositor::CompositorModel sharing;
+    std::size_t steps = 0U;
+    const auto step = [&](const doc::Root& document) {
+        updated.update(document);
+        scenes.update(document);
+        sharing.update(document, scenes);
+        compositor::CompositorModel rebuilt;
+        rebuilt.reset(document);
+        COMPOSITOR_CHECK(updated.evaluate() == rebuilt.evaluate());
+        COMPOSITOR_CHECK(sharing.evaluate() == rebuilt.evaluate());
+        COMPOSITOR_CHECK(sharing.evaluate(doc::NodeId{5U}) ==
+                         rebuilt.evaluate(doc::NodeId{5U}));
+        // The estimates are only there to compare when a stage is: the
+        // scoped graph's canvas is the authored one, by either route.
+        if (document.contains(doc::NodeId{5U})) {
+            COMPOSITOR_CHECK(sharing.evaluate(doc::NodeId{5U})
+                                 .resources.available);
+        }
+        COMPOSITOR_CHECK(updated.evaluate(doc::NodeId{5U}) ==
+                         rebuilt.evaluate(doc::NodeId{5U}));
+        COMPOSITOR_CHECK(updated.size() == rebuilt.size());
+        COMPOSITOR_CHECK(updated.counters().nodes == rebuilt.counters().nodes);
+        COMPOSITOR_CHECK(updated.counters().edges == rebuilt.counters().edges);
+        ++steps;
+    };
+
+    doc::Root running;
+    for (const doc::Node& one : authored) {
+        running = running.set(one);
+        step(running);
+    }
+    const doc::Delta all = doc::diff(doc::Root{}, full);
+    for (const doc::NodeChange& change : all.changes) {
+        doc::Node changed = *change.after;
+        changed.properties.insert_or_assign(std::string{schema::amount},
+                                            doc::PropertyValue{0.375});
+        step(full.set(changed));
+
+        doc::Node malformed = *change.after;
+        malformed.properties.insert_or_assign(
+            std::string{schema::amount},
+            doc::PropertyValue{std::string{"not a number"}});
+        step(full.set(malformed));
+
+        const auto erased = full.erase(change.id);
+        COMPOSITOR_CHECK(erased.has_value());
+        step(*erased);
+
+        step(full);
+    }
+    COMPOSITOR_CHECK(steps == authored.size() + all.changes.size() * 4U);
+    step(doc::Root{});
+    step(full);
+
+    // A scene model that is not at the document is not believed: the canvas
+    // comes out as the document's own, not as the stale model's.
+    scene::SceneModel stale;
+    stale.update(doc::Root{}.set(stage(5U, 640U, 360U)));
+    compositor::CompositorModel wary;
+    wary.update(full);
+    wary.update(full.set(stage(6U, 320U, 200U)), stale);
+    const auto canvas = wary.evaluate(doc::NodeId{5U}).resources.canvas;
+    COMPOSITOR_CHECK(canvas.width == 1920U && canvas.height == 1080U);
+}
+
+// A rebuild discards comment boxes with everything else: one deleted from the
+// document, or left over from the project that was open before, is gone.
+void a_rebuild_forgets_comment_boxes_the_document_no_longer_holds() {
+    const std::vector<doc::Node> plain{stage(5U, 1920U, 1080U),
+                                       node(1U, schema::output_type,
+                                            {whole(schema::scene_id, 5)})};
+    std::vector<doc::Node> boxed = plain;
+    boxed.push_back(node(40U, schema::comment_type,
+                         {whole(schema::scene_id, 5),
+                          text(schema::label, "Plates"),
+                          real(schema::comment_width, 400.0),
+                          real(schema::comment_height, 240.0)}));
+
+    compositor::CompositorModel model;
+    model.reset(root_of(boxed));
+    COMPOSITOR_CHECK(model.evaluate(doc::NodeId{5U}).comments.size() == 1U);
+    model.reset(root_of(plain));
+    COMPOSITOR_CHECK(model.evaluate(doc::NodeId{5U}).comments.empty());
+}
+
 // Pasting a copied selection: new ids in order, wires rewritten to the
 // copies, everything moved together, and what a graph can hold only one of
 // left behind.
@@ -2756,7 +2982,13 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 39U> cases{{
+constexpr std::array<Case, 42U> cases{{
+    {"an updated model is the model a rebuild would be",
+     &an_updated_model_is_the_model_a_rebuild_would_be},
+    {"LED Car setup places a take's plates by their slot screens",
+     &led_car_setup_places_a_takes_plates_by_their_slot_screens},
+    {"a rebuild forgets comment boxes the document no longer holds",
+     &a_rebuild_forgets_comment_boxes_the_document_no_longer_holds},
     {"Merge is typed, bounded and digested",
      &merge_is_typed_bounded_and_digested},
     {"Background is typed, bounded and digested",

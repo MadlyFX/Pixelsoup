@@ -287,6 +287,16 @@ inline constexpr core::u32 default_raster_height = 1'080U;
 // handed something absurd.
 inline constexpr core::u32 max_raster_extent = 65'536U;
 
+// How many slot screens a vehicle track can own - the LED Car Process's nine
+// image sockets, named in `schema::vehicle_slot_keys` - and the slot of a
+// track that is not one.
+inline constexpr std::size_t vehicle_slot_count = 9U;
+inline constexpr core::u8 no_vehicle_slot = 0xFFU;
+// The furthest a slot screen's plate may be moved against its take, either
+// way, in source frames: far past any take, and small enough that adding it
+// to a trim can never leave the signed range.
+inline constexpr core::i64 max_lane_time_offset = 1'000'000'000;
+
 // A track and the screen it owns, projected for editor and renderer use.
 //
 // A track is not a row that clips happen to be filed under - it is a plane in
@@ -328,6 +338,15 @@ struct TimelineLane final {
     // Whether ripple edits on other tracks move this one's later clips too.
     // Editing behaviour only: it changes nothing that is drawn.
     bool sync_locked{};
+    // A vehicle track owns no plane: its takes play on its slot screens.
+    bool vehicle{};
+    // A slot screen: the vehicle track it belongs to and its slot there, an
+    // index into `schema::vehicle_slot_keys`. Zero and `no_vehicle_slot` on
+    // every other track.
+    doc::NodeId parent{};
+    core::u8 slot{no_vehicle_slot};
+    // Source frames a slot screen's plate plays ahead of its take.
+    core::i64 time_offset{};
 
     bool operator==(const TimelineLane&) const = default;
 };
@@ -1890,6 +1909,13 @@ struct MediaPrewarm final {
     core::u32 loop_count{};
     core::u64 frames_until_start{};
     MediaResolution resolution{MediaResolution::Full};
+    // As MediaInstance::stream: set for a plate of a take, whose
+    // `source_node` here is the take.
+    core::u64 stream{};
+
+    [[nodiscard]] core::u64 stream_id() const noexcept {
+        return stream != 0U ? stream : source_node.value();
+    }
 
     bool operator==(const MediaPrewarm&) const = default;
 };
@@ -1954,8 +1980,37 @@ struct MediaInstance final {
     // size and draws the same pixels from it.
     MediaResolution resolution{MediaResolution::Full};
 
+    // The clip that placed this, when that is not `source_node`: a plate of a
+    // take on a vehicle track is drawn as its slot screen's picture - the
+    // screen is `source_node` and `timeline_lane` both, so everything that
+    // addresses a layer finds one layer per screen - while the take that put
+    // it there is named here. Zero everywhere else.
+    doc::NodeId placement{};
+    // The playhead this is, when `source_node` does not name one: a plate's
+    // is its take's and its slot's (`plate_stream`), so a take cut against
+    // itself on one screen keeps a decoder per cut, as two clips of one file
+    // do. Zero everywhere else.
+    //
+    // Both are outside scene_hash, like the loop window: they name whose
+    // decoder walks the file and what an editor selects, and every field
+    // that decides a pixel is already above.
+    core::u64 stream{};
+
+    // The clip an editor selects for this on the Timeline.
+    [[nodiscard]] doc::NodeId placed_by() const noexcept {
+        return placement != doc::NodeId{} ? placement : source_node;
+    }
+    // The decoder continuity a renderer keeps for it.
+    [[nodiscard]] core::u64 stream_id() const noexcept {
+        return stream != 0U ? stream : source_node.value();
+    }
+
     bool operator==(const MediaInstance&) const = default;
 };
+
+// The playhead of one plate of the take `clip`: never zero, the same on every
+// machine, and apart from every other take's and every other slot's.
+[[nodiscard]] core::u64 plate_stream(doc::NodeId clip, core::u8 slot) noexcept;
 
 // An imported 3D model placed in the scene. The scene layer is headless, so
 // this carries only a reference (the file path) and the transform; the renderer
@@ -2165,9 +2220,21 @@ struct PhysicalSky final {
 [[nodiscard]] DirectionalLight physical_sun(const PhysicalSky& sky, doc::NodeId source) noexcept;
 
 struct Environment final {
-    Vec3 sky_color{0.05F, 0.07F, 0.10F};
+    // The background: what shows behind the scene where no map or physical
+    // sky is drawn. Scene-linear, black by default so an LED wall shows
+    // nothing it was not asked to. It lights nothing.
+    Vec3 sky_color{};
+    // The default fill: a dim two-colour hemisphere, sky half above and ground
+    // half below, scaled by `ambient`. It stands in for lighting only while
+    // the scene has none - the first light added switches it off (see
+    // `ambient_fill`), so authored lights are never tinted by it.
+    Vec3 fill_sky_color{0.05F, 0.07F, 0.10F};
     Vec3 ground_color{0.02F, 0.02F, 0.02F};
     float ambient{1.0F};
+    // Keeps the fill under authored lights. Not authored by a project: for
+    // look-dev rigs such as the Asset Viewer's Studio that design the two to
+    // work together.
+    bool fill_with_lights{};
     // Optional equirectangular image identity. It is resolved by the explicit
     // asset-loading path, never by scene evaluation or the frame loop.
     std::string map_source;
@@ -2598,6 +2665,17 @@ struct Scene final {
     // canvas: an unmapped output should be black and obviously unmapped.
     [[nodiscard]] const CanvasRect* slice_for(core::u32 node_index) const noexcept;
 };
+
+// The hemisphere fill a scene is lit by: the environment's default fill while
+// the scene has no directional or local light (or keeps it on purpose), and
+// none at all once it has one. A physical sky's sun counts as a light.
+struct AmbientFill final {
+    Vec3 sky{};
+    Vec3 ground{};
+    float strength{};
+    bool operator==(const AmbientFill&) const = default;
+};
+[[nodiscard]] AmbientFill ambient_fill(const Scene& scene) noexcept;
 
 // FNV-1a over every value in the scene, in declaration order, reading floats
 // as their bit patterns rather than their decimal forms.

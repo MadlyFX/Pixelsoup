@@ -417,13 +417,15 @@ bool SceneRenderer::prepare_scene_constants(Frame& f) {
         scene_constants.eye_position[3U] = 1.0F;
     }
     scene_constants.view_mode[0U] = static_cast<float>(shading);
-    scene_constants.sky_ambient[0U] = scene.environment.sky_color.x;
-    scene_constants.sky_ambient[1U] = scene.environment.sky_color.y;
-    scene_constants.sky_ambient[2U] = scene.environment.sky_color.z;
-    scene_constants.sky_ambient[3U] = scene.environment.ambient;
-    scene_constants.ground_exposure[0U] = scene.environment.ground_color.x;
-    scene_constants.ground_exposure[1U] = scene.environment.ground_color.y;
-    scene_constants.ground_exposure[2U] = scene.environment.ground_color.z;
+    // The default fill, which goes out once the scene has a light.
+    const scene::AmbientFill fill = scene::ambient_fill(scene);
+    scene_constants.sky_ambient[0U] = fill.sky.x;
+    scene_constants.sky_ambient[1U] = fill.sky.y;
+    scene_constants.sky_ambient[2U] = fill.sky.z;
+    scene_constants.sky_ambient[3U] = fill.strength;
+    scene_constants.ground_exposure[0U] = fill.ground.x;
+    scene_constants.ground_exposure[1U] = fill.ground.y;
+    scene_constants.ground_exposure[2U] = fill.ground.z;
     // Basic remains the regression/reference renderer. Advanced consumes the
     // replicated physical camera controls, normalized so the existing default
     // camera is neutral while each authored stop retains its exact ratio.

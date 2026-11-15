@@ -143,6 +143,8 @@ struct Decoder final {
     // Decoding onto the renderer's device, so a decoded frame is handed over
     // as a surface rather than as pixels in system memory.
     bool resident_on_renderer{};
+    // RendererDecodeDevice::generation() when this decoder was opened.
+    core::u64 device_generation{};
     // Every frame is held at half size: halved on the device before the
     // decoder's surface is released, or in system memory before upload.
     bool half_resolution{};
@@ -184,27 +186,54 @@ struct Decoder final {
 // more per 4K frame than the decode itself.
 //
 // Exactly one device qualifies. A process that renders scenes on two devices
-// cannot share decoded surfaces between them, so the second registration
-// retires the path for everybody rather than handing a surface to the wrong
-// device.
+// cannot share decoded surfaces between them, so while a second one has a
+// scene renderer the path is suspended and both render from system memory.
+// It is suspended, not ended: every renderer withdraws its offer when it is
+// destroyed, and the path returns as soon as one device is left - the same
+// one, or the replacement an output redeploy built.
+//
+// The device decoded onto is held by a reference of its own. An offer is only
+// a pointer a renderer handed over, and the renderer may be gone before the
+// first clip opens.
 class RendererDecodeDevice final {
   public:
     void offer(const rhi::NativeHandle &device) noexcept {
-        const std::lock_guard lock{mutex_};
-        if (retired_ || device.object != rhi::NativeObjectKind::Device ||
+        if (device.object != rhi::NativeObjectKind::Device ||
             device.value == nullptr ||
             device.backend != rhi::BackendKind::D3d12) {
             return;
         }
-        if (device_.value == nullptr) {
-            device_ = device;
+        const std::lock_guard lock{mutex_};
+        const auto known = find_locked(device);
+        if (known != offered_.end()) {
+            ++known->renderers;
+        } else {
+            try {
+                offered_.push_back(Offered{device, 1U});
+            } catch (...) {
+                // An offer that could not be recorded still stands for a
+                // renderer on some device, so it suspends the path like any
+                // second device until it is withdrawn.
+                ++unrecorded_;
+            }
+        }
+        select_locked();
+    }
+
+    void withdraw(const rhi::NativeHandle &device) noexcept {
+        if (device.value == nullptr) {
             return;
         }
-        if (device_.value != device.value) {
-            retired_ = true;
-            av_buffer_unref(&context_);
-            device_ = rhi::NativeHandle{};
+        const std::lock_guard lock{mutex_};
+        const auto known = find_locked(device);
+        if (known != offered_.end()) {
+            if (--known->renderers == 0U) {
+                offered_.erase(known);
+            }
+        } else if (unrecorded_ != 0U) {
+            --unrecorded_;
         }
+        select_locked();
     }
 
     // A decoder context on that device, or null when there is none to use.
@@ -212,14 +241,14 @@ class RendererDecodeDevice final {
     [[nodiscard]] AVBufferRef *reference() noexcept {
 #ifdef _WIN32
         const std::lock_guard lock{mutex_};
-        if (retired_ || device_.value == nullptr) {
+        if (unusable_ || active_.value == nullptr) {
             return nullptr;
         }
         if (context_ == nullptr) {
             AVBufferRef *allocated =
                 av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D12VA);
             if (allocated == nullptr) {
-                retired_ = true;
+                unusable_ = true;
                 return nullptr;
             }
             auto *const hardware =
@@ -227,13 +256,14 @@ class RendererDecodeDevice final {
             auto *const d3d12 =
                 static_cast<AVD3D12VADeviceContext *>(hardware->hwctx);
             // The context releases this reference when it is destroyed, so it
-            // takes one of its own rather than consuming the renderer's.
-            auto *const native = static_cast<ID3D12Device *>(device_.value);
+            // takes one of its own rather than consuming this object's.
+            auto *const native = static_cast<ID3D12Device *>(active_.value);
             native->AddRef();
             d3d12->device = native;
             if (av_hwdevice_ctx_init(allocated) < 0) {
                 av_buffer_unref(&allocated);
-                retired_ = true;
+                // This device will not decode. Another one may.
+                unusable_ = true;
                 return nullptr;
             }
             context_ = allocated;
@@ -246,16 +276,84 @@ class RendererDecodeDevice final {
 
     [[nodiscard]] rhi::NativeHandle device() noexcept {
         const std::lock_guard lock{mutex_};
-        return retired_ ? rhi::NativeHandle{} : device_;
+        return unusable_ ? rhi::NativeHandle{} : active_;
     }
 
-    ~RendererDecodeDevice() { av_buffer_unref(&context_); }
+    // Whether `native` is the device decoded onto now. Read without the lock,
+    // because the frame path asks it for every picture it is handed.
+    [[nodiscard]] bool decodes_on(const void *native) const noexcept {
+        return native != nullptr &&
+               decoding_.load(std::memory_order_acquire) == native;
+    }
+
+    // Moves every time the device decoded onto changes, including to none.
+    [[nodiscard]] core::u64 generation() const noexcept {
+        return generation_.load(std::memory_order_acquire);
+    }
+
+    ~RendererDecodeDevice() {
+        av_buffer_unref(&context_);
+        release_locked();
+    }
 
   private:
+    struct Offered final {
+        rhi::NativeHandle device{};
+        std::size_t renderers{};
+    };
+
+    [[nodiscard]] std::vector<Offered>::iterator
+    find_locked(const rhi::NativeHandle &device) noexcept {
+        return std::find_if(offered_.begin(), offered_.end(),
+                            [&device](const Offered &entry) {
+                                return entry.device.value == device.value;
+                            });
+    }
+
+    void release_locked() noexcept {
+#ifdef _WIN32
+        if (active_.value != nullptr) {
+            static_cast<ID3D12Device *>(active_.value)->Release();
+        }
+#endif
+        active_ = rhi::NativeHandle{};
+    }
+
+    // The one device every live scene renderer agrees on, or none.
+    void select_locked() noexcept {
+        const rhi::NativeHandle wanted =
+            offered_.size() == 1U && unrecorded_ == 0U
+                ? offered_.front().device
+                : rhi::NativeHandle{};
+        if (wanted.value == active_.value) {
+            return;
+        }
+        // Decoders already open keep the old context alive for as long as
+        // they run on it; nothing new is handed it.
+        av_buffer_unref(&context_);
+        release_locked();
+        unusable_ = false;
+        active_ = wanted;
+#ifdef _WIN32
+        if (active_.value != nullptr) {
+            static_cast<ID3D12Device *>(active_.value)->AddRef();
+        }
+#endif
+        decoding_.store(active_.value, std::memory_order_release);
+        generation_.fetch_add(1U, std::memory_order_acq_rel);
+    }
+
     std::mutex mutex_;
-    rhi::NativeHandle device_{};
+    // Devices with a live scene renderer, and how many each has.
+    std::vector<Offered> offered_;
+    std::size_t unrecorded_{};
+    // The device decoded onto, holding a reference to it.
+    rhi::NativeHandle active_{};
     AVBufferRef *context_{};
-    bool retired_{};
+    // The active device refused a decoder context.
+    bool unusable_{};
+    std::atomic<const void *> decoding_{nullptr};
+    std::atomic<core::u64> generation_{0U};
 };
 
 [[nodiscard]] RendererDecodeDevice &renderer_decode_device() {
@@ -626,6 +724,9 @@ stream_frame_rate(const AVStream *stream) noexcept {
 [[nodiscard]] std::unique_ptr<Decoder> open_decoder(const std::string &source,
                                                     bool rgba_only = false) {
     auto decoder = std::make_unique<Decoder>();
+    // Read before the device is asked for, so a change during the open is
+    // seen as one on the next frame.
+    decoder->device_generation = renderer_decode_device().generation();
     const MediaSourceVariant variant = media_source_variant(source);
     decoder->half_resolution = variant.half_resolution;
     decoder->rgba_only = rgba_only;
@@ -739,11 +840,26 @@ stream_frame_rate(const AVStream *stream) noexcept {
 [[nodiscard]] DecodedFrame adopt_renderer_frame(Decoder &decoder) noexcept {
     auto *const hardware =
         reinterpret_cast<AVD3D12VAFrame *>(decoder.frame->data[0]);
-    const rhi::NativeHandle device = renderer_decode_device().device();
+    // The device this decoder runs on, which is the one its surfaces belong
+    // to. It is no longer the renderer's once a second device suspended the
+    // path or an output redeploy replaced it; such a surface is one no
+    // renderer may sample, so it is read back like any other.
+    ID3D12Device *decoding = nullptr;
+    if (decoder.codec->hw_device_ctx != nullptr) {
+        const auto *const context = reinterpret_cast<const AVHWDeviceContext *>(
+            decoder.codec->hw_device_ctx->data);
+        if (context->type == AV_HWDEVICE_TYPE_D3D12VA) {
+            decoding =
+                static_cast<const AVD3D12VADeviceContext *>(context->hwctx)
+                    ->device;
+        }
+    }
     if (hardware == nullptr || hardware->texture == nullptr ||
-        device.value == nullptr) {
+        !renderer_decode_device().decodes_on(decoding)) {
         return DecodedFrame{};
     }
+    const rhi::NativeHandle device{rhi::BackendKind::D3d12,
+                                   rhi::NativeObjectKind::Device, decoding};
     const FrameColour colour =
         resolve_frame_colour(*decoder.codec, *decoder.frame);
     const int width = decoder.frame->width;
@@ -1306,6 +1422,17 @@ class FfmpegSource final : public MediaSource {
     [[nodiscard]] DecodedFrame decode(const std::string &source,
                                       core::u32 frame_index) override {
         auto found = decoders_.find(source);
+        // A decoder opened before the renderer's device changed decodes onto
+        // a device no scene samples, or onto none while one is now on offer.
+        // Reopening walks to a keyframe once, and from then on the clip's
+        // frames stay where they are drawn.
+        if (found != decoders_.end() && !rgba_only_ &&
+            found->second->device_generation !=
+                renderer_decode_device().generation() &&
+            renderer_decode_device().device().value != nullptr) {
+            decoders_.erase(found);
+            found = decoders_.end();
+        }
         if (found == decoders_.end()) {
             auto decoder = open_decoder(source, rgba_only_);
             if (decoder == nullptr) {
@@ -1503,8 +1630,8 @@ class SharedVideoRegistry final {
                 }
             }
             source->latest_requested = frame_index;
-            const auto found =
-                frames_.find(std::make_pair(source->source_key, frame_index));
+            const auto found = live_frame_locked(
+                std::make_pair(source->source_key, frame_index));
             if (found == frames_.end()) {
                 enqueue_locked(source, frame_index, true);
                 return nullptr;
@@ -1525,7 +1652,8 @@ class SharedVideoRegistry final {
         try {
             std::unique_lock lock{mutex_, std::try_to_lock};
             if (!lock.owns_lock()) return nullptr;
-            const auto found = frames_.find({source->source_key, frame_index});
+            const auto found =
+                live_frame_locked({source->source_key, frame_index});
             if (found == frames_.end()) return nullptr;
             found->second.stamp = ++stamp_;
             return found->second.frame;
@@ -1552,7 +1680,7 @@ class SharedVideoRegistry final {
                 frame_index - *source->latest_valid > maximum_late_frames) {
                 return nullptr;
             }
-            const auto late = frames_.find(
+            const auto late = live_frame_locked(
                 std::make_pair(source->source_key, *source->latest_valid));
             if (late == frames_.end() || !late->second.frame->valid()) {
                 return nullptr;
@@ -1574,8 +1702,8 @@ class SharedVideoRegistry final {
             if (!lock.owns_lock()) {
                 return;
             }
-            const auto found =
-                frames_.find(std::make_pair(source->source_key, frame_index));
+            const auto found = live_frame_locked(
+                std::make_pair(source->source_key, frame_index));
             if (found != frames_.end()) {
                 // Both a valid frame and a persistent failed frame are complete.
                 // Touch valid residency, but never turn a speculative hint into
@@ -1829,6 +1957,25 @@ class SharedVideoRegistry final {
         if (frame.on_device) {
             device_bytes_ -= frame.bytes;
         }
+    }
+
+    // The ready frame under `key`, unless it was left on a device video is no
+    // longer decoded onto. No renderer can sample such a surface and there is
+    // no copy in system memory behind it, so it is forgotten here and the
+    // lookup becomes an ordinary miss: the picture is decoded again by
+    // whichever path is current. Without this a paused clip would hold a
+    // frame nothing could draw for as long as it stayed paused.
+    [[nodiscard]] std::map<FrameKey, ReadyFrame>::iterator
+    live_frame_locked(const FrameKey &key) {
+        const auto found = frames_.find(key);
+        if (found == frames_.end() || !found->second.frame->gpu.has_value() ||
+            renderer_decode_device().decodes_on(
+                found->second.frame->gpu->device.value)) {
+            return found;
+        }
+        retire_bytes_locked(found->second);
+        frames_.erase(found);
+        return frames_.end();
     }
 
     void publish_locked(const std::shared_ptr<AsyncVideoSourceState> &source,
@@ -2326,13 +2473,33 @@ bool media_decode_ready_frames(std::span<const std::string> sources,
     }
 }
 
-void offer_video_decode_device(const rhi::Device &device) noexcept {
+VideoDecodeDeviceOffer
+offer_video_decode_device(const rhi::Device &device) noexcept {
     if (!device.capabilities().external_memory) {
-        return;
+        return VideoDecodeDeviceOffer{};
     }
-    renderer_decode_device().offer(device.native_handle());
+    const rhi::NativeHandle handle = device.native_handle();
+    renderer_decode_device().offer(handle);
     video_registry().configure_device_budget(
         device.dedicated_video_memory_bytes());
+    return VideoDecodeDeviceOffer{handle};
+}
+
+VideoDecodeDeviceOffer::VideoDecodeDeviceOffer(
+    VideoDecodeDeviceOffer &&other) noexcept
+    : device_(std::exchange(other.device_, rhi::NativeHandle{})) {}
+
+VideoDecodeDeviceOffer &
+VideoDecodeDeviceOffer::operator=(VideoDecodeDeviceOffer &&other) noexcept {
+    if (this != &other) {
+        renderer_decode_device().withdraw(device_);
+        device_ = std::exchange(other.device_, rhi::NativeHandle{});
+    }
+    return *this;
+}
+
+VideoDecodeDeviceOffer::~VideoDecodeDeviceOffer() {
+    renderer_decode_device().withdraw(device_);
 }
 
 void configure_buffered_output_media_decode(MediaDecodeConfig config) noexcept {

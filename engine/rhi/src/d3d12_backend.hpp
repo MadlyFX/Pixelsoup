@@ -173,6 +173,7 @@ d3d12_submit(void* state, void* commands) noexcept;
 [[nodiscard]] core::u32 d3d12_begin_gpu_pass(void*, core::RenderPass) noexcept;
 void d3d12_end_gpu_pass(void*, core::u32) noexcept;
 core::u64 d3d12_upload_bytes(void*) noexcept;
+core::GpuRefusal d3d12_first_refusal(void*) noexcept;
 core::FrameTiming d3d12_work_frame_timing(void*, void*) noexcept;
 core::u64 d3d12_work_gpu_nanoseconds(
     void* state, void* work) noexcept;

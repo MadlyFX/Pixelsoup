@@ -565,6 +565,7 @@ PhaseExit DirectorShowLoop::apply_clip_requests(OperatorFrame &op) {
         place.scene = request.scene;
         place.plateset = request.plateset;
         place.start = request.start;
+        place.track = request.track;
         place.show_rate = show_rate;
         place.rig = request.rig == editor::PlatesetRigChoice::Replace
                         ? PlatesetRigChoice::Replace
@@ -598,12 +599,18 @@ PhaseExit DirectorShowLoop::apply_clip_requests(OperatorFrame &op) {
     }
     pending_plateset_places.clear();
     for (const auto &request : pending_plateset_swaps) {
-        auto planned = plan_plateset_swap(scheduler.projected_document(),
-                                          request.clip, request.plateset);
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        auto planned =
+            plan_plateset_swap(scheduler.projected_document(), request.clip,
+                               request.plateset, show_rate, next_new_node);
         if (!planned) {
             project_message = plateset_authoring_error_text(planned.error());
             continue;
         }
+        next_new_node = std::max(next_new_node, planned.value().next_node);
         if (!scheduler.schedule_document_replace(
                 planned.value().document, cmd::UndoContextId{2U},
                 cmd::TransactionId{request.gesture}, frame)) {
@@ -616,7 +623,7 @@ PhaseExit DirectorShowLoop::apply_clip_requests(OperatorFrame &op) {
                 ? std::string{"TAKE SWAPPED"}
                 : "TAKE SWAPPED; " +
                       std::to_string(planned.value().unmatched.size()) +
-                      " PLATES HAD NO MATCH AND STAYED";
+                      " SCREENS HAVE NO PLATE IN THIS SET";
     }
     pending_plateset_swaps.clear();
     return std::nullopt;
@@ -811,6 +818,10 @@ PhaseExit DirectorShowLoop::apply_element_and_lane_requests(OperatorFrame &op) {
             case LaneAuthorError::LaneLimit:
                 project_message =
                     "TRACK EDIT REJECTED - THE SCENE HOLDS THE MOST TRACKS";
+                break;
+            case LaneAuthorError::VehicleTrack:
+                project_message = "TRACK SPLIT REJECTED - CUT A VEHICLE "
+                                  "TRACK'S TAKE WITH THE RAZOR";
                 break;
             default:
                 project_message = "TRACK EDIT REJECTED";
@@ -1092,6 +1103,13 @@ PhaseExit DirectorShowLoop::apply_group_selection_and_mask_requests(OperatorFram
             }
             next_new_node = planned.value().next_node;
             project_message = "MASK EDIT APPLIED";
+            // A mask drawn on the picture is selected once the editor has
+            // it, so its handles are there to refine it with.
+            if (const auto *const drawn =
+                    std::get_if<editor::MaskDrawIntent>(&request.request)) {
+                static_cast<void>(editor->apply_mask_selection(
+                    drawn->scene, drawn->target, planned.value().mask));
+            }
         }
     }
     return std::nullopt;
@@ -1368,7 +1386,35 @@ PhaseExit DirectorShowLoop::apply_property_and_effect_requests(OperatorFrame &op
         // graph takes back everything the drop did.
         const cmd::UndoContextId context{add.graph_layer.has_value() ? 6U
                                                                      : 2U};
-        if (!schedule_add(
+        if (add.mask.has_value()) {
+            // A shape drawn on Program: the card and the mask that gives it
+            // its shape are one replacement document, so they arrive and
+            // undo together.
+            auto planned = plan_shape_card(
+                scheduler.projected_document(),
+                make_added_node(id, add, transport.anchor().rate,
+                                scene_model.renderer_settings()
+                                    .icvfx.camera_defaults),
+                add.scene, *add.mask, next_new_node);
+            if (!planned) {
+                if (planned.error().code ==
+                    scene::MaskAuthoringErrorCode::AllocationFailed) {
+                    std::cerr << "could not allocate a drawn shape\n";
+                    return 1;
+                }
+                project_message =
+                    mask_edit_error_message(planned.error().code);
+                continue;
+            }
+            if (!scheduler.schedule_document_replace(
+                    planned.value().document, context,
+                    cmd::TransactionId{add.gesture}, frame)) {
+                std::cerr << "could not author a drawn shape for frame "
+                          << frame.value() << '\n';
+                return 1;
+            }
+            next_new_node = planned.value().next_node;
+        } else if (!schedule_add(
                 scheduler, add, id, frame,
                 transport.anchor().rate,
                 scene_model.renderer_settings()
@@ -1377,6 +1423,11 @@ PhaseExit DirectorShowLoop::apply_property_and_effect_requests(OperatorFrame &op
                 << "could not author an element add for frame "
                 << frame.value() << '\n';
             return 1;
+        }
+        if (add.select) {
+            const doc::NodeId made[]{id};
+            static_cast<void>(
+                editor->apply_selection_set_recall(add.scene, made, id));
         }
         if (add.graph_layer.has_value()) {
             editor::CompositorAddIntent layer = *add.graph_layer;

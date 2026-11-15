@@ -36,8 +36,11 @@ scene::Scene fixture() {
   s.canvas = {64, 32};
   s.camera.eye = {0, 1, 5};
   s.camera.target = {0, 0, 0};
-  s.environment.sky_color = {0.25F, 0.5F, 1};
-  s.environment.ground_color = s.environment.sky_color;
+  // A uniform default fill: this unlit scene's only light. The background
+  // colour is deliberately different, because it lights nothing.
+  s.environment.fill_sky_color = {0.25F, 0.5F, 1};
+  s.environment.ground_color = s.environment.fill_sky_color;
+  s.environment.sky_color = {1, 0, 0};
   s.environment.baked.minimum = {-0.5F, -0.5F, -0.5F};
   s.environment.baked.maximum = {0.5F, 0.5F, 0.5F};
   s.environment.baked.count_x = 2;
@@ -112,7 +115,7 @@ void closed_box_transport_and_light_leaks() {
 }
 void coloured_bounce_and_dynamic_exclusion() {
   auto s = fixture();
-  s.environment.sky_color = {};
+  s.environment.fill_sky_color = {};
   s.environment.ground_color = {};
   s.environment.baked.minimum = {-0.5F, 0.1F, -0.5F};
   s.environment.baked.maximum = {0.5F, 0.4F, 0.5F};
@@ -142,7 +145,7 @@ void coloured_bounce_and_dynamic_exclusion() {
 void ies_transport_obeys_the_measured_web() {
   const auto path = std::filesystem::temp_directory_path() / "mediaserver-bake-ies.ies";
   { std::ofstream file(path); file << "IESNA:LM-63-2002\nTILT=NONE\n1 1000 1 4 1 1 2 0 0 0 1 1 10\n0 60 90 180\n0\n100 100 0 0\n"; CHECK(file); }
-  auto s = fixture(); s.environment.sky_color = s.environment.ground_color = {};
+  auto s = fixture(); s.environment.fill_sky_color = s.environment.ground_color = {};
   s.environment.baked.samples = 256; s.environment.baked.bounces = 1;
   s.environment.baked.minimum = {-0.5F, 0.1F, -0.5F};
   s.environment.baked.maximum = {0.5F, 0.4F, 0.5F};
@@ -161,7 +164,7 @@ void ies_transport_obeys_the_measured_web() {
 }
 
 void area_transport_obeys_shape_and_sides() {
-  auto s = fixture(); s.environment.sky_color = s.environment.ground_color = {};
+  auto s = fixture(); s.environment.fill_sky_color = s.environment.ground_color = {};
   s.environment.baked.samples = 256; s.environment.baked.bounces = 1;
   s.environment.baked.minimum = {-0.5F, 0.1F, -0.5F};
   s.environment.baked.maximum = {0.5F, 0.4F, 0.5F};
@@ -182,7 +185,7 @@ void area_transport_obeys_shape_and_sides() {
 
 void photometric_transport_matches_live_units() {
   auto s = fixture();
-  s.environment.sky_color = {};
+  s.environment.fill_sky_color = {};
   s.environment.ground_color = {};
   s.environment.baked.samples = 256;
   s.environment.baked.bounces = 1;

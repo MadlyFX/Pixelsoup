@@ -186,8 +186,8 @@ struct AddIntent final {
   // (see stage_placement.hpp). A click-to-add leaves this empty and uses the
   // document defaults.
   std::optional<scene::Vec3> position;
-  // Exact native cadence for video. Absence deliberately means legacy/image
-  // sequence 1:1 mapping, so old aggregate initializers remain compatible.
+  // Exact native cadence for video. An image sequence has none and maps one
+  // file to each show frame.
   std::optional<assets::MediaFrameRate> frame_rate;
   // A Library asset dropped on a Compositor port: the Scene Layer node to
   // create for the new element, with its wires, in the same undo step. Its
@@ -200,6 +200,14 @@ struct AddIntent final {
   // placement - its start, its show-frame duration and its first source
   // frame. Empty places the whole source from frame zero.
   std::optional<scene::ClipTiming> timing;
+  // A shape drawn on Program Output with nothing selected: a Background card
+  // of the size drawn, named for its shape, born with `mask` when the shape
+  // is not the card's own rectangle - all in the one undo step - and
+  // selected once it exists. Empty and false for every other add.
+  std::optional<scene::Vec3> scale;
+  std::optional<scene::MaskShape> mask;
+  std::string name;
+  bool select{};
 
   bool operator==(const AddIntent &) const = default;
 };
@@ -321,19 +329,21 @@ enum class PlatesetRigChoice : core::u8 {
   NewRig,
 };
 
-// A Library plateset let go on the Timeline or Stage: a track and clip per
-// plate from `start`, wired into a rig, as one undo step.
+// A Library plateset let go on the Timeline or Stage: one take from `start`
+// on a vehicle track - `track` when it was let go on one, else the scene's
+// own, else a new one with its screens wired into a rig - as one undo step.
 struct PlatesetPlaceIntent final {
   scene::SceneId scene{};
   doc::NodeId plateset{};
   core::i64 start{};
   PlatesetRigChoice rig{PlatesetRigChoice::Auto};
   core::u64 gesture{};
+  doc::NodeId track{};
 
   bool operator==(const PlatesetPlaceIntent &) const = default;
 };
 
-// A plateset let go on a placed plate: its take plays the new set instead.
+// A plateset let go on a take: that clip plays the new set instead.
 struct PlatesetSwapIntent final {
   scene::SceneId scene{};
   doc::NodeId clip{};
@@ -479,7 +489,7 @@ struct SelectionSetEditIntent final {
 // rotation likewise land as one shape edit.
 using MaskEditRequest =
     std::variant<MasksPanelIntent, MaskViewportTranslateIntent,
-                 MaskViewportShapeEditIntent>;
+                 MaskViewportShapeEditIntent, MaskDrawIntent>;
 
 struct MaskEditIntent final {
   MaskEditRequest request;
@@ -634,6 +644,13 @@ struct EditorProjectState final {
   // Library assets whose files changed since they were recorded, as of the
   // last RESCAN.
   std::span<const doc::NodeId> changed_assets;
+  // Unsaved work from a run that ended without saving it, found at start-up
+  // and not answered for yet. `recovery_project` is the file it belongs to,
+  // empty for a project that was never saved; `recovery_saved_at` is when the
+  // copy was written, in local time.
+  bool recovery_available{};
+  std::string_view recovery_project;
+  std::string_view recovery_saved_at;
 };
 
 struct ProjectFileRequest final {
@@ -1007,6 +1024,10 @@ struct EditorFrame final {
   std::optional<ProjectFileRequest> load_project;
   // File > New Project: replace the project with an untitled, empty one.
   bool new_project{};
+  // The operator's answer to an offered recovery: open the recovered work,
+  // or carry on with the project as it was saved.
+  bool recover_project{};
+  bool dismiss_recovery{};
   std::optional<ProjectFileRequest> import_linked_scene;
   bool cancel_linked_scene_import{};
   bool start_scene_link{}, stop_scene_link{};
@@ -1133,6 +1154,12 @@ public:
   [[nodiscard]] bool apply_selection_set_recall(
       scene::SceneId scene, std::span<const doc::NodeId> targets,
       std::optional<doc::NodeId> primary = std::nullopt) noexcept;
+
+  // Selects a mask the Director has just authored, once it appears in the
+  // scene this editor shows. Returns false if that scene is not displayed.
+  [[nodiscard]] bool apply_mask_selection(scene::SceneId scene,
+                                          doc::NodeId target,
+                                          doc::NodeId mask) noexcept;
 
   [[nodiscard]] bool apply_key_edit_selection(
       scene::SceneId scene,

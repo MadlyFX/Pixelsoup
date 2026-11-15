@@ -37,6 +37,7 @@ extern "C" {
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -922,18 +923,25 @@ void dnxhr_lb_decodes_exact_frames() {
 //
 // Runs last, deliberately: offering a decode device is process-wide and
 // sticky, and every test above reads decoded pixels out of system memory.
-void a_decoded_frame_stays_on_the_renderers_device() {
+// A device video could be decoded onto, or nothing on a machine without one.
+[[nodiscard]] std::optional<rhi::Device> create_decode_device() {
     if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
-        return;
+        return std::nullopt;
     }
     rhi::DeviceConfig config{};
     config.backend = rhi::BackendKind::D3d12;
     auto created = rhi::Device::create(config);
     if (!created || !created.value().capabilities().external_memory) {
-        return;
+        return std::nullopt;
     }
-    auto device = std::move(created).value();
+    return std::move(created).value();
+}
 
+// Eight distinct 1280x720 H.264 frames under `name`, or nothing where this
+// build cannot write them. Each test names its own file: decoded frames are
+// shared process-wide by path, and one test must not be handed another's.
+[[nodiscard]] std::optional<std::string>
+write_device_fixture(std::string_view file_name) {
     // The same encoder preference the proxy service uses. A build with none of
     // them cannot write the fixture, and there is nothing to test.
     constexpr std::array<const char*, 5U> encoders{{
@@ -946,13 +954,13 @@ void a_decoded_frame_stays_on_the_renderers_device() {
         }
     }
     if (encoder == nullptr) {
-        return;
+        return std::nullopt;
     }
 
     const auto directory =
         std::filesystem::current_path() / "out" / "codec-fixtures";
     std::filesystem::create_directories(directory);
-    const auto path = (directory / "device-resident-hd.mp4").string();
+    const auto path = (directory / file_name).string();
     {
         CodecFixtureWriter writer;
         writer.codec = avcodec_alloc_context3(encoder);
@@ -967,7 +975,7 @@ void a_decoded_frame_stays_on_the_renderers_device() {
         writer.codec->colorspace = AVCOL_SPC_BT709;
         writer.codec->color_range = AVCOL_RANGE_MPEG;
         if (avcodec_open2(writer.codec, encoder, nullptr) < 0) {
-            return;
+            return std::nullopt;
         }
         VIDEO_CHECK(avformat_alloc_output_context2(
             &writer.format, nullptr, "mp4", path.c_str()) >= 0);
@@ -1028,8 +1036,22 @@ void a_decoded_frame_stays_on_the_renderers_device() {
         drain();
         VIDEO_CHECK(av_write_trailer(writer.format) >= 0);
     }
+    return path;
+}
 
-    render::offer_video_decode_device(device);
+void a_decoded_frame_stays_on_the_renderers_device() {
+    auto made = create_decode_device();
+    if (!made.has_value()) {
+        return;
+    }
+    rhi::Device &device = *made;
+    const auto written = write_device_fixture("device-resident-hd.mp4");
+    if (!written.has_value()) {
+        return;
+    }
+    const std::string &path = *written;
+
+    const auto offer = render::offer_video_decode_device(device);
     auto source = render::make_media_source();
     const auto frame = await_frame(*source, path, 0U);
     VIDEO_CHECK(frame->valid());
@@ -1427,7 +1449,7 @@ void a_uhd_ten_bit_hevc_clip_plays_on_the_renderers_device() {
         VIDEO_CHECK(av_write_trailer(writer.format) >= 0);
     }
 
-    render::offer_video_decode_device(device);
+    const auto offer = render::offer_video_decode_device(device);
     auto source = render::make_media_source();
     // The luma code a frame shows at one row, read back from its plane.
     const auto luma_codes = [&](const rhi::Texture &luma) {
@@ -1489,7 +1511,132 @@ void a_uhd_ten_bit_hevc_clip_plays_on_the_renderers_device() {
 #endif
 }
 
-constexpr std::array<Case, 18U> cases{{
+// Direct3D 12 hands every device made on one adapter the same object, so the
+// presenters of a multi-output node - one RHI device each - are one decode
+// device, and each renderer's offer is counted rather than taken for a second
+// device that would suspend the path.
+void renderers_on_one_adapter_share_the_decode_device() {
+    auto first = create_decode_device();
+    auto second = create_decode_device();
+    if (!first.has_value() || !second.has_value()) {
+        return;
+    }
+    if (first->native_handle() != second->native_handle()) {
+        // Two adapters: genuinely two devices, which is the suspended case.
+        return;
+    }
+    const auto path = write_device_fixture("device-shared-hd.mp4");
+    if (!path.has_value()) {
+        return;
+    }
+    auto first_offer = render::offer_video_decode_device(*first);
+    auto second_offer = render::offer_video_decode_device(*second);
+    VIDEO_CHECK(static_cast<bool>(first_offer));
+    VIDEO_CHECK(static_cast<bool>(second_offer));
+    auto source = render::make_media_source();
+    const auto frame = await_frame(*source, *path, 0U);
+    VIDEO_CHECK(frame->valid());
+    if (render::probe_media_decode_support(*path)
+        != render::MediaDecodeSupport::HardwareAccelerated) {
+        return;
+    }
+    VIDEO_CHECK(frame->gpu.has_value());
+    VIDEO_CHECK(frame->gpu->device == first->native_handle());
+
+    // One renderer going leaves the other's offer standing: the clip stays on
+    // the device and the frame already there is still the one held.
+    second_offer = render::VideoDecodeDeviceOffer{};
+    VIDEO_CHECK(!static_cast<bool>(second_offer));
+    const auto next = await_frame(*source, *path, 1U);
+    VIDEO_CHECK(next->valid() && next->gpu.has_value());
+    VIDEO_CHECK(next->gpu->device == first->native_handle());
+    VIDEO_CHECK(await_frame(*source, *path, 0U).get() == frame.get());
+}
+
+// With no scene renderer left there is nothing that can sample a decoder's
+// surface. Frames come back through system memory - including one that was
+// already on the device, which would otherwise be held where nothing can draw
+// it - and a renderer offering the device again brings the clip back onto it.
+void withdrawing_every_offer_returns_frames_to_system_memory() {
+    auto device = create_decode_device();
+    if (!device.has_value()) {
+        return;
+    }
+    const auto path = write_device_fixture("device-withdrawn-hd.mp4");
+    if (!path.has_value()) {
+        return;
+    }
+    auto source = render::make_media_source();
+    {
+        const auto offer = render::offer_video_decode_device(*device);
+        const auto resident = await_frame(*source, *path, 0U);
+        VIDEO_CHECK(resident->valid());
+        if (render::probe_media_decode_support(*path)
+            != render::MediaDecodeSupport::HardwareAccelerated) {
+            return;
+        }
+        VIDEO_CHECK(resident->gpu.has_value());
+        VIDEO_CHECK(resident->pixels.empty());
+    }
+
+    const auto reread = await_frame(*source, *path, 0U);
+    VIDEO_CHECK(reread->valid());
+    VIDEO_CHECK(!reread->gpu.has_value());
+    VIDEO_CHECK(!reread->pixels.empty());
+    VIDEO_CHECK(reread->width == 1'280U && reread->height == 720U);
+    VIDEO_CHECK(reread->source_frame == 0U);
+    const auto later = await_frame(*source, *path, 1U);
+    VIDEO_CHECK(later->valid() && !later->gpu.has_value());
+    VIDEO_CHECK(later->source_frame == 1U);
+
+    const auto again = render::offer_video_decode_device(*device);
+    const auto back = await_frame(*source, *path, 6U);
+    VIDEO_CHECK(back->valid() && back->gpu.has_value());
+    VIDEO_CHECK(back->gpu->device == device->native_handle());
+    VIDEO_CHECK(back->source_frame == 6U);
+}
+
+// A renderer can be built and destroyed before any clip opens - an output
+// deployment that failed does exactly that. The decoder must not reach for
+// that renderer's device afterwards, and the device a later renderer offers
+// is the one decoded onto.
+void a_device_that_left_before_any_clip_opened_is_not_decoded_onto() {
+    const auto path = write_device_fixture("device-gone-hd.mp4");
+    if (!path.has_value()) {
+        return;
+    }
+    {
+        auto gone = create_decode_device();
+        if (!gone.has_value()) {
+            return;
+        }
+        const auto offer = render::offer_video_decode_device(*gone);
+        VIDEO_CHECK(static_cast<bool>(offer));
+    }
+    auto source = render::make_media_source();
+    const auto frame = await_frame(*source, *path, 0U);
+    VIDEO_CHECK(frame->valid());
+    VIDEO_CHECK(!frame->gpu.has_value());
+    VIDEO_CHECK(!frame->pixels.empty());
+    VIDEO_CHECK(frame->width == 1'280U && frame->height == 720U);
+
+    auto replacement = create_decode_device();
+    if (!replacement.has_value()) {
+        return;
+    }
+    const auto offer = render::offer_video_decode_device(*replacement);
+    const auto next = await_frame(*source, *path, 5U);
+    VIDEO_CHECK(next->valid());
+    if (render::probe_media_decode_support(*path)
+        != render::MediaDecodeSupport::HardwareAccelerated) {
+        return;
+    }
+    VIDEO_CHECK(next->gpu.has_value());
+    VIDEO_CHECK(next->gpu->device == replacement->native_handle());
+    VIDEO_CHECK(next->source_frame == 5U);
+}
+
+constexpr std::array<Case, 21U> cases{{
     {"halving averages each two by two block",
      &halving_averages_each_two_by_two_block},
     {"ready frames report what shared residency holds",
@@ -1517,9 +1664,15 @@ constexpr std::array<Case, 18U> cases{{
      &decode_support_distinguishes_non_video_and_unavailable_video},
     {"buffered output raises the decode cache without allocating it",
      &buffered_output_raises_the_decode_cache_without_allocating_it},
-    // Last: offering a decode device is process-wide and sticky.
+    // Last: which device video is decoded onto is process-wide.
     {"a decoded frame stays on the renderer's device",
      &a_decoded_frame_stays_on_the_renderers_device},
+    {"renderers on one adapter share the decode device",
+     &renderers_on_one_adapter_share_the_decode_device},
+    {"withdrawing every offer returns frames to system memory",
+     &withdrawing_every_offer_returns_frames_to_system_memory},
+    {"a device that left before any clip opened is not decoded onto",
+     &a_device_that_left_before_any_clip_opened_is_not_decoded_onto},
     {"ten-bit video keeps its depth",
      &ten_bit_video_keeps_its_depth},
     {"a UHD ten-bit HEVC clip plays on the renderer's device",

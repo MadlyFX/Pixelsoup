@@ -92,6 +92,20 @@ void modifier_resolution_never_conflates_ctrl_with_shift() {
            editor::SelectionAction::Range);
 }
 
+// On a canvas Shift toggles whatever else is held, Alt replaces even a
+// member of a larger selection, and a plain click keeps that selection.
+void canvas_clicks_toggle_with_shift_and_replace_with_alt() {
+  using editor::CanvasClick;
+  using editor::canvas_click_action;
+  UI_CHECK(canvas_click_action(true, false, false) == CanvasClick::Toggle);
+  UI_CHECK(canvas_click_action(true, false, true) == CanvasClick::Toggle);
+  UI_CHECK(canvas_click_action(true, true, true) == CanvasClick::Toggle);
+  UI_CHECK(canvas_click_action(false, true, true) == CanvasClick::Replace);
+  UI_CHECK(canvas_click_action(false, true, false) == CanvasClick::Replace);
+  UI_CHECK(canvas_click_action(false, false, false) == CanvasClick::Replace);
+  UI_CHECK(canvas_click_action(false, false, true) == CanvasClick::Keep);
+}
+
 void a_set_replaces_the_selection_around_its_primary() {
   editor::NodeSelection selection;
   selection.replace(doc::NodeId{90U});
@@ -114,7 +128,9 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 7U> cases{{
+    {"canvas clicks toggle with Shift and replace with Alt",
+     &canvas_clicks_toggle_with_shift_and_replace_with_alt},
     {"a set replaces the selection around its primary",
      &a_set_replaces_the_selection_around_its_primary},
     {"membership is unique and sorted without losing primary",

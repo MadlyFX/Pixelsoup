@@ -180,6 +180,19 @@ public:
     // the whole reason the document is a persistent tree.
     void apply(const doc::Delta& delta);
 
+    // Brings the model to `root` and leaves it exactly as reset(root) would,
+    // parsing only the nodes that differ from the document it last held. This
+    // is what a frame loop calls when the committed document changes: a drag
+    // changes one node per frame, and rebuilding the whole model for it costs
+    // every machine in the cluster milliseconds it does not have.
+    //
+    // "Exactly as reset" is the contract that keeps a node which joined from
+    // a checkpoint and one that followed every edit on the same picture. A
+    // document whose Blender link records do not parse is therefore not held
+    // at its last good state here, as apply() holds it: the model is rebuilt,
+    // which is what a machine arriving at that document cold would have.
+    void update(const doc::Root& root);
+
     // The scene as of `time`. Pure: the same model and the same time produce
     // the same bits on every machine. The compatibility overload chooses the
     // lowest-id stage (or the implicit legacy scene when there are no stages).
@@ -279,6 +292,15 @@ public:
     // Scene-relevant document nodes currently held. Excludes nodes whose type
     // is not one of the scene types, which are not the scene's business.
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+
+    // Whether the model is the accepted projection of exactly this document:
+    // the same immutable snapshot reset() or update() was last given, not
+    // merely one with an equal version. False for a refused document and
+    // after apply(), which is handed a delta and no document.
+    [[nodiscard]] bool holds(const doc::Root& root) const noexcept {
+        return loaded_ && !linked_error_.has_value() &&
+               accepted_root_.same_snapshot(root);
+    }
 
     // Cumulative since construction or the last `reset`.
     [[nodiscard]] const SceneCounters& counters() const noexcept {
@@ -388,6 +410,16 @@ private:
         bool locked{};
         bool visible{true};
         MediaResolution resolution{MediaResolution::Full};
+        // A take's plates, by slot: what each slot screen of the vehicle
+        // track it is on plays. A slot with no source is not filled. Empty
+        // for every ordinary clip.
+        struct Plate final {
+            std::string source;
+            doc::NodeId asset{};
+            core::u32 count{};
+            core::i64 offset{};
+        };
+        std::vector<Plate> plates;
     };
 
     struct LaneEntry final {
@@ -409,6 +441,11 @@ private:
         core::u32 raster_height{default_raster_height};
         bool aspect_locked{true};
         bool sync_locked{};
+        // A vehicle track, or one of its slot screens. See TimelineLane.
+        bool vehicle{};
+        std::optional<doc::NodeId> parent;
+        core::u8 slot{no_vehicle_slot};
+        core::i64 time_offset{};
     };
 
     struct MarkerEntry final {
@@ -618,6 +655,8 @@ private:
     LinkedSceneState linked_;
     std::optional<LinkedSceneError> linked_error_;
     bool links_present_{};
+    // Whether reset() or update() has given the model a document.
+    bool loaded_{};
     std::map<doc::NodeId, WallColorSettings> wall_colors_;
     doc::Version document_version_{};
     std::map<doc::NodeId, core::u64> history_nodes_;
@@ -626,6 +665,11 @@ private:
 
     void put(const doc::Node& node);
     void forget(doc::NodeId id) noexcept;
+    // Whether `delta` touches anything the Blender link records are read
+    // from, noting on the way that the document holds such records at all.
+    [[nodiscard]] bool touches_links(const doc::Delta& delta) noexcept;
+    // Accepts incoming_root_, already brought up to date, as version `to`.
+    void adopt(doc::Version to, bool links_dirty);
     // Adjusts the population figures for an entry entering or leaving.
     void note(const Entry& entry, bool added) noexcept;
     [[nodiscard]] SceneId default_scene_id() const noexcept;

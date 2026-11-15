@@ -80,6 +80,20 @@ struct EffectDeletePlan final {
 [[nodiscard]] core::Result<EffectDeletePlan, EffectDeletePlanError>
 plan_delete_effect(const doc::Root& root, doc::NodeId effect);
 
+struct ElementDeletePlan final {
+    // Every record that only exists to describe the element (its effects,
+    // masks, mask points, animation channels and selection-set memberships,
+    // transitively), in ascending node-id order, followed by the element.
+    std::vector<doc::NodeId> erases;
+};
+
+// Plans the referential cascade for deleting one scene element without
+// mutating `root`. Without it the element's effects stay behind in the
+// document pointing at an id that no longer exists, and come back to life when
+// a later element is given that id (a project reload restarts id allocation).
+[[nodiscard]] core::Result<ElementDeletePlan, EffectDeletePlanError>
+plan_delete_element(const doc::Root& root, doc::NodeId element);
+
 enum class GroupEditError {
     InvalidScene,
     EmptySelection,

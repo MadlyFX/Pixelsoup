@@ -142,6 +142,38 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
     if (const ElementInfo *const element = find_element(elements, selected);
         element != nullptr) {
       inspector_elements.push_back(*element);
+      if (element->kind == ElementKind::Track && element->vehicle) {
+        // The car's layout is its LED Car Process's: the one its screens'
+        // Scene Layers are wired into, the lowest id where they feed two.
+        const compositor::GraphNode *rig = nullptr;
+        for (const compositor::GraphEdge &edge : compositor_graph.edges) {
+          const compositor::GraphNode *const from =
+              compositor_graph.node(edge.from.node);
+          const compositor::GraphNode *const to =
+              compositor_graph.node(edge.to.node);
+          if (from == nullptr || to == nullptr ||
+              to->kind != compositor::NodeKind::LedCarProcess ||
+              (rig != nullptr && rig->node < to->node)) {
+            continue;
+          }
+          const auto *const layer =
+              std::get_if<compositor::SceneLayerParameters>(&from->parameters);
+          if (layer != nullptr && layer->scene_node != doc::NodeId{} &&
+              std::find(element->slot_screens.begin(),
+                        element->slot_screens.end(),
+                        layer->scene_node) != element->slot_screens.end()) {
+            rig = to;
+          }
+        }
+        if (rig != nullptr) {
+          if (const auto *const layout =
+                  std::get_if<compositor::LedCarProcessParameters>(
+                      &rig->parameters)) {
+            inspector_elements.back().vehicle_rig = rig->node;
+            inspector_elements.back().rig = *layout;
+          }
+        }
+      }
       if (element->kind == ElementKind::ParticleEffect) {
         // Read on the cache's worker; the section fills in when it lands.
         const render::ParticlePackageObservation observed =
@@ -190,6 +222,22 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
   }
   if (inspector.panel_request.has_value()) {
     pending_inspector_panel = inspector.panel_request;
+  }
+  // A wall clicked on the Inspector's rig: that slot screen is selected and
+  // its row listed under its car on the Timeline.
+  if (inspector.select_node.has_value()) {
+    const ElementInfo *const wall =
+        find_element(elements, *inspector.select_node);
+    if (wall != nullptr && !wall->locked) {
+      impl.stage_surface_selection.reset();
+      impl.select_only(wall->node);
+      impl.timeline_panel.reveal(wall->node, ui.time_seconds());
+    }
+  }
+  if (inspector.open_asset.has_value() &&
+      asset_registry.asset(*inspector.open_asset) != nullptr) {
+    impl.show_panel(panel_asset_viewer);
+    impl.asset_viewer_panel.open(*inspector.open_asset);
   }
   if (!inspector.effect_adds.empty()) {
     const auto gesture = impl.next_edit_gesture++;

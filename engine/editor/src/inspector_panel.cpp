@@ -2,6 +2,10 @@
 #include <mediaserver/editor/effects_panel.hpp>
 #include <mediaserver/editor/operator_widgets.hpp>
 
+#include <mediaserver/assets/plateset.hpp>
+
+#include <mediaserver/compositor/compositor_schema.hpp>
+
 #include <mediaserver/gui/color_picker.hpp>
 
 #include <mediaserver/scene/scene_schema.hpp>
@@ -205,6 +209,26 @@ constexpr std::array<std::string_view, 3U> rgb{{"R", "G", "B"}};
 constexpr std::array<std::string_view, 3U> tracker_protocol_choices{
     {"FreeD", "OpenTrackIO", "NatNet"}};
 
+// One value of a vehicle's rig, by the compositor's name for it; nothing for
+// a name the rig does not have.
+[[nodiscard]] std::optional<float> rig_value(
+    const compositor::LedCarProcessParameters& rig,
+    std::string_view property) noexcept {
+    namespace names = compositor::schema;
+    if (property == names::position_x) return rig.position.x;
+    if (property == names::position_y) return rig.position.y;
+    if (property == names::position_z) return rig.position.z;
+    if (property == names::rotation_yaw_turns) return rig.yaw;
+    if (property == names::rotation_pitch_turns) return rig.pitch;
+    if (property == names::rotation_roll_turns) return rig.roll;
+    if (property == names::plate_scale) return rig.plate_scale;
+    if (property == names::array_scale) return rig.array_scale;
+    if (property == names::horizontal_blend) return rig.horizontal_blend;
+    if (property == names::reflection_height) return rig.reflection_height;
+    if (property == names::reflection_scale) return rig.reflection_scale;
+    return std::nullopt;
+}
+
 // The element as a new one of its kind starts: what it is - its identity,
 // its kind, its place in the show and its links - kept, and every value an
 // operator authors put back to ElementInfo's own defaults, which mirror the
@@ -245,6 +269,8 @@ constexpr std::array<std::string_view, 3U> tracker_protocol_choices{
     pristine.style.horizontal_blend = fresh.style.horizontal_blend;
     pristine.raster_width = fresh.raster_width;
     pristine.raster_height = fresh.raster_height;
+    pristine.time_offset = fresh.time_offset;
+    pristine.rig = fresh.rig;
     pristine.field_of_view = fresh.field_of_view;
     pristine.shutter_seconds = fresh.shutter_seconds;
     pristine.aperture_f_number = fresh.aperture_f_number;
@@ -487,6 +513,12 @@ InspectorPanel::editable_value(const ElementInfo& element,
             return EditableValue{element.node, element.node,
                                  static_cast<double>(element.raster_height)};
         }
+        // Only a slot screen plays a plate that can be early or late.
+        if (binding.property == scene::schema::lane_time_offset &&
+            element.vehicle_track != doc::NodeId{}) {
+            return EditableValue{element.node, element.node,
+                                 static_cast<double>(element.time_offset)};
+        }
         return std::nullopt;
     case FieldDomain::Camera:
         if (element.kind != ElementKind::Camera) {
@@ -566,6 +598,20 @@ InspectorPanel::editable_value(const ElementInfo& element,
             return EditableValue{
                 element.node, element.node,
                 static_cast<double>(element.particle_start_frame)};
+        }
+        return std::nullopt;
+    case FieldDomain::Rig:
+        // The value is the rig's and so is the node the edit is addressed
+        // to; the element is still the vehicle track, which is what makes a
+        // locked car's layout read-only.
+        if (element.kind != ElementKind::Track || !element.vehicle ||
+            element.vehicle_rig == doc::NodeId{}) {
+            return std::nullopt;
+        }
+        if (const std::optional<float> value =
+                rig_value(element.rig, binding.property)) {
+            return EditableValue{element.node, element.vehicle_rig,
+                                 static_cast<double>(*value)};
         }
         return std::nullopt;
     case FieldDomain::Plate:
@@ -1003,6 +1049,13 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
         }
         return value;
       case FieldDomain::Screen:
+        // Whole source frames, either way.
+        if (binding.property == scene::schema::lane_time_offset) {
+          return std::clamp(
+              std::round(value),
+              -static_cast<double>(scene::max_lane_time_offset),
+              static_cast<double>(scene::max_lane_time_offset));
+        }
         // A raster is whole pixels. Rounding here rather than at the document
         // boundary means the field itself never shows 1919.6.
         return std::clamp(std::round(value), 1.0,
@@ -1038,6 +1091,23 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
                           binding.property == scene::schema::particle_seed
                               ? 4294967295.0
                               : 9007199254740992.0);
+      case FieldDomain::Rig: {
+        // The ranges the compositor reads a rig with: a size or a distance
+        // is never negative, and a blend takes at most half a wall.
+        constexpr double extent =
+            static_cast<double>(compositor::max_spatial_extent);
+        if (binding.property == compositor::schema::horizontal_blend) {
+          return std::clamp(
+              value, 0.0,
+              static_cast<double>(compositor::max_led_car_horizontal_blend));
+        }
+        if (binding.property == compositor::schema::plate_scale ||
+            binding.property == compositor::schema::array_scale ||
+            binding.property == compositor::schema::reflection_scale) {
+          return std::clamp(value, 0.0, extent);
+        }
+        return std::clamp(value, -extent, extent);
+      }
       case FieldDomain::Plate:
         // Every one of these is whole pixels or a whole ordinal. Rounding here
         // rather than at the document boundary means the field itself never
@@ -1204,6 +1274,7 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
             NamedEdit{target.author, std::string{binding.property}, value});
         break;
       case FieldDomain::Plate:
+      case FieldDomain::Rig:
         frame.named_edits.push_back(
             NamedEdit{target.author, std::string{binding.property}, value});
         break;
@@ -1867,7 +1938,9 @@ void InspectorPanel::draw_content(gui::UiContext& ctx, Cursor& cursor,
 void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,
                                  const ElementInfo& element,
                                  InspectorFrame& frame) {
-    if (element.kind != ElementKind::Track) {
+    // A vehicle track owns no plane, so it has no format to set: its walls
+    // are its slot screens, each with a section of its own.
+    if (element.kind != ElementKind::Track || element.vehicle) {
         return;
     }
     if (!section(ctx, cursor, "SCREEN", screen_open_)) {
@@ -1906,6 +1979,185 @@ void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,
             NamedEdit{element.node,
                       std::string{scene::schema::lane_aspect_locked},
                       element.aspect_locked ? 0.0 : 1.0});
+    }
+
+    // A slot screen's plate can play ahead of its take or behind it. The
+    // offset is the screen's, so it stays when the take is swapped: it is for
+    // timing one wall against the car, not for footage that came in out of
+    // sync, which the plateset's own sync offsets put right.
+    if (element.vehicle_track != doc::NodeId{}) {
+        constexpr std::array<std::string_view, 1U> unit{{"frames"}};
+        const std::array<float, 1U> offset{
+            static_cast<float>(element.time_offset)};
+        const std::array<FieldBinding, 1U> offset_binding{{
+            {FieldDomain::Screen, {}, scene::schema::lane_time_offset}}};
+        vector_row(ctx, cursor, "Time offset", unit, offset, 1.0F,
+                   offset_binding, frame);
+        ctx.tooltip(cursor.last(),
+                    "Source frames this screen's plate plays ahead of its "
+                    "take (negative: behind). It stays with the screen when "
+                    "the take is swapped.");
+    }
+}
+
+// The car from above, front up, as the plateset page draws it: a tile per
+// slot, each standing for that wall's screen. On a vehicle track it shows
+// which walls the car has; on a take, which of them this take plays on. A
+// wall with a screen is a button that selects it, which is where that wall's
+// place, grade and timing are set.
+void InspectorPanel::draw_vehicle(gui::UiContext& ctx, Cursor& cursor,
+                                  const ElementInfo& element,
+                                  InspectorFrame& frame) {
+    const bool car = element.kind == ElementKind::Track && element.vehicle;
+    const bool take = element.kind == ElementKind::Media && element.take;
+    if ((!car && !take) ||
+        !section(ctx, cursor, "VEHICLE", vehicle_open_)) {
+        return;
+    }
+    const gui::Theme& theme = ctx.theme();
+    constexpr float gap = 4.0F;
+    const gui::Rect area = take_row(cursor, 132.0F);
+    cursor.space(row_gap);
+    const float side = std::max(std::min(area.width, area.height), 0.0F);
+    const gui::Rect rig{area.x + (area.width - side) * 0.5F, area.y, side,
+                        side};
+    const float cell = (side - gap * 2.0F) / 3.0F;
+    // Column and row of each slot, in slot order: the eight walls clockwise
+    // from the front, then the ceiling over the car.
+    constexpr std::array<std::array<int, 2U>, scene::vehicle_slot_count>
+        cells{{{1, 0}, {2, 0}, {2, 1}, {2, 2}, {1, 2}, {0, 2}, {0, 1}, {0, 0},
+               {1, 1}}};
+    for (std::size_t slot = 0U; slot < cells.size(); ++slot) {
+        const auto role = static_cast<assets::PlatesetSlot>(slot);
+        const gui::Rect tile{
+            rig.x + static_cast<float>(cells[slot][0]) * (cell + gap),
+            rig.y + static_cast<float>(cells[slot][1]) * (cell + gap), cell,
+            cell};
+        const doc::NodeId screen = element.slot_screens[slot];
+        const bool has_screen = screen != doc::NodeId{};
+        const bool plays = take && element.plates[slot];
+        gui::Interaction it{};
+        if (has_screen) {
+            it = ctx.grab(
+                gui::ui_id(gui::ui_id(id_, "vehicle wall",
+                                      element.node.value()),
+                           "slot", slot),
+                tile);
+            ctx.cursor_for(it, gui::Cursor::Hand);
+            if (it.clicked) {
+                frame.select_node = screen;
+            }
+        }
+        const float hover = ctx.ease(
+            gui::ui_id(gui::ui_id(id_, "vehicle wall hover",
+                                  element.node.value()),
+                       "slot", slot),
+            it.hovered ? 1.0F : 0.0F);
+        if (has_screen) {
+            // A take lights the walls it plays on and leaves the rest dim.
+            const gui::UiColor resting =
+                take && !plays ? gui::blend(theme.track, theme.widget, 0.4F)
+                               : theme.widget;
+            ctx.rounded(tile,
+                        gui::blend(resting, theme.accent,
+                                   hover * 0.25F + (plays ? 0.18F : 0.0F)),
+                        theme.radius_small);
+        } else {
+            // No screen here. A plate with nowhere to play is the one case
+            // worth a warning.
+            ctx.rounded_outline(
+                tile,
+                plays ? theme.warning
+                      : gui::blend(theme.track, theme.border, 0.6F),
+                theme.radius_small);
+        }
+        const std::string_view tag = assets::plateset_slot_tag(role);
+        ctx.label(gui::Rect{tile.x + std::max((tile.width -
+                                               ctx.font_width(tag)) *
+                                                  0.5F,
+                                              0.0F),
+                            tile.y, tile.width, tile.height},
+                  tag, has_screen ? theme.text : theme.text_muted);
+        std::string tip{assets::plateset_slot_label(role)};
+        if (has_screen && take) {
+            tip += plays ? ": this take's plate plays on this screen. Click "
+                           "to select the screen."
+                         : ": this take has no plate for this screen, so it "
+                           "shows nothing while the take is up. Click to "
+                           "select the screen.";
+        } else if (has_screen) {
+            tip += ": click to select this screen and set where it stands, "
+                   "how it is graded and its time offset.";
+        } else if (plays) {
+            tip += ": this take has a plate here, but the car has no screen "
+                   "for it.";
+        } else {
+            tip += ": the car has no screen here.";
+        }
+        ctx.tooltip(tile, tip);
+    }
+    // The car's layout: every wall moves with these, so they are the car's
+    // and shown on its track. A wall's own fields stay a correction on top.
+    if (car && element.vehicle_rig != doc::NodeId{}) {
+        namespace names = compositor::schema;
+        const compositor::LedCarProcessParameters& layout = element.rig;
+        const std::array<float, 3U> position{layout.position.x, layout.position.y,
+                                             layout.position.z};
+        const std::array<FieldBinding, 3U> position_bindings{{
+            {FieldDomain::Rig, {}, names::position_x},
+            {FieldDomain::Rig, {}, names::position_y},
+            {FieldDomain::Rig, {}, names::position_z}}};
+        vector_row(ctx, cursor, "Position", xyz, position, 0.01F,
+                   position_bindings, frame);
+        ctx.tooltip(cursor.last(),
+                    "Where the car stands. Every wall and the ceiling move "
+                    "with it.");
+        const std::array<float, 3U> rotation{layout.yaw, layout.pitch, layout.roll};
+        const std::array<FieldBinding, 3U> rotation_bindings{{
+            {FieldDomain::Rig, {}, names::rotation_yaw_turns},
+            {FieldDomain::Rig, {}, names::rotation_pitch_turns},
+            {FieldDomain::Rig, {}, names::rotation_roll_turns}}};
+        vector_row(ctx, cursor, "Rotation (turns)", ypr, rotation, 0.002F,
+                   rotation_bindings, frame, nullptr, false, false, 0U, 3);
+        ctx.tooltip(cursor.last(),
+                    "Turns the whole car, walls and ceiling together.");
+        constexpr std::array<std::string_view, 1U> none{{""}};
+        const auto scalar = [&](std::string_view label,
+                                std::string_view property, float value,
+                                float speed, int precision,
+                                std::string_view tip) {
+            const std::array<float, 1U> values{value};
+            const std::array<FieldBinding, 1U> bindings{{
+                {FieldDomain::Rig, {}, property}}};
+            vector_row(ctx, cursor, label, none, values, speed, bindings,
+                       frame, nullptr, false, false, 0U, precision);
+            ctx.tooltip(cursor.last(), tip);
+        };
+        scalar("Wall distance", names::array_scale, layout.array_scale, 0.05F, 2,
+               "How far each wall stands from the middle of the car.");
+        scalar("Wall size", names::plate_scale, layout.plate_scale, 0.05F, 2,
+               "Sizes all eight walls together. A wall's own scale multiplies "
+               "this.");
+        scalar("Edge blend", names::horizontal_blend, layout.horizontal_blend,
+               0.005F, 3,
+               "How much of each wall's width fades out at its left and right "
+               "edges, so neighbouring walls overlap softly. The ceiling is "
+               "not blended.");
+        scalar("Ceiling height", names::reflection_height,
+               layout.reflection_height, 0.05F, 2,
+               "How high the ceiling plate hangs over the car.");
+        scalar("Ceiling size", names::reflection_scale, layout.reflection_scale,
+               0.05F, 2, "Sizes the ceiling plate on its own.");
+    }
+    if (take && element.plateset != doc::NodeId{}) {
+        const gui::Rect row = take_row(cursor, row_height);
+        cursor.space(row_gap);
+        if (ctx.button(gui::ui_id(id_, "open plateset", element.node.value()),
+                       row, "Open plateset")) {
+            frame.open_asset = element.plateset;
+        }
+        ctx.tooltip(row, "Show this take's plateset in the Asset Viewer: "
+                         "its plates, sync offsets and moments.");
     }
 }
 
@@ -3354,6 +3606,9 @@ InspectorFrame InspectorPanel::draw_selection(
                                        length, 0,
                                        static_cast<int>(line.size() - 1U)))},
                   ctx.theme().text_muted);
+    } else if (displayed->kind == ElementKind::Track && displayed->vehicle) {
+        // A vehicle track owns no plane: nine fields here would move
+        // nothing. Its walls are placed one at a time, from the rig below.
     } else {
         draw_transform(ctx, cursor, *displayed, frame, keyframes, show_frame);
     }
@@ -3366,6 +3621,7 @@ InspectorFrame InspectorPanel::draw_selection(
                displayed->kind != ElementKind::ParticleEffect) {
         cursor.space(row_gap);
         if (!displayed->linked) draw_content(ctx, cursor, *displayed, frame);
+        draw_vehicle(ctx, cursor, *displayed, frame);
         draw_screen(ctx, cursor, *displayed, frame);
         draw_fill(ctx, cursor, *displayed, frame);
         draw_material(ctx, cursor, *displayed, frame);

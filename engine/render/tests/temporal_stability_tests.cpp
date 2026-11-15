@@ -299,13 +299,22 @@ void glossy_geometry_matches_an_odd_node_split(rhi::Device& device) {
         readback.value().unmap();
         return pixels;
     };
-    const auto full = record({0U, 0U, 64U, 64U});
-    const auto left = record({0U, 0U, 31U, 64U});
-    const auto right = record({31U, 0U, 33U, 64U});
-    for (core::u32 y = 0U; y < 64U; ++y) {
-        const auto begin = full.begin() + y * 64U * 8U;
-        CHECK(std::equal(begin, begin + 31U * 8U, left.begin() + y * 31U * 8U));
-        CHECK(std::equal(begin + 31U * 8U, begin + 64U * 8U, right.begin() + y * 33U * 8U));
+    // With no fill under the light the highlight stands alone, so the last bit
+    // of every surface value reaches the half-float output. The right slice's
+    // padded target starts at an even canvas column, and the rasterizer's own
+    // interpolation there differed from the full canvas by one step at x=32;
+    // the lit stage now interpolates from canvas-space barycentrics instead.
+    // The dim fill used to round that away, so both are checked.
+    for (const float ambient : {0.0F, 1.0F}) {
+        value.environment.ambient = ambient;
+        const auto full = record({0U, 0U, 64U, 64U});
+        const auto left = record({0U, 0U, 31U, 64U});
+        const auto right = record({31U, 0U, 33U, 64U});
+        for (core::u32 y = 0U; y < 64U; ++y) {
+            const auto begin = full.begin() + y * 64U * 8U;
+            CHECK(std::equal(begin, begin + 31U * 8U, left.begin() + y * 31U * 8U));
+            CHECK(std::equal(begin + 31U * 8U, begin + 64U * 8U, right.begin() + y * 33U * 8U));
+        }
     }
 }
 

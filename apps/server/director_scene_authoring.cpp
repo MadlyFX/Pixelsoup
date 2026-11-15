@@ -10,6 +10,8 @@
 #include <mediaserver/assets/derivative.hpp>
 #include <mediaserver/assets/library_edit.hpp>
 #include <mediaserver/assets/proxy_policy.hpp>
+#include <mediaserver/compositor/compositor_graph.hpp>
+#include <mediaserver/compositor/compositor_schema.hpp>
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/doc/node.hpp>
 #include <mediaserver/output/feed_map_schema.hpp>
@@ -17,6 +19,7 @@
 #include <mediaserver/scene/linked_scene.hpp>
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene_model.hpp>
+#include <mediaserver/scene/scene_project.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <array>
@@ -316,7 +319,40 @@ map_transport(editor::TransportRequest request) noexcept {
         return static_cast<bool>(scheduler.schedule_document_replace(planned.value(),
             cmd::UndoContextId{2U}, cmd::TransactionId{edit.gesture}, apply_at));
     }
-    if (edit.property == scene::schema::animation_start_frame && edit.text.has_value()) {
+    if (existing->type == compositor::schema::led_car_process_type) {
+        // A vehicle track's layout, edited on the track but held by the rig
+        // its screens feed. Only the rig's own numbers, in the ranges the
+        // graph reads them with: anything else would make the node unreadable
+        // and take the whole car off the wall.
+        namespace names = compositor::schema;
+        constexpr double extent =
+            static_cast<double>(compositor::max_spatial_extent);
+        double low = -extent;
+        double high = extent;
+        if (edit.property == names::plate_scale ||
+            edit.property == names::array_scale ||
+            edit.property == names::reflection_scale) {
+            low = 0.0;
+        } else if (edit.property == names::horizontal_blend) {
+            low = 0.0;
+            high = static_cast<double>(
+                compositor::max_led_car_horizontal_blend);
+        } else if (edit.property != names::position_x &&
+                   edit.property != names::position_y &&
+                   edit.property != names::position_z &&
+                   edit.property != names::rotation_yaw_turns &&
+                   edit.property != names::rotation_pitch_turns &&
+                   edit.property != names::rotation_roll_turns &&
+                   edit.property != names::reflection_height) {
+            return true;
+        }
+        if (edit.text.has_value() || !std::isfinite(edit.value)) {
+            return true;
+        }
+        updated.properties.insert_or_assign(
+            edit.property,
+            doc::PropertyValue{std::clamp(edit.value, low, high)});
+    } else if (edit.property == scene::schema::animation_start_frame && edit.text.has_value()) {
         if (existing->type != scene::schema::model_type) return true;
         std::int64_t value{};
         const auto& text=*edit.text;
@@ -391,6 +427,22 @@ map_transport(editor::TransportRequest request) noexcept {
             edit.value, 1.0, static_cast<double>(scene::max_raster_extent))));
         updated.properties.insert_or_assign(edit.property,
                                             doc::PropertyValue{extent});
+    } else if (edit.property == scene::schema::lane_time_offset) {
+        // Whole source frames, and a slot screen's alone: on any other track
+        // the scene model refuses the node, and the track with it.
+        if (!std::isfinite(edit.value) ||
+            !existing->properties.contains(scene::schema::lane_parent)) {
+            return true;
+        }
+        const auto frames = static_cast<std::int64_t>(std::llround(std::clamp(
+            edit.value, -static_cast<double>(scene::max_lane_time_offset),
+            static_cast<double>(scene::max_lane_time_offset))));
+        if (frames == 0) {
+            updated.properties.erase(edit.property);
+        } else {
+            updated.properties.insert_or_assign(edit.property,
+                                                doc::PropertyValue{frames});
+        }
     } else if (edit.property == scene::schema::two_sided || edit.property == scene::schema::use_color_temperature || edit.property == scene::schema::casts_shadow || edit.property == scene::schema::bake_static || edit.property == scene::schema::bake_indirect || edit.property == scene::schema::animation_enabled || edit.property == scene::schema::animation_loop) {
         // The Inspector speaks in doubles because most of what it edits is a
         // number. A boolean written as 1.0 would parse as absent, so the
@@ -964,6 +1016,18 @@ schedule_project_settings(cmd::DirectorScheduler &scheduler,
                 doc::PropertyValue{
                     static_cast<double>(edit.environment.map_rotation)});
             stage.properties.insert_or_assign(
+                std::string{scene::schema::sky_r},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.sky_color.x)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::sky_g},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.sky_color.y)});
+            stage.properties.insert_or_assign(
+                std::string{scene::schema::sky_b},
+                doc::PropertyValue{
+                    static_cast<double>(edit.environment.sky_color.z)});
+            stage.properties.insert_or_assign(
                 std::string{scene::schema::environment_fog_density},
                 doc::PropertyValue{
                     static_cast<double>(edit.environment.fog_density)});
@@ -1106,6 +1170,21 @@ placed_clip_duration(const editor::AddIntent &add,
             node.properties.insert_or_assign(
                 std::string{scene::schema::position_z},
                 real(static_cast<double>(add.position->z)));
+        }
+        if (add.scale.has_value()) {
+            node.properties.insert_or_assign(
+                std::string{scene::schema::scale_x},
+                real(static_cast<double>(add.scale->x)));
+            node.properties.insert_or_assign(
+                std::string{scene::schema::scale_y},
+                real(static_cast<double>(add.scale->y)));
+            node.properties.insert_or_assign(
+                std::string{scene::schema::scale_z},
+                real(static_cast<double>(add.scale->z)));
+        }
+        if (!add.name.empty()) {
+            node.properties.insert_or_assign(
+                std::string{scene::schema::group_name}, text(add.name));
         }
         if (add.rotation.has_value()) {
             node.properties.insert_or_assign(
@@ -1478,17 +1557,15 @@ bool schedule_asset_library_edit(
     if (!planned.has_value()) {
         return true;
     }
-    // Placed plates stay in sync with their set: an offset change moves
-    // their source in by the same frames, in the same undo step.
-    if (request.edit.kind ==
-        assets::LibraryEdit::Kind::SetPlatesetHalfResolution) {
-        planned = follow_plateset_resolution(std::move(*planned),
-                                             request.edit.target);
-    }
-    if (request.edit.kind == assets::LibraryEdit::Kind::SetPlatesetOffsets) {
-        planned = follow_plateset_offsets(scheduler.projected_document(),
-                                          std::move(*planned),
-                                          request.edit.target, show_rate);
+    // Placed takes stay in step with their set: a plate moved to another
+    // slot, a sync offset or the decode size reaches every take of it, in
+    // the same undo step.
+    if (request.edit.kind == assets::LibraryEdit::Kind::SetPlatesetSlot ||
+        request.edit.kind == assets::LibraryEdit::Kind::SetPlatesetOffsets ||
+        request.edit.kind ==
+            assets::LibraryEdit::Kind::SetPlatesetHalfResolution) {
+        planned = follow_plateset(std::move(*planned), request.edit.target,
+                                  show_rate);
     }
     // Organising the Library is a direct UI action, undone from the same
     // globally reachable context as removing an asset.
@@ -1516,10 +1593,27 @@ bool schedule_asset_library_edit(
         return static_cast<bool>(scheduler.schedule_document_replace(plan.value(),
             cmd::UndoContextId{2U}, cmd::TransactionId{gesture}, apply_at));
     }
-    auto scheduled = scheduler.schedule_edit(
-        cmd::EraseNode{node}, cmd::PutNode{*existing}, cmd::UndoContextId{2U},
-        cmd::TransactionId{gesture}, apply_at);
-    return static_cast<bool>(scheduled);
+    // The element's effects, masks, channels and set memberships go with it,
+    // in the same undo step. Left behind they would point at an id that a
+    // later element can be given, and bring their old look back with it.
+    const auto planned =
+        scene::plan_delete_element(scheduler.projected_document(), node);
+    if (!planned) {
+        return planned.error() != scene::EffectDeletePlanError::AllocationFailed;
+    }
+    for (const doc::NodeId id : planned.value().erases) {
+        const auto *const stored = scheduler.projected_document().get(id);
+        if (stored == nullptr) {
+            continue;
+        }
+        if (!scheduler.schedule_edit(
+                cmd::EraseNode{id}, cmd::PutNode{*stored},
+                cmd::UndoContextId{2U}, cmd::TransactionId{gesture},
+                apply_at)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Authors one operator move as an ordinary command: read the node's current

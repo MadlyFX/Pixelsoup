@@ -9,6 +9,7 @@
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/show/frame_root_mailbox.hpp>
 #include <mediaserver/show/show_clock.hpp>
+#include <mediaserver/show/video_reference.hpp>
 
 namespace mediaserver::show {
 
@@ -100,9 +101,11 @@ private:
 };
 
 struct FrameBoundaryDriverConfig final {
+    // A pacer: build it with pacer_clock_config(), never from a show range.
     ShowClockConfig clock{};
-    // In VideoReference mode, tick() without a reference deliberately holds;
-    // only tick_from_video_reference() may advance show frames.
+    // In VideoReference mode only tick_from_video_reference() with a counting
+    // reference supplies frames for the picture. Without one the boundaries
+    // come from the system clock and are reported `unreferenced`.
     enum class TimingAuthority : core::u8 {
         SystemClock,
         VideoReference,
@@ -122,25 +125,16 @@ enum class FrameBoundaryDriverError : core::u8 {
     AllocationFailed,
 };
 
-enum class VideoReferenceState : core::u8 {
-    Unknown,
-    Unsupported,
-    Waiting,
-    Locked,
-    Lost,
-    Failed,
-};
-
-struct VideoReferenceSample final {
-    VideoReferenceState state{VideoReferenceState::Unknown};
-    core::u32 frame_counter{};
-
-    bool operator==(const VideoReferenceSample&) const = default;
-};
-
 struct FrameBoundaryReport final {
     ShowTick tick{};
     VideoReferenceState reference{VideoReferenceState::Unknown};
+    // The driver is paced by a video reference that is not supplying frames:
+    // not locked, or locked with a counter that stopped. Set on every tick
+    // while that lasts, boundary or not. The boundaries below then came from
+    // the system clock and everything they drive - commits, acknowledgements,
+    // checkpoint adoption - happened as usual. The one thing the caller must
+    // not do is put a new picture on its outputs: it repeats the previous one.
+    bool unreferenced{};
     // Frame boundaries the local clock crossed during this tick. More than one
     // means the caller was late.
     core::u64 boundaries{};
@@ -173,6 +167,12 @@ struct FrameBoundaryCounters final {
     core::u64 reference_samples{};
     core::u64 reference_holds{};
     core::u64 reference_losses{};
+    // Boundaries the system clock supplied while the reference was not
+    // supplying frames.
+    core::u64 unreferenced_boundaries{};
+    // Times the reference counter moved further than elapsed time allows and
+    // was taken as a new starting point.
+    core::u64 reference_discontinuities{};
 
     bool operator==(const FrameBoundaryCounters&) const = default;
 };
@@ -211,9 +211,14 @@ public:
     [[nodiscard]] core::Result<FrameBoundaryReport, ShowClockError> tick(
         TimePoint now) noexcept;
 
-    // Reference-driven entry point. The 32-bit counter is deliberately
-    // differenced modulo 2^32, matching the hardware API. A missing/lost
-    // source produces a hold, never free-running wall-clock frames.
+    // Reference-driven entry point; VideoReferenceCadence decides what each
+    // reading is worth. A missing, lost or stalled source never supplies a
+    // frame for the picture - the report says `unreferenced` and the caller
+    // repeats its previous one. The control side does not stop with it: the
+    // boundaries come from the system clock instead, because commits,
+    // acknowledgements and checkpoint adoption are how a node is told what to
+    // do about the fault. A driver that went quiet here could never receive
+    // the edit that turns the reference requirement off.
     [[nodiscard]] core::Result<FrameBoundaryReport, ShowClockError>
     tick_from_video_reference(
         TimePoint now,
@@ -226,27 +231,30 @@ public:
         FrameBoundaryDriverConfig::TimingAuthority authority,
         TimePoint at) noexcept;
 
-    // Local pacing controls. On a node these follow replicated transport
-    // state; on a Director they are the operator transport.
+    // Local pacing controls. The clock here is a pacer, not the show: a node
+    // starts it once and never pauses or stops it, because a tick that
+    // crosses no boundary commits nothing, adopts no checkpoint and
+    // acknowledges nothing. The show's play, pause and seek are replicated
+    // transport state read from the committed document, not these.
     [[nodiscard]] core::Result<ShowTick, ShowClockError> play(
         TimePoint at) noexcept {
-        reference_seen_ = false;
+        reference_.reset();
         return clock_.play(at);
     }
     [[nodiscard]] core::Result<ShowTick, ShowClockError> pause(
         TimePoint at) noexcept {
-        reference_seen_ = false;
+        reference_.reset();
         return clock_.pause(at);
     }
     [[nodiscard]] core::Result<ShowTick, ShowClockError> stop(
         TimePoint at) noexcept {
-        reference_seen_ = false;
+        reference_.reset();
         return clock_.stop(at);
     }
     [[nodiscard]] core::Result<ShowTick, ShowClockError> seek(
         ShowFrame target,
         TimePoint at) noexcept {
-        reference_seen_ = false;
+        reference_.reset();
         return clock_.seek(target, at);
     }
     [[nodiscard]] core::Result<ShowTick, ShowClockError> reconfigure_rate(
@@ -255,7 +263,7 @@ public:
         auto changed = clock_.reconfigure_rate(rate, at);
         if (changed) {
             config_.clock.rate = rate;
-            reference_seen_ = false;
+            reference_.reset();
         }
         return changed;
     }
@@ -284,15 +292,17 @@ private:
           mailbox_(std::move(mailbox)) {}
 
     [[nodiscard]] core::Result<FrameBoundaryReport, ShowClockError>
-    process_tick(ShowTick tick, VideoReferenceState reference) noexcept;
+    process_tick(
+        ShowTick tick,
+        VideoReferenceState reference,
+        bool unreferenced) noexcept;
 
     FrameBoundaryDriverConfig config_{};
     FrameCommitSink* sink_{};
     ShowClock clock_;
     FrameRootMailbox mailbox_;
     FrameBoundaryCounters counters_{};
-    bool reference_seen_{};
-    core::u32 last_reference_frame_{};
+    VideoReferenceCadence reference_{};
 };
 
 } // namespace mediaserver::show

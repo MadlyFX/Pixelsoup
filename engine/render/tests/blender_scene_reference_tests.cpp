@@ -123,10 +123,16 @@ doc::Root project(const std::string& source) {
     root = root.set(node(1, schema::stage_type, {{schema::scene_name, std::string{"Blender reference"}},
         {schema::canvas_width, core::i64{1280}}, {schema::canvas_height, core::i64{720}},
         {schema::ambient, 0.4}}));
+    scene::Camera aim{};
+    aim.eye = scene::Vec3{7.0F, 6.0F, 10.0F};
+    aim.target = scene::Vec3{0.0F, 0.75F, -1.0F};
+    const scene::Vec3 turns = scene::camera_rotation(aim);
     root = root.set(node(2, schema::camera_type, {{schema::scene_id, core::i64{1}},
         {schema::group_name, std::string{"Composition camera"}},
-        {schema::eye_x, 7.0}, {schema::eye_y, 6.0}, {schema::eye_z, 10.0},
-        {schema::target_y, 0.75}, {schema::up_y, 1.0},
+        {schema::position_x, 7.0}, {schema::position_y, 6.0}, {schema::position_z, 10.0},
+        {schema::rotation_yaw, (static_cast<double>(turns.x)+0.0)},
+        {schema::rotation_pitch, (static_cast<double>(turns.y)+0.0)},
+        {schema::rotation_roll, (static_cast<double>(turns.z)+0.0)},
         {schema::fov_turns, 0.07044657495455456}, {schema::near_plane, 0.05}, {schema::far_plane, 200.0}}));
     root = root.set(node(3, schema::settings_type, {{schema::renderer_backend, std::string{"advanced"}},
         {schema::renderer_required, true}, {schema::renderer_quality, std::string{"interactive"}}}));

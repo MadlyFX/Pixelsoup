@@ -604,8 +604,21 @@ void stage_camera_chords_never_pick_what_is_underneath() {
     UI_CHECK(!alt.picked.has_value() && !alt.surface_picked.has_value());
     UI_CHECK(alt.empty_canvas == editor::EmptyCanvasInteraction::Navigate);
     UI_CHECK(!panel.dragging());
-    static_cast<void>(draw(x, y, false, gui::KeyMods::None,
+    // Let go where it began, the Alt press was a click: it picks the clip,
+    // to be the whole selection.
+    const editor::ViewportFrame alt_click = draw(
+        x, y, false, gui::KeyMods::Alt, gui::MouseButton::Right, false);
+    UI_CHECK(alt_click.released && alt_click.pressed);
+    UI_CHECK(alt_click.picked == clip_node && alt_click.replace_pick);
+    // An Alt press that moves is the camera's and picks nothing.
+    static_cast<void>(
+        draw(x, y, true, gui::KeyMods::Alt, gui::MouseButton::Right, false));
+    static_cast<void>(draw(x + 20.0F, y, true, gui::KeyMods::Alt,
                            gui::MouseButton::Right, false));
+    const editor::ViewportFrame orbited = draw(
+        x + 20.0F, y, false, gui::KeyMods::Alt, gui::MouseButton::Right, false);
+    UI_CHECK(orbited.released && !orbited.picked.has_value() &&
+             !orbited.replace_pick);
 
     for (const gui::MouseButton held :
          {gui::MouseButton::Right, gui::MouseButton::Middle}) {

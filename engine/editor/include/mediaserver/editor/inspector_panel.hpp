@@ -137,6 +137,10 @@ struct InspectorFrame final {
     // request the Stage gizmo and Feed Mapping author, so animated axes route
     // to keys there too.
     std::optional<FeedSurfaceEditRequest> surface_edit;
+    // A wall of the car was clicked on the rig: select that slot screen.
+    std::optional<doc::NodeId> select_node;
+    // "Open plateset" on a take: show that Library asset in the Asset Viewer.
+    std::optional<doc::NodeId> open_asset;
 };
 
 // An element's authored values with its keyed transform and look channels
@@ -224,6 +228,10 @@ class InspectorPanel final {
         // A particle effect's seed and start frame: whole numbers that decide
         // which particles every node draws.
         Particles,
+        // A vehicle track's rig: where the car stands and how its walls and
+        // ceiling are laid out. Its own domain because the values live on
+        // the LED Car Process the track's screens feed, not on the track.
+        Rig,
     };
 
     // Semantic identity of one numeric field. Named properties need a domain
@@ -277,6 +285,10 @@ class InspectorPanel final {
     // the plane's height is tied to it.
     void draw_screen(gui::UiContext& ctx, Cursor& cursor,
                      const ElementInfo& element, InspectorFrame& frame);
+    // A vehicle track's, and a take's: the car from above, a tile per wall,
+    // each selecting that wall's slot screen.
+    void draw_vehicle(gui::UiContext& ctx, Cursor& cursor,
+                      const ElementInfo& element, InspectorFrame& frame);
     // A Background's colour or gradient: the controls of the compositor's
     // Background node, on the surface it fills.
     void draw_fill(gui::UiContext& ctx, Cursor& cursor,
@@ -402,6 +414,7 @@ class InspectorPanel final {
     void draw_material_extensions(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
     bool content_open_{true};
     bool screen_open_{true};
+    bool vehicle_open_{true};
     bool compositing_open_{true};
     bool effects_open_{true};
     bool tracking_open_{true};

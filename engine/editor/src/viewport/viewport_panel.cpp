@@ -54,6 +54,10 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     }
     prepare_surfaces(f);
     prepare_gizmos(f);
+    prepare_transform_box(f);
+    run_guides(f);
+    run_shape_tool(f);
+    run_gradient_tool(f);
     update_pivot_drag(f);
     pick_hovered_surface(f);
     resolve_deep_select_menu(f);
@@ -69,10 +73,12 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     // The editor chrome is a clipped 2D pass over the zero-copy scene image.
     // Program stays clean except for selection outlines; Stage adds the spatial
     // guides an operator needs to author the scene.
-    ctx.push_clip(f.result.image);
+    ctx.push_clip(shown_image(f.result.image));
     draw_overlays(f);
+    draw_layout_overlays(f);
     draw_gizmos(f);
     ctx.pop_clip();
+    draw_rulers(f);
     draw_stage_view_menu(ctx, f.view_menu, f.result);
     draw_stage_shading_menu(ctx, f.shading_menu, f.result);
 
@@ -116,13 +122,46 @@ bool ViewportPanel::begin_frame(Frame& f) {
         image_bounds.height -= stage_toolbar_height;
     }
 
+    // The Program view's rulers take a strip off the top and the left.
+    constexpr float ruler_top_height = 18.0F;
+    constexpr float ruler_left_width = 36.0F;
+    if (role_ == ViewportRole::Program && rulers_shown_ &&
+        image_bounds.width > 160.0F && image_bounds.height > 120.0F) {
+        f.ruler_top = gui::Rect{image_bounds.x + ruler_left_width,
+                                image_bounds.y,
+                                image_bounds.width - ruler_left_width,
+                                ruler_top_height};
+        f.ruler_left = gui::Rect{image_bounds.x,
+                                 image_bounds.y + ruler_top_height,
+                                 ruler_left_width,
+                                 image_bounds.height - ruler_top_height};
+        image_bounds.x += ruler_left_width;
+        image_bounds.width -= ruler_left_width;
+        image_bounds.y += ruler_top_height;
+        image_bounds.height -= ruler_top_height;
+    }
+    f.pane = image_bounds;
+    f.interaction_canvas = interaction_canvas;
+    if (role_ == ViewportRole::Program) {
+        navigate_canvas(f);
+    }
     // Letterboxed to the canvas, never stretched: a pixel the operator clicks
-    // has to be the pixel the renderer drew, or picking lies.
-    frame.image =
-        ctx.image_fit(image_bounds, target, canvas_width / canvas_height);
+    // has to be the pixel the renderer drew, or picking lies. A zoomed
+    // Program view keeps that shape and is cropped by its pane.
+    if (role_ == ViewportRole::Program && !canvas_fitted_) {
+        frame.image = canvas_view_.to_screen(
+            image_bounds, gui::Rect{0.0F, 0.0F, canvas_width, canvas_height});
+        ctx.push_clip(image_bounds);
+        ctx.image(frame.image, target);
+        ctx.pop_clip();
+    } else {
+        frame.image =
+            ctx.image_fit(image_bounds, target, canvas_width / canvas_height);
+    }
     if (frame.image.width <= 0.0F || frame.image.height <= 0.0F) {
         return false;
     }
+    canvas_scale_ = frame.image.width / canvas_width;
     // The view's own menu sits over the image's top-right corner, so the
     // pointer over it picks nothing underneath.
     const gui::Rect view_menu =

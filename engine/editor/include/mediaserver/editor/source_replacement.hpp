@@ -19,6 +19,10 @@ struct SourceReplacementIntent final {
 [[nodiscard]] inline bool can_replace_source(const ElementInfo &target,
                                              const assets::Asset &asset) noexcept {
   if (target.locked || target.linked) return false;
+  // A take plays a whole plateset: one file dropped on it would replace its
+  // front plate and leave the other walls on the old take. A plateset swaps
+  // it instead.
+  if (target.take) return false;
   return (target.kind == ElementKind::Media &&
           assets::asset_kind(asset) == assets::AssetKind::Media) ||
          (target.kind == ElementKind::Model &&
@@ -28,7 +32,7 @@ struct SourceReplacementIntent final {
 [[nodiscard]] inline bool can_replace_layer(const ElementInfo &target,
                                             const ElementInfo &source) noexcept {
   return !target.locked && !source.locked && target.node != source.node &&
-         target.kind == source.kind &&
+         target.kind == source.kind && !target.take && !source.take &&
          (target.kind == ElementKind::Media || target.kind == ElementKind::Model ||
           target.kind == ElementKind::Object || target.kind == ElementKind::Group ||
           target.kind == ElementKind::Track);

@@ -257,16 +257,48 @@ struct MediaReadyFrames final {
 void configure_buffered_output_media_decode(
     MediaDecodeConfig config = MediaDecodeConfig{}) noexcept;
 
+// One scene renderer's standing offer of its device for video decode. The
+// offer lasts as long as this object does and is withdrawn when it is
+// destroyed, which is how the decoder learns a device has gone - an output
+// redeploy replaces every renderer, and the device with them.
+class VideoDecodeDeviceOffer final {
+  public:
+    VideoDecodeDeviceOffer() noexcept = default;
+    VideoDecodeDeviceOffer(const VideoDecodeDeviceOffer &) = delete;
+    VideoDecodeDeviceOffer &operator=(const VideoDecodeDeviceOffer &) = delete;
+    VideoDecodeDeviceOffer(VideoDecodeDeviceOffer &&other) noexcept;
+    VideoDecodeDeviceOffer &operator=(VideoDecodeDeviceOffer &&other) noexcept;
+    ~VideoDecodeDeviceOffer();
+
+    // False for a device that could not be offered at all.
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return static_cast<bool>(device_);
+    }
+
+  private:
+    friend VideoDecodeDeviceOffer
+    offer_video_decode_device(const rhi::Device &device) noexcept;
+    explicit VideoDecodeDeviceOffer(rhi::NativeHandle device) noexcept
+        : device_(device) {}
+
+    rhi::NativeHandle device_{};
+};
+
 // Offers the device a scene is rendered on as the one video is decoded onto,
 // so a hardware-decoded frame can be sampled where it was produced instead of
 // being read back to system memory and uploaded again. Every SceneRenderer
-// offers its device; the call is cheap and repeating it is harmless.
+// offers its device and keeps the offer for its lifetime; the call is cheap
+// and several renderers on one device are counted, not confused.
 //
 // Only a device that can read a decoder's surfaces is taken, and only while
-// every scene in the process renders on that same one: a decoded surface
-// belongs to the device that made it, so a second scene device retires the
-// path and leaves both rendering from system memory.
-void offer_video_decode_device(const rhi::Device &device) noexcept;
+// every live scene renderer in the process is on that same one: a decoded
+// surface belongs to the device that made it, so a second scene device
+// suspends the path and leaves both rendering from system memory. It resumes
+// when one device is left. Frames already decoded onto a device that is no
+// longer the one are decoded again rather than handed to a renderer that
+// cannot read them.
+[[nodiscard]] VideoDecodeDeviceOffer
+offer_video_decode_device(const rhi::Device &device) noexcept;
 
 // The number of frames a media file holds, for a clip's loop length: a video's
 // frame count, or 1 for a still image (and on any failure). Opens and probes

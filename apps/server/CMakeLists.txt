@@ -16,6 +16,7 @@ set_target_properties(mediaserver_camera_prediction PROPERTIES FOLDER "apps")
 # same declarations the library was built with.
 add_library(mediaserver_server STATIC
     asset_readiness_provider.cpp
+    authority_gate.cpp
     blender_links.cpp
     clip_clipboard.cpp
     cluster_lifecycle_controller.cpp
@@ -57,7 +58,9 @@ add_library(mediaserver_server STATIC
     playback_runtime.cpp
     process_log.cpp
     project_asset_import.cpp
+    project_autosave.cpp
     project_assets.cpp
+    project_loader.cpp
     proxy_generation_service.cpp
     proxy_playback.cpp
     render_machine.cpp
@@ -115,9 +118,10 @@ target_link_libraries(mediaserver_server
 
 if(WIN32)
     # ole32/oleaut32 read the Windows Firewall rules, shell32 asks for the
-    # elevation that adds them, and advapi32 holds the sign-in entry.
+    # elevation that adds them, and advapi32 holds the sign-in entry. psapi
+    # reports the process private bytes on the node status line.
     target_link_libraries(mediaserver_server
-        PUBLIC dxgi user32 ole32 oleaut32 shell32 advapi32)
+        PUBLIC dxgi user32 ole32 oleaut32 shell32 advapi32 psapi)
 endif()
 
 # The machine-level Quadro Sync probe and the D3D12 present barrier share the
@@ -159,6 +163,9 @@ if(BUILD_TESTING)
 
     mediaserver_server_test(asset_activation)
     mediaserver_server_test(asset_readiness_provider)
+    # The turn-taking between the Director's sealing thread and its show
+    # thread: real threads, and counts of who got in, not timings.
+    mediaserver_server_test(authority_gate)
     mediaserver_server_test(blender_links)
     mediaserver_server_test(clip_clipboard)
     mediaserver_server_test(cluster_lifecycle_controller)
@@ -183,6 +190,24 @@ if(BUILD_TESTING)
     mediaserver_server_test(process_log)
     mediaserver_server_test(project_asset_import)
     mediaserver_server_test(project_assets)
+    # Recovery copies of unsaved work: real project files in a temporary
+    # folder, written by the autosave thread and read back.
+    mediaserver_server_test(project_autosave)
+    # Project loading off the frame loops: real project files in a temporary
+    # folder, read by the loader thread, with a counting media probe.
+    mediaserver_server_test(project_loader)
+    # The memory fields on the node status line: formatting only, plus a
+    # live read of this process's private bytes on Windows.
+    mediaserver_server_test(status_memory)
+    # The node's frame pacer is a metronome, not the timeline: built from
+    # launch options, it has to run past the show range they carry.
+    mediaserver_server_test(node_pacer)
+    if(WIN32 AND MEDIASERVER_ENABLE_NVAPI)
+        # Drives the real NVIDIA driver, so it checks something only on a
+        # machine whose adapter has no present barrier, and says why it
+        # skipped anywhere else.
+        mediaserver_server_test(nvapi_present_barrier)
+    endif()
     mediaserver_server_test(proxy_generation_service)
     mediaserver_server_test(proxy_playback)
     # The render machine's stored path - what a launch with no arguments
@@ -214,7 +239,8 @@ if(BUILD_TESTING)
     mediaserver_server_test(tracker_listener)
     mediaserver_server_test(transport_command TEST transport_commands)
     mediaserver_server_test(waveform_generation_service)
-    # mask_edit_integration.cpp has no tests yet.
+    # Shapes drawn on Program Output: a mask on a layer, a card with its mask.
+    mediaserver_server_test(mask_edit_integration)
 
     add_executable(mediaserver_proxy_encoder_benchmark
         tests/proxy_encoder_benchmark.cpp)
@@ -222,6 +248,16 @@ if(BUILD_TESTING)
         PRIVATE mediaserver_server)
     mediaserver_set_project_options(mediaserver_proxy_encoder_benchmark)
     set_target_properties(mediaserver_proxy_encoder_benchmark
+        PROPERTIES FOLDER "benchmarks")
+
+    # What the Director and nodes rebuild per document change and derive per
+    # loop wake, timed on a saved project. Not a test: run it by hand.
+    add_executable(mediaserver_director_tick_benchmark
+        tests/director_tick_benchmark.cpp)
+    target_link_libraries(mediaserver_director_tick_benchmark
+        PRIVATE mediaserver_server)
+    mediaserver_set_project_options(mediaserver_director_tick_benchmark)
+    set_target_properties(mediaserver_director_tick_benchmark
         PROPERTIES FOLDER "benchmarks")
 
     add_test(

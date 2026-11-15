@@ -3540,8 +3540,8 @@ void baked_probe_pixels_are_slice_exact_and_cancel_safe() {
     auto opened = rhi::Device::create(config); RENDER_CHECK(opened);
     auto device = std::move(opened).value();
     scene::Scene lighting{};
-    lighting.environment.sky_color = {0.6F, 0.1F, 0.03F};
-    lighting.environment.ground_color = lighting.environment.sky_color;
+    lighting.environment.fill_sky_color = {0.6F, 0.1F, 0.03F};
+    lighting.environment.ground_color = lighting.environment.fill_sky_color;
     auto& grid = lighting.environment.baked;
     grid.minimum = {-2,-2,-2}; grid.maximum = {2,2,2};
     grid.count_x = 2; grid.count_y = 2; grid.count_z = 2; grid.samples = 1024;
@@ -3551,7 +3551,7 @@ void baked_probe_pixels_are_slice_exact_and_cancel_safe() {
     const auto written = render::write_probe_asset(*baked.asset, std::string{bytes.begin(),bytes.end()}); RENDER_CHECK(written.ready());
     render::ProbeCache cache; static_cast<void>(cache.observe(written.source, written.asset->content)); cache.wait_for_test();
     auto scn = empty_scene({64,32});
-    scn.environment.sky_color = {}; scn.environment.ground_color = {};
+    scn.environment.fill_sky_color = {}; scn.environment.ground_color = {};
     scn.environment.baked = grid; scn.environment.baked.enabled = true;
     scn.environment.baked.source = written.source; scn.environment.baked.content = written.asset->content;
     scene::MeshInstance object{}; object.mesh = {scene::Primitive::Sphere,32};

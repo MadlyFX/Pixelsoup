@@ -36,9 +36,21 @@ void ViewportPanel::begin_interaction(Frame& f) {
     auto& interaction_canvas = f.interaction_canvas;
     auto& canvas_width = f.canvas_width;
     auto& occluded = f.occluded;
+    // The Program view answers across its whole pane: a box handle may
+    // stand outside the picture, and a zoomed picture is cropped by it.
     const gui::Rect interaction_bounds =
-        occluded || frame.keyboard_transform ? gui::Rect{} : frame.image;
-    const gui::Interaction it = ctx.grab(id_, interaction_bounds);
+        occluded || frame.keyboard_transform || f.navigating
+            ? gui::Rect{}
+            : (role_ == ViewportRole::Program ? f.pane : frame.image);
+    gui::Interaction it = ctx.grab(id_, interaction_bounds);
+    // Out in the bars beside the picture only a box handle answers: a press
+    // there otherwise starts nothing, as it always has.
+    const bool on_picture =
+        role_ != ViewportRole::Program ||
+        frame.image.contains(ctx.pointer_x(), ctx.pointer_y()) ||
+        frame.box_handle != TransformBoxHandle::None;
+    it.hovered = it.hovered && on_picture;
+    it.pressed = it.pressed && on_picture;
     frame.hovered = it.hovered;
     frame.held = it.held;
     frame.pointer =
@@ -110,7 +122,10 @@ void ViewportPanel::handle_press(Frame& f) {
         surface_dragging_ = false;
         deep_select_armed_ = false;
         deep_select_open_ = false;
+        alt_pick_.reset();
         deep_candidates_.clear();
+        box_handle_ = TransformBoxHandle::None;
+        snap_box_.reset();
 
         // On Stage, Alt+left orbits and left added to a right or middle drag
         // pans: camera chords that never pick, or drag, what is underneath.
@@ -133,11 +148,27 @@ void ViewportPanel::handle_press(Frame& f) {
             marquee_x_ = ctx.pointer_x();
             marquee_y_ = ctx.pointer_y();
         } else if (camera_chord) {
-            // Left to the shell's camera navigation.
+            // Left to the shell's camera navigation. An Alt press that is let
+            // go where it began is a click: it picks the element under it.
+            if (ctx.alt_held() && !other_buttons && !measuring_) {
+                const std::vector<scene::ScenePick> hits =
+                    scene_hits_under_pointer();
+                const auto front = std::find_if(
+                    hits.begin(), hits.end(), [](const scene::ScenePick& hit) {
+                        return !hit.crosses_camera;
+                    });
+                if (front != hits.end()) {
+                    alt_pick_ = front->node;
+                    alt_press_x_ = ctx.pointer_x();
+                    alt_press_y_ = ctx.pointer_y();
+                }
+            }
         } else if (measuring_) {
             if (measure_hover_.has_value()) {
                 measure_.click(*measure_hover_, ctx.shift_held());
             }
+        } else if (press_transform_box(f)) {
+            // A handle of the Program view's box: the selection's own.
         } else if (hovered_surface_axis != GizmoAxis::None &&
                    selected_surface_value != nullptr) {
             frame.surface_picked = selected_surface_value->node;
@@ -263,6 +294,7 @@ void ViewportPanel::handle_press(Frame& f) {
                                      : scene::translation_of(*world);
                     drag_source_vertex_.reset();
                     dragging_ = true;
+                    capture_snap(f, front->node);
                 }
             }
         }
@@ -382,6 +414,12 @@ void ViewportPanel::drag_element(Frame& f) {
     auto& projection = f.projection;
     auto& view_forward = f.view_forward;
     auto& it = f.it;
+    if (drag_transform_box(f)) {
+        if (!it.held) {
+            drag_snap_target_.reset();
+        }
+        return;
+    }
     if (it.held && dragging_) {
         const float dx = frame.pointer.x - press_x_;
         const float dy = frame.pointer.y - press_y_;
@@ -401,14 +439,20 @@ void ViewportPanel::drag_element(Frame& f) {
             switch (drag_tool_) {
             case TransformTool::Move:
                 if (drag_axis_ == GizmoAxis::Screen) {
+                    // On Program the move lands on the canvas lines it
+                    // comes near; elsewhere it is the drag as it stands.
+                    float move_x = dx;
+                    float move_y = dy;
+                    snap_canvas_move(f, move_x, move_y);
                     delta.translation =
                         projection != nullptr && projection->project
                             ? scene::screen_drag_to_translation(
                                   press_world_, projection->forward,
-                                  projection->up, projection->project, dx, dy)
+                                  projection->up, projection->project, move_x,
+                                  move_y)
                             : scene::screen_drag_to_translation(
-                                  scene.camera, scene.canvas, press_world_, dx,
-                                  dy);
+                                  scene.camera, scene.canvas, press_world_,
+                                  move_x, move_y);
                 } else {
                     const float axis_pixels_squared =
                         axis_canvas_x_ * axis_canvas_x_ +
@@ -422,6 +466,9 @@ void ViewportPanel::drag_element(Frame& f) {
                     }
                 }
                 exact = snap_drag(ctx, scene, selection, frame, delta);
+                // Program lays out against the picture: its moves snap to
+                // canvas lines above, not to the Stage's world increments.
+                exact = exact || role_ == ViewportRole::Program;
                 break;
             case TransformTool::Rotate:
                 drag_turns_ += sweep_turns(drag_centre_x_, drag_centre_y_,
@@ -483,12 +530,25 @@ void ViewportPanel::finish_gesture(Frame& f) {
         frame.marquee_adds = ctx.shift_held();
     }
 
+    if (it.released && alt_pick_.has_value()) {
+        // Within a few interface pixels counts as not moving, as a click.
+        constexpr float click_slop = 4.0F;
+        if (std::abs(ctx.pointer_x() - alt_press_x_) <= click_slop &&
+            std::abs(ctx.pointer_y() - alt_press_y_) <= click_slop) {
+            frame.pressed = true;
+            frame.picked = alt_pick_;
+            frame.replace_pick = true;
+            frame.empty_canvas = EmptyCanvasInteraction::None;
+        }
+        alt_pick_.reset();
+    }
     if (it.released) {
         frame.released = true;
         deep_select_armed_ = false;
         dragging_ = false;
         surface_dragging_ = false;
         drag_axis_ = GizmoAxis::None;
+        box_handle_ = TransformBoxHandle::None;
     }
 }
 

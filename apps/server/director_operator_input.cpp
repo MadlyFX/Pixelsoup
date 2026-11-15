@@ -55,32 +55,119 @@ EditCoalescingPlan *DirectorShowLoop::coalescing_for(core::u64 gesture) {
 }
 
 void DirectorShowLoop::remember_recent_project(std::string_view path) {
-    if (!recent_project_settings_file.has_value()) {
-        return;
-    }
-    auto remembered = persist::save_recent_project_path(
-        *recent_project_settings_file, native_path_from_utf8(path));
-    if (!remembered && !remembered.error().committed) {
-        report_recent_project_error("could not update", remembered.error());
-    } else if (!remembered) {
-        report_recent_project_error("updated without confirmed durability",
-                                    remembered.error());
-    }
-    if (remembered || remembered.error().committed) {
-        auto paths = persist::load_recent_project_paths(
-            *recent_project_settings_file);
-        if (paths) {
-            recent_project_paths.clear();
-            for (const auto &item : paths.value()) {
-                recent_project_paths.push_back(native_path_to_utf8(item));
+    // The list is a settings file; write_project_files writes it once this
+    // authoring pass is over and the gate can be left.
+    recent_project_to_remember = std::string{path};
+}
+
+void DirectorShowLoop::write_project_files() {
+    if (project_write.has_value()) {
+        const ProjectWrite write = std::move(*project_write);
+        project_write.reset();
+        const auto saved = [&] {
+            // The file is written and synced with the sealing thread free to
+            // run: nothing here refers to the authority.
+            const AuthorityGate::Away writing{authority_gate};
+            return persist::save_project_file(
+                native_path_from_utf8(write.request.path), write.content);
+        }();
+        const bool installed = !saved && saved.error().committed;
+        if (!saved && !installed) {
+            project_message = project_file_failure("SAVING", saved.error());
+            std::cerr << "could not save project '" << write.request.path
+                      << "' (code "
+                      << static_cast<unsigned>(saved.error().code) << ')';
+            if (saved.error().system_error) {
+                std::cerr << ": " << saved.error().system_error.message();
             }
+            std::cerr << '\n';
         } else {
-            report_recent_project_error("could not read", paths.error());
+            // What was written, not what the document has become since: the
+            // comparison that marks a project changed is made against this.
+            saved_project_snapshot = write.projected;
+            project_explicitly_dirty = false;
+            if (project_autosave != nullptr) {
+                // Under its old name too: Save As leaves that file as it was,
+                // and the work now lives in the new one.
+                project_autosave->discard(project_path);
+                if (project_path != write.request.path) {
+                    project_autosave->discard(write.request.path);
+                }
+                project_autosave->invalidate();
+            }
+            const bool asset_base_changed =
+                project_path != write.request.path;
+            project_path = write.request.path;
+            // Save As changes the base of project-relative asset
+            // paths even though authored content is unchanged.
+            if (asset_base_changed) {
+                assets_loaded = false;
+            }
+            recent_project_to_remember = project_path;
+            project_message =
+                installed ? "ERROR SAVE: DURABILITY NOT CONFIRMED"
+                          : "PROJECT SAVED";
+            if (installed) {
+                std::cerr << "project '" << write.request.path
+                          << "' was replaced, but durable directory "
+                             "sync failed";
+                if (saved.error().system_error) {
+                    std::cerr << ": "
+                              << saved.error().system_error.message();
+                }
+                std::cerr << '\n';
+            }
         }
     }
+    if (recent_project_to_remember.has_value() &&
+        recent_project_settings_file.has_value()) {
+        const std::string path = std::move(*recent_project_to_remember);
+        recent_project_to_remember.reset();
+        std::optional<std::vector<std::string>> listed;
+        {
+            const AuthorityGate::Away writing{authority_gate};
+            auto remembered = persist::save_recent_project_path(
+                *recent_project_settings_file, native_path_from_utf8(path));
+            if (!remembered && !remembered.error().committed) {
+                report_recent_project_error("could not update",
+                                            remembered.error());
+            } else if (!remembered) {
+                report_recent_project_error(
+                    "updated without confirmed durability",
+                    remembered.error());
+            }
+            if (remembered || remembered.error().committed) {
+                auto paths = persist::load_recent_project_paths(
+                    *recent_project_settings_file);
+                if (paths) {
+                    listed.emplace();
+                    for (const auto &item : paths.value()) {
+                        listed->push_back(native_path_to_utf8(item));
+                    }
+                } else {
+                    report_recent_project_error("could not read",
+                                                paths.error());
+                }
+            }
+        }
+        if (listed.has_value()) {
+            recent_project_paths = std::move(*listed);
+        }
+    }
+    recent_project_to_remember.reset();
 }
 
 void DirectorShowLoop::clear_pending_project_authoring() {
+    drop_pending_requests();
+    // These name nodes of the project being replaced.
+    asset_viewer_request.reset();
+    clip_clipboard.clear();
+    compositor_clipboard.clear();
+    linked_clipboard.reset();
+    key_clipboard.clear();
+}
+
+void DirectorShowLoop::drop_pending_requests() {
     pending_edits.clear();
     pending_world_edits.clear();
     pending_history.reset();
@@ -105,17 +192,13 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_highlights.clear();
     pending_timeline_edits.clear();
     pending_source_edits.clear();
-    asset_viewer_request.reset();
     pending_group_edit.reset();
     pending_selection_set_edit.reset();
     pending_mask_edit.reset();
     pending_clip_paste.reset();
     pending_scene_duplicates.clear();
-    clip_clipboard.clear();
-    compositor_clipboard.clear();
-    linked_clipboard.reset(); pending_linked_paste.reset();
+    pending_linked_paste.reset();
     pending_key_paste.reset();
-    key_clipboard.clear();
     pending_project_settings.reset();
     pending_properties.clear();
     pending_generics.clear();
@@ -175,6 +258,54 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     scheduler.end_coalescing();
 }
 
+void DirectorShowLoop::refuse_operator_request(std::string_view what,
+                                               cmd::FrameNumber frame) {
+    // The phase already wrote the exact step to the log. Whatever else the
+    // editor queued this frame belongs to the same gesture, so it is dropped
+    // with it instead of being retried against a document it no longer fits.
+    drop_pending_requests();
+    ++refused_operator_requests;
+    // Short enough for the status bar, which cuts a longer line off.
+    project_message.assign(what);
+    project_message.append(" NOT APPLIED");
+    std::cerr << "refused an operator request (" << what
+              << ") at control frame " << frame.value()
+              << "; the Director continues\n";
+}
+
+void DirectorShowLoop::autosave_project(const DirectorTick &tick) {
+    if (project_autosave == nullptr) {
+        return;
+    }
+    const ProjectAutosaveCounters counters = project_autosave->counters();
+    if (counters.failed != reported_autosave_failures) {
+        reported_autosave_failures = counters.failed;
+        project_message = "AUTOSAVE FAILED - SAVE THE PROJECT";
+    }
+    // A project about to be replaced is not the one to protect.
+    if (project_load_pending()) {
+        return;
+    }
+    const doc::Root &projected = scheduler.projected_document();
+    if (!project_autosave->due(tick.now, projected.version(), project_path)) {
+        return;
+    }
+    try {
+        const bool dirty =
+            project_explicitly_dirty ||
+            project_content_changed(saved_project_snapshot, projected);
+        show::TransportAnchor saved_transport = transport.anchor();
+        saved_transport.anchor_show_frame =
+            transport.frame_at(tick.control_frame);
+        saved_transport.anchor_control_frame = tick.control_frame;
+        project_autosave->observe(tick.now, dirty, projected,
+                                  show::make_transport_node(saved_transport),
+                                  project_path);
+    } catch (const std::bad_alloc &) {
+        std::cerr << "could not queue the project recovery copy\n";
+    }
+}
+
 // Entering Preview seeds its playhead from wherever the show currently is
 // and freezes it there, so the operator starts from the picture they were
 // just looking at and the show carries on without them.
@@ -207,23 +338,49 @@ doc::NodeId DirectorShowLoop::scene_being_authored(const OperatorFrame &op) {
     return infos.empty() ? doc::NodeId{} : infos.front().id;
 }
 
-PhaseExit DirectorShowLoop::apply_project_load(DirectorTick &tick,
-                                               OperatorFrame &op) {
-    auto &repace_after_seal = tick.repace_after_seal;
+// A project the operator asked for is handed to the loader, which reads the
+// file and probes its media on its own thread. This pass only stages the
+// answer once it has arrived; until then the project that is open stays open.
+PhaseExit DirectorShowLoop::apply_project_load(OperatorFrame &op) {
+    if (pending_project_load.has_value()) {
+        editor::ProjectFileRequest request = std::move(*pending_project_load);
+        pending_project_load.reset();
+        // Only the load it was set for: the next one is the operator's
+        // unless something says otherwise.
+        const ProjectLoadOrigin origin =
+            std::exchange(pending_load_origin, ProjectLoadOrigin::Operator);
+        const core::u64 ticket = project_loader.request(
+            std::move(request.path), std::move(pending_preloaded_project));
+        pending_preloaded_project.reset();
+        if (ticket == 0U) {
+            project_load_in_flight.reset();
+            project_message = "ERROR LOADING PROJECT: NOT ENOUGH MEMORY";
+            std::cerr << "could not queue the project load\n";
+        } else {
+            project_load_in_flight = ProjectLoadInFlight{ticket, origin};
+        }
+    }
+    // Taken whether or not anything is awaited, so an answer to a load the
+    // operator has since replaced or cancelled is dropped and not kept.
+    if (auto loaded = project_loader.take()) {
+        if (project_load_in_flight.has_value() &&
+            loaded->ticket == project_load_in_flight->ticket) {
+            const ProjectLoadOrigin origin = project_load_in_flight->origin;
+            project_load_in_flight.reset();
+            adopt_loaded_project(op, std::move(*loaded), origin);
+        }
+    }
+    return std::nullopt;
+}
+
+void DirectorShowLoop::adopt_loaded_project(OperatorFrame &op,
+                                            LoadedProject loaded_project,
+                                            ProjectLoadOrigin origin) {
     const auto &frame = op.frame;
     auto &project_loaded_this_frame = op.project_loaded_this_frame;
-    if (pending_project_load.has_value()) {
-        const editor::ProjectFileRequest request =
-            std::move(*pending_project_load);
-        pending_project_load.reset();
-
-        auto loaded =
-            pending_preloaded_project.has_value()
-                ? persist::ProjectLoadResult::success(
-                      std::move(*pending_preloaded_project))
-                : persist::load_project_file(
-                      native_path_from_utf8(request.path));
-        pending_preloaded_project.reset();
+    {
+        const editor::ProjectFileRequest request{loaded_project.path};
+        auto &loaded = loaded_project.project;
         if (!loaded) {
             project_message =
                 project_file_failure("LOADING", loaded.error());
@@ -237,22 +394,7 @@ PhaseExit DirectorShowLoop::apply_project_load(DirectorTick &tick,
             }
             std::cerr << '\n';
         } else {
-            doc::Root replacement = scene::without_publication_locks(scene::without_asset_commits(std::move(loaded).value()));
-            std::size_t enriched_media_nodes{};
-            try {
-                MediaRateEnrichment enrichment =
-                    enrich_media_frame_rates(replacement);
-                replacement = std::move(enrichment.project);
-                enriched_media_nodes = enrichment.updated_nodes;
-            } catch (const std::bad_alloc &) {
-                std::cerr << "could not enrich loaded media FPS "
-                             "metadata: "
-                             "allocation failed\n";
-            } catch (const std::length_error &) {
-                std::cerr << "could not enrich loaded media FPS "
-                             "metadata: "
-                             "project limits exceeded\n";
-            }
+            doc::Root replacement = std::move(loaded).value();
             show::TransportAuthority replacement_transport =
                 transport;
             const doc::Node *const raw_transport =
@@ -396,10 +538,18 @@ PhaseExit DirectorShowLoop::apply_project_load(DirectorTick &tick,
                         transport = replacement_transport;
                         repace_after_seal = transport.anchor().rate;
                         authored = transport.anchor();
+                        const bool recovered =
+                            origin == ProjectLoadOrigin::Recovery;
+                        if (project_autosave != nullptr) {
+                            if (origin == ProjectLoadOrigin::Operator) {
+                                project_autosave->discard(project_path);
+                            }
+                            project_autosave->invalidate();
+                        }
                         saved_project_snapshot =
                             scheduler.projected_document();
-                        project_explicitly_dirty =
-                            enriched_media_nodes != 0U;
+                        // Recovered work is not in any file yet.
+                        project_explicitly_dirty = recovered;
                         project_path = request.path;
                         // An untitled project leaves the recent
                         // project alone, and makes its own Blender
@@ -409,23 +559,9 @@ PhaseExit DirectorShowLoop::apply_project_load(DirectorTick &tick,
                         }
                         unsaved_blender_name.clear();
                         project_message =
-                            project_path.empty() ? "NEW PROJECT"
-                            : enriched_media_nodes == 0U
-                                ? "PROJECT LOADED"
-                                : "PROJECT LOADED - MEDIA "
-                                  "FPS "
-                                  "UPDATED (" +
-                                      std::to_string(
-                                          enriched_media_nodes) +
-                                      ')';
-                        if (enriched_media_nodes != 0U) {
-                            std::cerr
-                                << "enriched "
-                                << enriched_media_nodes
-                                << " loaded media node(s) with "
-                                   "native FPS; save the project "
-                                   "to persist metadata\n";
-                        }
+                            recovered ? "RECOVERED UNSAVED CHANGES"
+                            : project_path.empty() ? "NEW PROJECT"
+                                                   : "PROJECT LOADED";
                         leave_preview();
                         next_new_node = 100'000U;
                         ++project_generation;
@@ -434,6 +570,7 @@ PhaseExit DirectorShowLoop::apply_project_load(DirectorTick &tick,
                         changed_library_sources.clear();
                         changed_library_assets.clear();
                         director_pose_predictors.reset();
+                        tracking_plan = TrackingPlan{};
                         pending_asset_commit.reset();
                         last_asset_commit_digest = 0;
                         last_asset_commit_frame = 0;
@@ -452,7 +589,6 @@ PhaseExit DirectorShowLoop::apply_project_load(DirectorTick &tick,
             }
         }
     }
-    return std::nullopt;
 }
 
 void DirectorShowLoop::apply_preview_transport(OperatorFrame &op) {
@@ -1026,9 +1162,7 @@ PhaseExit DirectorShowLoop::apply_switcher_request(OperatorFrame &op) {
     return std::nullopt;
 }
 
-PhaseExit DirectorShowLoop::apply_show_timing_requests(DirectorTick &tick,
-                                                       OperatorFrame &op) {
-    auto &repace_after_seal = tick.repace_after_seal;
+PhaseExit DirectorShowLoop::apply_show_timing_requests(OperatorFrame &op) {
     const auto &frame = op.frame;
     if (pending_cues_armed.has_value()) {
         static_cast<void>(
@@ -1134,61 +1268,29 @@ PhaseExit DirectorShowLoop::apply_history_request(OperatorFrame &op) {
     return std::nullopt;
 }
 
+// Save is the last thing an authoring pass does, and it only takes the
+// picture: the document as authored through this frame. The file is written
+// by write_project_files once the pass is over.
 PhaseExit DirectorShowLoop::apply_project_save(OperatorFrame &op) {
     const auto &frame = op.frame;
     if (pending_project_save.has_value()) {
-        const editor::ProjectFileRequest request =
+        editor::ProjectFileRequest request =
             std::move(*pending_project_save);
         pending_project_save.reset();
-        doc::Root snapshot = scene::without_asset_commits(scheduler.projected_document());
         show::TransportAnchor saved_transport = transport.anchor();
         saved_transport.anchor_show_frame =
             transport.frame_at(frame);
         saved_transport.anchor_control_frame = frame;
-        snapshot = snapshot.set(
-            show::make_transport_node(saved_transport));
-        auto saved = persist::save_project_file(
-            native_path_from_utf8(request.path), snapshot);
-        const bool installed = !saved && saved.error().committed;
-        if (!saved && !installed) {
-            project_message =
-                project_file_failure("SAVING", saved.error());
-            std::cerr << "could not save project '" << request.path
-                      << "' (code "
-                      << static_cast<unsigned>(saved.error().code)
-                      << ')';
-            if (saved.error().system_error) {
-                std::cerr << ": "
-                          << saved.error().system_error.message();
-            }
-            std::cerr << '\n';
-        } else {
-            saved_project_snapshot = scheduler.projected_document();
-            project_explicitly_dirty = false;
-            const bool asset_base_changed =
-                project_path != request.path;
-            project_path = request.path;
-            // Save As changes the base of project-relative asset
-            // paths even though authored content is unchanged.
-            if (asset_base_changed) {
-                assets_loaded = false;
-            }
-            remember_recent_project(project_path);
-            project_message =
-                installed ? "ERROR SAVE: DURABILITY NOT CONFIRMED"
-                          : "PROJECT SAVED";
-            if (installed) {
-                std::cerr
-                    << "project '" << request.path
-                    << "' was replaced, but durable directory "
-                       "sync failed";
-                if (saved.error().system_error) {
-                    std::cerr
-                        << ": "
-                        << saved.error().system_error.message();
-                }
-                std::cerr << '\n';
-            }
+        const doc::Root &projected = scheduler.projected_document();
+        try {
+            project_write = ProjectWrite{
+                std::move(request),
+                saved_project_content(
+                    projected, show::make_transport_node(saved_transport)),
+                projected};
+        } catch (const std::bad_alloc &) {
+            project_message = "ERROR SAVING PROJECT: NOT ENOUGH MEMORY";
+            std::cerr << "could not prepare the project for saving\n";
         }
     }
     return std::nullopt;

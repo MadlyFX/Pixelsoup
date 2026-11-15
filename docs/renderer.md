@@ -107,6 +107,15 @@ Lighting is a small, deliberately bounded PBR core in `scene.frag.hlsl` -
 Trowbridge-Reitz distribution, height-correlated Smith visibility, Schlick
 Fresnel, Lambert diffuse, a two-colour hemisphere ambient term standing in for
 image-based lighting, ACES tone mapping, and explicit sRGB encode/decode.
+That hemisphere is the default fill (`Environment::fill_sky_color`,
+`ground_color`, `ambient`): `scene::ambient_fill` returns it only while the
+scene has no directional or local light - a physical sky's sun counts - so the
+first authored light switches it off and nothing tints authored lighting. The
+offline bake reads the same function. The background is separate:
+`Environment::sky_color`, black by default, is the clear colour where no map
+or physical sky draws, and lights nothing. `fill_with_lights` keeps the fill
+under lights for look-dev rigs such as the Asset Viewer's Studio; projects do
+not author it.
 Advanced adds cascaded directional shadow maps and a bounded one-bounce
 reflective-shadow-map diffuse term for the first directional light. How many
 cascades a show renders, and how strong that bounce is, are replicated project

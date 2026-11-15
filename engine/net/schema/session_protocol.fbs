@@ -331,7 +331,8 @@ enum RuntimeOutputDeploymentState:ubyte {
   DuplicateDisplayTarget = 6,
   MirroredDisplayTarget = 7,
   DuplicateRenderServer = 8,
-  PresenterUnavailable = 9
+  PresenterUnavailable = 9,
+  NoBoundDisplay = 10
 }
 
 table RuntimeMediaAssetStatus {
@@ -446,6 +447,16 @@ table HeartbeatAck {
   // reports zeroes alongside a state it never sends.
   renderer_video_memory_needed:ulong;
   renderer_video_memory_free:ulong;
+  // Frames the node failed to draw and where the latest one failed: the step
+  // (core::PresentStep), the GPU's refusal (core::GpuRefusal), the output map
+  // node for a map step, and the show frame. Appended; an older peer reports
+  // zeroes, which read as "no failures".
+  output_failed_frames:ulong;
+  output_failure_step:ubyte;
+  output_failure_refusal:ubyte;
+  output_failure_map:ulong;
+  output_failure_show_frame:ulong;
+  output_failing:bool;
 }
 
 // Bidirectional graceful-close notice. final_cursor is only the sender's safe

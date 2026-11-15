@@ -47,6 +47,22 @@ if(BUILD_TESTING)
     add_test(NAME mediaserver.show_clock COMMAND mediaserver_show_clock_tests)
     set_target_properties(mediaserver_show_clock_tests PROPERTIES FOLDER "tests")
 
+    add_executable(mediaserver_video_reference_tests
+        tests/video_reference_tests.cpp
+    )
+    target_link_libraries(mediaserver_video_reference_tests
+        PRIVATE MediaServer::Show
+    )
+    mediaserver_set_project_options(mediaserver_video_reference_tests)
+    add_test(
+        NAME mediaserver.show_video_reference
+        COMMAND mediaserver_video_reference_tests
+    )
+    set_target_properties(
+        mediaserver_video_reference_tests
+        PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_frame_root_mailbox_tests
         tests/frame_root_mailbox_tests.cpp
     )

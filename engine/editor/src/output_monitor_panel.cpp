@@ -1,3 +1,4 @@
+#include <cctype>
 #include <mediaserver/editor/output_monitor_panel.hpp>
 
 #include <mediaserver/editor/mapping_panels.hpp>
@@ -151,8 +152,43 @@ std::string_view output_node_deployment_label(
     return "TWO RENDER SERVERS CLAIM THIS NODE INDEX";
   case OutputStatus::PresenterRefused:
     return "DISPLAY DOES NOT OFFER THE SAVED MODE";
+  case OutputStatus::NoBoundDisplay:
+    return "NO DISPLAY IS BOUND TO THIS RENDER SERVER";
   }
   return "OUTPUT NOT DEPLOYED";
+}
+
+std::string output_node_failure_text(const OutputMonitorState::Node &node) {
+  const core::PresentFailure &failure = node.present_failure;
+  if (failure.failed_frames == 0U) {
+    return {};
+  }
+  std::string text;
+  if (failure.step == core::PresentStep::DrawMap) {
+    text = "Drawing " +
+           (node.present_failure_map.empty() ? std::string{"a map"}
+                                             : node.present_failure_map) +
+           " failed";
+  } else if (failure.step == core::PresentStep::MapProjection) {
+    text = "The projection surface of " +
+           (node.present_failure_map.empty() ? std::string{"a map"}
+                                             : node.present_failure_map) +
+           " is unavailable";
+  } else {
+    text = std::string{core::present_step_text(failure.step)};
+    if (!text.empty()) {
+      text[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(text[0])));
+    }
+  }
+  if (const auto reason = core::gpu_refusal_text(failure.refusal);
+      !reason.empty()) {
+    text += ": ";
+    text += reason;
+  }
+  if (failure.show_frame != 0U) {
+    text += " (show frame " + std::to_string(failure.show_frame) + ")";
+  }
+  return text;
 }
 
 std::string output_node_content_label(const OutputMonitorState::Node &node) {
@@ -642,6 +678,20 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
           "Output", std::string{output_node_deployment_label(node)} +
                         " - this node is not driving its displays");
     }
+    // Also above Assets: a node that cannot draw holds its last picture, and
+    // the cause is a refusal on that machine, not a slow load.
+    if (node.present_failure.failed_frames != 0U) {
+      const std::string count =
+          std::to_string(node.present_failure.failed_frames) +
+          (node.present_failure.failed_frames == 1U ? " frame" : " frames");
+      lines.emplace_back(
+          "Drawing",
+          node.frames_failing()
+              ? output_node_failure_text(node) +
+                    " - holding the last picture, " + count + " failed"
+              : "Drawing again - " + count + " failed earlier. Last: " +
+                    output_node_failure_text(node));
+    }
     if (node.content != ContentStatus::NotRequired) {
       std::string content = output_node_content_label(node);
       if (!node.content_detail.empty()) {
@@ -944,7 +994,11 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     // reports afterwards is true of a display. Say OUTPUT FAILED instead, and
     // put the reason in the tooltip rather than only in the expanded detail.
     const bool output_failed = node.output_failed();
-    const gui::UiColor node_color = output_failed ? theme.warning
+    // Live and connected, but every frame it tries fails: from the wall this
+    // is a frozen picture, so the row says so rather than LIVE.
+    const bool frames_failing = !output_failed && node.frames_failing();
+    const gui::UiColor node_color = output_failed || frames_failing
+        ? theme.warning
         : awaiting_connection ? theme.caution
                               : status_color(node.status);
     std::string status_tip{status_label(node.status)};
@@ -953,6 +1007,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     }
     const auto displayed_status = output_failed
         ? std::string_view{"OUTPUT FAILED"}
+        : frames_failing ? std::string_view{"FRAMES FAILING"}
         : node.status == NodeStatus::Running
             ? output_node_connection_label(node)
             : status_label(node.status);
@@ -964,6 +1019,10 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       status_tip += " - ";
       status_tip += output_node_deployment_label(node);
     }
+    if (frames_failing) {
+      status_tip += " - ";
+      status_tip += output_node_failure_text(node);
+    }
     if (show_status) {
       const bool faulted = node.status == NodeStatus::Faulted ||
                            node.status == NodeStatus::AuthenticationFailed ||
@@ -974,7 +1033,9 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       // Lit when live or broken - the two states worth seeing from across
       // the room - and outlined otherwise.
       status_pill(status_x, centre_y, displayed_status, node_color,
-                  node.status == NodeStatus::Running || faulted, status_tip);
+                  node.status == NodeStatus::Running || faulted ||
+                      frames_failing,
+                  status_tip);
     }
     if (show_assets && node.content != ContentStatus::NotRequired) {
       std::string tip = output_node_content_label(node);

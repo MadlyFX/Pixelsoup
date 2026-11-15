@@ -71,6 +71,8 @@ struct EditorShell::Impl final {
   // runs here, off the frame thread, so the Director's frame loop that draws
   // this editor keeps sealing frames while the operator answers.
   AsyncDialog<EditorShell::Frame> dialog;
+  // Whether the recovery on offer has been put to the operator.
+  bool recovery_asked{};
 
   enum class PendingMediaAction : core::u8 { Add, Import, Revise };
 
@@ -107,6 +109,14 @@ struct EditorShell::Impl final {
   render::ProjectionMeshWarp program_to_warp;
   render::SceneMixer program_mixer;
   render::OutputTransform program_display;
+  // The Canvas view of a scene that is not on Program: its display image,
+  // made the first time that view is shown. The picture itself is drawn by
+  // the transition's second executor, which is idle outside a transition.
+  std::optional<render::OutputTransform> canvas_display;
+  // That image is a complete picture of this scene, kept on a frame whose
+  // command acquisition is missed, as Program keeps its own.
+  bool canvas_preview_valid{};
+  scene::SceneId canvas_preview_scene{};
   render::CompositorSceneExecutor stage_renderer;
   render::OutputTransform stage_display;
   render::OutputProjectionCache program_projection_cache;
@@ -306,6 +316,11 @@ struct EditorShell::Impl final {
   // operation/point within that target and is shared only by Masks + Stage.
   MasksPanelSelection mask_selection{};
   bool mask_coverage_visible{};
+  // A mask the Director has authored and asked to have selected. Its node
+  // reaches this editor a frame or more later, so the request waits here for
+  // the first projected scene that holds it.
+  std::optional<MasksPanelSelection> pending_mask_selection;
+  core::u32 pending_mask_frames{};
   // Group ids are allocated at the Director boundary. Keep the exact child
   // set briefly so the first projected frame containing their new parent can
   // promote that parent to the canonical selection.
@@ -320,6 +335,11 @@ struct EditorShell::Impl final {
   core::u32 pending_new_group_frames{};
   std::optional<doc::NodeId> stage_surface_selection;
   std::optional<doc::NodeId> program_output_map_node;
+  // Program shows the whole authored canvas, flat, rather than one output's
+  // connector image: the picture 2D work is done on.
+  bool program_canvas_view{};
+  // The Program options bar's position, size and rotation fields.
+  NumberField program_fields;
   scene::SceneId displayed_scene{};
   std::size_t scene_list_offset{};
   std::optional<scene::SceneId> pending_scene_delete;
@@ -396,6 +416,19 @@ struct EditorShell::Impl final {
   core::u64 next_edit_gesture{1U};
   // A plateset placement waiting on the operator's answer about the rig.
   std::optional<PlatesetPlaceIntent> pending_plateset_place;
+  // Videos added while their frame rate differs from the timeline's, held
+  // back until the operator says whether the timeline should follow them.
+  // `changing` is set once the rate change was requested; the clips are then
+  // released only after the timeline reports the new rate, so their lengths
+  // are measured against it.
+  struct PendingRateMatch final {
+    std::vector<AddIntent> adds;
+    ShowRateRequest rate;
+    ShowRateRequest previous;
+    bool changing{};
+    core::u32 frames_waited{};
+  };
+  std::optional<PendingRateMatch> pending_rate_match;
   // The Library is carrying assets right now (as of its last draw), so the
   // plateset page can light its slots as drop targets.
   bool library_dragging{};
@@ -660,19 +693,6 @@ struct EditorShell::Impl final {
     pending_group_frames = 0U;
     pending_new_group_parent.reset();
     scene_selection.replace(node);
-    delete_domain = DeleteDomain::Scene;
-    history_context = HistoryContext::Scene;
-    semantic_boundary = true;
-  }
-
-  // Several nodes chosen as one - a plateset take's plates - with `primary`
-  // the one the Inspector shows.
-  void select_set(std::span<const doc::NodeId> nodes, doc::NodeId primary) {
-    scene_settings_selection = SceneSettingsTarget::None;
-    pending_group_members.clear();
-    pending_group_frames = 0U;
-    pending_new_group_parent.reset();
-    scene_selection.replace(nodes, primary);
     delete_domain = DeleteDomain::Scene;
     history_context = HistoryContext::Scene;
     semantic_boundary = true;

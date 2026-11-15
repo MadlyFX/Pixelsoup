@@ -128,7 +128,15 @@ void buffered_output_keeps_presenting_with_offline_media() {
   for (int i = 0; i < 3; ++i) {
     frame.control_frame = frame.show_frame = static_cast<mediaserver::core::u64>(i + 10);
     frame.media.front().world = scene::translation({static_cast<float>(i) * 0.2F, 0, 0});
-    PRESENTER_CHECK(presenter.present(frame, scene::whole(frame.canvas)) == show::PresenterStatus::Presented);
+    // Outputs flip on the display refresh, so presenting faster than it can
+    // find the display not ready yet: that frame is composited but Skipped.
+    const auto shown_by = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    auto status = presenter.present(frame, scene::whole(frame.canvas));
+    while (status == show::PresenterStatus::Skipped && std::chrono::steady_clock::now() < shown_by) {
+      std::this_thread::sleep_for(std::chrono::milliseconds{2});
+      status = presenter.present(frame, scene::whole(frame.canvas));
+    }
+    PRESENTER_CHECK(status == show::PresenterStatus::Presented);
     const auto image = presenter.readback();
     PRESENTER_CHECK(image);
     PRESENTER_CHECK(image.digest != previous);
@@ -198,8 +206,10 @@ void two_native_outputs_publish_bakes_together_and_a_late_output_holds() {
       status = output.present(frame, scene::whole(frame.canvas));
       // Busy means no candidate was recorded. An asset-deferred submission,
       // however, must remain observable to the publication assertions below.
-      if (status != show::PresenterStatus::Deferred ||
-          output.timing().frames != submissions)
+      // Skipped means the display had not taken the previous flip yet.
+      if (status != show::PresenterStatus::Skipped &&
+          (status != show::PresenterStatus::Deferred ||
+           output.timing().frames != submissions))
         break;
       std::this_thread::sleep_for(std::chrono::milliseconds{1});
     } while (std::chrono::steady_clock::now() < deadline);
@@ -428,6 +438,64 @@ void fullscreen_output_keeps_presenting_without_keyboard_focus() {
   PRESENTER_CHECK(presenter.readback());
 }
 
+// A frame that fails says which step and which map, so a node holding its
+// picture can tell the operator why; the next good frame clears "ongoing"
+// but keeps the count and the cause.
+void a_failed_map_is_reported_by_step_and_map() {
+  ui::SdlPresenterConfig config{};
+  config.title = "media-server present failure test";
+  config.width = 160;
+  config.height = 90;
+  config.resizable = false;
+  config.gpu = config.scene = config.output = true;
+  auto created = ui::SdlPresenter::create(config);
+  PRESENTER_CHECK(created);
+  auto owned = std::move(created).value();
+  auto &presenter = static_cast<ui::SdlPresenter &>(*owned);
+  PRESENTER_CHECK(presenter.present_failure() == mediaserver::core::PresentFailure{});
+
+  scene::Scene frame;
+  frame.canvas = {config.width, config.height};
+  frame.renderer_settings.backend = scene::RendererBackend::Advanced;
+  frame.renderer_settings.required = true;
+  frame.environment.sky_color = frame.environment.ground_color = {0.1F, 0.2F, 0.3F};
+  frame.show_frame = frame.control_frame = 37U;
+  std::array<mediaserver::output::OutputMap, 2> maps{};
+  maps[0].node = mediaserver::doc::NodeId{21};
+  maps[0].source = maps[0].viewport = scene::CanvasRect{0, 0, 80, 90};
+  // A surface projection whose surface never resolved: drawing it is refused.
+  maps[1].node = mediaserver::doc::NodeId{22};
+  maps[1].order = 1;
+  maps[1].projection = mediaserver::output::FeedProjection::PlanarSurface;
+  maps[1].surface = mediaserver::doc::NodeId{900};
+  maps[1].source = maps[1].viewport = scene::CanvasRect{80, 0, 80, 90};
+
+  PRESENTER_CHECK(presenter.present(frame, std::span{maps}) ==
+                  show::PresenterStatus::Failed);
+  const auto failed = presenter.present_failure();
+  PRESENTER_CHECK(failed.failed_frames == 1U);
+  PRESENTER_CHECK(failed.step == mediaserver::core::PresentStep::MapProjection);
+  PRESENTER_CHECK(failed.map_node == 22U);
+  PRESENTER_CHECK(failed.refusal == mediaserver::core::GpuRefusal::None);
+  PRESENTER_CHECK(failed.show_frame == 37U);
+  PRESENTER_CHECK(failed.ongoing);
+
+  // Only the drawable map: the frame presents (after any GPU-busy deferral).
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+  show::PresenterStatus status = show::PresenterStatus::Deferred;
+  ++frame.show_frame;
+  while (status != show::PresenterStatus::Presented &&
+         std::chrono::steady_clock::now() < deadline) {
+    status = presenter.present(frame, std::span{maps.data(), 1U});
+    PRESENTER_CHECK(status != show::PresenterStatus::Failed);
+  }
+  PRESENTER_CHECK(status == show::PresenterStatus::Presented);
+  const auto recovered = presenter.present_failure();
+  PRESENTER_CHECK(!recovered.ongoing);
+  PRESENTER_CHECK(recovered.failed_frames == 1U);
+  PRESENTER_CHECK(recovered.map_node == 22U);
+}
+
 } // namespace
 
 int main() {
@@ -444,6 +512,8 @@ int main() {
     std::cout << "[pass] native bake cohort pixels and late-node hold\n";
     busy_native_output_defers_and_hold_retires_without_rendering();
     std::cout << "[pass] busy output defers and held output retires GPU work\n";
+    a_failed_map_is_reported_by_step_and_map();
+    std::cout << "[pass] a failed map is reported by step and map\n";
     fullscreen_output_keeps_presenting_without_keyboard_focus();
     std::cout << "[pass] exclusive fullscreen output presents without keyboard focus\n";
     return 0;

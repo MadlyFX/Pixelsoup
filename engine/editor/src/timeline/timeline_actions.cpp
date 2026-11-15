@@ -333,6 +333,15 @@ void TimelinePanel::handle_actions(Pass &p) {
               return !held.implicit && held.id == row.node;
             });
         if (lane != lanes.end()) {
+          const bool slot_screen = lane->parent != doc::NodeId{};
+          if (lane->vehicle) {
+            // The car's walls: listed under it to place, grade and key
+            // one at a time, folded away the rest of the time.
+            add_entry(rows_state_.listed_screens.contains(lane->id)
+                          ? "Fold Screens"
+                          : "List Screens",
+                      MenuCommand::ToggleScreensListed, lane->id);
+          }
           add_entry("Rename Track", MenuCommand::RenameTrack, lane->id);
           add_entry(lane->muted ? "Unmute Track" : "Mute Track",
                     MenuCommand::ToggleTrackMute, lane->id);
@@ -353,7 +362,9 @@ void TimelinePanel::handle_actions(Pass &p) {
                                  : held.timing.last_frame();
             spanned = true;
           }
-          if (!lane->locked &&
+          // A vehicle track and its screens are one car: its takes are cut
+          // with the razor, never the track.
+          if (!lane->locked && !lane->vehicle && !slot_screen &&
               track_splittable(elements, lane->id, signed_frame(acting_frame))) {
             add_entry("Split Track at Playhead      Ctrl+K",
                       MenuCommand::SplitTrackAtPlayhead, lane->id);
@@ -366,7 +377,7 @@ void TimelinePanel::handle_actions(Pass &p) {
             add_entry("Clear Keyframes", MenuCommand::ClearKeys, lane->id);
           }
           if (clipboard_span.has_value() && *clipboard_span > 0 &&
-              !lane->locked) {
+              !lane->locked && !slot_screen) {
             add_entry("Insert Clipboard at Playhead",
                       MenuCommand::InsertClipboard, lane->id);
             add_entry("Overwrite Clipboard at Playhead",
@@ -384,8 +395,12 @@ void TimelinePanel::handle_actions(Pass &p) {
             add_entry("Delete Track and Its Clips",
                       MenuCommand::DeleteTrackClips, lane->id);
             for (const scene::TimelineLane &destination : lanes) {
+              // Takes go to another car, and clips to another track's
+              // screen; a slot screen takes neither.
               if (!destination.implicit && destination.id != lane->id &&
-                  destination.scene == lane->scene) {
+                  destination.scene == lane->scene &&
+                  destination.vehicle == lane->vehicle &&
+                  destination.parent == doc::NodeId{}) {
                 add_entry("Move Clips to " + destination.name +
                               ", Delete Track",
                           MenuCommand::MoveClipsDeleteTrack, lane->id, 0,
@@ -395,42 +410,6 @@ void TimelinePanel::handle_actions(Pass &p) {
           }
           open_menu = true;
         }
-      } else if (row.kind == Row::Kind::PlatesetHeader) {
-        // The set as one thing: its tracks folded or listed, switched,
-        // cut, ranged and removed together.
-        const PlatesetGroup &group = p.built.platesets[row.plateset];
-        const bool listed = rows_state_.expanded_platesets.contains(row.node);
-        add_entry(listed ? "Fold Plate Tracks" : "List Plate Tracks",
-                  MenuCommand::TogglePlatesetOpen, row.node);
-        add_entry(row.muted ? "Unmute Plates" : "Mute Plates",
-                  MenuCommand::TogglePlatesetMute, row.node);
-        add_entry(row.locked ? "Unlock Plates" : "Lock Plates",
-                  MenuCommand::TogglePlatesetLock, row.node);
-        bool spanned = false;
-        core::i64 set_first = 0;
-        core::i64 set_last = 0;
-        for (const PlatesetTake &take : group.takes) {
-          const core::i64 take_last = take.start + take.duration - 1;
-          if (!take.locked && playhead > take.start && playhead <= take_last) {
-            add_entry("Split Take at Playhead", MenuCommand::SplitAtPlayhead,
-                      take.lead);
-          }
-          set_first = spanned ? std::min(set_first, take.start) : take.start;
-          set_last = spanned ? std::max(set_last, take_last) : take_last;
-          spanned = true;
-        }
-        if (spanned) {
-          add_entry("Set In/Out to Plateset", MenuCommand::RangeToClip,
-                    row.node, set_first, {}, set_last);
-          add_entry("Open Plateset in Asset Viewer",
-                    MenuCommand::OpenPlatesetInAssetViewer,
-                    group.takes.front().lead);
-        }
-        if (!row.locked) {
-          add_entry("Delete Plateset Tracks and Plates",
-                    MenuCommand::DeletePlatesetTracks, row.node);
-        }
-        open_menu = true;
       } else if (row.kind == Row::Kind::Layer && !row.surface) {
         const ElementInfo *const element = find_element(elements, row.node);
         if (element != nullptr && !element->locked) {
@@ -504,59 +483,13 @@ void TimelinePanel::handle_actions(Pass &p) {
         }
         return {};
       };
-      // The placed set a take row's entry names, while it is still placed.
-      const auto plateset_named =
-          [&](doc::NodeId key) -> const PlatesetGroup * {
-        const auto found = std::find_if(
-            p.built.platesets.begin(), p.built.platesets.end(),
-            [&](const PlatesetGroup &group) { return group.key == key; });
-        return found != p.built.platesets.end() ? &*found : nullptr;
-      };
-      const auto switch_plateset = [&](doc::NodeId key,
-                                       TimelineLaneAction action) {
-        const PlatesetGroup *const group = plateset_named(key);
-        if (group == nullptr) {
-          return;
-        }
-        // Every track to the state the row does not show yet.
-        const bool all = std::all_of(
-            group->lanes.begin(), group->lanes.end(), [&](doc::NodeId id) {
-              return std::any_of(
-                  lanes.begin(), lanes.end(),
-                  [&](const scene::TimelineLane &lane) {
-                    return lane.id == id &&
-                           (action == TimelineLaneAction::ToggleMute
-                                ? lane.muted
-                                : lane.locked);
-                  });
-            });
-        for (TimelineLaneEdit &edit :
-             plateset_switch_edits(*group, lanes, action, !all)) {
-          frame.lane_edits.push_back(std::move(edit));
-        }
-      };
       switch (static_cast<MenuCommand>(entry.command)) {
-      case MenuCommand::TogglePlatesetOpen:
-        if (!rows_state_.expanded_platesets.erase(entry.node)) {
-          rows_state_.expanded_platesets.insert(entry.node);
+      case MenuCommand::ToggleScreensListed:
+        if (!rows_state_.listed_screens.erase(entry.node)) {
+          rows_state_.listed_screens.insert(entry.node);
+          // Its screens are listed under it, so it has to be open.
+          rows_state_.collapsed_lanes.erase(entry.node);
         }
-        break;
-      case MenuCommand::TogglePlatesetMute:
-        switch_plateset(entry.node, TimelineLaneAction::ToggleMute);
-        break;
-      case MenuCommand::TogglePlatesetLock:
-        switch_plateset(entry.node, TimelineLaneAction::ToggleLock);
-        break;
-      case MenuCommand::DeletePlatesetTracks:
-        if (const PlatesetGroup *const group = plateset_named(entry.node)) {
-          for (const doc::NodeId lane : group->lanes) {
-            frame.lane_edits.push_back(TimelineLaneEdit{
-                TimelineLaneAction::DeleteClips, lane, {}});
-          }
-        }
-        break;
-      case MenuCommand::OpenPlatesetInAssetViewer:
-        frame.view_clip = TimelineViewClipRequest{entry.node, false, true};
         break;
       case MenuCommand::SplitAtPlayhead:
         frame.clip_splits.push_back(
@@ -577,9 +510,14 @@ void TimelinePanel::handle_actions(Pass &p) {
       case MenuCommand::InsertClipboard:
         frame.timeline_edits.emplace_back(TimelineInsertRequest{entry.node});
         break;
-      case MenuCommand::OpenInAssetViewer:
-        frame.view_clip = TimelineViewClipRequest{entry.node, false};
+      case MenuCommand::OpenInAssetViewer: {
+        // A take opens its plateset - the rig, the sync and the moments -
+        // rather than the front plate's file alone.
+        const ElementInfo *const clip = find_element(elements, entry.node);
+        frame.view_clip = TimelineViewClipRequest{
+            entry.node, false, clip != nullptr && clip->take};
         break;
+      }
       case MenuCommand::OverwriteClipboard:
         frame.timeline_edits.emplace_back(TimelineOverwriteRequest{entry.node});
         break;

@@ -33,7 +33,7 @@ std::string_view environment_status_text(
     EnvironmentStatus status) noexcept {
   switch (status) {
   case EnvironmentStatus::NotAuthored:
-    return "Empty: the two-colour hemisphere lights the scene.";
+    return "Empty: the sky colour shows behind the scene.";
   case EnvironmentStatus::Loading:
     return "Reading the map.";
   case EnvironmentStatus::Failed:
@@ -49,7 +49,7 @@ std::string_view environment_status_text(
   case EnvironmentStatus::Ready:
     return "Lighting the scene and drawing as the sky.";
   }
-  return "Empty: the two-colour hemisphere lights the scene.";
+  return "Empty: the sky colour shows behind the scene.";
 }
 
 std::string_view color_status_text(ColorStatus status) noexcept {
@@ -160,6 +160,21 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       sections_[index] = !sections_[index];
     return sections_[index];
   };
+  // Text wrapped at spaces onto as many rows as the panel's width needs.
+  const auto paragraph = [&](std::string_view text, gui::UiColor color) {
+    const auto columns =
+        static_cast<std::size_t>(std::max(16.0F, form.width() / 8.0F));
+    while (!text.empty()) {
+      auto count = std::min(columns, text.size());
+      if (count < text.size()) {
+        const auto space = text.rfind(' ', count);
+        if (space != std::string_view::npos && space > 0) count = space;
+      }
+      ctx.label(form.control(), text.substr(0, count), color);
+      text.remove_prefix(count);
+      while (text.starts_with(' ')) text.remove_prefix(1);
+    }
+  };
   const auto check = [&](std::string_view label, bool &value) {
     if (ctx.checkbox(id(label), well(label), value, ""))
       changed = true;
@@ -231,6 +246,25 @@ SceneSettingsFrame SceneSettingsPanel::draw(
         value = *fallback;
         changed = true;
       }
+    }
+  };
+  // A colour well beside its label, with the reset arrow while the colour
+  // is not the default.
+  const auto colour = [&](std::string_view label, scene::Vec3 &value,
+                          scene::Vec3 fallback) {
+    const gui::Rect field = well(label);
+    gui::UiColor picked{value.x, value.y, value.z, 1.0F};
+    if (ctx.color_well(id(label), field, picked)) {
+      value = scene::Vec3{picked.r, picked.g, picked.b};
+      changed = true;
+    }
+    if (!(value == fallback) && field.x - label_width >= bounds.x &&
+        reset_button(ctx, id(label) ^ 0x5E5E7ULL,
+                     gui::Rect{field.x - reset_button_width - 2.0F, field.y,
+                               reset_button_width, field.height},
+                     "Reset to default (black)")) {
+      value = fallback;
+      changed = true;
     }
   };
   const auto file = [&](std::string_view label, std::string &value, FilePickerKind kind) {
@@ -440,6 +474,34 @@ SceneSettingsFrame SceneSettingsPanel::draw(
              scene::min_graph_texture_budget_gb,
              scene::max_graph_texture_budget_gb, 0.1, "GB", 1);
     }
+  } else if (renderer.backend == scene::RendererBackend::Basic) {
+    // Apart from the plain sky colour, everything on this page needs the
+    // scene-linear Advanced renderer: Basic ignores the map and fog, refuses
+    // baked light and reflections, and fails the frame outright for a
+    // physical sky. So those fields are hidden rather than offered to edit
+    // nothing; their authored values are kept and come back with Advanced.
+    form.space(section_space);
+    colour("Sky colour", environment.sky_color, fresh.environment.sky_color);
+    form.space(section_space);
+    paragraph("An environment map, physical sky, atmosphere, baked lighting "
+              "and reflections need the Advanced renderer.",
+              ctx.theme().text_muted);
+    form.space(section_space);
+    if (ctx.button(id("use advanced"), form.control(), "Use Advanced renderer")) {
+      renderer.backend = scene::RendererBackend::Advanced;
+      changed = true;
+    }
+    // The one hidden value that stops the picture on Basic stays reachable.
+    if (environment.physical_sky.enabled) {
+      form.space(section_space);
+      paragraph("The physical sky is still on, and Basic cannot draw it.",
+                ctx.theme().warning);
+      if (ctx.button(id("physical sky off"), form.control(),
+                     "Turn off physical sky")) {
+        environment.physical_sky.enabled = false;
+        changed = true;
+      }
+    }
   } else {
     if (section(6, "SKY & LIGHTING")) {
       check("Physical sky", environment.physical_sky.enabled);
@@ -460,6 +522,10 @@ SceneSettingsFrame SceneSettingsPanel::draw(
         number("Ground albedo", environment.physical_sky.ground_albedo, 0, 1);
       } else {
         file("Environment map", environment.map_source, FilePickerKind::EnvironmentMap);
+        // The plain colour shows only where no map is drawn over it.
+        if (environment.map_source.empty())
+          colour("Sky colour", environment.sky_color,
+                 fresh.environment.sky_color);
         if (!environment.map_source.empty()) {
           environment_number("Intensity",
                              scene::PropertyChannel::EnvironmentIntensity, 0,
@@ -505,33 +571,22 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       number("Maximum Y", environment.baked.maximum.y, -10000, 10000);
       number("Maximum Z", environment.baked.maximum.z, -10000, 10000);
       file("Bake folder", bake_destination_, FilePickerKind::BakeFolder);
-      if (!state.bake_status.empty()) {
-        auto remaining=std::string_view{state.bake_status};
-        const auto columns=static_cast<std::size_t>(std::max(16.0F,form.width()/8.0F));
-        while (!remaining.empty()) {
-          auto count=std::min(columns,remaining.size());
-          if (count<remaining.size()) { const auto space=remaining.rfind(' ',count); if (space!=std::string_view::npos && space>0) count=space; }
-          ctx.label(form.control(),remaining.substr(0,count),state.bake_status.starts_with("STALE") ? ctx.theme().warning : ctx.theme().text_muted);
-          remaining.remove_prefix(count); while (remaining.starts_with(' ')) remaining.remove_prefix(1);
-        }
-      }
+      if (!state.bake_status.empty())
+        paragraph(state.bake_status, state.bake_status.starts_with("STALE")
+                                         ? ctx.theme().warning
+                                         : ctx.theme().text_muted);
       if (state.bake_running) {
         if (ctx.button(id("cancel bake"), form.control(), "Cancel bake"))
           result.project.cancel_bake = true;
       } else {
         const bool ready = !bake_destination_.empty() &&
-                           state.stage_node != doc::NodeId{} &&
-                           renderer.backend == scene::RendererBackend::Advanced;
+                           state.stage_node != doc::NodeId{};
         const auto action = form.control();
         if (ready && ctx.button(id("bake"), action, "Bake lighting")) {
           result.project.bake = scene::clamped(environment.baked);
           result.project.bake_destination = bake_destination_;
         } else if (!ready) {
-          ctx.label(action,
-                    renderer.backend == scene::RendererBackend::Basic
-                        ? "Advanced renderer required for baking"
-                        : "Enter a bake path",
-                    ctx.theme().text_muted);
+          ctx.label(action, "Enter a bake path", ctx.theme().text_muted);
         }
       }
     }

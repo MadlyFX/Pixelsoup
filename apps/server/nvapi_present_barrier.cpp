@@ -227,6 +227,7 @@ public:
         if (!supported) {
             // A supported NVAPI runtime on a non-Quadro adapter is not a
             // failed membership; this output simply cannot offer a barrier.
+            // It goes on presenting as an ordinary output (see present()).
             client->status.store(rhi::PresentBarrierStatus::Unsupported,
                                  std::memory_order_release);
             return rhi::PresentBarrierStatus::Unsupported;
@@ -337,8 +338,20 @@ public:
         if (client == nullptr) {
             return rhi::PresentBarrierPresentResult::PassThrough;
         }
-        if (client->status.load(std::memory_order_acquire) !=
-            rhi::PresentBarrierStatus::Joined) {
+        const rhi::PresentBarrierStatus state =
+            client->status.load(std::memory_order_acquire);
+        if (state == rhi::PresentBarrierStatus::Unsupported) {
+            // The adapter offers no barrier, so this swapchain was never
+            // joined to one and is still an ordinary output. Its record is
+            // kept only so status() can go on saying why it is not locked;
+            // refusing its frames would freeze a wall for a capability the
+            // readiness gate already reports as missing.
+            return rhi::PresentBarrierPresentResult::PassThrough;
+        }
+        if (state != rhi::PresentBarrierStatus::Joined) {
+            // A member that failed to join, or was dropped, holds: showing
+            // it unsynchronised beside members that are locked is the fault
+            // the barrier exists to prevent.
             return rhi::PresentBarrierPresentResult::Failed;
         }
         if (api_.present(static_cast<IUnknown*>(device.value), client->swapchain,
@@ -377,14 +390,25 @@ public:
         if (!initialized_ || !is_d3d12_device(device)) {
             return {};
         }
+        // The swap-group frame counter of the Quadro Sync master. Locked here
+        // says only that the driver answered with a count: whether the count
+        // moves is judged by show::VideoReferenceCadence, and whether the
+        // board is following house sync is the lifecycle agent's reading
+        // (nvapi_sync_device.cpp), which the readiness gate checks separately.
         NvU32 frame_counter{};
         if (api_.query_frame_count(static_cast<IUnknown*>(device.value),
-                                   &frame_counter) != nv_ok) {
-            return rhi::VideoReferenceSample{rhi::VideoReferenceState::Lost,
-                                             0U};
+                                   &frame_counter) == nv_ok) {
+            return rhi::VideoReferenceSample{rhi::VideoReferenceState::Locked,
+                                             frame_counter};
         }
-        return rhi::VideoReferenceSample{rhi::VideoReferenceState::Locked,
-                                         frame_counter};
+        // No count. An adapter that offers no swap groups never had a counter
+        // to lose - every GeForce answers this way - and saying Lost there
+        // would send an operator looking for a cable.
+        return rhi::VideoReferenceSample{
+            offers_swap_groups(device.value)
+                ? rhi::VideoReferenceState::Lost
+                : rhi::VideoReferenceState::Unsupported,
+            0U};
     }
 
 private:
@@ -491,6 +515,23 @@ private:
             }
         }
         return nullptr;
+    }
+
+    // Asked of the driver once per device, not on every reading: the frame
+    // counter is read on each wake of a frame loop.
+    [[nodiscard]] bool offers_swap_groups(void* device) const noexcept {
+        if (swap_group_device_.load(std::memory_order_acquire) == device) {
+            return swap_groups_offered_.load(std::memory_order_acquire);
+        }
+        NvU32 groups{};
+        NvU32 barriers{};
+        const bool offered =
+            api_.query_max_swap_group(static_cast<IUnknown*>(device), &groups,
+                                      &barriers) == nv_ok &&
+            groups != 0U;
+        swap_groups_offered_.store(offered, std::memory_order_release);
+        swap_group_device_.store(device, std::memory_order_release);
+        return offered;
     }
 
     [[nodiscard]] Client* allocate_client() noexcept {
@@ -600,6 +641,8 @@ private:
     Api api_{};
     bool initialized_{};
     std::array<Client, maximum_barrier_clients> clients_{};
+    mutable std::atomic<void*> swap_group_device_{};
+    mutable std::atomic<bool> swap_groups_offered_{};
 };
 
 } // namespace

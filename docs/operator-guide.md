@@ -60,6 +60,18 @@ applies that path; Cancel leaves the document unchanged. Typed IES paths use
 sets the export destination, and **Bake lighting** starts the bake. Content's
 Source row shows the file name with its full path on hover.
 
+**Sky colour** on the Environment page is the background behind the scene
+wherever no environment map or physical sky is drawn; it is black by default
+and lights nothing. A scene with no lights gets a dim default fill so objects
+are visible; it switches off as soon as the scene has any light, so it never
+changes authored lighting.
+
+The Environment page's map, physical sky, atmosphere, baked lighting and
+reflections draw only on the Advanced renderer, so a project set to Basic shows
+only Sky colour, a note and **Use Advanced renderer** there instead. Their values are kept and return with
+Advanced. A physical sky left on stops Basic drawing the frame, so the page also
+offers **Turn off physical sky** while one is on.
+
 Object and effect icons use a neutral palette; shape and labels identify their
 types. Colour is kept for state, one meaning per hue: green is on air,
 healthy and playing; cyan marks Preview, selection, focus and the active tool;
@@ -276,20 +288,161 @@ timeline - the playhead and its transport buttons, including step, jump, and
 go-to-start - drives Preview alone. The show keeps running underneath at its
 own frame, and the status bar reads `PREVIEW  PGM <frame>` so the live position
 is always visible. The Program viewport and Output Monitor keep reporting the
-live show, never the rehearsal. Preview's playhead is never replicated and
+live show, never the rehearsal - except Program Output's **Canvas** view, which
+follows the Stage into Preview and says so (see
+[Working in 2D on Program Output](#working-in-2d-on-program-output)).
+Preview's playhead is never replicated and
 never written to the project: render nodes only ever hear about Program.
 
+### Working in 2D on Program Output
+
+Program Output is also where layers are laid out flat, the way an editing or
+compositing program's viewer works. Three things make it so: a tool palette
+down its left edge, a box round the selected layer, and a bar of numbers above
+the picture.
+
+**Tools.** Each has a key while the pointer is over the picture.
+
+| Tool | Key | What it does |
+| --- | --- | --- |
+| Select | V | Click a layer to select it, Shift+click to add or remove one, Alt+click to select only it; drag it to move it; use its box to resize and turn it |
+| Hand | H | Drag to move the picture inside the panel |
+| Zoom | Z | Click to zoom in on a point, Alt+click to zoom out |
+| Rectangle | R | Drag out a rectangle |
+| Ellipse | E | Drag out an ellipse |
+| Pen | P | Click out a closed curve |
+| Gradient | G | Drag a Background's gradient about on the picture |
+
+The wheel zooms on the pointer and a middle drag moves the picture with any
+tool. **F** fits the picture to the panel again. The zoom button in the output
+bar reads `Fit` or a percentage of the output's own pixels, and its menu offers
+Fit, 50%, 100%, 200% and 400%. Zooming and panning change only this panel:
+nothing about the show moves.
+
+**The box.** With Select, the selected layer is outlined with a handle at each
+corner and side and one on a stalk above it.
+
+- Drag a corner to resize both ways, a side to resize one way. The opposite
+  corner or side stays where it is; hold **Alt** to resize about the middle,
+  and **Shift** on a corner to keep the layer's proportions.
+- Drag the handle on the stalk to turn the layer. **Shift** turns in
+  fifteen-degree steps. A flat layer turns in its own plane, so it stays
+  facing the way it faced.
+- Drag the layer itself to move it, as before.
+
+A flat layer - media, a plane, a Background, a track's screen - has its own
+outline as its box, which leans and foreshortens with it. A model or other
+solid gets a box round what it covers on the picture, with corner handles that
+resize it as a whole. The box writes the same position, rotation and scale the
+Stage gizmo and Properties do, keys them when Auto-key is on and the value is
+animated, and one drag is one undo step. With several layers selected the box
+is round the one selected last and the others follow it.
+
+**Shapes.** Rectangle, Ellipse and Pen draw one of two things, as they do in
+a compositing program:
+
+- **On a selected flat layer**, the shape is a mask of that layer, exactly
+  where it was drawn, in the layer's own coordinates - so it stays on the
+  layer when the layer moves. The new mask is selected, so switching to Select
+  shows its handles to refine it; drawing again adds another mask.
+- **With nothing selected**, the shape is a new Background card standing where
+  it was drawn, facing the camera, on the plane through the point the camera
+  looks at. A rectangle is the card itself. An ellipse or a pen curve is a
+  card the size of the shape with that mask on it. The card and its mask are
+  one undo step, and the card is selected once it exists, named `Rectangle`,
+  `Ellipse` or `Shape`. It is an ordinary Background: its fill, its box and
+  its masks are edited like any other.
+
+Rectangle and Ellipse are a drag: **Shift** keeps the shape square or round,
+**Alt** draws it from its middle, and **Esc** during the drag drops it. With
+the Pen, click to place points and drag from a click to pull that point's
+handles out into a curve. Click the first point again, or press **Enter**, to
+close the shape - it takes at least three points. **Backspace** takes the last
+point back and **Esc** drops the whole curve.
+
+A new card can be drawn on the Canvas view, on an unmapped Program picture and
+on an output that is a crop of the canvas. On a physical or warped surface the
+picture's pixels do not say where in the scene a card would stand, so there the
+shape tools only draw masks on a selected layer.
+
+**Gradient.** With a Background selected whose fill is Linear or Radial, the
+Gradient tool draws the fill's own line on the picture: a handle at its middle
+and one at its far end (colour B), or the rim of a radial fill.
+
+- Drag the middle to move the gradient.
+- Drag the end to turn it and change its length, or a radial fill's radius.
+- Drag anywhere else on the card to draw it afresh: colour A where the drag
+  starts, colour B where it ends; for a radial fill, the centre and then the
+  rim.
+
+The handles are where the renderer puts the ramp, so what moves under the
+pointer is the picture. These are the same Angle, Centre and Size that
+Properties shows; a fill of one colour has no handles until it is made a
+gradient there.
+
+**Snapping.** A layer dragged with Select lands on a line when it comes
+within a few pixels of one: the picture's edges and its middle, the edges and
+middle of every other layer, and any guide. Its own two edges and its middle
+each look for a line, across and down separately, and the line it took is
+drawn through the picture for as long as it holds. The magnet at the right of
+the options bar turns this off; holding **Ctrl** during a drag does the
+opposite of the magnet for that drag. Resizing and turning do not snap.
+
+**Rulers and guides.** The ruler button beside the magnet shows rulers along
+the top and left of the picture, numbered in the picture's own pixels, with a
+mark where the pointer is. Drag down out of the top ruler for a guide across
+the picture, or across out of the left ruler for one down it. With Select, drag
+a guide to move it, and drag it back onto a ruler to remove it. Guides sit on
+whole pixels, stay with the picture as it is zoomed and panned, and are hidden
+with the rulers. They belong to this editor's view and are not saved with the
+project.
+
+**Safe areas.** The frame button shows the action-safe (93%) and title-safe
+(90%) frames and a cross at the middle of the picture.
+
+**Align.** The Align menu lines the selected layers up by what each covers on
+the picture - left, centre, right, top, middle or bottom of the box round them
+all - or, with one layer selected, lines that layer up with the picture itself.
+Distribute across and Distribute down space three or more layers so their
+middles are evenly apart between the two outermost. Locked layers stay where
+they are, and each choice is one undo step.
+
+**The options bar** shows where the selected layer's middle is on the picture
+(`X`, `Y`), how long its sides are (`W`, `H`) and how far it is turned (`R`, in
+degrees clockwise), all in the pixels of the view shown. Drag a number or
+click it to type. The amber arrows put position, scale and rotation back to
+their defaults. A locked layer shows its numbers and takes no edits.
+
+**Which picture.** The button at the left of the output bar goes round the
+outputs and then to **Canvas**: the whole authored canvas laid flat, with no
+crop or warp. On an output, the box and the numbers follow that output's own
+projection, so a handle is where the layer is on that connector's picture; on
+a curved or warped surface the box's sides stay straight between its corners
+while the picture bends. Canvas is the view to lay things out in.
+
+Canvas shows the scene on the Stage. While that is the scene on air it is the
+live picture, and an edit is live. In Preview it is the scene being built: the
+button reads `Canvas - Preview`, the footer says `The scene in Preview, not on
+air` and the state pill reads `Preview`, and nothing done there reaches the
+wall until a Take. During a transition the view goes back to Program, and
+Select is unavailable until it finishes.
+
 **Masking on the output.** A matte is judged against the picture it is cutting,
-which is the one on the wall rather than the one in a perspective viewport. With
-the Masks panel open on a target, the Program Output panel becomes a second
-authoring surface for it: the same masks, the same selection, the same undo
-gesture as the Stage, drawn over the connector image. Its overlay resolves
-through the output's own projection, so a mask over a canvas slice registers
-with the crop and one over a physical surface registers with the warp, and the
-panel says `PROGRAM OUTPUT  /  MASKS` while it is doing so.
-Both mask-authoring viewports display `Can't select while masking`, making
-the temporary interaction domain explicit instead of leaving an ordinary
-selection click to appear broken.
+which is the one on the wall rather than the one in a perspective viewport.
+Program Output is a second authoring surface for a layer's masks: the same
+masks, the same selection, the same undo gesture as the Stage, drawn over the
+connector image. Its overlay resolves through the output's own projection, so a
+mask over a canvas slice registers with the crop and one over a physical
+surface registers with the warp.
+
+The two panels enter that state differently. The Stage edits masks for as long
+as the Masks tab is in front, and says `Can't select while masking`. Program
+Output edits a mask only while one of the selected layer's masks is selected
+and **Select** is the tool - select it by drawing it, by clicking its row in
+Masks, or by clicking it on the Stage. The options bar then reads `Editing a
+mask`, and a click away from the mask, or **Esc**, goes back to the layer and
+its box. Choosing a layer and shaping its mask are two states of one tool
+there, not two modes of the panel.
 
 Primitive masks are transformed on the picture itself. Selecting a rectangle
 or ellipse exposes four resize handles and a rotation handle; dragging the body
@@ -307,7 +460,8 @@ planes and media - have one surface for a mask to sit on; a mask on a volume or
 imported model reports `SOURCE MASK MAPPING UNAVAILABLE` on Stage, and the
 render refuses the frame rather than cut it somewhere arbitrary.
 
-Program Output authors masks only while the Stage is on the Program scene. In
+Program Output authors masks only while it is showing the Stage's scene: the
+Program scene, or any scene in its Canvas view. On an output in
 Preview the two panels are showing different scenes, and a mask dragged over a
 picture that does not contain the layer it belongs to would be authored
 somewhere nobody is looking; the panel stays an ordinary output view until the
@@ -370,6 +524,15 @@ New projects start with a five-minute timeline: 7,200 frames at the default
 24 fps, from frame 0 through frame 7,199 inclusive. Saved projects retain their
 authored range; `--show-range=FIRST:LAST` overrides the startup range.
 
+Adding a video whose frame rate differs from the timeline's, from the Library
+or the Asset Viewer onto the Timeline or Stage, opens a small menu at the
+pointer: **Change the timeline to** the clip's rate, or **Keep the timeline
+at** its current rate. The clip goes in after the answer; when the timeline
+changes, the clip waits until the new rate is in force so its length is
+measured at that rate. Clicking away keeps the timeline's rate and still adds
+the clip. Only rates the timeline offers (23.976, 24, 25, 29.97, 30, 50,
+59.94 and 60 fps) ask; stills, image sequences and other rates go straight in.
+
 A media element is a *placement* of a source, not a copy of it. The document
 carries where the clip starts on the show timeline, how many show frames it
 occupies, which source frame its first show frame shows, and how long its head
@@ -416,6 +579,12 @@ a track with nothing on it, a muted one, and one between clips are all
 still findable and still have a gizmo.
 They are carried in the evaluated scene rather than re-derived by each panel,
 which is what makes the editor and the renderer agree about where a screen is.
+
+A **vehicle track** is the one track that owns no screen. It holds the takes
+of a placed plateset, and each take plays on the track's slot screens - one
+per wall of the car - so the nine angles are edited as one clip while each
+wall keeps a screen of its own. See
+[Vehicle process platesets](#vehicle-process-platesets).
 
 A track holds any number of clips from any number of sources. Start and
 duration decide when a clip plays; explicit clip order decides where it sits in
@@ -470,7 +639,8 @@ the track takes that place in the stack, the same reorder a header drag makes;
 moved in time as well, both are one undo step. A track with a locked clip
 refuses the drag rather than leave that clip behind.
 
-A placed plateset's tracks are listed together under one **take row**; see
+A placed plateset is one clip on a **vehicle track**, whose slot screens are
+listed under it on request; see
 [Vehicle process platesets](#vehicle-process-platesets).
 
 **Splitting a track.** The razor on a track's bar, **Split Track at Playhead**
@@ -1034,7 +1204,7 @@ The Library has two views, switched from the icons at the left of its footer:
   to open it. Each tile names its duration and resolution, or its vertex
   count and texture size.
 
-A UHD clip's Status says how its editor proxy is coming along: **Editor
+A video clip's Status says how its editor proxy is coming along: **Editor
 proxy queued**, **Editor proxy 40%** with a cyan bar filling under
 the row, **Editor proxy ready**, or **Editor proxy failed** in amber. Until
 it is ready, Stage, Program and the Asset Viewer play that clip's source,
@@ -1208,24 +1378,37 @@ restart, stale manifest, duplicate node index, or pending Hardware Map change
 shows on the Output Monitor, but it does not hold a Program promotion: the
 operator, not the readiness gate, decides when a look goes on air.
 
-**Presence is routine; content is asked for.** When the manifest revision
+**Presence is routine; revisions are asked for.** When the manifest revision
 changes, every machine stats the required paths and reports present or missing.
-That is one stat per asset, it reads nothing, and it cannot report a content
-mismatch because it never looks at content.
+That is one stat per asset, it reads nothing, and it cannot report a mismatch
+because it looks at nothing but whether the file is there. Hashing file
+contents was tried and took too long, so presence is the routine answer.
 
-`RESCAN`, in the Library, is the other question: it streams each required file
-and reports wrong byte lengths, wrong hashes, and local verification failures.
-It is the only thing in the program that reads a source's bytes for this
-purpose, and the only place a mismatch can come from. It also finds Library
-files that changed since they were recorded and offers to accept them; see
-[Changed source files](#the-library-panel).
+The question is asked on a thread of its own on every machine. The loop that
+seals frames on the Director, and the one that presents them on a node, hand
+the manifest over and take the answer on whichever frame finds it, so a slow
+disk or a file server that has stopped answering holds neither. Until the
+answer arrives a machine goes on what it already knew, takes a newly required
+file to be there - a clip just placed opens at once, and shows the usual grey
+box if it turns out to be missing - and does not report itself ready for the
+new manifest.
 
-Nothing rescans on a timer. An earlier build re-verified every fingerprinted
-source every five seconds for as long as anything was missing, which on a 40 MB
-plate stalled the control thread for two and a half seconds at a time, forever,
-because a missing file never stops being missing. A share that mounts late is
-picked up by pressing `RESCAN` - which is a worse answer than automatic
-recovery only if the automatic version is free, and that one was not.
+`RESCAN`, in the Library, is the other question. On the Director it compares
+each required file's size and modification time with the revision recorded for
+it and reports the ones that differ or cannot be read; it reads no file
+contents. It also finds Library files that changed since they were recorded
+and offers to accept them; see [Changed source files](#the-library-panel).
+The status bar shows CHECKING ASSETS... until the answer arrives, then ASSETS
+VERIFIED or ASSETS INCOMPLETE - SEE LIBRARY. The same press makes every render
+node look at its own files again, so a file copied to a node after the show
+was loaded, or a share that mounted late, is found without restarting it.
+
+Nothing rescans on a timer; a machine looks at its disks when the set of
+required files changes and when you press `RESCAN`, and at no other time. An
+earlier build re-verified every fingerprinted source every five seconds for as
+long as anything was missing, which on a 40 MB plate stalled the control
+thread for two and a half seconds at a time, forever, because a missing file
+never stops being missing.
 
 Thumbnails are derivatives, not assets. Their key contains the persistent Asset
 NodeId, expected fingerprint, frozen `thumb-320x180-srgb` profile, and generator
@@ -1274,7 +1457,7 @@ path.
 project and found on this machine. **SOURCE - NOT CHECKED** is the asset's own
 file when nothing in the project uses it: presence is only asked of required
 content, so a missing file shows the grey placeholder rather than a warning.
-**PROXY** is a UHD asset's 720p editor proxy, or the proxy its Prefer or
+**PROXY** is a video asset's 720p editor proxy, or the proxy its Prefer or
 Require Proxy policy asks for. **PROXY REQUIRED - NOT READY** draws nothing,
 as the wall would, and **OFFLINE** is a missing file. The **Proxy / Full res**
 menu in the header chooses which file the viewer decodes; Full res shows the
@@ -1463,74 +1646,124 @@ diamond-on-a-staff button in the Timeline toolbar shows or hides the band.
 They are not cues and never stop the show.
 
 **Placing a plateset.** Drag it from the Library onto the Timeline (it
-starts where it lands) or the Stage (at the playhead). Each plate gets a
-track named after its slot and the take, its raster set to the plate's,
-and a clip lasting the frames every plate covers. The scene's compositor
-gets a Scene Layer per track wired to the matching socket of an LED Car
-Process, created and fed to Output (composited over what Output already
-shows) when the scene has none. When the scene's rig already plays
-something on a socket the plates need, a menu asks whether to replace those
-plates, add a second LED Car Process, or keep its wires and fill only the
-free sockets. The whole placement is one undo step.
+starts where it lands) or the Stage (at the playhead). A placed plateset is
+one **take**: a single clip on a **vehicle track**, lasting the frames every
+plate covers and named after the set. The scene's first placement makes the
+vehicle track - named **Vehicle**, marked with the plateset's car - and with
+it a **slot screen** for each plate, named after its slot, its raster set to
+the plate's. The compositor gets a Scene Layer per slot screen wired to the
+matching socket of an LED Car Process, created and fed to Output (composited
+over what Output already shows) when the scene has none. The whole placement
+is one undo step.
 
-**The take row.** On the Timeline a placed plateset reads as one track: a
-take row, marked with the plateset's car and named after the set (as the
-Library names it, or after what its tracks' names share), with how many
-plates it holds - and how many takes, once a cut has made more than one. It
-starts closed, listing only the row, whose lane draws a bar per take from
-its first frame to its last, with its fade ramps and a hairline per plate.
-The bar edits the take as a clip: drag it to move the take, drag an end to
-trim it, pull a fade knob, Slip it, or click it with the **Razor (`C`)** to
-cut it (`Shift` cuts every clip on every track, as on a clip). Each is the
-same edit the front plate's own clip makes, so it is one undo step and every
-plate of the take follows; a move never changes tracks or stack order.
-Ripple, Roll and Slide would move one plate's neighbours alone, so the bar
-answers them as Selection does. A take with a locked plate or track takes no
-drag. Clicking the row or a bar selects every plate it stands for - the
-row all of its takes, a bar its own - with the front plate shown in the
-Inspector, so Delete and Copy act on the whole take.
+Once a scene has a vehicle track, every later plateset goes on it as another
+take and nothing is rewired: dropped on the track's band it starts at the
+frame under the pointer, and dropped anywhere else on the Timeline or on the
+Stage it goes on the scene's vehicle track, in front of any take already
+there. A set with a plate in a slot the car has no screen for gains that one
+screen, wired to the rig the others feed. Only a scene with no vehicle track
+whose rig already plays something on a socket the plates need asks first: a
+menu offers to replace those plates, add a second LED Car Process, or keep
+its wires and fill only the free sockets. **Add a second LED Car Process**
+makes a second vehicle track, **Vehicle 2**, with screens and a rig of its
+own.
 
-The row's eye, **Solo** and padlock switch every track of the set at once:
-each reads lit while all of its tracks are, and a click brings every track
-to the same state. Drag the row by its name to move all of its tracks up or
-down the stack together, in their order; a track dropped onto a closed row
-goes in front of or behind the whole set, never between its tracks. A set
-with a locked track stays where it is. Right-click the row to **List** or
-**Fold Plate Tracks**, **Mute** or **Lock Plates**, **Split Take at
-Playhead**, **Set In/Out to Plateset**, **Open Plateset in Asset Viewer**,
-or **Delete Plateset Tracks and Plates**, which removes every track of the
-set with its plate in one undo step.
+**The vehicle track.** It is a track like any other on the Timeline - a
+header with its number, eye, **Solo**, sync lock and padlock, and a bar when
+it is closed - and it owns no screen itself: its takes play on its slot
+screens. Switching the track off, soloing it or locking it does so for the
+whole car. It has no **Target** switch, because Insert and Overwrite lay a
+file over a track's own screen and it has none, and it cannot be split: cut
+its take with the razor instead, on the take's own row with the track open.
+**Delete Track and Its Clips** removes the track, its takes and its slot
+screens in one undo step. A project made before takes were one clip shows
+each of its old plates as an ordinary clip on an ordinary track; place the
+plateset again to get a take.
 
-Twirl the row open, or double-click it or a bar, to list the plates' tracks
-under it, one indent in. Each is named by its slot alone - **LEFT**, or its
-tag **L** when the list is too narrow - since the row above names the set;
-hover for the track's full name, which renaming still starts from. Each is
-still its own track and screen: its own grade, mute, lock, solo, target,
-keys and clips, edited as before, and the row stays above them with its
-bars. Open or closed is the operator's view,
-not saved in the project; a search opens it, and pointing at a plate from
-another panel opens it. A track joins the row while every clip on it is a
-plate of that set; tracks that share a take are one placement, so two
-placements of one set are two rows, and the halves of a razored take stay in
-one. The row sits where its frontmost track would be, and its tracks keep
-their numbers whether it is open or closed. A track moved in between a
-set's tracks parts the row in two, one above it and one below, so the list
-always shows the stacking order the Stage draws; moving it out joins them
-again. The document still holds one track per
-plate; the row is only how the Timeline shows them, and changes nothing the
-Stage, Program or the render nodes draw.
+Its **Properties** on the Timeline list **Opacity** and its effects, which
+fade and grade the whole car, and no Position, Rotation or Scale: the track
+has no screen of its own to move. A take lists the same, as every clip on a
+track does - a clip plays on its track's screen, so its own transform moves
+nothing there.
 
-**Editing a take.** Moving, trimming, fading, slipping or cutting one plate
-of a placed take does the same to every plate of it: plates sharing a take,
-a start and a length are one unit. A plate moved on its own leaves its take,
-and its take row shows it as a bar of its own.
-Changing the set's offsets moves every placed plate's source in by the
-difference, and shortens the take if a plate would now run out. Drop
-another plateset onto a placed plate, or onto its take row (a bar there
-picks that take), to **swap the take**: each plate plays
-the new set's media for its slot at the same take position, keeping its
-trims, track, grade and wiring; tracks named after the old take are
-renamed, and plates the new set has no slot for stay as they were.
+**Editing a take.** A take is one clip, so every clip tool edits it as it
+edits any clip: drag it to move it, drag an end to trim it, pull a fade knob,
+cut it with the **Razor (`C`)**, and Ripple, Roll, Slip and Slide it against
+the takes beside it. Copy, paste, duplicate and delete act on the one clip.
+Every plate follows, because the plates are the clip's, not clips of their
+own. A take can be dragged to another vehicle track and nowhere else; an
+ordinary clip cannot be dragged onto a vehicle track or a slot screen, and a
+file dropped on a take does not replace it.
+
+Where two takes overlap on one vehicle track, each slot screen shows the take
+in front that has a plate for it - a screen plays one picture at a time - so
+takes cut and fade to and from black rather than dissolve into each other.
+Butt two takes end to end to cut from one to the next.
+
+**Swapping a take.** Drop another plateset onto a take - its row, or its bar
+on the vehicle track - and that take plays the new set instead: the clip
+keeps its place on the Timeline, its trim as a position in the take, its
+fades and its effects, and is shortened if the new footage runs out sooner.
+The vehicle track and its slot screens are not touched, so where each wall
+stands, how it is graded and its time offset all carry over; that is how a
+new scene is put up without moving the car or the camera. A slot the new set
+has no plate for leaves its screen standing and showing nothing while the
+take is up, and the status line says how many.
+
+**Slot screens.** A slot screen is one wall of the car: a screen like any
+track's, placed, scaled, graded and keyed the same way, and wired into the
+rig through its own Scene Layer. It takes no clips of its own, and a mask
+cannot be put on a single wall. The screens are folded away so the car reads
+as one track;
+right-click the vehicle track and choose **List Screens** to list them under
+it, front first and round the car to the ceiling, and **Fold Screens** to put
+them away. Each is named by its slot - or its tag (**L**, **TOP**) when the
+list is too narrow - has no track number, and starts closed; twirl one open
+for its Properties and keys. Clicking a plate on the Stage or in Program
+Output selects its slot screen, where the plate is drawn, ready to be moved
+or scaled to land a reflection, and lists and selects its row on the
+Timeline; selecting the row selects the plate. Selecting a take outlines
+every wall it is playing on.
+
+**The Inspector.** With the vehicle track selected the Inspector shows the
+car from above, front up, with a tile per wall. A wall the car has a screen
+for is a button: click it to select that slot screen, which also lists it on
+the Timeline. Under the car is its layout, the values of the LED Car Process
+its screens feed: **Position** and **Rotation** place and turn the whole car,
+**Wall distance** is how far each wall stands from its middle, **Wall size**
+sizes the eight walls together, **Edge blend** fades each wall's left and
+right edges into its neighbours, and **Ceiling height** and **Ceiling size**
+set the ceiling plate. They are the same values as that node's Parameters in
+the Compositor, and are not keyed. A car whose screens feed no LED Car
+Process shows no layout. With a take selected the same view is lit where the take has a
+plate; a screen the take leaves empty reads dim, and a plate with no screen
+to play on is outlined as a warning. **Open plateset** shows the take's set
+in the Asset Viewer, where its plates, sync offsets and moments are. A slot
+screen's **Screen** section has, besides the raster and its lock, a **Time
+offset**: whole source frames its plate plays ahead of its take, or behind it
+when negative.
+
+**Where each adjustment lives.**
+
+- *The footage* - which file is in which slot, each plate's **SYNC** offset,
+  the kept moments, the half-size decode - belongs to the plateset, in the
+  Asset Viewer. A change there reaches every take of that set, in the same
+  undo step: a take keeps its position in the footage, and is shortened if a
+  plate would now run out. A plate added in a slot the car has no screen for
+  is not shown until the set is placed or swapped in again, which makes the
+  screen.
+- *One wall* - its position, scale and rotation, its raster, its opacity and
+  effects, its time offset - belongs to its slot screen, and stays when the
+  take is swapped. Use the time offset to move one wall against the car; use
+  **SYNC** when the footage itself came in out of step.
+- *The whole car* - opacity and effects on the vehicle track apply to every
+  wall after that wall's own. Where the car stands, how it is turned, how
+  far out and how large its walls are, their edge blend and the ceiling are
+  the layout on the vehicle track's Inspector; the LED Car Process node in
+  the Compositor holds the same values and takes the setup's effects and
+  filters.
+- *One take* - effects on the take's clip apply to every wall while that
+  take is up, before each wall's own.
 
 ## Render-node lifecycle control
 
@@ -1708,16 +1941,31 @@ never rewrite bindings, cables, or project files on their own.
 A node that could not open its displays reads `OUTPUT FAILED` in Output
 Monitor, and its row names the reason: the bound display not connected, present
 but switched off, mirroring another, claimed by two bindings, or not offering
-the saved mode. That is reported separately from asset readiness on purpose. A
+the saved mode, or no display bound to its Render Server at all. That is
+reported separately from asset readiness on purpose. A
 node with no outputs has no renderer to report either, which on the Director is
 indistinguishable from one still loading, so the row used to say the assets
 were not ready while the fault was a display.
+
+A node that is connected but cannot draw its frames reads `FRAMES FAILING`, and
+the cluster headline reads `A NODE CANNOT DRAW ITS FRAMES`. Such a node holds
+its last picture, which on the wall looks like a stall. The row's tooltip and
+its expanded **Drawing** line name the map being drawn (its label and viewport
+number), and the reason when the GPU refused the work: the frame ran out of GPU
+upload space, or a buffer was rewritten after an earlier map in the same frame
+had used it. A refusal repeats on every frame that asks for the same work, so
+the node keeps failing until what it draws changes. When it draws again the
+line keeps the failed-frame count and the last cause. The node's log has one
+line each time it starts failing, fails differently, or recovers.
 
 One lifecycle agent still supervises one fixed render-process identity. That
 child now opens one presenter per saved output binding and selects each binding's
 Feed index. Changing bindings is replicated as project state; Restart from
 Output Monitor relaunches the same process, which reapplies the saved deployment.
-Projects without output-binding nodes use the single-window output model.
+A Render Server with no output binding opens nothing and reads `NO DISPLAY IS
+BOUND TO THIS RENDER SERVER`; bind a display to one of its outputs. Only a
+render process whose node index no Render Server card claims - a command-line
+launch such as the wall demo - opens the single window its arguments describe.
 
 ## Hardware Map and LED processors
 
@@ -2116,8 +2364,8 @@ the Track it plays on - into view and outlines it for a moment, and choosing
 a Scene Layer node scrolls the Timeline to its layer or track, opening the
 track if it was closed. Neither changes the other panel's selection.
 
-**Selecting and arranging.** Click a node to select it. **Ctrl**-click adds
-or removes one node, and **Shift**-click adds one. Drag on empty canvas for a
+**Selecting and arranging.** Click a node to select it. **Shift**-click adds
+or removes one node, and **Alt**-click makes it the whole selection. Drag on empty canvas for a
 rubber band: dragged rightwards it takes the nodes it wholly contains, and
 leftwards every node it touches; hold Shift to add to the selection or Ctrl
 to take from it. Dragging any selected node moves them all together as one
@@ -2395,7 +2643,7 @@ From the left:
 | Box resting on a line | Surface snapping |
 | Grid, frame corners, three axes, corner brackets | Show the floor grid, guides, gizmo and every element's bounds |
 | Screen with Full / Half / Quarter | The resolution Stage renders at |
-| Framed square with Proxy / Full res | Which file Stage decodes for UHD video - see [Editor proxies](media-playback.md#editor-proxies). On Stage a bar along its foot fills as the project's editor proxies are made; on Program it fills while some clips still play their source waiting for theirs |
+| Framed square with Proxy / Full res | Which file Stage decodes for video above 720p - see [Editor proxies](media-playback.md#editor-proxies). On Stage a bar along its foot fills as the project's editor proxies are made; on Program it fills while some clips still play their source waiting for theirs |
 
 The rate at the right end is how fast Stage is drawing. Program Output's bar
 carries the same media and resolution menus, chosen separately from Stage's. Over the image's
@@ -2486,7 +2734,12 @@ An imported model is measured on its own triangles once a moment has passed
 after it first appears; until then points land on its bounding box.
 
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
-Ctrl toggles membership and Shift selects a visible range; the Inspector shows
+In the Scene and Timeline lists, Ctrl toggles a row and Shift selects a visible
+range. On Stage and Program Output, Shift-click adds an element or takes it
+out, and Alt-click makes it the whole selection; a plain click on a member of
+a larger selection keeps the others so a drag moves them all. On Stage an Alt
+press that moves orbits the camera instead, and Alt on a gizmo duplicates.
+Ctrl does not change the selection on either view. The Inspector shows
 `MIXED` for disagreeing compatible values and applies an accepted edit only to
 unlocked compatible members. Select top-level elements, right-click one of
 them in the Scene panel and choose **Group** (or **Group Selection**) to create
@@ -2645,7 +2898,36 @@ time; asking for another while one is up shows "Another dialog is already
 open" in the status bar instead. If another project is opened while a dialog
 is up, its answer is dropped rather than applied to
 the new project.
+
+Opening a project does not pause the show either. The file is read - and any
+video in it that records no frame rate is opened to find one - away from the
+frames the cluster is waiting for. The status bar shows LOADING PROJECT..., the
+project that was open stays on screen and on air, and the new one replaces it
+on a single frame once it is ready. Choosing another project while one is still
+loading opens only the last one chosen. Saving writes the file while control
+frames keep going out; the editor's own window waits for the write.
+
 `.mstage` saves are checksummed and atomically replaced. Recovered WAL state
 takes precedence at startup; otherwise the last successfully opened/saved
 project is offered through recent-project recovery. A damaged or inaccessible
 project safely falls back to untitled startup.
+
+While a project has unsaved changes the editor keeps a recovery copy of it,
+refreshed within ten seconds of each change, in
+`%LOCALAPPDATA%\MediaServer\settings\recovery`. An untitled project has one
+too. The copy is written on its own thread, so it never holds a frame. Saving
+the project removes it, and so does closing the editor, opening another project
+or starting a new one once you have agreed to discard the changes. If the
+editor stops any other way - a crash, a power cut, the process being ended -
+the next start asks "Recover Unsaved Changes" and names the project and the
+time of the copy. Yes opens the recovered work under the project's own name,
+still unsaved, with RECOVERED UNSAVED CHANGES in the status bar; save to keep
+it. No carries on from the saved project and leaves the copy in place until
+the project is next saved or closed. AUTOSAVE FAILED - SAVE THE PROJECT in the
+status bar means the copy could not be written and the changes are not
+protected until you save.
+
+A request the project refuses - an edit, an undo, a scene or publish request
+that no longer fits the document - is dropped and reported in the status bar
+as, for example, KEYFRAME EDIT NOT APPLIED. The show keeps running and the
+rest of the project is untouched; the log names the exact step.

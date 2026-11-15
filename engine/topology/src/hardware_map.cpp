@@ -317,12 +317,7 @@ core::u64 digest(const HardwareMap &map) noexcept {
     hash_i32(hash, device.desktop_x);
     hash_i32(hash, device.desktop_y);
     core::fnv1a_byte(hash, device.main_node ? 1U : 0U);
-    // Only a vendor protocol is hashed, so maps authored before protocols
-    // existed keep their digest.
-    if (device.protocol != HardwareProcessorProtocol::Generic) {
-      hash_u32(hash, 0x50524f54U);
-      core::fnv1a_byte(hash, static_cast<core::u8>(device.protocol));
-    }
+    core::fnv1a_byte(hash, static_cast<core::u8>(device.protocol));
   }
   core::fnv1a_u64(hash, static_cast<core::u64>(map.links.size()));
   for (const HardwareLink &link : map.links) {

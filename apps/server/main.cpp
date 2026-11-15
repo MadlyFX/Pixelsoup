@@ -610,8 +610,9 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
 [[nodiscard]] int run_utf8_main(int argc, char **argv) {
 #if defined(MEDIASERVER_HAS_NVAPI_PRESENT_BARRIER)
     // This must happen before a presenter can claim a swapchain. The registry
-    // owns a shared lease for the process lifetime; a no-driver/no-Quadro host
-    // intentionally installs nothing and continues to report Unsupported.
+    // owns a shared lease for the process lifetime. A host with no NVIDIA
+    // driver installs nothing; one with a driver and no Quadro Sync installs
+    // a backend that answers Unsupported for its adapter.
     if (auto backend = mediaserver::app::create_nvapi_present_barrier_backend()) {
         mediaserver::rhi::install_present_barrier_backend(std::move(backend));
     }

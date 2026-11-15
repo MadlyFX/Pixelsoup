@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <limits>
 
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/strong_id.hpp>
@@ -44,6 +45,23 @@ struct ShowClockConfig final {
 
     bool operator==(const ShowClockConfig&) const = default;
 };
+
+// The configuration of a pacer: a clock used only as a metronome that says
+// when the next frame boundary is due.
+//
+// A transport has a range and, with looping off, parks on its last frame. A
+// pacer must never do that, because everything a frame loop does is gated on
+// the boundaries it reports: a parked pacer reports none, for ever. So a pacer
+// never takes its range from the timeline. This range is long enough that no
+// run reaches its end (2^64 - 1 frames), which makes the loop flag irrelevant.
+[[nodiscard]] constexpr ShowClockConfig pacer_clock_config(
+    FrameRate rate) noexcept {
+    return ShowClockConfig{
+        rate,
+        ShowFrame{0U},
+        ShowFrame{std::numeric_limits<core::u64>::max() - 1U},
+        false};
+}
 
 enum class ShowClockError : core::u8 {
     InvalidConfiguration,

@@ -42,10 +42,8 @@ inline constexpr std::string_view rate_denominator = "rate_denominator";
 inline constexpr std::string_view first_frame = "first_frame";
 inline constexpr std::string_view last_frame = "last_frame";
 inline constexpr std::string_view loop = "loop";
-// Optional. Absent reads as armed, which is what a project authored before
-// cues existed would have meant had it carried any.
 inline constexpr std::string_view cues_armed = "cues_armed";
-// Optional. Absent reads as an operator anchor.
+// True for an anchor a cue scheduled, false for an operator's.
 inline constexpr std::string_view scheduled = "scheduled";
 // Optional, together. Absent reads as a cut.
 inline constexpr std::string_view blend_frames = "blend_frames";

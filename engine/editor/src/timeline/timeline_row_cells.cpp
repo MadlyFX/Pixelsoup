@@ -32,13 +32,13 @@ void TimelinePanel::draw_rows(Pass &p) {
   {
     std::size_t number = 0U;
     for (std::size_t index = 0U; index < rows.size(); ++index) {
+      // A slot screen is a wall of its car, not a track in the stack.
+      if (rows[index].kind == Row::Kind::LaneHeader &&
+          rows[index].slot_screen) {
+        continue;
+      }
       if (rows[index].kind == Row::Kind::LaneHeader) {
         track_numbers[index] = ++number;
-      } else if (rows[index].kind == Row::Kind::PlatesetHeader &&
-                 rows[index].end == index + 1U) {
-        // A closed take row still counts its tracks, so the tracks below
-        // keep their numbers whether it is open or not.
-        number += p.built.platesets[rows[index].plateset].lanes.size();
       }
     }
   }
@@ -104,9 +104,6 @@ void TimelinePanel::draw_rows(Pass &p) {
     case Row::Kind::LaneHeader:
       track_header_list_cell(rc);
       break;
-    case Row::Kind::PlatesetHeader:
-      plateset_header_list_cell(rc);
-      break;
     case Row::Kind::Layer:
       layer_list_cell(rc);
       break;
@@ -143,9 +140,6 @@ void TimelinePanel::draw_rows(Pass &p) {
       break;
     case Row::Kind::LaneHeader:
       track_bar_cell(rc);
-      break;
-    case Row::Kind::PlatesetHeader:
-      plateset_takes_cell(rc);
       break;
     case Row::Kind::PropertiesHeader:
       summary_lane_cell(rc, true);
@@ -310,35 +304,6 @@ void TimelinePanel::layout_row(RowContext &rc) {
       rc.clip_bar = bar_between(rc.track_first, rc.track_end);
     }
   }
-  // A take row's bars follow each take's lead plate, which is what a
-  // gesture on the bar moves.
-  if (row.kind == Row::Kind::PlatesetHeader) {
-    const PlatesetGroup &group = p.built.platesets[row.plateset];
-    for (std::size_t take = 0U; take < group.takes.size(); ++take) {
-      const ElementInfo *const lead =
-          find_element(elements, group.takes[take].lead);
-      if (lead == nullptr) {
-        continue;
-      }
-      const scene::ClipTiming timing = shown_timing(*lead);
-      const gui::Rect bar =
-          bar_between(timing.start, timing.start + timing.duration);
-      const float left = std::max(bar.x, graph.x);
-      const float right = std::min(bar.right(), graph.right());
-      if (right > left) {
-        take_targets_.push_back(TakeTarget{
-            group.takes[take].lead,
-            gui::Rect{left, rc.interaction_y, right - left,
-                      rc.interaction_height}});
-      }
-      rc.take_bars.push_back(RowContext::TakeBar{
-          take, bar, timing,
-          frame_to_x(static_cast<double>(timing.start + timing.fade_in)),
-          frame_to_x(static_cast<double>(timing.start + timing.duration -
-                                         timing.fade_out))});
-    }
-  }
-
   if (!rc.row_channel_identity.has_value()) {
     return;
   }
@@ -395,53 +360,6 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
     p.hits.add(target);
   }
 
-  if (row.kind == Row::Kind::PlatesetHeader) {
-    // Each take's bar is its own clip: its body, and unless the tool cuts or
-    // slips its trim edges and fade knobs. Ripple, roll and slide would
-    // tear a take apart, so its bar answers them as Selection does.
-    const PlatesetGroup &group = p.built.platesets[row.plateset];
-    const bool selection_parts = edit_tool_ != TimelineEditTool::Razor &&
-                                 edit_tool_ != TimelineEditTool::Slip;
-    for (const RowContext::TakeBar &take : rc.take_bars) {
-      if (group.takes[take.take].locked) {
-        continue;
-      }
-      const gui::Rect &bar = take.bar;
-      const core::u64 take_identity = gui::ui_id(identity, "take", take.take);
-      const auto add = [&](std::string_view name, const gui::Rect &bounds,
-                           HitPriority priority, const gui::Rect &anchor,
-                           RowPart part,
-                           float reach = std::numeric_limits<float>::infinity()) {
-        HitTarget target{gui::ui_id(id_, name, take_identity), bounds, priority,
-                         anchor, row_part_tag(rc.index, part, take.take)};
-        target.reach = reach;
-        p.hits.add(target);
-      };
-      add("take body", bar, HitPriority::ClipBody, bar, RowPart::ClipBody);
-      if (!selection_parts) {
-        continue;
-      }
-      const float grab = edge_grab_width(bar.width);
-      add("take in", gui::span_x(bar, bar.x - trim_outer_reach, bar.x + grab),
-          HitPriority::TrimEdge, gui::rule_x(bar, bar.x, 0.0F),
-          RowPart::TrimIn);
-      add("take out",
-          gui::span_x(bar, bar.right() - grab, bar.right() + trim_outer_reach),
-          HitPriority::TrimEdge, gui::rule_x(bar, bar.right(), 0.0F),
-          RowPart::TrimOut);
-      for (const auto &[x, name, part] :
-           {std::tuple{take.fade_in_x, "take fade in", RowPart::FadeIn},
-            std::tuple{take.fade_out_x, "take fade out", RowPart::FadeOut}}) {
-        const float centre_y = bar.y + 1.0F;
-        add(name,
-            gui::span_y(gui::rule_x(bar, x, fade_handle_reach * 2.0F),
-                        centre_y - fade_handle_reach, bar.y + fade_knob_depth),
-            HitPriority::FadeKnob, gui::Rect{x, centre_y, 0.0F, 0.0F}, part,
-            fade_handle_reach);
-      }
-    }
-    return;
-  }
   if (row.locked || (rc.clip_element == nullptr && !rc.track_bar)) {
     return;
   }
@@ -540,37 +458,13 @@ void TimelinePanel::begin_row(RowContext &rc) {
         {rows_bounds.x, top, rows_bounds.width, bottom - top},
         row.kind == Row::Kind::LaneHeader});
   }
-  // A take row stands for its first take wherever no bar is: its bars came
-  // first, from layout_row().
-  if (row.kind == Row::Kind::PlatesetHeader) {
-    const PlatesetGroup &group = p.built.platesets[row.plateset];
-    if (!group.takes.empty()) {
-      const float top = std::max(y, rows_bounds.y);
-      const float bottom = std::min(y + row.height, rows_bounds.bottom());
-      take_targets_.push_back(TakeTarget{
-          group.takes.front().lead,
-          gui::Rect{rows_bounds.x, top, rows_bounds.width, bottom - top}});
-    }
-  }
-  if (row.kind == Row::Kind::PlatesetHeader) {
-    // A take row is selected while every plate it stands for is.
-    const PlatesetGroup &group = p.built.platesets[row.plateset];
-    rc.is_selected = !group.takes.empty();
-    for (const PlatesetTake &take : group.takes) {
-      for (const doc::NodeId clip : take.clips) {
-        rc.is_selected = rc.is_selected && selected(clip, selection);
-      }
-    }
-  } else {
-    rc.is_selected =
-        row.kind == Row::Kind::LaneHeader
-            ? row.node == selected_lane_
-            : (row.surface ? row.node == selected_surface
-                           : selected(row.node, selection));
-  }
+  rc.is_selected =
+      row.kind == Row::Kind::LaneHeader
+          ? row.node == selected_lane_
+          : (row.surface ? row.node == selected_surface
+                         : selected(row.node, selection));
   rc.layer_like = row.kind == Row::Kind::Layer ||
-                  row.kind == Row::Kind::LaneHeader ||
-                  row.kind == Row::Kind::PlatesetHeader;
+                  row.kind == Row::Kind::LaneHeader;
   const gui::Theme &row_theme = ctx.theme();
   rc.row_hovered =
       !ctx.pointer_blocked() &&
@@ -582,8 +476,7 @@ void TimelinePanel::begin_row(RowContext &rc) {
     // The selected layer's own properties: tinted, not flooded, so the
     // selection still reads as one row.
     background = mix_colors(row_theme.track, row_theme.selection, 0.35F);
-  } else if (row.kind == Row::Kind::LaneHeader ||
-             row.kind == Row::Kind::PlatesetHeader) {
+  } else if (row.kind == Row::Kind::LaneHeader) {
     background = row_theme.header;
   } else if (layer_like) {
     background = row_theme.row;
@@ -624,10 +517,9 @@ void TimelinePanel::begin_row(RowContext &rc) {
                      alpha(row_theme.border, 0.9F));
   rc.row_group = group_id(row.node, row.group);
   rc.open = row.kind == Row::Kind::LaneHeader
-      ? (!search_.empty() || !rows_state_.collapsed_lanes.contains(row.node))
-      : row.kind == Row::Kind::PlatesetHeader
       ? (!search_.empty() ||
-         rows_state_.expanded_platesets.contains(row.node))
+         (row.slot_screen ? rows_state_.open_screens.contains(row.node)
+                          : !rows_state_.collapsed_lanes.contains(row.node)))
       : row.hierarchy
       ? (!search_.empty() || rows_state_.expanded_hierarchies.contains(row.node))
       : ((row.kind == Row::Kind::Layer ||
@@ -674,19 +566,35 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
 
   // Tracks are numbered top-down, the way they are called across a
   // stage: "kill track two".
-  const std::string number = std::to_string(track_number);
-  const float badge_width = std::max(18.0F, ctx.font_width(number) + 8.0F);
-  const gui::Rect badge{content_x + 2.0F, centre_y - 8.0F, badge_width,
-                        16.0F};
-  ctx.panel(badge, row.muted ? alpha(row_theme.text_muted, 0.6F)
-                             : row.color);
-  ctx.label(gui::Rect{badge.x + std::max((badge.width -
-                                          ctx.font_width(number)) *
-                                             0.5F,
-                                         0.0F),
-                      badge.y, badge.width, badge.height},
-            number, row_theme.background);
-  name_x = badge.right() + 8.0F;
+  // A slot screen is one wall of the car above it, not a track in the
+  // stack: it has no number to be called by.
+  if (row.slot_screen) {
+    name_x = content_x + 2.0F;
+  } else {
+    const std::string number = std::to_string(track_number);
+    const float badge_width = std::max(18.0F, ctx.font_width(number) + 8.0F);
+    const gui::Rect badge{content_x + 2.0F, centre_y - 8.0F, badge_width,
+                          16.0F};
+    ctx.panel(badge, row.muted ? alpha(row_theme.text_muted, 0.6F)
+                               : row.color);
+    ctx.label(gui::Rect{badge.x + std::max((badge.width -
+                                            ctx.font_width(number)) *
+                                               0.5F,
+                                           0.0F),
+                        badge.y, badge.width, badge.height},
+              number, row_theme.background);
+    name_x = badge.right() + 8.0F;
+  }
+  if (row.vehicle) {
+    // The car: what tells this track from the ones around it.
+    constexpr float icon = 18.0F;
+    const gui::Rect mark{name_x - 2.0F, centre_y - icon * 0.5F, icon, icon};
+    draw_plateset_icon(ctx, mark);
+    ctx.tooltip(mark,
+                "A vehicle track: each take on it plays its plates on the "
+                "car's screens. Right-click to list the screens.");
+    name_x = mark.right() + 6.0F;
+  }
   // The track's working switches, just inside its padlock: where Insert
   // and Overwrite land, whether it keeps time with ripples elsewhere, and
   // whether the Stage shows it alone. Each reads its state from across a
@@ -703,7 +611,11 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
                           row.height};
   const bool targeted =
       targeted_lane_.has_value() && *targeted_lane_ == row.node;
-  if (icon_toggle(ctx, gui::ui_id(id_, "track target", row.node.value()),
+  // Insert and Overwrite lay a file over a track's screen: a vehicle track
+  // has takes instead, and a slot screen has no clips at all - nothing to
+  // aim at, keep in time or show alone.
+  if (!row.vehicle && !row.slot_screen &&
+      icon_toggle(ctx, gui::ui_id(id_, "track target", row.node.value()),
                   target_chip, gui::Icon::Target, targeted, row_theme.accent,
                   targeted ? "Targeted: Insert and Overwrite land on this "
                              "track. Click to stop aiming them here."
@@ -716,7 +628,8 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
       targeted_lane_ = row.node;
     }
   }
-  if (icon_toggle(ctx, gui::ui_id(id_, "track sync lock", row.node.value()),
+  if (!row.slot_screen &&
+      icon_toggle(ctx, gui::ui_id(id_, "track sync lock", row.node.value()),
                   sync_chip, gui::Icon::SyncLock, row.sync_locked,
                   row_theme.good,
                   row.sync_locked
@@ -729,7 +642,9 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
     frame.lane_edits.push_back(TimelineLaneEdit{
         TimelineLaneAction::ToggleSyncLock, row.node, {}});
   }
-  solo_toggle(rc, solo_chip);
+  if (!row.slot_screen) {
+    solo_toggle(rc, solo_chip);
+  }
   if (rename_.editing(row.node.value())) {
     // While a track's name is open the shell holds one lane gesture and
     // keeps the keyboard's shortcuts away from the field.
@@ -765,7 +680,7 @@ void TimelinePanel::row_name_label(RowContext &rc, gui::UiColor color) {
   gui::UiContext &ctx = rc.p.ctx;
   const gui::Rect &bounds = rc.name_bounds;
   const std::string &preferred =
-      rc.row.shown_label.empty() ? rc.row.label : rc.row.shown_label;
+      rc.row.label;
   const std::string &shown =
       !rc.row.short_label.empty() &&
               ctx.font_width(preferred) + 2.0F > bounds.width
@@ -1263,7 +1178,10 @@ bool TimelinePanel::row_label_press(RowContext &rc) {
       ctx.grab(gui::ui_id(id_, "row", row_identity(row)),
                gui::Rect{rows_bounds.x, interaction_y, label_width,
                          interaction_height});
-  if (label_it.pressed && row.kind == Row::Kind::LaneHeader && !row.locked) {
+  // A slot screen is a wall of its car: it has no place in the stack to be
+  // dragged to.
+  if (label_it.pressed && row.kind == Row::Kind::LaneHeader && !row.locked &&
+      !row.slot_screen) {
     reorder_.lane_node = row.node;
     reorder_.lane_block.assign(1U, row.node);
     reorder_.lane_block_label.clear();
@@ -1271,30 +1189,6 @@ bool TimelinePanel::row_label_press(RowContext &rc) {
     reorder_.lane_start_x = ctx.pointer_press_x();
     reorder_.lane_start_y = ctx.pointer_press_y();
     reorder_.lane_moved = false;
-  } else if (label_it.pressed && row.kind == Row::Kind::PlatesetHeader &&
-             !(row.expandable && ctx.pointer_press_x() < content_x)) {
-    // A take row lifts its run of tracks, to land together in their order.
-    // A locked track holds the run where it is.
-    const PlatesetGroup &group = p.built.platesets[row.plateset];
-    const bool movable =
-        !group.lanes.empty() &&
-        std::none_of(group.lanes.begin(), group.lanes.end(),
-                     [&](doc::NodeId id) {
-                       return std::any_of(
-                           p.input.lanes.begin(), p.input.lanes.end(),
-                           [&](const scene::TimelineLane &lane) {
-                             return lane.id == id && lane.locked;
-                           });
-                     });
-    if (movable) {
-      reorder_.lane_node = group.lanes.front();
-      reorder_.lane_block = group.lanes;
-      reorder_.lane_block_label = group.name;
-      reorder_.layer_nodes = group.lanes;
-      reorder_.lane_start_x = ctx.pointer_press_x();
-      reorder_.lane_start_y = ctx.pointer_press_y();
-      reorder_.lane_moved = false;
-    }
   } else if (label_it.pressed && row.kind == Row::Kind::Layer &&
              !row.surface &&
              !(row.expandable && ctx.pointer_press_x() < content_x)) {
@@ -1325,49 +1219,12 @@ bool TimelinePanel::row_label_press(RowContext &rc) {
     }
   }
   const bool dragged_header_click =
-      ((row.kind == Row::Kind::LaneHeader && row.node == reorder_.lane_node) ||
-       (row.kind == Row::Kind::PlatesetHeader &&
-        !p.built.platesets[row.plateset].lanes.empty() &&
-        p.built.platesets[row.plateset].lanes.front() ==
-            reorder_.lane_node)) &&
+      row.kind == Row::Kind::LaneHeader && row.node == reorder_.lane_node &&
       reorder_.lane_moved;
   const bool dragged_layer_click =
       row.kind == Row::Kind::Layer && row.node == scratch.released_layer_drag_node &&
       scratch.released_layer_drag_moved;
   if (label_it.clicked && !dragged_header_click && !dragged_layer_click) {
-    if (row.kind == Row::Kind::PlatesetHeader &&
-        !(row.expandable && ctx.pointer_x() < content_x)) {
-      // Choosing the row chooses every plate it stands for, as choosing a
-      // clip chooses the clip: Delete, Copy and the Inspector then act on
-      // the whole set, with the first take's lead plate as the one shown.
-      const PlatesetGroup &group = p.built.platesets[row.plateset];
-      keys_.selected.clear();
-      keys_.drag_keys.clear();
-      keys_.dragging = false;
-      keys_.duplicate = false;
-      selected_lane_ = doc::NodeId{};
-      TimelineSelectionRequest next{};
-      for (const PlatesetTake &take : group.takes) {
-        if (next.node == doc::NodeId{} && !take.locked) {
-          next.node = take.lead;
-        }
-        next.members.insert(next.members.end(), take.clips.begin(),
-                            take.clips.end());
-      }
-      if (next.node != doc::NodeId{}) {
-        frame.selection = std::move(next);
-      }
-      // A double-click opens or closes it, as its twirl does.
-      if (clicks_.double_click(gui::ui_id(id_, "plateset row", row.node.value()),
-                               ctx.time_seconds())) {
-        if (open) {
-          rows_state_.expanded_platesets.erase(row.node);
-        } else {
-          rows_state_.expanded_platesets.insert(row.node);
-        }
-      }
-      return true;
-    }
     if (row.kind == Row::Kind::LaneHeader &&
         !(row.expandable && ctx.pointer_x() < content_x)) {
       selected_lane_ = row.node;
@@ -1401,17 +1258,17 @@ bool TimelinePanel::row_label_press(RowContext &rc) {
     }
     const bool on_twirl = row.expandable && ctx.pointer_x() < content_x;
     if (on_twirl) {
-      if (row.kind == Row::Kind::LaneHeader) {
+      if (row.kind == Row::Kind::LaneHeader && row.slot_screen) {
+        if (open) {
+          rows_state_.open_screens.erase(row.node);
+        } else {
+          rows_state_.open_screens.insert(row.node);
+        }
+      } else if (row.kind == Row::Kind::LaneHeader) {
         if (open) {
           rows_state_.collapsed_lanes.insert(row.node);
         } else {
           rows_state_.collapsed_lanes.erase(row.node);
-        }
-      } else if (row.kind == Row::Kind::PlatesetHeader) {
-        if (open) {
-          rows_state_.expanded_platesets.erase(row.node);
-        } else {
-          rows_state_.expanded_platesets.insert(row.node);
         }
       } else if (row.hierarchy) {
         if (open) {
@@ -1673,223 +1530,6 @@ void TimelinePanel::press_track_bar(RowContext &rc, ClipDrag part) {
           ? std::optional{gui::UiPoint{ctx.pointer_release_x(),
                                        ctx.pointer_release_y()}}
           : std::nullopt;
-}
-
-// A placed plateset's take row: the set's mark and name, how many plates -
-// and takes, once a cut has made more than one - it stands for, and mute,
-// solo and lock for all of its tracks at once. Each track keeps its own
-// switches too; the row's read lit while every track's is.
-void TimelinePanel::plateset_header_list_cell(RowContext &rc) {
-  Pass &p = rc.p;
-  gui::UiContext &ctx = p.ctx;
-  TimelinePanelFrame &frame = p.frame;
-  const Row &row = rc.row;
-  const PlatesetGroup &group = p.built.platesets[row.plateset];
-  const gui::Theme &theme = ctx.theme();
-  const auto switch_all = [&](TimelineLaneAction action, bool on) {
-    for (TimelineLaneEdit &edit :
-         plateset_switch_edits(group, p.input.lanes, action, on)) {
-      frame.lane_edits.push_back(std::move(edit));
-    }
-  };
-  if (row_flag_toggle(ctx, gui::ui_id(id_, "plateset mute", row.node.value()),
-                      rc.eye_bounds, RowFlag::Visible, !row.muted,
-                      rc.row_hovered)) {
-    switch_all(TimelineLaneAction::ToggleMute, !row.muted);
-  }
-  if (row_flag_toggle(ctx, gui::ui_id(id_, "plateset lock", row.node.value()),
-                      rc.lock_bounds, RowFlag::Locked, row.locked,
-                      rc.row_hovered)) {
-    switch_all(TimelineLaneAction::ToggleLock, !row.locked);
-  }
-  const gui::Rect solo_chip{rc.lock_x - 4.0F - row_switch_width,
-                            rc.centre_y - 8.0F, row_switch_width, 16.0F};
-  const bool soloed =
-      !group.lanes.empty() &&
-      std::all_of(group.lanes.begin(), group.lanes.end(),
-                  [&](doc::NodeId lane) { return soloed_.contains(lane); });
-  if (icon_toggle(ctx, gui::ui_id(id_, "plateset solo", row.node.value()),
-                  solo_chip, gui::Icon::Solo, soloed, theme.warning,
-                  soloed ? "Soloed: the Stage draws only this set's plates "
-                           "and whatever else is soloed. Program and the "
-                           "outputs draw everything."
-                         : "Solo the set on the Stage: draw only its plates "
-                           "while you work. Program is unaffected.")) {
-    for (const doc::NodeId lane : group.lanes) {
-      if (soloed) {
-        soloed_.erase(lane);
-      } else {
-        soloed_.insert(lane);
-      }
-    }
-  }
-  constexpr float icon = 18.0F;
-  const gui::Rect mark{rc.content_x + 1.0F, rc.centre_y - icon * 0.5F, icon,
-                       icon};
-  draw_plateset_icon(ctx, mark);
-  rc.name_x = mark.right() + 7.0F;
-  std::string count = std::to_string(group.lanes.size()) +
-                      (group.lanes.size() == 1U ? " plate" : " plates");
-  if (group.takes.size() > 1U) {
-    count += ", " + std::to_string(group.takes.size()) + " takes";
-  }
-  const float count_width = ctx.font_width(count) + 1.0F;
-  const float count_right = solo_chip.x - 6.0F;
-  const float count_left = count_right - count_width;
-  const bool count_fits = count_left >= rc.name_x + 40.0F;
-  rc.name_bounds = gui::Rect{
-      rc.name_x, rc.y,
-      std::max((count_fits ? count_left - 8.0F : count_right) - rc.name_x,
-               0.0F),
-      row.height};
-  row_name_label(rc, row.muted ? theme.text_muted : theme.text);
-  if (count_fits) {
-    ctx.label(gui::Rect{count_left, rc.y, count_width, row.height}, count,
-              theme.text_muted);
-  }
-  ctx.tooltip(mark, rc.open ? "A placed plateset, its plate tracks listed "
-                              "below. Twirl or double-click to fold them "
-                              "into this row."
-                            : "A placed plateset: its plate tracks folded "
-                              "into this row. Twirl or double-click to list "
-                              "them.");
-}
-
-// A take row's lane: a bar per take, washed in the set's colour like a
-// track's bar and named for the set, with its trim edges, ramps and fade
-// knobs and what a press would do. The clip helpers draw each bar in turn.
-void TimelinePanel::plateset_takes_cell(RowContext &rc) {
-  Pass &p = rc.p;
-  gui::UiContext &ctx = p.ctx;
-  const gui::Rect &graph = p.layout.graph;
-  const std::span<const doc::NodeId> selection = p.input.selection;
-  const Row &row = rc.row;
-  const PlatesetGroup &group = p.built.platesets[row.plateset];
-  summary_lane_cell(rc, false);
-  for (const RowContext::TakeBar &shown : rc.take_bars) {
-    const PlatesetTake &take = group.takes[shown.take];
-    rc.clip_item = shown.take;
-    rc.clip_bar = shown.bar;
-    rc.clip_timing = shown.timing;
-    rc.clip_fade_in_x = shown.fade_in_x;
-    rc.clip_fade_out_x = shown.fade_out_x;
-    const gui::Rect &bar = shown.bar;
-    const bool live = clip_.drag != ClipDrag::None && clip_.node == take.lead;
-    const float strength = take.locked ? 0.5F : 1.0F;
-    ctx.rounded(bar, alpha(row.color, (live ? 0.42F : 0.30F) * strength),
-                clip_radius(bar));
-    // A hairline per plate along the foot: the take is several pictures.
-    if (take.clips.size() > 1U && bar.height >= 14.0F) {
-      const float pitch = std::min(
-          3.0F, (bar.height - 10.0F) / static_cast<float>(take.clips.size()));
-      for (std::size_t plate = 0U; plate < take.clips.size(); ++plate) {
-        ctx.panel(gui::Rect{bar.x + 3.0F,
-                            bar.bottom() - 3.0F -
-                                pitch * static_cast<float>(plate + 1U),
-                            std::max(bar.width - 6.0F, 0.0F), 1.0F},
-                  alpha(row.color, 0.35F * strength));
-      }
-    }
-    draw_clip_edges(rc);
-    if (!take.locked) {
-      draw_clip_ramps(rc);
-    }
-    const float name_left =
-        std::max(bar.x, graph.x) + 6.0F + edge_grab_width(bar.width);
-    const float name_right = bar.right() - 6.0F;
-    if (name_right - name_left >= 24.0F) {
-      std::string name = row.label;
-      if (clip_.drag == ClipDrag::Slip && live) {
-        name += "  Source " + std::to_string(shown.timing.source_in);
-      }
-      ctx.label(gui::span_x(bar, name_left, name_right),
-                elide_middle(ctx, name, name_right - name_left),
-                take.locked ? ctx.theme().text_muted : ctx.theme().text);
-    }
-    const bool chosen =
-        !take.clips.empty() &&
-        std::all_of(take.clips.begin(), take.clips.end(),
-                    [&](doc::NodeId clip) { return selected(clip, selection); });
-    if (chosen) {
-      ctx.glow(bar, ctx.theme().accent, clip_radius(bar), 8.0F);
-      ctx.rounded_outline(bar, ctx.theme().text, clip_radius(bar), 1.5F);
-    }
-    if (!take.locked) {
-      draw_clip_hover(rc);
-      if (p.hover_owner.has_value() &&
-          tag_row(p.hover_owner->tag) == rc.index &&
-          tag_item(p.hover_owner->tag) == shown.take &&
-          tag_part(p.hover_owner->tag) == RowPart::ClipBody) {
-        ctx.tooltip(bar, "The take on every plate: drag to move it, drag an "
-                         "end to trim it, the razor cuts it. Double-click "
-                         "to list each plate's track.");
-      }
-    }
-  }
-  rc.clip_item = 0U;
-}
-
-// A press on a take's bar. The take is chosen whole; then the razor cuts its
-// lead plate where it lands (Shift: every clip on every track), Slip slips
-// it, and anything else lifts it as Selection would. The shell carries each
-// edit of the lead plate to the take's other plates in the same undo step,
-// so the bar authors exactly what a drag on the front plate's own clip
-// does. Ripple, roll and slide would move one plate's neighbours alone, so
-// the bar answers them as Selection does.
-void TimelinePanel::press_take_bar(RowContext &rc, ClipDrag part,
-                                   std::size_t take_index) {
-  Pass &p = rc.p;
-  gui::UiContext &ctx = p.ctx;
-  const std::span<const ElementInfo> elements = p.input.elements;
-  TimelinePanelFrame &frame = p.frame;
-  const Row &row = rc.row;
-  const PlatesetGroup &group = p.built.platesets[row.plateset];
-  clip_.press_consumed = true;
-  if (take_index >= group.takes.size()) {
-    return;
-  }
-  const PlatesetTake &take = group.takes[take_index];
-  const ElementInfo *const lead = find_element(elements, take.lead);
-  if (lead == nullptr) {
-    return;
-  }
-  keys_.selected.clear();
-  keys_.drag_keys.clear();
-  keys_.dragging = false;
-  keys_.duplicate = false;
-  markers_.selected.clear();
-  selected_lane_ = doc::NodeId{};
-  TimelineSelectionRequest next{};
-  next.node = take.lead;
-  next.members = take.clips;
-  frame.selection = std::move(next);
-  if (edit_tool_ == TimelineEditTool::Razor) {
-    const core::i64 cut = razor_frame(p, ctx.pointer_press_x());
-    for (const ElementInfo &element : elements) {
-      if (!editable_clip(element) ||
-          (element.node != take.lead && !ctx.shift_held())) {
-        continue;
-      }
-      if (cut > element.timing.start && cut <= element.timing.last_frame()) {
-        frame.clip_splits.push_back(TimelineClipSplit{element.node, cut});
-      }
-    }
-    return;
-  }
-  // A second press on the bar opens or closes the row, as its twirl does.
-  if (clicks_.double_click(gui::ui_id(id_, "plateset take", row.node.value()),
-                           ctx.time_seconds())) {
-    if (rows_state_.expanded_platesets.contains(row.node)) {
-      rows_state_.expanded_platesets.erase(row.node);
-    } else {
-      rows_state_.expanded_platesets.insert(row.node);
-    }
-    return;
-  }
-  lift_clip(p,
-            edit_tool_ == TimelineEditTool::Slip ? ClipDrag::Slip : part,
-            take.lead, shown_timing(*lead), ctx.pointer_released());
-  clip_.take = true;
 }
 
 // A placed clip: body, filmstrip and waveform, trim edges, ramps and fade
@@ -2203,7 +1843,6 @@ void TimelinePanel::draw_clip_ramps(RowContext &rc) {
     const bool near = clip_.drag == ClipDrag::None &&
                       p.hover_owner.has_value() &&
                       tag_row(p.hover_owner->tag) == rc.index &&
-                      tag_item(p.hover_owner->tag) == rc.clip_item &&
                       tag_part(p.hover_owner->tag) == part;
     const bool lit = engaged || near;
     draw_filled_circle(ctx, handle_x, clip_bar.y + 1.0F,
@@ -2291,8 +1930,7 @@ void TimelinePanel::draw_clip_hover(RowContext &rc) {
   // What a press here would do, shown before it is done: the trim edge
   // under a Selection pointer lights, and the razor draws its cut.
   const RowPart hovered =
-      p.hover_owner.has_value() && tag_row(p.hover_owner->tag) == rc.index &&
-              tag_item(p.hover_owner->tag) == rc.clip_item
+      p.hover_owner.has_value() && tag_row(p.hover_owner->tag) == rc.index
           ? tag_part(p.hover_owner->tag)
           : RowPart::Lane;
   if (hovered != RowPart::Lane && clip_.drag == ClipDrag::None &&
@@ -2415,7 +2053,6 @@ void TimelinePanel::lift_clip(Pass &p, ClipDrag drag, doc::NodeId node,
   gui::UiContext &ctx = p.ctx;
   clip_.drag = drag;
   clip_.node = drag != ClipDrag::None ? node : doc::NodeId{};
-  clip_.take = false;
   clip_.origin = timing;
   clip_.proposed = timing;
   clip_.status.clear();
@@ -2494,15 +2131,7 @@ void TimelinePanel::lane_press(RowContext &rc) {
                        owned == RowPart::FadeIn || owned == RowPart::FadeOut;
   const bool razor_press = owned_here && on_clip &&
                            edit_tool_ == TimelineEditTool::Razor;
-  if (owned_here && on_clip && row.kind == Row::Kind::PlatesetHeader) {
-    press_take_bar(rc,
-                   owned == RowPart::TrimIn    ? ClipDrag::TrimIn
-                   : owned == RowPart::TrimOut ? ClipDrag::TrimOut
-                   : owned == RowPart::FadeIn  ? ClipDrag::FadeIn
-                   : owned == RowPart::FadeOut ? ClipDrag::FadeOut
-                                               : ClipDrag::Move,
-                   owned_item);
-  } else if (owned_here && on_clip && rc.track_bar) {
+  if (owned_here && on_clip && rc.track_bar) {
     press_track_bar(rc, owned == RowPart::TrimIn    ? ClipDrag::TrimIn
                         : owned == RowPart::TrimOut ? ClipDrag::TrimOut
                                                     : ClipDrag::Move);
@@ -2642,7 +2271,7 @@ void TimelinePanel::note_row_menu_press(RowContext &rc) {
 }
 
 // A press on a key: it becomes the active channel, the selection takes the
-// key (Ctrl toggles it, Shift adds it), and unless Ctrl just dropped it the
+// key (Shift or Ctrl toggles it), and unless the toggle just dropped it the
 // whole selection lifts for a shared-delta drag.
 void TimelinePanel::press_key(Pass &p, const SelectedKey &hit) {
   gui::UiContext &ctx = p.ctx;
@@ -2652,15 +2281,11 @@ void TimelinePanel::press_key(Pass &p, const SelectedKey &hit) {
   bool begin_drag = true;
   const auto selected_it =
       std::find(keys_.selected.begin(), keys_.selected.end(), hit);
-  if (ctx.ctrl_held()) {
+  if (ctx.shift_held() || ctx.ctrl_held()) {
     if (selected_it != keys_.selected.end()) {
       keys_.selected.erase(selected_it);
       begin_drag = false;
     } else {
-      keys_.selected.push_back(hit);
-    }
-  } else if (ctx.shift_held()) {
-    if (selected_it == keys_.selected.end()) {
       keys_.selected.push_back(hit);
     }
   } else if (selected_it == keys_.selected.end()) {

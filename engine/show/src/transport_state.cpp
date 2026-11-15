@@ -327,25 +327,11 @@ std::optional<TransportAnchor> read_transport(const doc::Root& root) noexcept {
             anchor.rate.denominator)
         || !read_u64(node->properties, transport_property::first_frame, first)
         || !read_u64(node->properties, transport_property::last_frame, last)
-        || !read_bool(node->properties, transport_property::loop, anchor.loop)) {
-        return std::nullopt;
-    }
-    // Optional, but a value that is present has to be the right type: a
-    // mistyped flag is a damaged node, not an armed one.
-    if (node->properties.find(transport_property::cues_armed)
-            != node->properties.end()
-        && !read_bool(
-            node->properties,
-            transport_property::cues_armed,
-            anchor.cues_armed)) {
-        return std::nullopt;
-    }
-    if (node->properties.find(transport_property::scheduled)
-            != node->properties.end()
-        && !read_bool(
-            node->properties,
-            transport_property::scheduled,
-            anchor.scheduled)) {
+        || !read_bool(node->properties, transport_property::loop, anchor.loop)
+        || !read_bool(
+            node->properties, transport_property::cues_armed, anchor.cues_armed)
+        || !read_bool(
+            node->properties, transport_property::scheduled, anchor.scheduled)) {
         return std::nullopt;
     }
 

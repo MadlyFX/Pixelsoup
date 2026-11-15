@@ -154,8 +154,12 @@ struct Rig {
             {{"scene_name",std::string{"Blender Preview"}},{"canvas_width",core::i64{640}},
              {"canvas_height",core::i64{360}},{"ambient",0.8}}});
         context.document=context.document.set({program,std::string{ss::stage_type},{{"scene_name",std::string{"Program"}}}});
+        scene::Camera aim{}; aim.eye=scene::Vec3{0.0F,1.5F,6.0F}; aim.target=scene::Vec3{0.0F,0.0F,-1.0F};
+        const scene::Vec3 turns=scene::camera_rotation(aim);
         context.document=context.document.set({doc::NodeId{12},std::string{ss::camera_type},
-            {{"scene_id",static_cast<core::i64>(preview.value())},{"eye_z",6.0},{"eye_y",1.5}}});
+            {{"scene_id",static_cast<core::i64>(preview.value())},{"position_y",1.5},{"position_z",6.0},
+             {"rotation_yaw",(static_cast<double>(turns.x)+0.0)},{"rotation_pitch",(static_cast<double>(turns.y)+0.0)},
+             {"rotation_roll",(static_cast<double>(turns.z)+0.0)}}});
         context.document=context.document.set(show::make_switcher_node({program,preview,program,program,{},0}));
         context.target=preview; context.program=program; context.project=1;
         check(static_cast<bool>(director.schedule_document_replace(context.document,cmd::UndoContextId{2},

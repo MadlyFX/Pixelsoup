@@ -274,6 +274,228 @@ void EditorShell::Frame::emit_transform(const TransformDelta &delta,
   }
 }
 
+// One move each for the captured elements, `translations` parallel to them:
+// what Align and Distribute author. An element with nowhere to go is left
+// alone rather than given a key it never asked for.
+void EditorShell::Frame::emit_moves(std::span<const scene::Vec3> translations,
+                                    core::u64 gesture) {
+  for (std::size_t index = 0U;
+       index < impl.group_nodes.size() && index < translations.size();
+       ++index) {
+    const scene::Vec3 &translation = translations[index];
+    if (translation.x == 0.0F && translation.y == 0.0F &&
+        translation.z == 0.0F) {
+      continue;
+    }
+    const doc::NodeId node = impl.group_nodes[index];
+    TransformDelta delta{};
+    delta.tool = TransformTool::Move;
+    delta.translation = translation;
+    const TransformResult moved =
+        apply_transform(impl.group_transform[index], delta);
+    const bool position_keyed = impl.timeline_panel.auto_key_enabled() && (
+        keyed(keyframes, node, scene::TransformChannel::PositionX) ||
+        keyed(keyframes, node, scene::TransformChannel::PositionY) ||
+        keyed(keyframes, node, scene::TransformChannel::PositionZ));
+    if (!position_keyed) {
+      result.edits.push_back(EditIntent{node, moved.position, gesture});
+    } else {
+      emit_components(node, scene::TransformChannel::PositionX,
+                      moved.position, gesture);
+    }
+  }
+}
+
+// Align and Distribute from Program's options bar, by what each selected
+// layer covers on the picture: lined up with the box round them all - or
+// with the canvas, for one layer alone - or spaced evenly between the two
+// outermost. One undo step.
+void EditorShell::Frame::align_selection(std::size_t choice,
+                                         const scene::Scene &authored,
+                                         const scene::Scene &view,
+                                         const ViewportProjection *projection) {
+  std::vector<doc::NodeId> nodes;
+  std::vector<CanvasBox> boxes;
+  for (const doc::NodeId node : impl.scene_selection.members()) {
+    const ElementInfo *const element = find_element(elements, node);
+    if (element == nullptr || element->locked) {
+      continue;
+    }
+    if (const auto box =
+            impl.program_panel.canvas_box_bounds(view, node, projection)) {
+      nodes.push_back(node);
+      boxes.push_back(*box);
+    }
+  }
+  if (nodes.empty()) {
+    return;
+  }
+  const scene::Canvas canvas =
+      projection != nullptr && projection->project ? projection->canvas
+                                                   : view.canvas;
+  std::vector<CanvasMove> moves;
+  if (choice < 6U) {
+    const CanvasBox reference =
+        boxes.size() >= 2U
+            ? bounds_of(boxes)
+            : CanvasBox{0.0F, 0.0F, static_cast<float>(canvas.width),
+                        static_cast<float>(canvas.height)};
+    moves = align_boxes(boxes, reference, static_cast<CanvasAlign>(choice));
+  } else {
+    moves = distribute_boxes(boxes, choice == 6U);
+  }
+  impl.history_context = HistoryContext::Scene;
+  capture_group(authored, view);
+  std::vector<scene::Vec3> translations(impl.group_nodes.size());
+  bool any = false;
+  for (std::size_t index = 0U; index < nodes.size(); ++index) {
+    const auto captured = std::find(impl.group_nodes.begin(),
+                                    impl.group_nodes.end(), nodes[index]);
+    if (captured == impl.group_nodes.end() ||
+        (moves[index].x == 0.0F && moves[index].y == 0.0F)) {
+      continue;
+    }
+    // Each way on its own, through the same resolution the options bar's
+    // X and Y use; a move across and one down simply add.
+    scene::Vec3 translation{};
+    const auto metrics =
+        impl.program_panel.canvas_box_metrics(view, nodes[index], projection);
+    if (!metrics.has_value()) {
+      continue;
+    }
+    if (moves[index].x != 0.0F) {
+      if (const auto across = impl.program_panel.canvas_box_edit(
+              view, nodes[index], projection, CanvasBoxField::X,
+              metrics->x + moves[index].x)) {
+        translation = translation + across->translation;
+      }
+    }
+    if (moves[index].y != 0.0F) {
+      if (const auto down = impl.program_panel.canvas_box_edit(
+              view, nodes[index], projection, CanvasBoxField::Y,
+              metrics->y + moves[index].y)) {
+        translation = translation + down->translation;
+      }
+    }
+    translations[static_cast<std::size_t>(
+        std::distance(impl.group_nodes.begin(), captured))] = translation;
+    any = true;
+  }
+  if (any) {
+    emit_moves(translations, impl.next_edit_gesture++);
+    impl.semantic_boundary = true;
+  }
+  impl.group_nodes.clear();
+  impl.group_start.clear();
+}
+
+// A shape finished on Program Output. Drawn on a layer it is a mask of that
+// layer, in the layer's own coordinates. Drawn on bare picture it is a new
+// Background card standing where it was drawn, facing the camera, on the
+// plane through what the camera looks at - a rectangle is the card itself,
+// an ellipse or a curve the card with that mask - as one undo step.
+void EditorShell::Frame::author_canvas_shape(
+    const CanvasShape &shape, const scene::Scene &view,
+    const ViewportProjection *projection) {
+  const bool pen = shape.tool == CanvasTool::Pen;
+  if (pen && shape.points.size() < 3U) {
+    return;
+  }
+  if (shape.on_layer) {
+    const ElementInfo *const element = find_element(elements, impl.anchor());
+    if (element == nullptr || element->locked) {
+      return;
+    }
+    scene::MaskShape drawn;
+    const scene::MaskBounds bounds{shape.left, shape.top, shape.right,
+                                   shape.bottom};
+    if (pen) {
+      drawn = scene::BezierMaskShape{shape.points};
+    } else if (shape.tool == CanvasTool::Ellipse) {
+      drawn = scene::EllipseMaskShape{bounds};
+    } else {
+      drawn = scene::RectangleMaskShape{bounds};
+    }
+    queue_mask_edit(MaskEditRequest{MaskDrawIntent{
+        authored_stage.id, element->node,
+        scene::MaskCoordinateSpace::SourceLayer, std::move(drawn)}});
+    return;
+  }
+
+  // The box the shape covers, in canvas pixels. A curve lies inside the
+  // hull of its points and handles.
+  float left = shape.left;
+  float top = shape.top;
+  float right = shape.right;
+  float bottom = shape.bottom;
+  if (pen) {
+    left = right = shape.points.front().x;
+    top = bottom = shape.points.front().y;
+    for (const scene::MaskPointGeometry &point : shape.points) {
+      for (const float x : {point.x, point.in_x, point.out_x}) {
+        left = std::min(left, x);
+        right = std::max(right, x);
+      }
+      for (const float y : {point.y, point.in_y, point.out_y}) {
+        top = std::min(top, y);
+        bottom = std::max(bottom, y);
+      }
+    }
+  }
+  if (!(right - left > 0.5F) || !(bottom - top > 0.5F)) {
+    return;
+  }
+  const scene::Vec3 forward =
+      scene::normalize(view.camera.target - view.camera.eye);
+  const scene::Vec3 across =
+      scene::normalize(scene::cross(forward, view.camera.up),
+                       scene::Vec3{1.0F, 0.0F, 0.0F});
+  const scene::Vec3 upward = scene::cross(across, forward);
+  const auto top_left = impl.program_panel.canvas_point_on_plane(
+      view, projection, view.camera.target, across, upward, left, top);
+  const auto bottom_right = impl.program_panel.canvas_point_on_plane(
+      view, projection, view.camera.target, across, upward, right, bottom);
+  if (!top_left.has_value() || !bottom_right.has_value()) {
+    return;
+  }
+  const float card_width = scene::dot(*bottom_right - *top_left, across);
+  const float card_height =
+      scene::dot(*top_left - *bottom_right, upward);
+  if (!(card_width > 1.0e-4F) || !(card_height > 1.0e-4F)) {
+    return;
+  }
+  AddIntent add{};
+  add.kind = AddKind::Background;
+  add.gesture = impl.next_edit_gesture++;
+  add.scene = authored_stage.id;
+  add.position = (*top_left + *bottom_right) * 0.5F;
+  add.rotation = rotation_turns_of({across, upward, forward * -1.0F});
+  add.scale = scene::Vec3{card_width, card_height, 1.0F};
+  add.select = true;
+  if (pen) {
+    // The same curve as fractions of the card it now fills.
+    scene::BezierMaskShape curve{shape.points};
+    for (scene::MaskPointGeometry &point : curve.points) {
+      for (float *const x : {&point.x, &point.in_x, &point.out_x}) {
+        *x = (*x - left) / (right - left);
+      }
+      for (float *const y : {&point.y, &point.in_y, &point.out_y}) {
+        *y = (*y - top) / (bottom - top);
+      }
+    }
+    add.mask = std::move(curve);
+    add.name = "Shape";
+  } else if (shape.tool == CanvasTool::Ellipse) {
+    add.mask = scene::EllipseMaskShape{};
+    add.name = "Ellipse";
+  } else {
+    add.name = "Rectangle";
+  }
+  result.adds.push_back(std::move(add));
+  impl.history_context = HistoryContext::Scene;
+  impl.semantic_boundary = true;
+}
+
 // Alt+G / Alt+R / Alt+S over the Stage: Blender's clear location, rotation
 // and scale, as one undo step for the whole selection.
 void EditorShell::Frame::clear_transform(TransformTool tool,
@@ -420,15 +642,26 @@ void EditorShell::Frame::handle_viewport(const ViewportFrame &viewport,
       // select_only()/toggle(). It is still an explicit choice of the Scene
       // history domain for the global undo/redo actions.
       impl.history_context = HistoryContext::Scene;
+      // Ctrl is not a selection modifier here; it is the snapping switch
+      // for the drag.
       const doc::NodeId picked = viewport.picked.value();
-      if (ui.ctrl_held()) {
+      const CanvasClick click = canvas_click_action(
+          ui.shift_held(), viewport.replace_pick || ui.alt_held(),
+          impl.is_selected(picked));
+      if (click == CanvasClick::Toggle) {
         impl.toggle(picked);
-      } else if (ui.shift_held() || !impl.is_selected(picked)) {
-        // A spatial viewport has no stable visible row order, so Shift is a
-        // plain replacement here. Only Ctrl is the exact membership toggle.
+      } else if (click == CanvasClick::Replace) {
         impl.select_only(picked);
       } else {
         impl.scene_selection.set_primary(picked);
+      }
+      // A car's wall has no Timeline row until its screens are listed, so
+      // picking one here lists it: the same screen is then the selected row
+      // there, as selecting the row selects it here.
+      if (const ElementInfo *const wall = find_element(elements, picked);
+          wall != nullptr && wall->kind == ElementKind::Track &&
+          wall->vehicle_track != doc::NodeId{} && impl.is_selected(picked)) {
+        impl.timeline_panel.reveal(picked, ui.time_seconds());
       }
       if (impl.is_selected(picked)) {
         capture_group(authored_view, display_view);
@@ -843,6 +1076,48 @@ void EditorShell::Frame::confirm_discard(std::string_view action,
   message.append(action);
   message.append(". Continue?");
   open_confirm_dialog("Unsaved Project", std::move(message), std::move(then));
+}
+
+void EditorShell::Frame::offer_recovery() {
+  if (!project.recovery_available) {
+    impl.recovery_asked = false;
+    return;
+  }
+  if (impl.recovery_asked || impl.dialog.pending()) {
+    return;
+  }
+  impl.recovery_asked = true;
+  std::string message{"Media Server stopped before the changes to "};
+  if (project.recovery_project.empty()) {
+    message.append("an untitled project");
+  } else {
+    message.append(project.recovery_project);
+  }
+  message.append(" were saved. A copy from ");
+  message.append(project.recovery_saved_at);
+  message.append(
+      " was kept.\n\nOpen the recovered changes? They stay unsaved until "
+      "you save the project. Choose No to carry on without them.");
+  // Both answers come back, so the Director knows a No from a dialog that
+  // never opened: a No stops the offer, an unopened dialog asks again.
+  open_file_dialog(
+      [message = std::move(message)]() -> std::optional<std::string> {
+        return std::string{tinyfd_messageBox("Recover Unsaved Changes",
+                                             message.c_str(), "yesno",
+                                             "question", 1) != 0
+                               ? "yes"
+                               : "no"};
+      },
+      [](Frame &frame, std::string answer) {
+        if (answer == "yes") {
+          frame.result.recover_project = true;
+        } else {
+          frame.result.dismiss_recovery = true;
+        }
+      });
+  if (!impl.dialog.pending()) {
+    impl.recovery_asked = false;
+  }
 }
 
 void EditorShell::Frame::save_project() {

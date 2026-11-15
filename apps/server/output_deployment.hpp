@@ -10,7 +10,9 @@
 namespace mediaserver::app {
 
 enum class OutputDeploymentIssueCode : core::u8 {
-    MissingRenderServer,
+    // The Render Server card owning this node binds no display target, so
+    // there is nothing for the process to open.
+    NoBoundDisplay,
     DuplicateRenderServer,
     InventoryUnavailable,
     MissingDisplayTarget,
@@ -27,7 +29,7 @@ enum class OutputDeploymentIssueCode : core::u8 {
 };
 
 struct OutputDeploymentIssue final {
-    OutputDeploymentIssueCode code{OutputDeploymentIssueCode::MissingRenderServer};
+    OutputDeploymentIssueCode code{OutputDeploymentIssueCode::NoBoundDisplay};
     doc::NodeId binding{};
     topology::HardwareDisplayTargetKey target;
     std::string message;
@@ -49,9 +51,8 @@ struct DeployedOutput final {
 struct OutputDeployment final {
     doc::NodeId render_server{};
     core::u32 node_index{};
-    // Legacy projects have no explicit bindings and retain one CLI/device
-    // presenter. New projects contain one entry per real display target.
-    bool legacy_single_output{};
+    // One entry per bound display target of the owning Render Server, or the
+    // single command-line window of a node no Render Server card names.
     std::vector<DeployedOutput> outputs;
     std::vector<OutputDeploymentIssue> issues;
 
@@ -73,7 +74,9 @@ runtime_output_deployment_state(const OutputDeployment& deployment) noexcept;
 // Resolves only the RenderServer whose process identity equals
 // options.node_index. Active display discovery is an input, never project
 // authoring; a missing target therefore produces a deterministic issue while
-// leaving the saved binding untouched for repair.
+// leaving the saved binding untouched for repair. A node index no Render
+// Server card owns is a command-line launch and gets its launch window; a
+// card with no output bindings opens nothing and reports NoBoundDisplay.
 [[nodiscard]] OutputDeployment resolve_output_deployment(
     const PlaybackOptions& options,
     const topology::HardwareMap& hardware,

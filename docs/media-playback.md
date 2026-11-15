@@ -162,15 +162,28 @@ video-plane path per source when any of them is not true:
 
 - the renderer is on the native D3D12 backend; SDL Basic keeps the
   system-memory path;
-- the process renders scenes on one device. A decoded surface belongs to the
-  device that made it, so a second scene device retires the path rather than
-  handing a surface to the wrong one;
+- every live scene renderer in the process is on one device. A decoded
+  surface belongs to the device that made it, so while a second device has a
+  scene renderer the path is suspended rather than handing a surface to the
+  wrong one, and it resumes when one device is left. Direct3D 12 gives every
+  device created on one adapter the same device object, so the outputs of a
+  node driving several displays from one GPU are one device here; two
+  adapters are two;
 - the source resolves to Rec.709;
 - the surface is NV12 or P010. Both depths are carried: an eight-bit surface
   is read as R8/Rg8 plane views and a ten-bit one as R16/Rg16, and the RHI
   refuses a view whose depth does not match the surface rather than
   reinterpreting the bytes. A 4:2:2 or twelve-bit hardware surface, should a
   later codec produce one, goes back through system memory.
+
+Each scene renderer offers its device for as long as it exists and the offer
+is withdrawn with it, so an output redeploy - which replaces every renderer -
+moves decode to the device the new renderers are on. Clips already open are
+reopened onto it at their next frame, at the cost of one walk to a keyframe.
+A frame left on a device that is no longer decoded onto is decoded again
+instead of being handed to a renderer that cannot read it, so a paused clip
+does not hold a picture nothing can draw. With no scene renderer at all,
+video decodes through system memory.
 
 Such a frame is held until the renderer is finished with it: releasing it
 would return the surface to the decoder's pool while a submitted command list
@@ -219,7 +232,7 @@ does.
 ## Editor proxies
 
 The editor decodes a 720p H.264 proxy for every video asset larger than
-1920 x 1080 instead of its source. The Director makes these proxies itself,
+1280 x 720 instead of its source. The Director makes these proxies itself,
 in the background, as soon as such an asset is in the project; output nodes
 never make or play them, and they are not saved with the project. Until an
 asset's proxy is ready its clips show the source, so nothing waits.

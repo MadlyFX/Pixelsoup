@@ -1,14 +1,38 @@
 #pragma once
 
-// The Director's frame loop, split into named phases.
+// The Director's frame loops, split into named phases.
 //
 // run_director_show owns every piece of show state and builds it in the order
-// start-up needs. DirectorShowLoop names that state by reference, so each
-// phase below reads and writes exactly what the single loop body used to, and
-// the phases run in the order the body ran them: pace, seal (operator input is
-// authored onto the first sealed frame), evaluate the committed frame, refresh
-// the editor, present, report. Values that only live for one iteration are in
-// DirectorTick; the editor projection's inputs are in EditorViewInputs.
+// start-up needs. DirectorShowLoop names that state by reference, and two
+// threads work on it:
+//
+//   The sealing thread (control_loop) wakes at every show boundary, paces,
+//   seals the control frames that are due, retires the ones the cohort has
+//   finished and samples the camera trackers. Nothing else: it never draws,
+//   evaluates a scene or opens a file, because what it sends is what every
+//   node presents.
+//
+//   The show thread (show_loop) does the rest, in this order: evaluate the
+//   committed frame, refresh the editor, present, author the operator's input
+//   onto the next control frame, report. It is as slow as the scene, the GPU
+//   and the operator's panels make it.
+//
+// They take turns through `authority_gate` (authority_gate.hpp). The show
+// thread is inside the gate for all of its document work and leaves it -
+// AuthorityGate::Away - around what can block: drawing the editor,
+// presenting, and writing files. Reading a project is on neither thread;
+// ProjectLoader does it and the show thread adopts the answer.
+//
+// What the sealing thread touches is listed at control_loop. The show thread
+// may leave the gate only while nothing it handed out refers to that state;
+// what the sealing thread has to tell the operator therefore goes through
+// SealerNotes and is taken over inside the gate, never written into a string
+// the editor may be drawing.
+//
+// Values that only live for one iteration are in DirectorTick and
+// ControlTick; the editor projection's inputs are in EditorViewInputs.
+
+#include "authority_gate.hpp"
 
 #include "camera_prediction.hpp"
 #include "clip_clipboard.hpp"
@@ -19,6 +43,8 @@
 #include "playback_media.hpp"
 #include "playback_runtime.hpp"
 #include "project_assets.hpp"
+#include "project_autosave.hpp"
+#include "project_loader.hpp"
 #include "proxy_playback.hpp"
 #include "renderer_lockstep.hpp"
 #include "tracker_listener.hpp"
@@ -63,10 +89,12 @@
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/render/render_conformance.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -102,13 +130,41 @@ struct DirectorSyncView final {
     sync::SyncReadiness readiness{};
 };
 
-// Values one loop iteration derives and several phases read: the pacing
-// decision, then the committed frame the Director evaluated after sealing.
-struct DirectorTick final {
+// One wake of the sealing thread: when it woke and how many frames are due.
+struct ControlTick final {
     Clock::time_point now{};
     core::u64 due{};
+    core::u64 sealed{};
+};
+
+// What the sealing thread has to say to the operator or hand to the show
+// thread. Written and taken inside the gate.
+struct SealerNotes final {
+    std::optional<std::string> project_message;
+    std::optional<std::string> publication_message;
+    // The sealing thread stopped, with the process exit code it stopped on,
+    // or with the exception that stopped it.
+    std::optional<int> exit;
+    std::exception_ptr failure;
+    // It sealed the last of --run-frames and will seal no more.
+    bool finished{};
+};
+
+// Which camera follows which tracker feed, as of the frame the show thread
+// last evaluated. The sealing thread samples every feed against it at each
+// boundary; it is at most the show thread's own lag behind the document.
+struct TrackingPlan final {
+    std::vector<scene::TrackingSource> sources;
+    std::vector<scene::TrackedCameraView> cameras;
+    scene::IcvfxSettings icvfx{};
+};
+
+// Values one show-thread iteration derives and several phases read: the
+// committed frame the Director evaluated, and what it found there.
+struct DirectorTick final {
+    Clock::time_point now{};
+    // Control frames sealed since the previous iteration looked.
     core::u64 sealed_this_iteration = 0U;
-    std::optional<show::FrameRate> repace_after_seal;
 
     cmd::FrameNumber control_frame{};
     show::TestPatternInput input{};
@@ -135,7 +191,6 @@ struct DirectorTick final {
     std::optional<show::TransportBlend> loop_blend;
     output::FeedMap feed_map;
     topology::HardwareMap hardware_map;
-    ProjectAssetManifest asset_manifest;
     // The graph of the scene on the Stage - the one the Compositor panel
     // edits. Program renders its own, which is the same object except while
     // Preview is showing a different scene.
@@ -232,8 +287,7 @@ struct DirectorShowLoop final {
     std::optional<std::filesystem::path> &workspace_layout_file;
     show::ShowClock &pacer;
     sync::DirectorClockStatus &director_clock;
-    bool &director_reference_seen;
-    core::u32 &director_last_reference_frame;
+    show::VideoReferenceCadence &director_reference;
     show::TransportAuthority &transport;
     std::deque<net::DirectorFrameBarrierId> &tracked;
     std::vector<show::PresenterCommand> &operator_commands;
@@ -348,6 +402,10 @@ struct DirectorShowLoop final {
     doc::Root &saved_project_snapshot;
     bool &project_explicitly_dirty;
     core::u64 &project_generation;
+    // Recovery copies of unsaved work, and the copy found at start-up that
+    // the operator has not answered for yet.
+    std::unique_ptr<ProjectAutosave> &project_autosave;
+    std::optional<ProjectRecovery> &project_recovery;
     render::LinkedSceneIngest &linked_ingest;
     BlenderLinks &blender_links;
     std::string &blender_store_project;
@@ -446,7 +504,32 @@ struct DirectorShowLoop final {
     bool &compositor_loaded;
 
     // Owned by the loop rather than bound to playback.cpp locals.
+
+    // The turn-taking between the two threads; see the top of this file.
+    AuthorityGate authority_gate{};
+    // Each thread's own waiter. The other thread only ever calls notify():
+    // the sealing thread on the show thread's after sealing, and the show
+    // thread on the sealing thread's to stop it.
     show::FrameWaiter frame_waiter{};
+    show::FrameWaiter seal_waiter{};
+    std::atomic<bool> sealing_stopped{};
+    SealerNotes sealer_notes{};
+    // How many sealed frames the show thread had seen when it last evaluated.
+    core::u64 evaluated_sealed{};
+    // The control frame operator input was last authored onto. One pass per
+    // frame: a second would author into a transaction the first already
+    // closed, so input that arrives meanwhile waits for the next frame, as it
+    // always waited for the next boundary.
+    std::optional<cmd::FrameNumber> operator_input_frame{};
+    // The rate the frame carrying that input changes the show to. The
+    // sealing thread re-anchors its pacer once that frame is sealed.
+    std::optional<show::FrameRate> repace_after_seal{};
+    // The Director's own house reference, read from its presenter by the show
+    // thread - the only thread that may call the presenter - and paced from
+    // by the sealing thread.
+    show::VideoReferenceSample director_video_reference{
+        show::VideoReferenceState::Unsupported, 0U};
+    TrackingPlan tracking_plan{};
     show::BoundaryLateness boundary_lateness{};
     ControlBacklogWatch backlog_watch{};
     core::u64 reported_lockstep_demotions{};
@@ -479,18 +562,76 @@ struct DirectorShowLoop final {
     editor::AssetViewerRendition asset_viewer_rendition{
         editor::AssetViewerRendition::None};
     std::vector<editor::SourceRangeEditIntent> pending_source_edits{};
+    // Who asked for the project load now pending. The start-up reopen and a
+    // recovery leave the recovery copy alone; an operator's own Open or New
+    // gave the previous project's changes up, so its copy goes.
+    enum class ProjectLoadOrigin : core::u8 { Startup, Operator, Recovery };
+    ProjectLoadOrigin pending_load_origin{ProjectLoadOrigin::Startup};
+    // Reads and prepares a project off both loops. The request in flight is
+    // the only one whose answer is adopted.
+    ProjectLoader project_loader{};
+    struct ProjectLoadInFlight final {
+        core::u64 ticket{};
+        ProjectLoadOrigin origin{ProjectLoadOrigin::Operator};
+    };
+    std::optional<ProjectLoadInFlight> project_load_in_flight{};
+    // A Save the authoring pass prepared: the document as it will be written
+    // and the projected document it was taken from. Written to disk by
+    // write_project_files, outside the gate.
+    struct ProjectWrite final {
+        editor::ProjectFileRequest request;
+        doc::Root content;
+        doc::Root projected;
+    };
+    std::optional<ProjectWrite> project_write{};
+    // A project path to put at the head of the recent list, likewise.
+    std::optional<std::string> recent_project_to_remember{};
+    core::u64 reported_autosave_failures{};
+    // What the project needs on disk, as the editor's panels read it. Kept
+    // across wakes and collected again only when the document or the asset
+    // registry changes.
+    // The Director's own asset check, asked on a thread of its own, and
+    // whether a RESCAN is waiting for the frame that carries it to be
+    // evaluated.
+    ProjectAssetReadiness asset_check{};
+    bool asset_check_requested{};
+    ProjectAssetManifest editor_asset_manifest{};
+    core::u64 editor_asset_manifest_version{};
+    bool editor_asset_manifest_stale{true};
+    // Operator requests refused since start-up, for the stopping report.
+    core::u64 refused_operator_requests{};
 
-    // Runs until stopped, closed or out of run frames; returns the exit code.
+    // Runs both threads until stopped, closed or out of run frames; returns
+    // the exit code. The caller's thread becomes the show thread.
     [[nodiscard]] int run();
 
-    // director_show_loop.cpp: pacing, sealing and the shared evaluations.
-    [[nodiscard]] PaceOutcome pace(DirectorTick &tick);
-    [[nodiscard]] PhaseExit seal_due_frames(DirectorTick &tick);
-    [[nodiscard]] PhaseExit apply_operator_input(DirectorTick &tick,
-                                                 cmd::FrameNumber frame,
+    // director_show_loop.cpp: the sealing thread.
+    //
+    // Inside the gate it reads and writes: scheduler, hub, barrier, tracked,
+    // pacer, director_clock and the reference counters, transport and
+    // preview_transport (settling), authored, anchors, sealed, interval,
+    // since_status, repace_after_seal, the asset commit and publication
+    // permit state (pending_asset_commit, last_asset_commit_*,
+    // publication_activation), pending_asset_rescan, asset_check_requested,
+    // the editor coalescing policy and its pending close, boundary_lateness,
+    // backlog_watch, reported_lockstep_demotions and sealer_notes; and for
+    // tracking, tracker_listeners (sampling), director_pose_predictors,
+    // director_pose_channels, director_poses_sent and
+    // last_replicated_pose_frame. It reads options, director_sync.policy,
+    // director_video_reference, tracking_plan and
+    // observed_local_renderer.assets.
+    void control_loop();
+    [[nodiscard]] PaceOutcome pace(ControlTick &tick);
+    [[nodiscard]] PhaseExit seal_due_frames(ControlTick &tick);
+    void sample_tracked_cameras(cmd::FrameNumber control_frame);
+
+    // director_show_loop.cpp: the show thread's loop and shared evaluations.
+    [[nodiscard]] int show_loop();
+    void adopt_sealer_notes();
+    void sample_director_video_reference() noexcept;
+    [[nodiscard]] PhaseExit author_operator_input();
+    [[nodiscard]] PhaseExit apply_operator_input(cmd::FrameNumber frame,
                                                  core::u64 through);
-    [[nodiscard]] show::VideoReferenceSample
-    read_director_video_reference() noexcept;
     [[nodiscard]] server::RendererLockstep
     evaluate_renderer_lockstep(const scene::RendererSettings &source,
                                const topology::HardwareMap &hardware) noexcept;
@@ -516,19 +657,34 @@ struct DirectorShowLoop final {
     [[nodiscard]] EditCoalescingPlan *coalescing_for(core::u64 gesture);
     void remember_recent_project(std::string_view path);
     void clear_pending_project_authoring();
+    // Drops every queued editor request, keeping the clipboards and views.
+    void drop_pending_requests();
+    // Turns a request the document refused into a message for the operator
+    // instead of the end of the show.
+    void refuse_operator_request(std::string_view what, cmd::FrameNumber frame);
+    // Queues a recovery copy of a changed project; never touches the disk.
+    void autosave_project(const DirectorTick &tick);
     void enter_preview(cmd::FrameNumber at);
     void leave_preview() noexcept;
     [[nodiscard]] doc::NodeId scene_being_authored(const OperatorFrame &op);
-    [[nodiscard]] PhaseExit apply_project_load(DirectorTick &tick,
-                                               OperatorFrame &op);
+    [[nodiscard]] PhaseExit apply_project_load(OperatorFrame &op);
+    void adopt_loaded_project(OperatorFrame &op, LoadedProject loaded,
+                              ProjectLoadOrigin origin);
+    // Whether a project is on its way in: asked for, or being read.
+    [[nodiscard]] bool project_load_pending() const noexcept {
+        return pending_project_load.has_value() ||
+               project_load_in_flight.has_value();
+    }
     void apply_preview_transport(OperatorFrame &op);
     void prepare_authoring_context(OperatorFrame &op);
     [[nodiscard]] PhaseExit apply_switcher_request(OperatorFrame &op);
-    [[nodiscard]] PhaseExit apply_show_timing_requests(DirectorTick &tick,
-                                                       OperatorFrame &op);
+    [[nodiscard]] PhaseExit apply_show_timing_requests(OperatorFrame &op);
     [[nodiscard]] PhaseExit apply_history_request(OperatorFrame &op);
     void refresh_history_state();
     [[nodiscard]] PhaseExit apply_project_save(OperatorFrame &op);
+    // Writes what the authoring pass left for the disk: a Save, and the
+    // recent-project list. Leaves the gate for each write.
+    void write_project_files();
 
     // director_linked_scenes.cpp: publication and Blender links.
     [[nodiscard]] PhaseExit apply_publication_requests(OperatorFrame &op);

@@ -2793,8 +2793,9 @@ void a_new_wire_is_held_until_the_graph_reports_it() {
   UI_CHECK(arriving.list.vertices().size() == arrived);
 }
 
-// Clicks that build a selection: Ctrl toggles one node, Shift adds one.
-void ctrl_and_shift_clicks_build_a_selection() {
+// Clicks that build a selection, as on any canvas: Shift adds a node or takes
+// it out, Alt makes it the whole selection, and Ctrl does neither.
+void shift_and_alt_clicks_build_a_selection() {
   compositor::CompositorGraph graph;
   graph.nodes.push_back(
       graph_node(1U, compositor::NodeKind::Brightness, 40.0F, 60.0F));
@@ -2803,9 +2804,15 @@ void ctrl_and_shift_clicks_build_a_selection() {
   graph.nodes.push_back(
       graph_node(3U, compositor::NodeKind::Blur, 40.0F, 300.0F));
   CompositorHarness harness;
-  const auto click = [&](float x, float y, gui::KeyMods mods) {
+  const auto press = [&](float x, float y, gui::KeyMods mods) {
     static_cast<void>(harness.frame(graph, x, y, true, {}, std::nullopt, mods));
+  };
+  const auto release = [&](float x, float y, gui::KeyMods mods) {
     static_cast<void>(harness.frame(graph, x, y, false, {}, std::nullopt, mods));
+  };
+  const auto click = [&](float x, float y, gui::KeyMods mods) {
+    press(x, y, mods);
+    release(x, y, mods);
   };
   const auto members = [&] {
     const auto span = harness.panel.selected_nodes();
@@ -2813,11 +2820,12 @@ void ctrl_and_shift_clicks_build_a_selection() {
   };
   // Bodies, below the titles: (80, 135), (340, 135), (80, 375).
   click(80.0F, 135.0F, gui::KeyMods::None);
-  click(340.0F, 135.0F, gui::KeyMods::Ctrl);
+  click(340.0F, 135.0F, gui::KeyMods::Shift);
   UI_CHECK(members() == (std::vector<doc::NodeId>{doc::NodeId{1U},
                                                   doc::NodeId{2U}}));
   UI_CHECK(harness.panel.selection().node == doc::NodeId{2U});
-  click(80.0F, 135.0F, gui::KeyMods::Ctrl);
+  // Shift on a selected node takes it out.
+  click(80.0F, 135.0F, gui::KeyMods::Shift);
   UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{2U}});
   click(80.0F, 375.0F, gui::KeyMods::Shift);
   UI_CHECK(members() == (std::vector<doc::NodeId>{doc::NodeId{2U},
@@ -2825,6 +2833,17 @@ void ctrl_and_shift_clicks_build_a_selection() {
   // A plain click on one member of several picks it out on its own.
   click(80.0F, 375.0F, gui::KeyMods::None);
   UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{3U}});
+  // Alt picks a member out at once, before any release.
+  click(340.0F, 135.0F, gui::KeyMods::Shift);
+  UI_CHECK(members() == (std::vector<doc::NodeId>{doc::NodeId{2U},
+                                                  doc::NodeId{3U}}));
+  press(340.0F, 135.0F, gui::KeyMods::Alt);
+  UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{2U}});
+  release(340.0F, 135.0F, gui::KeyMods::Alt);
+  UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{2U}});
+  // Ctrl is not a selection modifier: it selects as a plain click does.
+  click(80.0F, 135.0F, gui::KeyMods::Ctrl);
+  UI_CHECK(members() == std::vector<doc::NodeId>{doc::NodeId{1U}});
 }
 
 // A rubber band dragged rightwards takes the nodes it wholly contains;
@@ -3398,6 +3417,43 @@ void content_labels_distinguish_missing_stale_and_verification_failures() {
 // finished yet", and each physical fault has to stay distinguishable: an
 // operator sent to check the assets when a display is mirrored looks in the
 // wrong place entirely.
+// A node that is connected but cannot draw its frames holds its last picture,
+// which from the wall looks like a stall. The row names the failing map and
+// the GPU's reason in plain words, and says when it is drawing again.
+void failed_frames_name_the_map_and_the_reason() {
+  editor::OutputMonitorState::Node node{};
+  UI_CHECK(!node.frames_failing());
+  UI_CHECK(editor::output_node_failure_text(node).empty());
+
+  node.present_failure = mediaserver::core::PresentFailure{
+      5'120U, mediaserver::core::PresentStep::DrawMap,
+      mediaserver::core::GpuRefusal::BufferInUse, 100'020U, 2'391U, true};
+  node.present_failure_map = "Wall - DP1.2, viewport 2";
+  UI_CHECK(node.frames_failing());
+  UI_CHECK(editor::output_node_failure_text(node) ==
+           "Drawing Wall - DP1.2, viewport 2 failed: a GPU buffer was "
+           "rewritten after an earlier map in the same frame had used it "
+           "(show frame 2391)");
+
+  node.present_failure.refusal = mediaserver::core::GpuRefusal::UploadSpaceFull;
+  UI_CHECK(editor::output_node_failure_text(node).find(
+               "ran out of GPU upload space") != std::string::npos);
+
+  // Not a map step: no map is named even if one was resolved earlier.
+  node.present_failure.step = mediaserver::core::PresentStep::Submit;
+  node.present_failure.refusal = mediaserver::core::GpuRefusal::None;
+  node.present_failure.show_frame = 0U;
+  UI_CHECK(editor::output_node_failure_text(node) ==
+           "The GPU did not accept the frame");
+
+  // Drawing again: the cause stays for the operator, the row is not failing.
+  node.present_failure.ongoing = false;
+  UI_CHECK(!node.frames_failing());
+  UI_CHECK(!editor::output_node_failure_text(node).empty());
+  // A failure of frames is not a display fault.
+  UI_CHECK(!node.output_failed());
+}
+
 void output_failures_are_named_and_distinct_from_asset_failures() {
   using OutputStatus = editor::OutputMonitorState::Node::OutputStatus;
   editor::OutputMonitorState::Node node{};
@@ -4097,6 +4153,7 @@ struct LiveSettingsHarness {
   }
   void environment_section(std::size_t section) {
     target=editor::SceneSettingsTarget::Environment;
+    state.renderer.backend=scene::RendererBackend::Advanced;
     static_cast<void>(click(58,30));
     static_cast<void>(click(58.0F+40.0F*static_cast<float>(section),30));
   }
@@ -4114,6 +4171,7 @@ void project_settings_apply_reports_the_edited_values() {
 void scene_file_fields_request_the_matching_picker_without_editing() {
   LiveSettingsHarness environment;
   environment.target = editor::SceneSettingsTarget::Environment;
+  environment.state.renderer.backend = scene::RendererBackend::Advanced;
   environment.state.environment.map_source = "C:/lighting/stage.exr";
   const auto map = environment.click(154, 285);
   UI_CHECK(map.file_picker && map.file_picker->kind == editor::FilePickerKind::EnvironmentMap);
@@ -4141,6 +4199,7 @@ void baked_lighting_page_starts_cancels_and_preserves_the_authored_field() {
   LiveSettingsHarness h;h.state.environment.baked.enabled=true;h.state.environment.baked.source="lighting.msgi";
   h.state.environment.baked.content="1234567890abcdef";h.state.environment.baked.count_x=3;
   h.environment_section(2);
+  h.state.renderer.backend=scene::RendererBackend::Basic;
   UI_CHECK(!h.click(650.0).project.bake);
   h.state.renderer.backend=scene::RendererBackend::Advanced;
   auto bake=h.click(650.0);
@@ -4335,16 +4394,84 @@ struct Case final {
 
 // Map edits are immediate and preserve the other scene environment values.
 void the_environment_category_authors_the_lighting_map() {
-  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;h.state.renderer.backend=scene::RendererBackend::Advanced;
   static_cast<void>(h.click(154.0));h.input.new_frame();h.input.add_text("studio.hdr");h.ctx.new_frame();auto result=h.draw();
   UI_CHECK(result.project.apply && h.state.environment.map_source=="studio.hdr");
   static_cast<void>(h.key(gui::Key::Enter));static_cast<void>(h.enter(186.0,"2.5"));static_cast<void>(h.enter(218.0,"0.25"));
   UI_CHECK(h.state.environment.map_intensity==2.5F && h.state.environment.map_rotation==0.25F);
 }
 
+// Basic draws none of the environment page, so it shows why and a way out
+// instead of fields; a physical sky left on stays reachable to turn off.
+void basic_renderer_hides_the_environment_fields() {
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  h.state.environment.map_source="studio.hdr";
+  h.state.environment.fog_density=0.25F;
+  // Where Advanced has the physical sky switch, Basic has nothing to toggle.
+  UI_CHECK(!h.click(90.0).project.apply && !h.state.environment.physical_sky.enabled);
+  h.state.environment.physical_sky.enabled=true;
+  // Basic draws the plain sky colour, so that control stays: its reset arrow
+  // is somewhere on the page.
+  h.state.environment.sky_color={0.5F,0.25F,0.125F};
+  bool switched=false,turned_off=false,reset=false;
+  for(float y=44.0F;y<700.0F;y+=6.0F) {
+    for(const float x:{30.0F,126.0F,134.0F,142.0F,150.0F,158.0F,200.0F}) {
+      const auto frame=h.click(y,x);
+      UI_CHECK(!frame.file_picker && frame.keys.empty());
+      static_cast<void>(h.key(gui::Key::Escape));
+      if(!frame.project.apply) continue;
+      if(h.state.renderer.backend==scene::RendererBackend::Advanced) {
+        switched=true;h.state.renderer.backend=scene::RendererBackend::Basic;
+      } else if(!h.state.environment.physical_sky.enabled) {
+        turned_off=true;
+      } else if(h.state.environment.sky_color==scene::Vec3{}) {
+        reset=true;
+      }
+      // The hidden values are kept for when Advanced returns.
+      UI_CHECK(h.state.environment.map_source=="studio.hdr" && h.state.environment.fog_density==0.25F);
+    }
+  }
+  UI_CHECK(switched && turned_off && reset);
+  // On Advanced the same page offers the sky switch again.
+  h.state.renderer.backend=scene::RendererBackend::Advanced;
+  static_cast<void>(h.click(90.0));
+  UI_CHECK(h.state.environment.physical_sky.enabled);
+}
+
+// The plain sky colour is a colour well under an empty map path, applied
+// live from its picker, with a reset arrow back to black.
+void the_sky_colour_is_picked_and_resets_to_black() {
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  h.state.renderer.backend=scene::RendererBackend::Advanced;
+  UI_CHECK(h.state.environment.sky_color==scene::Vec3{});
+  static_cast<void>(h.click(186.0,280));
+  // The picker's field hangs under the well; near its top is bright.
+  static_cast<void>(h.frame(215,238,true));
+  const auto picked=h.frame(215,238,true);
+  static_cast<void>(h.frame(215,238,false));
+  static_cast<void>(h.key(gui::Key::Enter));
+  UI_CHECK(picked.project.apply);
+  const auto colour=h.state.environment.sky_color;
+  UI_CHECK(std::max({colour.x,colour.y,colour.z})>0.5F);
+  // Only the background changed; the fill is not this colour.
+  UI_CHECK(h.state.environment.fill_sky_color==scene::Environment{}.fill_sky_color);
+  // A map hides the plain colour: the row under the path is Intensity.
+  h.state.environment.map_source="studio.hdr";
+  static_cast<void>(h.enter(186.0,"2.5"));
+  UI_CHECK(h.state.environment.map_intensity==2.5F && h.state.environment.sky_color==colour);
+  h.state.environment.map_source.clear();
+  bool reset=false;
+  for(float x=60.0F;x<200.0F && !reset;x+=4.0F) {
+    static_cast<void>(h.click(186.0,x));
+    static_cast<void>(h.key(gui::Key::Escape));
+    reset=h.state.environment.sky_color==scene::Vec3{};
+  }
+  UI_CHECK(reset);
+}
+
 // Physical sky values use the same property key controls as fog and maps.
 void physical_sky_controls_apply_and_author_a_time_key() {
-  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
+  LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;h.state.renderer.backend=scene::RendererBackend::Advanced;
   static_cast<void>(h.click(90.0));UI_CHECK(h.state.environment.physical_sky.enabled);
   static_cast<void>(h.enter(122.0,"16.5"));
   auto result=h.click(122.0,306);UI_CHECK(result.keys.size()==1 && result.keys[0].channel==scene::PropertyChannel::SkyTimeOfDay && result.keys[0].value==16.5);
@@ -4536,7 +4663,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 137U> cases{{
+constexpr std::array<Case, 140U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -4654,8 +4781,8 @@ constexpr std::array<Case, 137U> cases{{
      &drops_from_other_panels_find_compatible_inputs},
     {"a new wire is held until the graph reports it",
      &a_new_wire_is_held_until_the_graph_reports_it},
-    {"ctrl and shift clicks build a selection",
-     &ctrl_and_shift_clicks_build_a_selection},
+    {"shift and alt clicks build a selection",
+     &shift_and_alt_clicks_build_a_selection},
     {"a rubber band selects nodes",
      &a_rubber_band_selects_nodes},
     {"a selection moves and nudges together",
@@ -4736,6 +4863,8 @@ constexpr std::array<Case, 137U> cases{{
      &content_labels_distinguish_missing_stale_and_verification_failures},
     {"output failures are named and distinct from asset failures",
      &output_failures_are_named_and_distinct_from_asset_failures},
+    {"failed frames name the map and the reason",
+     &failed_frames_name_the_map_and_the_reason},
     {"output monitor scroll reaches later cluster nodes",
      &output_monitor_scroll_reaches_later_cluster_nodes},
     {"output monitor emits explicit cluster relaunch",
@@ -4761,6 +4890,10 @@ constexpr std::array<Case, 137U> cases{{
     {"texture sampling controls apply and cancel", &texture_sampling_controls_apply_and_cancel},
     {"texture streaming controls emit authored policy", &texture_streaming_controls_emit_authored_policy},
     {"geometry controls emit replicated settings", &geometry_controls_emit_replicated_settings},
+    {"basic renderer hides the environment fields",
+     &basic_renderer_hides_the_environment_fields},
+    {"the sky colour is picked and resets to black",
+     &the_sky_colour_is_picked_and_resets_to_black},
     {"shadow cascades and bounce are authored beside the backend",
      &shadow_cascades_and_bounce_are_authored_beside_the_backend},
     {"antialiasing is one authored choice",

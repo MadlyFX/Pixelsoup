@@ -668,8 +668,19 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
             project_message = "STAGING LINKED SCENE - import again to supersede, or File > Cancel Linked Scene Import";
         }
     }
+    // The answer to a recovery offer. Yes takes the ordinary load path with
+    // the recovered document already decoded, under the project's own name;
+    // No only stops the offer, and the copy stays until the project is saved
+    // or closed.
+    const bool recover = editor_frame.recover_project &&
+                         project_recovery.has_value() &&
+                         !editor_frame.load_project.has_value() &&
+                         !editor_frame.new_project;
+    if (editor_frame.dismiss_recovery && !recover) {
+        project_recovery.reset();
+    }
     if (editor_frame.load_project.has_value() ||
-        editor_frame.new_project) {
+        editor_frame.new_project || recover) {
         blender_links.stop_all();
         deferred_blender_connect.clear(); deferred_blender_resync.clear();
         deferred_blender_open.reset();
@@ -679,7 +690,14 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
         // candidate, including its already-decoded Root. Never pair a
         // newly chosen path with stale preloaded project contents.
         pending_preloaded_project.reset();
-        if (editor_frame.new_project) {
+        pending_load_origin = ProjectLoadOrigin::Operator;
+        if (recover) {
+            pending_preloaded_project = std::move(project_recovery->project);
+            pending_project_load =
+                editor::ProjectFileRequest{project_recovery->project_path};
+            pending_load_origin = ProjectLoadOrigin::Recovery;
+            project_message = "RECOVERING UNSAVED CHANGES...";
+        } else if (editor_frame.new_project) {
             // A new project takes the ordinary load path with its
             // document already built and no file behind it.
             pending_preloaded_project = new_project_document();
@@ -689,11 +707,15 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
             pending_project_load = std::move(editor_frame.load_project);
             project_message = "LOADING PROJECT...";
         }
+        // Answered, or overtaken by a project the operator chose instead.
+        project_recovery.reset();
     } else if (editor_frame.save_project.has_value()) {
         // Explicit Save means "save this current project", not "load
         // the remembered project at the next boundary first".
         pending_project_load.reset();
         pending_preloaded_project.reset();
+        // Nor one already being read: its answer is dropped when it arrives.
+        project_load_in_flight.reset();
         pending_project_save = std::move(editor_frame.save_project);
         project_message = "SAVING PROJECT...";
     }

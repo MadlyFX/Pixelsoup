@@ -1,5 +1,6 @@
 #pragma once
 #include <mediaserver/core/frame_timing.hpp>
+#include <mediaserver/core/present_failure.hpp>
 #include <array>
 #include <mediaserver/core/render_conformance.hpp>
 
@@ -169,6 +170,11 @@ struct DeviceCapabilities final {
     // establish this: SDL_GPU may expose every attachment format while the
     // native Advanced implementation still exists only on D3D12.
     bool advanced_scene_raster{};
+    // A pixel stage may read each corner of its triangle through
+    // GetAttributeAtVertex (Shader Model 6.1 barycentrics). The Advanced lit
+    // stage interpolates its surface from canvas-space weights with it, so
+    // every node shades a canvas pixel from identical values.
+    bool pixel_barycentrics{};
     bool offscreen{};
     bool rgba16_float{};
     bool rgba32_float{};
@@ -211,8 +217,8 @@ struct DeviceCapabilities final {
     bool operator==(const DeviceCapabilities&) const = default;
 
     [[nodiscard]] bool advanced_raster() const noexcept {
-        return advanced_scene_raster && offscreen && rgba16_float &&
-            sampled_depth && integer_targets;
+        return advanced_scene_raster && pixel_barycentrics && offscreen &&
+            rgba16_float && sampled_depth && integer_targets;
     }
 
     [[nodiscard]] bool advanced_ray_tracing() const noexcept {
@@ -1117,6 +1123,9 @@ public:
     [[nodiscard]] core::u32 begin_gpu_pass(core::RenderPass pass) noexcept;
     void end_gpu_pass(core::u32 token) noexcept;
     [[nodiscard]] core::u64 upload_bytes() const noexcept;
+    // The first command this recording refused, and why. A frame that fails
+    // to record reports it so the operator is told what ran out or clashed.
+    [[nodiscard]] core::GpuRefusal first_refusal() const noexcept;
     [[nodiscard]] Device* device() const noexcept { return device_; }
 
     CommandList() noexcept = default;
@@ -1491,9 +1500,16 @@ struct ExternalVideoPlanes final {
 // allocations are demoted to system memory rather than refused, so a frame
 // slows down instead of failing. It moves as other processes use the GPU.
 // Zero budget means the backend cannot tell.
+//
+// `system_usage` is the non-local segment: what this process holds in system
+// memory on the GPU's behalf, including resources demoted out of local memory
+// past `budget`. It is the number that grows when video memory leaks on a
+// machine with plenty of RAM, long before anything is refused.
 struct VideoMemory final {
     core::u64 budget{};
     core::u64 usage{};
+    core::u64 system_budget{};
+    core::u64 system_usage{};
 
     [[nodiscard]] bool known() const noexcept { return budget != 0U; }
     [[nodiscard]] core::u64 headroom() const noexcept {

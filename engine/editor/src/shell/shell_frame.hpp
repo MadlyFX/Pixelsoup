@@ -28,6 +28,11 @@ struct EditorShell::Frame final {
   void draw_panel(gui::PanelId panel, const gui::Rect &bounds);
   void draw_stage_panel(const gui::Rect &bounds);
   void draw_program_panel(const gui::Rect &bounds);
+  void draw_program_options(const gui::Rect &bar,
+                            const scene::Scene &authored,
+                            const scene::Scene &view,
+                            const ViewportProjection *projection,
+                            bool picture_ok);
   void draw_scene_panel(const gui::Rect &bounds);
   void draw_selection_sets_panel(const gui::Rect &bounds);
   void draw_masks_panel(const gui::Rect &bounds);
@@ -65,6 +70,11 @@ struct EditorShell::Frame final {
   void emit_components(doc::NodeId node, scene::TransformChannel first,
                        scene::Vec3 values, core::u64 gesture);
   void emit_transform(const TransformDelta &delta, core::u64 gesture);
+  void emit_moves(std::span<const scene::Vec3> translations,
+                  core::u64 gesture);
+  void align_selection(std::size_t choice, const scene::Scene &authored,
+                       const scene::Scene &view,
+                       const ViewportProjection *projection);
   void clear_transform(TransformTool tool, const scene::Scene &authored_scene);
   void route_surface_edit(FeedSurfaceEditRequest request);
   void enqueue_model(std::string source, scene::SceneId add_scene,
@@ -91,6 +101,8 @@ struct EditorShell::Frame final {
   // agrees to discard the unsaved changes for `action`.
   void confirm_discard(std::string_view action,
                        std::function<void(Frame &)> then);
+  // Asks once whether to open unsaved work recovered at start-up.
+  void offer_recovery();
   // Saves to the project's own file, or asks for one when it has none.
   void save_project();
   void adopt_dialog();
@@ -106,8 +118,9 @@ struct EditorShell::Frame final {
       std::optional<scene::ClipTiming> timing = std::nullopt);
   void draw_placeholder(const gui::Rect &bounds, std::string_view title,
                         std::span<const std::string_view> rows);
-  std::vector<const ElementInfo *> take_siblings(const ElementInfo &clip);
   void queue_mask_edit(MaskEditRequest request);
+  void author_canvas_shape(const CanvasShape &shape, const scene::Scene &view,
+                           const ViewportProjection *projection);
   void run_color_sampler(gui::UiId id, const gui::Rect &image,
                          const rhi::Texture &target,
                          bool pointer_available = true);
@@ -166,7 +179,15 @@ struct EditorShell::Frame final {
   scene::Scene stage_scene{};
   std::optional<scene::Scene> stage_view_scene{};
   scene::Scene stage_interaction_scene{};
+  // Program's scene as its compositor graph places it; unset while that is
+  // the scene itself.
+  std::optional<scene::Scene> program_interaction_scene{};
   const output::OutputMap *program_output{};
+  // Program's Canvas view is showing the scene on the Stage rather than the
+  // one on air: the two differ (Preview) and no transition holds the
+  // executor it draws with. Its picture, once there is one.
+  bool program_canvas_stage{};
+  const rhi::Texture *canvas_stage_texture{};
   ProgramOutputExtent program_extent{};
   std::size_t stage_view_count{};
   std::array<PreviewExtent, 4U> stage_previews{};
@@ -201,7 +222,6 @@ struct EditorShell::Frame final {
   bool plateset_editor_drawn{};
   std::vector<assets::DerivativeKey> plateset_thumbnail_keys{};
   std::vector<TimelineMoment> timeline_moments{};
-  std::vector<TimelinePlateset> timeline_platesets{};
   std::vector<doc::NodeId> dragging_assets{};
   std::optional<LibraryAddAction> dragging_generator{};
   std::optional<LibraryGeneratorDrop> pending_generator_drop{};
