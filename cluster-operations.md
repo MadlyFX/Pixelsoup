@@ -425,6 +425,69 @@ options in the README's lifecycle section (or `scripts/run-output-node.ps1`)
 under a service manager. The command-line agent reads no stored settings, so
 a service's configuration is exactly its command line.
 
+### Remote control for development builds
+
+When render machines run `media-server.exe` from a shared build folder, a new
+build cannot link while any machine still has that file open, and the
+lifecycle agent is itself `media-server.exe`. Output Monitor's Stop ends only
+the render process, so the agent keeps the file locked. For development
+machines, `scripts/node-remote-control.py` owns `run-output-node.ps1` as a
+child process and lets the control machine stop and start the whole tree - agent
+and render process - and read the node's logs, without anyone at the render
+machine. It uses only the Python standard library and runs on Windows.
+
+On the render machine, from the repository's `scripts` folder; everything after
+`--` goes to `run-output-node.ps1` unchanged:
+
+```powershell
+python node-remote-control.py --token <secret> --autostart -- `
+  -DirectorHost 192.168.200.154 -Build release
+```
+
+It listens on TCP 47850 (`--port`, `--listen`) and refuses to start without a
+token unless `--no-token` is passed deliberately; requests carry it in an
+`X-Token` header or a `token=` query parameter. The node script opens in its
+own console (`--hidden` suppresses it). Allow the port from an elevated
+prompt, and narrow it with `remoteip=` on a shared VLAN:
+
+```powershell
+netsh advfirewall firewall add rule name="Media Server Remote Control" `
+  dir=in action=allow protocol=TCP localport=47850
+```
+
+From the control machine:
+
+```powershell
+$h = @{ 'X-Token' = '<secret>' }
+Invoke-RestMethod http://<render-ip>:47850/status -Headers $h
+Invoke-RestMethod http://<render-ip>:47850/stop -Headers $h -Method Post
+# ...build...
+Invoke-RestMethod http://<render-ip>:47850/start -Headers $h -Method Post
+Invoke-RestMethod "http://<render-ip>:47850/log?lines=200" -Headers $h
+```
+
+| Request | Effect |
+| --- | --- |
+| `GET /status` | Whether the node script is running, its uptime and command, and every `media-server.exe` on the machine. |
+| `POST /start` | Starts the node script unless it is running. Refuses while a `media-server.exe` it did not start is running (a node started by hand or by an earlier run of the script); `?force=1` overrides. |
+| `POST /stop` | Ends the node script's whole process tree with `taskkill /T /F`, then waits up to ten seconds for every `media-server.exe` to exit so a build started next can link. `?all=1` also ends processes it did not start. |
+| `POST /restart` | Stop, then start. |
+| `GET /log` | Plain text. `file=node` (default), `agent` or `control`; `previous=1` for the previous run's `.1.log`; `lines=N` (default 400, at most 20,000, `0` for the whole file up to its last 16 MiB); `grep=TEXT` keeps matching lines. |
+
+Logs are read from the node script's `-LogDir`, otherwise
+`%LOCALAPPDATA%\MediaServer\logs`, using its `-NodeIndex` (default 0);
+`--log-dir` overrides. The script records its own requests in
+`remote-control-<index>.log` beside them. Processes holding under 1 MB are
+ignored by the start guard and the stop wait: Windows can leave an unreaped
+`media-server.exe` of a few kilobytes behind that no longer holds the file.
+
+Closing the script leaves a running node running, and a restarted script does
+not track it. `--autostart` then reports the node already running instead of
+starting a second one; `POST /stop?all=1` followed by `POST /start` hands the
+node to the new script. Anyone who can reach the port and knows the
+token can stop the wall: keep it on the control VLAN and off show machines
+that do not need remote rebuilds.
+
 ## Network, service, and secret safety
 
 - Put Director sessions and lifecycle listeners on a trusted, isolated control
