@@ -4,6 +4,11 @@
   "version-string": "0.1.0",
   "description": "Cross-platform virtual production media server",
   "builtin-baseline": "3af1d1e60af2b2abf55760538cd607829029b07a",
+  "vcpkg-configuration": {
+    "overlay-ports": [
+      "./vcpkg-ports"
+    ]
+  },
   "dependencies": [
     "asio",
     "flatbuffers"
@@ -23,7 +28,8 @@
         {
           "name": "ffmpeg",
           "features": [
-            "nvcodec"
+            "nvcodec",
+            "x265"
           ]
         },
         "freetype"

@@ -256,8 +256,16 @@ float3 apply_film_grain(
 
 float3 apply_inline_effects(
     float3 colour, uint4 range, float2 output_position) {
-    for (uint index = 0u; index < range.y; ++index) {
-        const InlineEffectOp operation = inline_effects[range.x + index];
+    // The range comes from per-instance data. Bound it by the buffer that
+    // actually holds the operations, so a stale or corrupt range can only
+    // misdraw a frame instead of looping long enough to hang the GPU.
+    uint effect_slots;
+    uint effect_stride;
+    inline_effects.GetDimensions(effect_slots, effect_stride);
+    const uint effect_first = min(range.x, effect_slots);
+    const uint effect_count = min(range.y, effect_slots - effect_first);
+    for (uint index = 0u; index < effect_count; ++index) {
+        const InlineEffectOp operation = inline_effects[effect_first + index];
         if (operation.kind == 0u) {
             colour *= inline_effect_parameters[operation.parameter_offset].x;
         } else if (operation.kind == 1u) {

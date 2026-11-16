@@ -314,6 +314,38 @@ const DerivativeProfile* derivative_profile(std::string_view name) noexcept {
     return nullptr;
 }
 
+PixelDimensions
+proxy_encoded_dimensions(PixelDimensions source,
+                         const DerivativeProfile& profile) noexcept {
+    if (source.width == 0U || source.height == 0U || profile.width == 0U ||
+        profile.height == 0U) {
+        return PixelDimensions{};
+    }
+    if (profile.fit_policy == DerivativeFitPolicy::PreserveWithinBounds) {
+        const core::u64 width = core::u64{source.width} + (source.width & 1U);
+        const core::u64 height =
+            core::u64{source.height} + (source.height & 1U);
+        if (width <= profile.width && height <= profile.height) {
+            return PixelDimensions{static_cast<core::u32>(width),
+                                   static_cast<core::u32>(height)};
+        }
+    }
+    core::u64 width = source.width;
+    core::u64 height = source.height;
+    if (width > profile.width) {
+        height = (height * profile.width) / width;
+        width = profile.width;
+    }
+    if (height > profile.height) {
+        width = (width * profile.height) / height;
+        height = profile.height;
+    }
+    width = std::max<core::u64>(2U, width & ~core::u64{1U});
+    height = std::max<core::u64>(2U, height & ~core::u64{1U});
+    return PixelDimensions{static_cast<core::u32>(width),
+                           static_cast<core::u32>(height)};
+}
+
 Sha256Digest derivative_profile_signature(
     const DerivativeProfile& profile) noexcept {
     Sha256Hasher hash;

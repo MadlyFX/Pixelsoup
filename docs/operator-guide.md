@@ -2,20 +2,18 @@
 
 Run commands below from the repository root. See the [README](../README.md) for building.
 
-## Run the editor
+## Run the local editor demo
 
 From the repository root, after a GUI build:
 
 ```powershell
-.\scripts\run-editor.ps1
+.\scripts\run-editor-demo.ps1
 ```
 
-The script starts a Director editor. On each output machine,
-`.\scripts\run-output-node.ps1 -DirectorHost <editor address>` starts a
-lifecycle-supervised render node. Dragging or editing content in the editor
-updates the replicated scene shown by the node. Output Monitor controls the
-node with the render node password set in the editor's Preferences; give each
-node the same one with `-Password` (none by default).
+The script starts a Director editor and a lifecycle-supervised local output
+node. Dragging or editing content in the editor updates the replicated scene
+shown by the node. Both halves read one temporary password file the script
+creates, so Output Monitor controls the node securely without setup.
 
 Other Windows demonstrations are:
 
@@ -1358,6 +1356,8 @@ cheaper question.
 
 Every machine answers the same question about the paths the current document
 actually needs — scene media, scene models, and imported projection surfaces.
+A plateset take counts every plate it fills, not only its front plate, so a
+node that cannot open one wall's file reports that file missing.
 Library assets nothing currently uses are not counted, so an operator can keep
 a shelf of unused imports. A placement whose Library record was deleted is
 still counted, because the renderer still opens that file.
@@ -2110,7 +2110,7 @@ join a present barrier, so a physical policy correctly reports
 `SWAP BARRIER INCOMPLETE` on this presentation path. To rehearse the operator
 procedures without a genlock card, pass `-SyncSimulate locked`,
 `reference-lost`, `reference-idle`, or `no-device` to
-`scripts/run-output-node.ps1`; simulated samples are marked as such all the
+`scripts/run-editor-demo.ps1`; simulated samples are marked as such all the
 way to the surface and can satisfy only a DEGRADED policy.
 
 Under HOLD GROUP a render process that cannot produce a complete frame for one
@@ -2143,14 +2143,7 @@ PTP/genlock/frame-lock integration boundary.
 
 ## Authoring and project files
 
-Use Library to import media or models, then drag them into Stage. Models can
-be glTF/GLB, OBJ or FBX (binary or ASCII). An FBX file is converted from its
-own axes and units to the stage's Y-up metres, with node pivots and mirroring
-applied, and imports as static geometry: its animation, skinning and blend
-shapes are not used. Its texture paths are tried as written and then by file
-name beside the model, so a copied asset folder still resolves; a texture that
-cannot be found or decoded (PNG, JPEG, TGA or BMP) refuses the import and names
-the file. The Inspector
+Use Library to import media or models, then drag them into Stage. The Inspector
 and Timeline author ordinary document commands, so their changes participate in
 replication and undo/redo. The conventional **Edit** menu carries Undo, Redo,
 Copy, and Paste, with **Ctrl+Z** for undo and **Ctrl+Shift+Z** or **Ctrl+Y** for redo; **Ctrl+S** saves the project. A
@@ -2773,9 +2766,7 @@ see [Hardware Map and LED processors](#hardware-map-and-led-processors).
 Feed mappings support flat,
 horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,
 split the calibrated LED geometry externally, retain a shared model origin, and
-import each feed mesh with `+ IMPORT UV MESH` as glTF/GLB, OBJ or FBX. FBX
-geometry is converted to Y-up metres first, so pieces exported from the same
-file keep their shared origin. Its persistent projection asset
+import each feed mesh with `+ IMPORT UV MESH`. Its persistent projection asset
 is referenced by absolute path and reported for readiness exactly like media
 and models. UV0 represents the full connector image; it is not material UV
 space.

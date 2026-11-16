@@ -157,9 +157,12 @@ constexpr std::size_t copy_buffer_bytes = 1U * 1'024U * 1'024U;
         !preserved_video_metadata(source, encoded)) {
         return false;
     }
+    // A full-size proxy keeps the source size, except that 4:2:0 cannot
+    // hold an odd side: that one is a single row or column larger.
     if (profile.fit_policy ==
             assets::DerivativeFitPolicy::PreserveWithinBounds &&
-        encoded.dimensions != source.dimensions) {
+        encoded.dimensions !=
+            assets::proxy_encoded_dimensions(source.dimensions, profile)) {
         return false;
     }
     if (source.has_audio &&

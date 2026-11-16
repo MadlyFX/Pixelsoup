@@ -925,11 +925,11 @@ void EditorShell::Frame::handle_library_add(LibraryAddAction action) {
   case LibraryAddAction::Model: {
     open_file_dialog(
         []() -> std::optional<std::string> {
-          const char *const filters[]{"*.gltf", "*.glb", "*.obj", "*.fbx",
+          const char *const filters[]{"*.gltf", "*.glb", "*.obj",
                                       "*.msmodel"};
           const char *const path = tinyfd_openFileDialog(
-              "Add 3D Model", "", static_cast<int>(std::size(filters)),
-              filters, "3D models (glTF, OBJ, FBX, model package)", 0);
+              "Add 3D Model", "", 4, filters,
+              "3D models (glTF, OBJ, model package)", 0);
           return path != nullptr ? std::optional<std::string>{path}
                                  : std::nullopt;
         },
@@ -1001,7 +1001,7 @@ void EditorShell::Frame::import_asset(LibraryImportAction action,
             "*.m4v", "*.mpg", "*.mpeg", "*.wmv", "*.png", "*.jpg",
             "*.jpeg", "*.bmp", "*.tga", "*.exr", "*.hdr"};
         const char *const model_filters[]{"*.gltf", "*.glb", "*.obj",
-                                          "*.fbx", "*.msmodel"};
+                                          "*.msmodel"};
         const char *const particle_filters[]{"*.ajfx"};
         const char *const path = tinyfd_openFileDialog(
             media       ? "Import Media Asset"
@@ -1010,13 +1010,13 @@ void EditorShell::Frame::import_asset(LibraryImportAction action,
             "",
             media       ? static_cast<int>(std::size(media_filters))
             : particles ? 1
-                        : static_cast<int>(std::size(model_filters)),
+                        : 4,
             media       ? media_filters
             : particles ? particle_filters
                         : model_filters,
             media       ? "Video and images"
             : particles ? "ajfx particle effects"
-                        : "3D models (glTF, OBJ, FBX)",
+                        : "3D models (glTF, OBJ)",
             1);
         return path != nullptr ? std::optional<std::string>{path}
                                : std::nullopt;

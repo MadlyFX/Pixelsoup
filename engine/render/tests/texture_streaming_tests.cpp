@@ -135,6 +135,7 @@ rhi::CommandList acquire(rhi::Device &device) {
 }
 void submit(rhi::Device &device, rhi::CommandList commands) {
     auto result = device.submit(std::move(commands));
+    if (!result) std::cerr << "DIAG submit error " << static_cast<int>(result.error()) << " backend " << static_cast<int>(device.capabilities().backend) << "\n";
     CHECK(result);
     CHECK(result.value().wait());
 }
@@ -469,10 +470,10 @@ int main() {
             auto opened = rhi::Device::create(config);
             CHECK(opened);
             auto device = std::move(opened).value();
-            compressed_mips_upload_and_sample(device);
-            row_uploads_preserve_other_rows(device);
-            gpu_transactions(device);
-            large_mips_progress_in_bounded_recordings(device);
+            std::cerr << "DIAG a\n"; compressed_mips_upload_and_sample(device);
+            std::cerr << "DIAG b\n"; row_uploads_preserve_other_rows(device);
+            std::cerr << "DIAG c\n"; gpu_transactions(device);
+            std::cerr << "DIAG d\n"; large_mips_progress_in_bounded_recordings(device);
             if (backend == rhi::BackendKind::D3d12)
                 renderers_share_detail_across_slices_and_view_overrides(device);
             std::cout << "[pass] GPU transactions, tail pixels, bounded uploads, "

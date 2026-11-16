@@ -1,5 +1,7 @@
 #include <mediaserver/render/projection_mesh_warp.hpp>
 
+#include <mediaserver/core/idle_report.hpp>
+
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/projection_mesh_warp_frag_dxil.h>
 #include <mediaserver/shaders/projection_mesh_warp_vert_dxil.h>
@@ -90,6 +92,10 @@ struct BatchConstants final {
     core::u32 unused2{};
 };
 
+struct PassConstants final {
+    core::u32 unused[4]{};
+};
+
 static_assert(sizeof(output::MeshWarpVertex) == 32U);
 static_assert(sizeof(BatchConstants) == 16U);
 
@@ -145,9 +151,12 @@ Result ProjectionMeshWarp::create(rhi::Device& device, core::u32 width,
     fragment.bytecode = blobs.fragment;
     fragment.sampler_count = 1U;
 
+    // draw_pulled always binds the warp's depth target, so the pipeline has to
+    // declare one to match it (D3D12 checks the DSV format against the bound
+    // view). The warp never occludes itself: no test and no writes.
+    const rhi::DepthState depth_state{true, false, true, false};
     auto pipeline = device.create_pipeline(
-        vertex, fragment, format,
-        rhi::ColorBlend::Disabled, rhi::DepthState{});
+        vertex, fragment, format, rhi::ColorBlend::Disabled, depth_state);
     if (!pipeline) {
         return Result::failure(
             pipeline.error() == rhi::RhiError::ShaderFormatUnsupported
@@ -189,17 +198,27 @@ bool ProjectionMeshWarp::render(
     const output::ProjectionMesh& mesh,
     const output::MeshPerspectiveView& view,
     const output::ProjectionMeshPlacement* placement) noexcept {
+    constexpr const char* feature = "projection mesh warp";
     graph_.begin();
-    if (!source || !source.desc().sampled || mesh.vertices.size() == 0U
+    if (!source || !source.desc().sampled) {
+        static_cast<void>(core::report_idle_once(
+            feature, "the rendered surface view is not a sampled texture"));
+        return false;
+    }
+    if (mesh.vertices.size() == 0U
         || mesh.vertices.size() > limits_.max_vertices
         || mesh.indices.size() == 0U
         || mesh.indices.size() > limits_.max_indices) {
+        static_cast<void>(core::report_idle_once(
+            feature, "the mesh is empty or exceeds the warp's vertex limits"));
         return false;
     }
     auto resolved = placement != nullptr
                         ? output::mesh_warp_vertices(mesh, view, *placement)
                         : output::mesh_warp_vertices(mesh, view);
     if (!resolved) {
+        static_cast<void>(core::report_idle_once(
+            feature, "the mesh vertices could not be projected from the eye"));
         return false;
     }
     const std::vector<output::MeshWarpVertex>& warp = resolved.value();
@@ -210,6 +229,8 @@ bool ProjectionMeshWarp::render(
                                          std::span<const core::u32>{
                                              mesh.indices.data(),
                                              mesh.indices.size()}))) {
+        static_cast<void>(core::report_idle_once(
+            feature, "the GPU refused the mesh vertex or index upload"));
         return false;
     }
 
@@ -218,8 +239,15 @@ bool ProjectionMeshWarp::render(
     const rhi::DrawBatch batch{
         static_cast<core::u32>(mesh.indices.size()), 1U};
     const BatchConstants constants{};
+    // The vertex stage declares b0 for pass-wide data and b1 for the batch.
+    // It reads nothing from b0, but a declared slot is always bound, and the
+    // D3D12 backend refuses an empty record: without this every warp draw
+    // failed and a UV-mesh output held its last picture.
+    const PassConstants pass{};
     rhi::PulledDraw draw{};
     draw.pipeline = &pipeline_;
+    draw.vertex_uniform = std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(&pass), sizeof(pass)};
     draw.vertex_buffers = buffers;
     draw.batch_uniforms = std::span<const core::u8>{
         reinterpret_cast<const core::u8*>(&constants), sizeof(constants)};
@@ -228,8 +256,13 @@ bool ProjectionMeshWarp::render(
     draw.batches = std::span<const rhi::DrawBatch>{&batch, 1U};
     draw.texture = &source;
     draw.sampler = &sampler_;
-    return graph_.draw_pulled(commands, core::RenderPass::Output,
-        color_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}, depth_, 0.0F, draw);
+    if (!graph_.draw_pulled(commands, core::RenderPass::Output,
+            color_, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}, depth_, 0.0F, draw)) {
+        static_cast<void>(core::report_idle_once(
+            feature, "the warp draw could not be recorded"));
+        return false;
+    }
+    return true;
 }
 
 } // namespace mediaserver::render

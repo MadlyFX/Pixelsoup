@@ -2172,6 +2172,9 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
     if ((!view.has_value() &&
          !scene::contains(plan.adjusted_scene.canvas, slice)) ||
         !scene::valid(plan.adjusted_scene.camera)) {
+        static_cast<void>(core::report_idle_once("scene render",
+            view.has_value() ? "the scene camera is not valid for a view"
+                             : "the slice lies outside the canvas or the camera is not valid"));
         return CompositorSceneResult::failure(
             RenderError::InvalidConfiguration);
     }
@@ -2221,6 +2224,8 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         last_scene_linear_ =
             last_readiness_.selected == scene::RendererBackend::Advanced;
         if (!last_readiness_.satisfied) {
+            static_cast<void>(core::report_idle_once("scene render",
+                "the renderer readiness is not satisfied for this frame"));
             return CompositorSceneResult::failure(
                 RenderError::CapabilityUnsupported);
         }
@@ -2255,6 +2260,8 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                       == scene::RendererBackend::Advanced);
         if (!padded) {
             if (dof_requested) return refuse_dof("plate filter guard exceeds the authored limit");
+            static_cast<void>(core::report_idle_once("scene render",
+                "the filter apron for this frame cannot be fitted"));
             return CompositorSceneResult::failure(
                 RenderError::InvalidConfiguration);
         }
@@ -2277,6 +2284,8 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         const auto padded_extent = padded_target_extent(
             padded.value(), frame_rect, width(), height());
         if (!reserve_padded(padded_extent.width, padded_extent.height)) {
+            static_cast<void>(core::report_idle_once("scene render",
+                "render targets could not be resized to this frame's extent"));
             return CompositorSceneResult::failure(
                 RenderError::AllocationFailed);
         }
@@ -2309,6 +2318,8 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                     last_readiness_.fallback = false;
                     last_readiness_.video_memory_needed = needed;
                     last_readiness_.video_memory_free = memory.headroom();
+                    static_cast<void>(core::report_idle_once("scene render",
+                        "video memory is too short for another layer renderer at this extent"));
                     return CompositorSceneResult::failure(
                         RenderError::AllocationFailed);
                 }
@@ -2403,8 +2414,11 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 commands, composite_a_, plan.adjusted_scene, frame_rect,
                 background_options);
         if (accumulator_clear.a > 0.0F && plan.adjusted_scene.environment.physical_sky.enabled
-            && (last_readiness_.selected != scene::RendererBackend::Advanced || !sky_drawn))
+            && (last_readiness_.selected != scene::RendererBackend::Advanced || !sky_drawn)) {
+            static_cast<void>(core::report_idle_once("scene render",
+                "the physical sky could not be drawn for this frame"));
             return CompositorSceneResult::failure(RenderError::CapabilityUnsupported);
+        }
         if (!sky_drawn
             && !graph_.clear(commands, core::RenderPass::Composite, composite_a_, accumulator_clear)) {
             return CompositorSceneResult::failure(RenderError::BackendFailure);

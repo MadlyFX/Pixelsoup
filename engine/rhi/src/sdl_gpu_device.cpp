@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <mediaserver/rhi/device.hpp>
 
 #include "d3d12_backend.hpp"
@@ -1047,20 +1048,7 @@ bool CommandList::upload_texture_rows(
     const std::size_t row_bytes = required / (compressed
         ? static_cast<std::size_t>((row_count + 3U) / 4U)
         : static_cast<std::size_t>(row_count));
-    // SDL's D3D12 driver describes the copy footprint with the region's own
-    // width and height, and D3D12 refuses a block-compressed footprint that
-    // is not whole blocks (a 6x6 or 3x3 mip fails the command list's Close).
-    // There the region is padded to whole blocks, which D3D12 measures
-    // against the subresource's block-aligned size, and the rows are staged
-    // at the aligned pitch so SDL never realigns them. Vulkan instead wants a
-    // copy that ends exactly at the mip edge, so other drivers keep the
-    // logical size.
-    const auto* const driver = SDL_GetGPUDeviceDriver(device);
-    const bool block_padded = compressed && driver != nullptr &&
-        std::string_view{driver} == "direct3d12";
-    const std::size_t pitch = block_padded
-        ? (row_bytes + row_alignment - 1U) / row_alignment * row_alignment
-        : compressed || row_alignment % texel_bytes != 0U
+    const std::size_t pitch = compressed || row_alignment % texel_bytes != 0U
         ? row_bytes
         : (row_bytes + row_alignment - 1U) / row_alignment * row_alignment;
     const std::size_t staged = pitch * (required / row_bytes);
@@ -1114,9 +1102,7 @@ bool CommandList::upload_texture_rows(
     }
     SDL_GPUTextureTransferInfo source{};
     source.transfer_buffer = staging;
-    source.pixels_per_row = block_padded
-        ? static_cast<Uint32>(pitch / texel_bytes * 4U)
-        : compressed
+    source.pixels_per_row = compressed
         ? (width + 3U) / 4U * 4U
         : static_cast<Uint32>(pitch / texel_bytes);
     source.rows_per_layer = compressed ? (row_count + 3U) / 4U * 4U : row_count;
@@ -1125,9 +1111,10 @@ bool CommandList::upload_texture_rows(
     region.mip_level = mip;
     region.layer = layer;
     region.y = first_row;
-    region.w = block_padded ? (width + 3U) / 4U * 4U : width;
-    region.h = block_padded ? source.rows_per_layer : row_count;
+    region.w = width;
+    region.h = row_count;
     region.d = 1U;
+    if (compressed) std::fprintf(stderr, "DIAG bc upload tex %ux%u mips %u mip %u w %u rows %u..%u ppr %u rpl %u bytes %zu\n", texture.desc_.width, texture.desc_.height, texture.desc_.mip_levels, mip, width, first_row, row_count, source.pixels_per_row, source.rows_per_layer, required);
     SDL_UploadToGPUTexture(pass, &source, &region, false);
     SDL_EndGPUCopyPass(pass);
 
@@ -2699,6 +2686,7 @@ core::Result<SubmittedWork, RhiError> Device::submit(CommandList commands) noexc
     const auto submitted_at = std::chrono::steady_clock::now();
     auto* const fence = SDL_SubmitGPUCommandBufferAndAcquireFence(raw);
     if (fence == nullptr) {
+        std::fprintf(stderr, "DIAG sdl submit: %s\n", SDL_GetError());
         commands.finish_recording(CommandRecordingOutcome::Canceled);
         return Result::failure(RhiError::BackendFailure);
     }

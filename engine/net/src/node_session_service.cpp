@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <cstdio>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -71,6 +72,34 @@ struct FailureDecision final {
     bool retry{};
     NodeSessionServiceFailure failure{NodeSessionServiceFailure::Protocol};
 };
+
+// A terminal protocol fault stops the render process, and the operator only
+// sees "reason 5". Say which error ended the session, in numbers the source
+// can be searched for, so the node log names the cause.
+void report_terminal_session_error(const char* where,
+                                   const ResumeSessionError& error) noexcept {
+    if (const auto* framed = std::get_if<FramedStreamError>(&error)) {
+        std::fprintf(stderr,
+                     "node session %s: framed stream error %u\n", where,
+                     static_cast<unsigned>(framed->code));
+    } else if (const auto* protocol =
+                   std::get_if<SessionProtocolFailure>(&error)) {
+        if (protocol->reject_code.has_value()) {
+            std::fprintf(stderr,
+                         "node session %s: protocol error %u (peer reject %u)\n",
+                         where, static_cast<unsigned>(protocol->code),
+                         static_cast<unsigned>(*protocol->reject_code));
+        } else {
+            std::fprintf(stderr, "node session %s: protocol error %u\n", where,
+                         static_cast<unsigned>(protocol->code));
+        }
+    } else {
+        std::fprintf(stderr,
+                     "node session %s: session error variant %u\n", where,
+                     static_cast<unsigned>(error.index()));
+    }
+    std::fflush(stderr);
+}
 
 [[nodiscard]] FailureDecision classify_session_error(
     const ResumeSessionError& error) noexcept {
@@ -321,8 +350,14 @@ public:
                 if (session_state == NodeSessionState::CheckpointActivated) {
                     auto completed = session->complete_checkpoint_activation();
                     if (!completed) {
+                        const auto decision =
+                            classify_session_error(completed.error());
+                        if (!decision.retry) {
+                            report_terminal_session_error("send failed",
+                                                          completed.error());
+                        }
                         record_writer_failure(
-                            classify_session_error(completed.error()),
+                            decision,
                             failed,
                             retry,
                             failure,
@@ -341,8 +376,14 @@ public:
                     && session->pending_control_messages() != 0U) {
                     auto flushed = session->flush_frame_acknowledgements();
                     if (!flushed) {
+                        const auto decision =
+                            classify_session_error(flushed.error());
+                        if (!decision.retry) {
+                            report_terminal_session_error("flush failed",
+                                                          flushed.error());
+                        }
                         record_writer_failure(
-                            classify_session_error(flushed.error()),
+                            decision,
                             failed,
                             retry,
                             failure,
@@ -486,6 +527,8 @@ public:
                     clear(session);
                     last_failure.store(decision.failure, std::memory_order_release);
                     if (!decision.retry) {
+                        report_terminal_session_error("resume refused",
+                                                      resumed.error());
                         latch_terminal(decision.failure);
                         break;
                     }
@@ -568,6 +611,10 @@ public:
                     auto inbound = session->receive_live_message();
                     if (!inbound) {
                         reader_failure = classify_session_error(inbound.error());
+                        if (!reader_failure->retry) {
+                            report_terminal_session_error("receive failed",
+                                                          inbound.error());
+                        }
                         break;
                     }
                     if (std::get_if<ReceivedFrameReport>(&inbound.value())
@@ -820,6 +867,8 @@ NodeSessionService::activate_checkpoint() noexcept {
         if (!activated) {
             const auto code = protocol_code(activated.error());
             if (!benign_boundary_rejection(activated.error())) {
+                report_terminal_session_error("checkpoint activation refused",
+                                              activated.error());
                 state_->active_session->close();
                 state_->latch_terminal(NodeSessionServiceFailure::Protocol);
                 return Result::failure({
@@ -861,6 +910,8 @@ NodeSessionService::commit_prepared_frame(cmd::FrameNumber frame) noexcept {
         if (!committed) {
             const auto code = protocol_code(committed.error());
             if (!benign_boundary_rejection(committed.error())) {
+                report_terminal_session_error("frame commit refused",
+                                              committed.error());
                 state_->active_session->close();
                 state_->latch_terminal(NodeSessionServiceFailure::Protocol);
                 return Result::failure({

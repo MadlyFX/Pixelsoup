@@ -557,6 +557,58 @@ void cpu_only_media_asks_for_a_full_resolution_proxy_and_warns() {
            assets::DerivativeProfileId::ProxySourceCfrHevcMain10);
 }
 
+void the_cpu_decode_warning_lasts_only_while_the_source_plays() {
+  // The flag describes the source; the warning describes what the output is
+  // decoding. A ready proxy is what the nodes play, so the warning goes.
+  editor::LibraryProxyRuntimeObservation observation{};
+  observation.asset = doc::NodeId{20U};
+  observation.media_decode = editor::LibraryMediaDecodeState::CpuOnly;
+  for (const editor::LibraryProxyRuntimeState state :
+       {editor::LibraryProxyRuntimeState::Source,
+        editor::LibraryProxyRuntimeState::PreferFallback,
+        editor::LibraryProxyRuntimeState::RequiredUnready,
+        editor::LibraryProxyRuntimeState::Failed}) {
+    observation.state = state;
+    UI_CHECK(editor::library_output_decodes_on_cpu(observation));
+  }
+  observation.state = editor::LibraryProxyRuntimeState::ProxyReady;
+  UI_CHECK(!editor::library_output_decodes_on_cpu(observation));
+  // A source with a hardware decoder never warns, whatever plays.
+  observation.media_decode =
+      editor::LibraryMediaDecodeState::HardwareAccelerated;
+  observation.state = editor::LibraryProxyRuntimeState::Source;
+  UI_CHECK(!editor::library_output_decodes_on_cpu(observation));
+
+  // Drawn: the red triangle leads the Status cell while the proxy is being
+  // made, and is gone once it is ready.
+  const auto warning_drawn =
+      [](editor::LibraryProxyRuntimeState state,
+         std::optional<editor::LibraryProxyTranscodeProgress> progress) {
+        Harness harness;
+        harness.bounds = gui::Rect{0.0F, 0.0F, 1400.0F, 520.0F};
+        harness.registry = project_assets();
+        harness.runtime.push_back(editor::LibraryProxyRuntimeObservation{
+            doc::NodeId{20U}, std::nullopt, state,
+            assets::ProxyPlaybackReason::SourcePolicy,
+            editor::LibraryProxyRuntimeIssue::None, progress,
+            editor::LibraryMediaDecodeState::CpuOnly});
+        static_cast<void>(harness.frame(-1.0F, -1.0F, false));
+        return std::any_of(
+            harness.list.vertices().begin(), harness.list.vertices().end(),
+            [](const gui::UiVertex &vertex) {
+              return vertex.x >= 1196.0F && vertex.x <= 1212.0F &&
+                     vertex.y >= opening_plate_y - 8.0F &&
+                     vertex.y <= opening_plate_y + 8.0F && vertex.r > 0.8F &&
+                     vertex.g < 0.6F;
+            });
+      };
+  UI_CHECK(warning_drawn(editor::LibraryProxyRuntimeState::PreferFallback,
+                         editor::LibraryProxyTranscodeProgress{1'500U, 6'733U,
+                                                               false}));
+  UI_CHECK(!warning_drawn(editor::LibraryProxyRuntimeState::ProxyReady,
+                          std::nullopt));
+}
+
 void proxy_runtime_status_labels_explain_resolution_and_failure() {
   editor::LibraryProxyRuntimeObservation observation{};
   observation.asset = doc::NodeId{100U};
@@ -1142,7 +1194,7 @@ void an_empty_plateset_comes_from_the_background_menu() {
                editor::LibraryColumn::Type) == "Plateset (2)");
 }
 
-constexpr std::array<Case, 39U> cases{{
+constexpr std::array<Case, 40U> cases{{
     {"changed sources are offered for acceptance",
      &changed_sources_are_offered_for_acceptance},
     {"the horizontal scrollbar drags without touching rows",
@@ -1172,6 +1224,8 @@ constexpr std::array<Case, 39U> cases{{
      &the_proxy_chip_cycles_its_policy_without_placing},
     {"cpu-only media asks for a full-resolution proxy and warns",
      &cpu_only_media_asks_for_a_full_resolution_proxy_and_warns},
+    {"the cpu decode warning lasts only while the source plays",
+     &the_cpu_decode_warning_lasts_only_while_the_source_plays},
     {"proxy runtime status labels explain resolution and failure",
      &proxy_runtime_status_labels_explain_resolution_and_failure},
     {"editor proxy status says how much is made",

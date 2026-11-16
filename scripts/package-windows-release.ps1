@@ -157,10 +157,6 @@ Copy-Item -LiteralPath (Join-Path $repository 'third_party/bcdec/LICENSE') `
 Copy-Item -LiteralPath (Join-Path $repository 'third_party/bc7enc/LICENSE') `
     -Destination (Join-Path $packageRoot 'licenses/bc7enc.txt')
 
-# The FBX reader is vendored too; ufbx is not in the pinned vcpkg baseline.
-Copy-Item -LiteralPath (Join-Path $repository 'third_party/ufbx/LICENSE') `
-    -Destination (Join-Path $packageRoot 'licenses/ufbx.txt')
-
 Copy-Item -LiteralPath (Join-Path $repository 'third_party/ltc/LICENSE') `
     -Destination (Join-Path $packageRoot 'licenses/ltc.txt')
 
