@@ -916,7 +916,36 @@ mesh_perspective_view_for_impl(
     if (!finite(to_centre) || !(scene::length(to_centre) > 1.0e-6F)) {
         return Result::failure(PerspectiveMappingError::DegenerateFrustum);
     }
-    const scene::Vec3 forward = scene::normalize(to_centre);
+    // The view aims at the bounding-box centre. That fails for a viewer
+    // standing near one end of a long wall - inside a U of LED walls, close to
+    // its open side - where the near end of the side wall falls behind the
+    // plane facing the box centre although one frustum sees all of it. Only
+    // then does it look along the angular mean of the directions to the
+    // vertices instead. Both are fixed-order sums, so every node derives the
+    // same view.
+    scene::Vec3 angular{};
+    for (const core::u32 index : mesh.indices) {
+        const scene::Vec3 to_vertex = position_for(mesh.vertices[index]) - eye;
+        const float distance = scene::length(to_vertex);
+        if (distance > 1.0e-6F) {
+            angular = angular + to_vertex * (1.0F / distance);
+        }
+    }
+    const auto all_in_front = [&](scene::Vec3 direction) noexcept {
+        for (const core::u32 index : mesh.indices) {
+            const scene::Vec3 to_vertex =
+                position_for(mesh.vertices[index]) - eye;
+            if (!(scene::dot(to_vertex, direction) > 1.0e-6F)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    scene::Vec3 forward = scene::normalize(to_centre);
+    if (!all_in_front(forward) && finite(angular)
+        && scene::length(angular) > 1.0e-6F) {
+        forward = scene::normalize(angular);
+    }
     scene::Vec3 up = scene::normalize(stage_up);
     // A calibrated patch directly above/below the viewpoint needs a stable
     // fallback axis. Pick it deterministically; do not let look_at collapse.

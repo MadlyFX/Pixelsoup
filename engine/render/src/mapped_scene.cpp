@@ -2,6 +2,8 @@
 
 #include <mediaserver/render/projection_mesh_loader.hpp>
 
+#include <mediaserver/core/idle_report.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -414,6 +416,9 @@ struct OutputProjectionCache::AsyncState final
       }
       // Two live outer recordings may not share one mutable observation slot.
       // The caller refuses this recording and can retry after the owner ends.
+      static_cast<void>(core::report_idle_once(
+          "imported projection surface",
+          "an earlier frame's recording still holds this surface's mesh slot"));
       return {};
     }
 
@@ -781,19 +786,45 @@ namespace {
     return projection;
   }
   case output::ProjectionSurfaceShape::ImportedMesh: {
+    constexpr const char *feature = "imported projection surface";
     if (mesh == nullptr) {
+      static_cast<void>(core::report_idle_once(
+          feature, "the UV mesh is not loaded for this frame"));
       return std::nullopt;
     }
     const output::ProjectionMeshPlacement placement{geometry,
                                                      surface.mesh_scale};
     if (surface.mesh_scale > output::max_imported_mesh_scale ||
         !output::valid(placement)) {
+      static_cast<void>(core::report_idle_once(
+          feature, "the surface placement or mesh scale is not valid"));
       return std::nullopt;
     }
     auto mesh_view = output::mesh_perspective_view_for(
         *mesh, placement, frame.camera.eye, frame.camera.near_plane,
         frame.camera.far_plane, stage_up);
     if (!mesh_view) {
+      const char *reason = "no perspective view fits the mesh from the eye";
+      switch (mesh_view.error()) {
+      case output::PerspectiveMappingError::MeshBehindEye:
+        reason = "part of the mesh is behind the scene camera's eye";
+        break;
+      case output::PerspectiveMappingError::InvalidClipRange:
+        reason = "the scene camera's clip range is not valid";
+        break;
+      case output::PerspectiveMappingError::InvalidEye:
+        reason = "the scene camera's eye is not valid";
+        break;
+      case output::PerspectiveMappingError::InvalidMesh:
+        reason = "the mesh has non-finite or invalid vertices";
+        break;
+      case output::PerspectiveMappingError::DegenerateFrustum:
+        reason = "the mesh subtends a degenerate frustum from the eye";
+        break;
+      default:
+        break;
+      }
+      static_cast<void>(core::report_idle_once(feature, reason));
       return std::nullopt;
     }
     MappedProjection projection{};
@@ -935,8 +966,13 @@ std::optional<MappedProjection> OutputProjectionCacheRegistry::resolve(
     const output::OutputMap &map) noexcept {
   prepare_recording(commands);
   OutputProjectionCache *const cache = cache_for(map.node);
-  return cache != nullptr ? cache->resolve(commands, frame, map)
-                          : std::nullopt;
+  if (cache == nullptr) {
+    static_cast<void>(core::report_idle_once(
+        "imported projection surface",
+        "no projection cache slot is free for this map"));
+    return std::nullopt;
+  }
+  return cache->resolve(commands, frame, map);
 }
 
 bool OutputProjectionCacheRegistry::refresh_imported_meshes() noexcept {
@@ -1033,6 +1069,66 @@ block_next_output_projection_cache_load_for_test(OutputProjectionCache &cache) {
 
 namespace {
 
+constexpr const char *mapped_draw_feature = "mapped surface draw";
+
+// A mapped (physical) surface that cannot be drawn holds the node's last
+// picture, and from the wall every cause looks the same. Name the step and
+// the renderer's reason once each, so the node log says which it was.
+void report_mapped_scene_refusal(RenderError error) noexcept {
+  const char *reason = "the scene render refused the surface view";
+  switch (error) {
+  case RenderError::Unavailable:
+    reason = "the scene render for the surface view is unavailable";
+    break;
+  case RenderError::ShaderFormatUnsupported:
+    reason = "the scene render for the surface view has no usable shaders";
+    break;
+  case RenderError::CapabilityUnsupported:
+    reason = "the scene render for the surface view lacks a required "
+             "renderer capability";
+    break;
+  case RenderError::InvalidConfiguration:
+    reason = "the scene render refused the surface view as an invalid "
+             "configuration";
+    break;
+  case RenderError::AllocationFailed:
+    reason = "the scene render could not allocate targets for the surface "
+             "view";
+    break;
+  case RenderError::BackendFailure:
+    reason = "the scene render for the surface view failed in the GPU "
+             "backend";
+    break;
+  }
+  static_cast<void>(core::report_idle_once(mapped_draw_feature, reason));
+}
+
+[[nodiscard]] const rhi::Texture *
+warp_mapped_scene(ProjectionMeshWarp &mesh_warp, rhi::CommandList &commands,
+                  const MappedProjection &projection,
+                  const rhi::Texture *rendered) noexcept {
+  const output::ProjectionMesh *const projection_mesh =
+      projection.projection_mesh();
+  if (rendered == nullptr || projection_mesh == nullptr) {
+    return rendered;
+  }
+  if (!projection.mesh_view.has_value()) {
+    static_cast<void>(core::report_idle_once(
+        mapped_draw_feature, "the surface mesh has no perspective view"));
+    return nullptr;
+  }
+  if (!mesh_warp.render(commands, *rendered, *projection_mesh,
+                        *projection.mesh_view,
+                        projection.mesh_placement.has_value()
+                            ? &*projection.mesh_placement
+                            : nullptr)) {
+    static_cast<void>(core::report_idle_once(
+        mapped_draw_feature, "the projection mesh warp refused the surface"));
+    return nullptr;
+  }
+  return &mesh_warp.target();
+}
+
 template <typename ProjectionCaches>
 const rhi::Texture *record_output_mapped_scene_impl(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
@@ -1052,22 +1148,11 @@ const rhi::Texture *record_output_mapped_scene_impl(
       executor.execute(commands, frame, projection->render_view,
                        shared_media_cache);
   if (!rendered) {
+    report_mapped_scene_refusal(rendered.error());
     return nullptr;
   }
-  const output::ProjectionMesh *const projection_mesh =
-      projection->projection_mesh();
-  if (projection_mesh == nullptr) {
-    return rendered.value();
-  }
-  if (!projection->mesh_view.has_value() ||
-      !mesh_warp.render(commands, *rendered.value(), *projection_mesh,
-                        *projection->mesh_view,
-                        projection->mesh_placement.has_value()
-                            ? &*projection->mesh_placement
-                            : nullptr)) {
-    return nullptr;
-  }
-  return &mesh_warp.target();
+  return warp_mapped_scene(mesh_warp, commands, *projection,
+                           rendered.value());
 }
 
 template <typename ProjectionCaches>
@@ -1086,43 +1171,33 @@ const rhi::Texture *record_output_mapped_scene_impl(
     mapping_unavailable = true;
     return nullptr;
   }
-  const auto finish =
-      [&](const rhi::Texture *rendered) -> const rhi::Texture * {
-    const output::ProjectionMesh *const projection_mesh =
-        projection->projection_mesh();
-    if (rendered == nullptr || projection_mesh == nullptr) {
-      return rendered;
-    }
-    if (!projection->mesh_view.has_value() ||
-        !mesh_warp.render(commands, *rendered, *projection_mesh,
-                          *projection->mesh_view,
-                          projection->mesh_placement.has_value()
-                              ? &*projection->mesh_placement
-                              : nullptr)) {
+  const auto finish = [&](const auto &rendered) -> const rhi::Texture * {
+    if (!rendered) {
+      report_mapped_scene_refusal(rendered.error());
       return nullptr;
     }
-    return &mesh_warp.target();
+    return warp_mapped_scene(mesh_warp, commands, *projection,
+                             rendered.value());
   };
   if (!graph.valid() || graph.plan.steps.empty()) {
-    const auto rendered =
-        executor.execute(commands, frame, projection->render_view,
-                         shared_media_cache);
-    return finish(rendered ? rendered.value() : nullptr);
+    return finish(executor.execute(commands, frame, projection->render_view,
+                                   shared_media_cache));
   }
   const auto planned = plan_compositor_scene(graph, frame);
   if (!planned) {
     if (planned.error() == CompositorScenePlanError::MissingSceneLayer) {
-      const auto rendered =
-          executor.execute(commands, frame, projection->render_view,
-                           shared_media_cache);
-      return finish(rendered ? rendered.value() : nullptr);
+      return finish(executor.execute(commands, frame,
+                                     projection->render_view,
+                                     shared_media_cache));
     }
+    static_cast<void>(core::report_idle_once(
+        mapped_draw_feature,
+        "the compositor graph could not be planned for the surface view"));
     return nullptr;
   }
-  const auto rendered =
-      executor.execute(commands, graph, frame, projection->render_view,
-                       shared_media_cache);
-  return finish(rendered ? rendered.value() : nullptr);
+  return finish(executor.execute(commands, graph, frame,
+                                 projection->render_view,
+                                 shared_media_cache));
 }
 
 } // namespace

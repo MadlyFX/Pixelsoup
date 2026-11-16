@@ -1819,6 +1819,8 @@ show::PresenterStatus SdlPresenter::present(
                 scene_target = record_inner_frustum(
                     platform.icvfx_from, commands, frame, map, scene_target);
                 if (scene_target == nullptr) {
+                    static_cast<void>(core::report_idle_once(
+                        "output map draw", "the inner frustum plate could not be recorded"));
                     return nullptr;
                 }
                 include_icvfx_readiness(platform.icvfx_from, media_complete, buffered_media_);
@@ -1826,6 +1828,8 @@ show::PresenterStatus SdlPresenter::present(
                         commands, *scene_target, map.viewport,
                         platform.scene_from->scene_linear_output(),
                         map.source, map.surface)) {
+                    static_cast<void>(core::report_idle_once(
+                        "output map draw", "the output transform refused to composite the map into its viewport"));
                     return nullptr;
                 }
             }
@@ -1901,6 +1905,8 @@ show::PresenterStatus SdlPresenter::present(
                 scene_target = record_inner_frustum(
                     platform.icvfx_from, commands, frame, map, scene_target);
                 if (scene_target == nullptr) {
+                    static_cast<void>(core::report_idle_once(
+                        "output map draw", "the inner frustum plate could not be recorded"));
                     return nullptr;
                 }
                 include_icvfx_readiness(platform.icvfx_from, media_complete, buffered_media_);
@@ -1908,6 +1914,8 @@ show::PresenterStatus SdlPresenter::present(
                         commands, *scene_target, map.viewport,
                         platform.scene_from->scene_linear_output(),
                         map.source, map.surface)) {
+                    static_cast<void>(core::report_idle_once(
+                        "output map draw", "the output transform refused to composite the map into its viewport"));
                     return nullptr;
                 }
             }
