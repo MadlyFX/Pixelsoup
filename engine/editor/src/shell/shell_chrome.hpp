@@ -98,7 +98,7 @@ constexpr std::array<ApplicationMenuItem, 9U> file_menu_items{{
     {"Open Project...", ApplicationMenuAction::OpenProject},
     {"Recent Projects", ApplicationMenuAction::RecentProjects},
     {"Connect to Blender...", ApplicationMenuAction::StartSceneLink},
-    {"Publish Preview...", ApplicationMenuAction::SceneLinkDetails},
+    {"Freeze Blender...", ApplicationMenuAction::SceneLinkDetails},
     {"Save Project", ApplicationMenuAction::SaveProject},
     {"Save Project As...", ApplicationMenuAction::SaveProjectAs},
     {"Project Settings...", ApplicationMenuAction::OpenProjectSettings},

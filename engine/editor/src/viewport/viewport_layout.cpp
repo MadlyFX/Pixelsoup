@@ -226,6 +226,52 @@ void ViewportPanel::run_guides(Frame& f) {
     }
 }
 
+// The Program canvas's edge, and on the pasteboard past it the outline of
+// every layer reaching off the picture: a black picture on a dark panel still
+// shows where it ends, and a layer dragged off it can be found and brought
+// back. The picture itself stays clean.
+void ViewportPanel::draw_canvas_frame(Frame& f) {
+    if (role_ != ViewportRole::Program) {
+        return;
+    }
+    auto& ctx = f.ctx;
+    const gui::Theme& theme = ctx.theme();
+    gui::UiDrawList& list = ctx.draw_list();
+    const gui::Rect& image = f.result.image;
+    const gui::Rect& pane = f.pane;
+    const float left = std::max(pane.x, image.x);
+    const float top = std::max(pane.y, image.y);
+    const float right = std::min(pane.right(), image.right());
+    const float bottom = std::min(pane.bottom(), image.bottom());
+    const std::array<gui::Rect, 4U> pasteboard{
+        gui::Rect{pane.x, pane.y, pane.width, std::max(top - pane.y, 0.0F)},
+        gui::Rect{pane.x, bottom, pane.width,
+                  std::max(pane.bottom() - bottom, 0.0F)},
+        gui::Rect{pane.x, top, std::max(left - pane.x, 0.0F),
+                  std::max(bottom - top, 0.0F)},
+        gui::Rect{right, top, std::max(pane.right() - right, 0.0F),
+                  std::max(bottom - top, 0.0F)}};
+    const gui::UiColor ghost = gui::fade(theme.text_muted, 0.8F);
+    for (const gui::Rect& strip : pasteboard) {
+        if (strip.width <= 0.0F || strip.height <= 0.0F) {
+            continue;
+        }
+        ctx.push_clip(strip);
+        draw_offcanvas_outlines(list, image, f.scene, f.model_bounds,
+                                f.projection, ghost);
+        ctx.pop_clip();
+    }
+    // One whole pixel just outside the picture, so it covers none of it.
+    const float x0 = std::floor(image.x) - 1.0F;
+    const float y0 = std::floor(image.y) - 1.0F;
+    const float x1 = std::ceil(image.right());
+    const float y1 = std::ceil(image.bottom());
+    list.add_rect(x0, y0, x1 - x0 + 1.0F, 1.0F, theme.text_muted);
+    list.add_rect(x0, y1, x1 - x0 + 1.0F, 1.0F, theme.text_muted);
+    list.add_rect(x0, y0, 1.0F, y1 - y0, theme.text_muted);
+    list.add_rect(x1, y0, 1.0F, y1 - y0, theme.text_muted);
+}
+
 // Drawn over the picture and clipped to it: the safe areas, the guides, and
 // the lines a moved layer has snapped to.
 void ViewportPanel::draw_layout_overlays(Frame& f) {

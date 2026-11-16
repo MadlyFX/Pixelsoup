@@ -76,7 +76,7 @@ For remote render nodes the linked content in `<project> Blender/Link Resources`
 be visible at the same absolute path on every node: keep the project on such a share. A
 node missing a file reports it in Output Monitor and keeps its last complete picture.
 
-**File > Publish Preview...** still freezes Preview into an immutable revision on shared
+**File > Freeze Blender...** still freezes Preview into an immutable revision on shared
 storage with **Roll back Program**, for a Program that must not change while Blender
 edits; it is not needed to go on air.
 

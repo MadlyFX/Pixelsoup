@@ -288,9 +288,9 @@ void EditorShell::Frame::finish() {
     ui.panel(card, ui.theme().panel);
     ui.outline(card, ui.theme().accent);
     ui.push_clip(card);
-    ui.label({card.x+16, card.y+10, card.width-32, 24}, "PUBLISH PREVIEW", ui.theme().text);
+    ui.label({card.x+16, card.y+10, card.width-32, 24}, "FREEZE BLENDER - optional: lock a copy that Blender edits cannot change", ui.theme().text);
     const std::string details{project.scene_link_details.empty()
-        ? "Connect a Blender scene from File > Connect to Blender." : project.scene_link_details};
+        ? "Linked Blender scenes go on air live. Freeze Blender is only for a Program that must not change." : project.scene_link_details};
     std::istringstream lines{details};
     std::string line; float y=card.y+45;
     while (std::getline(lines, line) && y<card.y+265) {
@@ -324,9 +324,9 @@ void EditorShell::Frame::finish() {
     if (impl.publication_storage_draft.empty() && !impl.publication_storage_editing && !project.publication_default_storage.empty())
       ui.label({card.x+24,card.y+476,card.width-150,27},"Default: "+std::string{project.publication_default_storage},ui.theme().text_muted);
     ui.label({card.x+16,card.y+510,card.width-32,24},project.publication_status,ui.theme().text_muted);
-    if (chrome_button(ui,gui::ui_id("editor.publication.publish"),{card.x+16,card.y+546,156,30},"Publish Preview",false,
+    if (chrome_button(ui,gui::ui_id("editor.publication.publish"),{card.x+16,card.y+546,156,30},"Freeze Blender",false,
           !project.publication_scheduled && switcher.rehearsal_scene != scene::SceneId{})) result.publish_linked_scene=true;
-    if (chrome_button(ui,gui::ui_id("editor.publication.cancel"),{card.x+188,card.y+546,156,30},"Cancel publication",false,
+    if (chrome_button(ui,gui::ui_id("editor.publication.cancel"),{card.x+188,card.y+546,156,30},"Cancel freeze",false,
           project.publication_pending && !project.publication_scheduled)) result.cancel_linked_publication=true;
     if (chrome_button(ui,gui::ui_id("editor.publication.rollback"),{card.x+360,card.y+546,156,30},"Roll back Program",false,
           project.publication_rollback && !project.publication_pending)) result.rollback_linked_publication=true;

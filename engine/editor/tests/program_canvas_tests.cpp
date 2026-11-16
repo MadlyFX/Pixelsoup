@@ -320,8 +320,8 @@ void the_selected_layer_has_a_box_on_program_and_none_elsewhere() {
     Harness h;
     const editor::ViewportFrame shown = h.at(10.0F, 10.0F);
     UI_CHECK(shown.box.visible && shown.box.sides);
-    // The picture is 1000 wide in the middle of the square panel; the clip
-    // is a square about its centre.
+    // The picture is centred in the square panel, inside its pasteboard;
+    // the clip is a square about its centre.
     UI_CHECK(near(shown.box.centre.x, 500.0F, 0.05F));
     UI_CHECK(near(shown.box.centre.y, 500.0F, 0.05F));
     const float width = shown.box.corners[1U].x - shown.box.corners[0U].x;
@@ -335,7 +335,7 @@ void the_selected_layer_has_a_box_on_program_and_none_elsewhere() {
     const editor::CanvasBoxMetrics metrics = h.metrics();
     UI_CHECK(metrics.sides);
     UI_CHECK(near(metrics.x, 960.0F, 0.05F) && near(metrics.y, 540.0F, 0.05F));
-    UI_CHECK(near(metrics.width, width * 1.92F, 0.1F));
+    UI_CHECK(near(metrics.width, width * 1920.0F / shown.image.width, 0.1F));
     UI_CHECK(near(metrics.height, metrics.width, 0.05F));
     UI_CHECK(near(metrics.turns, 0.0F, 1.0e-4F));
 
@@ -544,11 +544,12 @@ void the_wheel_zooms_about_the_pointer_and_fit_puts_it_back() {
     Harness h;
     const editor::ViewportFrame fitted = h.at(600.0F, 450.0F);
     UI_CHECK(h.panel.canvas_fitted());
-    // Letterboxed exactly as before: 1000 wide, 562.5 tall, centred.
-    UI_CHECK(near(fitted.image.x, 0.0F) && near(fitted.image.y, 218.75F));
-    UI_CHECK(near(fitted.image.width, 1000.0F) &&
-             near(fitted.image.height, 562.5F));
-    UI_CHECK(near(h.panel.canvas_scale(), 1000.0F / 1920.0F, 1.0e-4F));
+    // Letterboxed inside a forty-unit pasteboard: 920 wide, 517.5 tall,
+    // centred.
+    UI_CHECK(near(fitted.image.x, 40.0F) && near(fitted.image.y, 241.25F));
+    UI_CHECK(near(fitted.image.width, 920.0F) &&
+             near(fitted.image.height, 517.5F));
+    UI_CHECK(near(h.panel.canvas_scale(), 920.0F / 1920.0F, 1.0e-4F));
     const editor::CanvasPoint under = fitted.pointer;
 
     // Two notches in: larger by 1.2 each, and the canvas pixel under the
@@ -557,8 +558,8 @@ void the_wheel_zooms_about_the_pointer_and_fit_puts_it_back() {
         h.frame(Pointer{600.0F, 450.0F, false, false, 2.0F});
     UI_CHECK(zoomed.navigated);
     UI_CHECK(!h.panel.canvas_fitted());
-    UI_CHECK(near(zoomed.image.width, 1440.0F, 0.05F));
-    UI_CHECK(near(zoomed.image.height, 810.0F, 0.05F));
+    UI_CHECK(near(zoomed.image.width, 1324.8F, 0.05F));
+    UI_CHECK(near(zoomed.image.height, 745.2F, 0.05F));
     UI_CHECK(near(zoomed.pointer.x, under.x, 0.05F));
     UI_CHECK(near(zoomed.pointer.y, under.y, 0.05F));
     // The box follows the picture: still round the clip, now larger.
@@ -572,7 +573,7 @@ void the_wheel_zooms_about_the_pointer_and_fit_puts_it_back() {
     for (int notch = 0; notch < 30; ++notch) {
         small = h.frame(Pointer{600.0F, 450.0F, false, false, -1.0F});
     }
-    UI_CHECK(near(small.image.width, 250.0F, 0.05F));
+    UI_CHECK(near(small.image.width, 230.0F, 0.05F));
 
     // A chosen scale is panel units per canvas pixel, about the middle.
     h.panel.set_canvas_scale(1.0F);
@@ -674,6 +675,86 @@ void a_handle_in_the_bars_is_taken_and_a_bare_press_there_is_not() {
     UI_CHECK(!h.panel.dragging());
 }
 
+void the_canvas_edge_is_outlined_just_outside_the_picture() {
+    Harness h;
+    h.selection.clear();
+    const editor::ViewportFrame shown = h.at(10.0F, 10.0F);
+    // A pasteboard on every side of the fitted picture.
+    UI_CHECK(shown.image.x > Harness::bounds.x + 8.0F);
+    UI_CHECK(shown.image.y > Harness::bounds.y + 8.0F);
+    UI_CHECK(shown.image.right() < Harness::bounds.right() - 8.0F);
+    const gui::UiColor ink = h.ctx.theme().text_muted;
+    const float left = std::floor(shown.image.x) - 1.0F;
+    const float top = std::floor(shown.image.y) - 1.0F;
+    const float right = std::ceil(shown.image.right());
+    const float bottom = std::ceil(shown.image.bottom());
+    bool left_edge = false;
+    bool top_edge = false;
+    bool right_edge = false;
+    bool bottom_edge = false;
+    for (const gui::UiVertex& vertex : h.list.vertices()) {
+        if (vertex.r != ink.r || vertex.g != ink.g || vertex.b != ink.b ||
+            vertex.a != ink.a) {
+            continue;
+        }
+        left_edge = left_edge || vertex.x == left;
+        top_edge = top_edge || vertex.y == top;
+        right_edge = right_edge || vertex.x == right + 1.0F;
+        bottom_edge = bottom_edge || vertex.y == bottom + 1.0F;
+        // One pixel wide, outside the picture: none of it covers a pixel.
+        UI_CHECK(vertex.x <= left + 1.0F || vertex.x >= right ||
+                 vertex.y <= top + 1.0F || vertex.y >= bottom);
+    }
+    UI_CHECK(left_edge && top_edge && right_edge && bottom_edge);
+}
+
+void a_layer_dragged_off_the_canvas_is_outlined_and_picked_on_the_pasteboard() {
+    Harness h;
+    const editor::ViewportFrame first = h.at(10.0F, 10.0F);
+    const gui::Rect image = first.image;
+    // Drawn runs clipped to the pasteboard left of the picture.
+    const auto left_board_runs = [&h, &image] {
+        std::size_t vertices = 0U;
+        for (const auto& batch : h.list.batches()) {
+            if (batch.texture == nullptr && batch.clip_max_x <= image.x + 0.5F &&
+                batch.clip_max_x > batch.clip_min_x) {
+                vertices += batch.vertex_count;
+            }
+        }
+        return vertices;
+    };
+    // Wholly on the picture, a layer leaves nothing on the pasteboard.
+    h.selection.clear();
+    static_cast<void>(h.at(10.0F, 10.0F));
+    UI_CHECK(left_board_runs() == 0U);
+
+    // Moved so its middle sits on the pasteboard left of the picture.
+    const float units_per_world =
+        (first.box.corners[1U].x - first.box.corners[0U].x) / 2.0F;
+    const float board_x = image.x * 0.5F;
+    const float shift = (board_x - first.box.centre.x) / units_per_world;
+    h.scene.media[0U].world = scene::multiply(
+        scene::translation(scene::Vec3{shift, 0.0F, 0.0F}),
+        scene::scaling(scene::Vec3{2.0F, 2.0F, 1.0F}));
+    const float middle_y = first.box.centre.y;
+    static_cast<void>(h.at(10.0F, 10.0F));
+    UI_CHECK(left_board_runs() > 0U);
+
+    // A press there picks it, and a drag brings it back on.
+    const editor::ViewportFrame pressed = h.at(board_x, middle_y, true);
+    UI_CHECK(pressed.pressed && pressed.picked == clip_node);
+    h.selection = {clip_node};
+    const editor::ViewportFrame dragged = h.at(board_x + 200.0F, middle_y, true);
+    UI_CHECK(dragged.transform.has_value() &&
+             dragged.transform->translation.x > 0.0F);
+    static_cast<void>(h.at(board_x + 200.0F, middle_y, false));
+
+    // Bare pasteboard, away from it, still starts nothing.
+    h.selection.clear();
+    const editor::ViewportFrame bare = h.at(board_x, image.y * 0.5F, true);
+    UI_CHECK(!bare.pressed && !bare.picked.has_value());
+}
+
 void a_drag_on_the_layer_itself_still_moves_it() {
     Harness h;
     static_cast<void>(h.at(500.0F, 500.0F));
@@ -729,17 +810,19 @@ void a_shape_dragged_on_bare_picture_is_in_canvas_pixels() {
     Harness h;
     h.selection.clear();
     h.panel.set_canvas_tool(editor::CanvasTool::Ellipse);
-    // The picture is 1000 wide for 1920 pixels, its top 218.75 down.
+    // Canvas pixels per panel unit, and where the picture sits.
+    const gui::Rect image = h.at(10.0F, 10.0F).image;
+    const float px = 1920.0F / image.width;
     static_cast<void>(h.at(100.0F, 300.0F, true));
     static_cast<void>(h.at(350.0F, 400.0F, true));
     const editor::ViewportFrame released = h.at(350.0F, 400.0F, false);
     UI_CHECK(released.shape.has_value());
     const editor::CanvasShape& shape = *released.shape;
     UI_CHECK(shape.tool == editor::CanvasTool::Ellipse && !shape.on_layer);
-    UI_CHECK(near(shape.left, 192.0F, 0.05F));
-    UI_CHECK(near(shape.top, (300.0F - 218.75F) * 1.92F, 0.05F));
-    UI_CHECK(near(shape.right, 672.0F, 0.05F));
-    UI_CHECK(near(shape.bottom, (400.0F - 218.75F) * 1.92F, 0.05F));
+    UI_CHECK(near(shape.left, (100.0F - image.x) * px, 0.05F));
+    UI_CHECK(near(shape.top, (300.0F - image.y) * px, 0.05F));
+    UI_CHECK(near(shape.right, (350.0F - image.x) * px, 0.05F));
+    UI_CHECK(near(shape.bottom, (400.0F - image.y) * px, 0.05F));
 
     // Shift keeps it as wide as it is tall, by the longer way dragged.
     static_cast<void>(h.at(100.0F, 300.0F, true));
@@ -747,8 +830,10 @@ void a_shape_dragged_on_bare_picture_is_in_canvas_pixels() {
     const editor::ViewportFrame square =
         h.at(350.0F, 400.0F, false, gui::KeyMods::Shift);
     UI_CHECK(square.shape.has_value());
-    UI_CHECK(near(square.shape->right - square.shape->left, 480.0F, 0.05F));
-    UI_CHECK(near(square.shape->bottom - square.shape->top, 480.0F, 0.05F));
+    UI_CHECK(near(square.shape->right - square.shape->left, 250.0F * px,
+                  0.05F));
+    UI_CHECK(near(square.shape->bottom - square.shape->top, 250.0F * px,
+                  0.05F));
 
     // Alt grows it from the press, which is then its middle.
     static_cast<void>(h.at(500.0F, 500.0F, true));
@@ -758,8 +843,10 @@ void a_shape_dragged_on_bare_picture_is_in_canvas_pixels() {
     UI_CHECK(centred.shape.has_value());
     UI_CHECK(near((centred.shape->left + centred.shape->right) * 0.5F, 960.0F,
                   0.05F));
-    UI_CHECK(near(centred.shape->right - centred.shape->left, 192.0F, 0.05F));
-    UI_CHECK(near(centred.shape->bottom - centred.shape->top, 76.8F, 0.05F));
+    UI_CHECK(near(centred.shape->right - centred.shape->left, 100.0F * px,
+                  0.05F));
+    UI_CHECK(near(centred.shape->bottom - centred.shape->top, 40.0F * px,
+                  0.05F));
 
     // A twitch is not a shape, and Esc drops one that is under way.
     static_cast<void>(h.at(500.0F, 500.0F, true));
@@ -1190,7 +1277,8 @@ void a_dragged_layer_lands_on_the_middle_of_the_picture() {
             moved.media[0U].world);
         const auto landed = h.panel.canvas_box_metrics(moved, clip_node);
         UI_CHECK(landed.has_value() &&
-                 near(landed->x, 960.0F + 4.0F * 1.92F, 0.1F));
+                 near(landed->x, 960.0F + 4.0F * 1920.0F / shown.image.width,
+                      0.1F));
     }
     // Twenty units off, nothing is in reach across the picture.
     const editor::ViewportFrame far =
@@ -1227,7 +1315,8 @@ void a_dragged_layer_lands_on_another_layers_edge() {
     static_cast<void>(h.at(centre.x, centre.y, true));
     // Dragged left until its left edge is three units short of the other's
     // right edge: the edges meet.
-    const float gap = (moving->left - fixed->right) / 1.92F;
+    const float gap =
+        (moving->left - fixed->right) * shown.image.width / 1920.0F;
     const editor::ViewportFrame dragged =
         h.at(centre.x - gap + 3.0F, centre.y, true);
     UI_CHECK(dragged.snap_x.has_value());
@@ -1340,6 +1429,10 @@ constexpr Case cases[] = {
      &the_zoom_tool_doubles_on_a_click_and_alt_halves},
     {"a handle in the bars is taken and a bare press there is not",
      &a_handle_in_the_bars_is_taken_and_a_bare_press_there_is_not},
+    {"the canvas edge is outlined just outside the picture",
+     &the_canvas_edge_is_outlined_just_outside_the_picture},
+    {"a layer dragged off the canvas is outlined and picked on the pasteboard",
+     &a_layer_dragged_off_the_canvas_is_outlined_and_picked_on_the_pasteboard},
     {"a drag on the layer itself still moves it",
      &a_drag_on_the_layer_itself_still_moves_it},
     {"a shape dragged on the selected layer is in the layers own space",

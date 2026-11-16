@@ -444,11 +444,12 @@ void the_render_is_letterboxed_to_the_canvas_aspect() {
     Harness h;
     const editor::ViewportFrame frame = h.frame(0.0F, 0.0F, false);
 
-    // 16:9 inside a square: full width, and centred vertically.
-    UI_CHECK(near(frame.image.width, 1000.0F));
-    UI_CHECK(near(frame.image.height, 562.5F));
-    UI_CHECK(near(frame.image.x, 0.0F));
-    UI_CHECK(near(frame.image.y, (1000.0F - 562.5F) * 0.5F));
+    // 16:9 inside a square, within a forty-unit pasteboard: the board's full
+    // width, and centred vertically.
+    UI_CHECK(near(frame.image.width, 920.0F));
+    UI_CHECK(near(frame.image.height, 517.5F));
+    UI_CHECK(near(frame.image.x, 40.0F));
+    UI_CHECK(near(frame.image.y, (1000.0F - 517.5F) * 0.5F));
 }
 
 void a_pointer_maps_through_the_letterbox_to_canvas_pixels() {
@@ -1088,11 +1089,12 @@ void the_image_is_recorded_against_its_own_texture() {
     Harness h;
     static_cast<void>(h.frame(0.0F, 0.0F, false));
 
-    // One batch, and it samples the panel's target rather than the atlas -
-    // which is what makes a viewport a zero-copy texture in the widget tree.
+    // The first batch is the picture, and it samples the panel's target
+    // rather than the atlas - which is what makes a viewport a zero-copy
+    // texture in the widget tree.
     UI_CHECK(!h.list.batches().empty());
     UI_CHECK(h.list.batches().front().texture == &h.target);
-    UI_CHECK(h.list.vertices().size() == 6U);
+    UI_CHECK(h.list.batches().front().vertex_count == 6U);
 }
 
 void clicking_a_procedural_object_selects_it() {

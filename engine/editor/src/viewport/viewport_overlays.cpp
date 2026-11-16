@@ -97,16 +97,26 @@ void wire_shape(gui::UiDrawList& list, const gui::Rect& image,
                 const std::array<scene::Vec3, PointCount>& points,
                 const std::array<std::array<std::size_t, 2U>, EdgeCount>& edges,
                 gui::UiColor color,
-                const ViewportProjection* projection = nullptr) {
+                const ViewportProjection* projection = nullptr,
+                bool beyond_canvas_only = false) {
     std::array<gui::UiPoint, PointCount> projected{};
     const scene::Canvas canvas = viewport_canvas(view, projection);
+    const auto canvas_width = static_cast<float>(canvas.width);
+    const auto canvas_height = static_cast<float>(canvas.height);
+    bool beyond = false;
     for (std::size_t index = 0U; index < points.size(); ++index) {
         const auto canvas_point = project_world(
             view, projection, scene::transform_point(world, points[index]));
         if (!canvas_point.visible) {
             return;
         }
+        beyond = beyond || canvas_point.x < 0.0F || canvas_point.y < 0.0F ||
+                 canvas_point.x > canvas_width ||
+                 canvas_point.y > canvas_height;
         projected[index] = to_ui(image, canvas, canvas_point);
+    }
+    if (beyond_canvas_only && !beyond) {
+        return;
     }
     for (const auto& edge : edges) {
         line(list, projected[edge[0U]], projected[edge[1U]], 5.0F,
@@ -123,7 +133,8 @@ void wire_box(gui::UiDrawList& list, const gui::Rect& image,
               const scene::Scene& view, const scene::Mat4& world,
               gui::UiColor color,
               scene::ModelLocalBounds bounds,
-              const ViewportProjection* projection) {
+              const ViewportProjection* projection,
+              bool beyond_canvas_only) {
     const std::array<scene::Vec3, 8U> points{
         scene::Vec3{bounds.minimum.x, bounds.minimum.y, bounds.minimum.z},
         scene::Vec3{bounds.maximum.x, bounds.minimum.y, bounds.minimum.z},
@@ -147,7 +158,8 @@ void wire_box(gui::UiDrawList& list, const gui::Rect& image,
         {{2U, 6U}},
         {{3U, 7U}},
     }};
-    wire_shape(list, image, view, world, points, edges, color, projection);
+    wire_shape(list, image, view, world, points, edges, color, projection,
+               beyond_canvas_only);
 }
 
 namespace {
@@ -155,7 +167,8 @@ namespace {
 void wire_quad(gui::UiDrawList& list, const gui::Rect& image,
                const scene::Scene& view, const scene::Mat4& world, bool floor,
                gui::UiColor color,
-               const ViewportProjection* projection = nullptr) {
+               const ViewportProjection* projection = nullptr,
+               bool beyond_canvas_only = false) {
     const std::array<scene::Vec3, 4U> points =
         floor ? std::array<scene::Vec3, 4U>{scene::Vec3{-0.5F, 0.0F, -0.5F},
                                             scene::Vec3{0.5F, 0.0F, -0.5F},
@@ -171,7 +184,8 @@ void wire_quad(gui::UiDrawList& list, const gui::Rect& image,
         {{2U, 3U}},
         {{3U, 0U}},
     }};
-    wire_shape(list, image, view, world, points, edges, color, projection);
+    wire_shape(list, image, view, world, points, edges, color, projection,
+               beyond_canvas_only);
 }
 
 void draw_light_icon(gui::UiDrawList& list, const gui::Rect& image,
@@ -607,6 +621,65 @@ void draw_selection_outlines(gui::UiDrawList& list, const gui::Rect& image,
     // exhaust the UI vertex budget and prevent the Inspector from presenting.
     for (const auto& [id,bounds] : batches)
         wire_box(list,image,view,scene::identity(),outline(id),bounds,projection);
+}
+
+void draw_offcanvas_outlines(gui::UiDrawList& list, const gui::Rect& image,
+                             const scene::Scene& view,
+                             const scene::ModelBoundsProvider& model_bounds,
+                             const ViewportProjection* projection,
+                             gui::UiColor color) {
+    // Only what reaches past the canvas: a layer wholly on the picture is
+    // seen in the picture itself.
+    for (const auto& object : view.instances) {
+        if (object.mesh.primitive == scene::Primitive::Quad ||
+            object.mesh.primitive == scene::Primitive::Plane) {
+            wire_quad(list, image, view, object.world,
+                      object.mesh.primitive == scene::Primitive::Plane, color,
+                      projection, true);
+        } else {
+            wire_box(list, image, view, object.world, color,
+                     scene::ModelLocalBounds{}, projection, true);
+        }
+    }
+    for (const auto& clip : view.media) {
+        wire_quad(list, image, view, clip.world, false, color, projection,
+                  true);
+    }
+    // Scattered models are boxed as their group, as selection outlines are.
+    std::map<doc::NodeId, scene::ModelLocalBounds> batches;
+    for (const auto& model : view.models) {
+        const auto local = (model_bounds ? model_bounds(model) : std::nullopt)
+                               .value_or(scene::ModelLocalBounds{});
+        if (!model.motion_source.value()) {
+            wire_box(list, image, view, model.world, color, local, projection,
+                     true);
+            continue;
+        }
+        auto [entry, added] = batches.try_emplace(model.source_node);
+        auto& group = entry->second;
+        for (const float x : {local.minimum.x, local.maximum.x}) {
+            for (const float y : {local.minimum.y, local.maximum.y}) {
+                for (const float z : {local.minimum.z, local.maximum.z}) {
+                    const auto p =
+                        scene::transform_point(model.world, {x, y, z});
+                    if (added) {
+                        group.minimum = group.maximum = p;
+                        added = false;
+                    }
+                    group.minimum = {std::min(group.minimum.x, p.x),
+                                     std::min(group.minimum.y, p.y),
+                                     std::min(group.minimum.z, p.z)};
+                    group.maximum = {std::max(group.maximum.x, p.x),
+                                     std::max(group.maximum.y, p.y),
+                                     std::max(group.maximum.z, p.z)};
+                }
+            }
+        }
+    }
+    for (const auto& [id, bounds] : batches) {
+        wire_box(list, image, view, scene::identity(), color, bounds,
+                 projection, true);
+    }
 }
 
 namespace {

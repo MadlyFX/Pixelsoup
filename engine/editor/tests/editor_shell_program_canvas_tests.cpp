@@ -106,15 +106,18 @@ void program_tools() {
                        panel.y + 52.0F,
                        panel.width - editor::canvas_tool_palette_width,
                        panel.height - 52.0F - 24.0F};
-  // The 16:9 picture, fitted into that pane.
-  float picture_width = pane.width;
+  // The 16:9 picture, fitted inside the pasteboard round that pane.
+  const gui::Rect board = editor::program_canvas_board(pane);
+  check(board.x > pane.x && board.width < pane.width,
+        "a pasteboard surrounds the picture");
+  float picture_width = board.width;
   float picture_height = picture_width * 9.0F / 16.0F;
-  if (picture_height > pane.height) {
-    picture_height = pane.height;
+  if (picture_height > board.height) {
+    picture_height = board.height;
     picture_width = picture_height * 16.0F / 9.0F;
   }
-  const gui::Rect picture{pane.x + (pane.width - picture_width) * 0.5F,
-                          pane.y + (pane.height - picture_height) * 0.5F,
+  const gui::Rect picture{board.x + (board.width - picture_width) * 0.5F,
+                          board.y + (board.height - picture_height) * 0.5F,
                           picture_width, picture_height};
   // Where a point of the world lands in the window.
   const auto on_screen = [&](scene::Vec3 point) {
@@ -187,6 +190,21 @@ void program_tools() {
   check(shell->apply_selection_set_recall(show.id, selected), "select card");
   frame();
   frame();
+  if (SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "MEDIASERVER_HOLD") != nullptr) {
+    const scene::Mat4 kept = show.instances[0].world;
+    show.instances[0].world = scene::multiply(
+        scene::translation(scene::Vec3{-7.6F, 2.0F, 0.0F}),
+        scene::scaling(card.scale));
+    scene::MeshInstance second = show.instances[0];
+    second.source = doc::NodeId{6U};
+    second.world = scene::multiply(
+        scene::translation(scene::Vec3{9.8F, -2.5F, 0.0F}),
+        scene::scaling(card.scale));
+    show.instances.push_back(second);
+    for (int i = 0; i < 800; ++i) { frame(); SDL_Delay(30); }
+    show.instances.pop_back();
+    show.instances[0].world = kept;
+  }
 
   // The card's bottom-right corner, dragged half a card further right and a
   // quarter further down: the box resizes against its top-left corner.

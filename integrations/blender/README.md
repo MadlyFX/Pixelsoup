@@ -76,7 +76,7 @@ Server; restoring it in Blender restores the same linked object.
   in that Blender releases scenes that file does not hold.
 - Right-click a row > **Disconnect Blender** ends that scene's link; the scene keeps the
   last synced content and does not relink until you open it again.
-- **File > Publish Preview...** still freezes Preview into an immutable revision on
+- **File > Freeze Blender...** still freezes Preview into an immutable revision on
   shared storage, for a Program that must not change; it is no longer needed to go on air.
 
 ## Recovery and status

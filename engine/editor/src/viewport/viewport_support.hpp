@@ -62,7 +62,8 @@ void wire_box(gui::UiDrawList& list, const gui::Rect& image,
               const scene::Scene& view, const scene::Mat4& world,
               gui::UiColor color,
               scene::ModelLocalBounds bounds = scene::ModelLocalBounds{},
-              const ViewportProjection* projection = nullptr);
+              const ViewportProjection* projection = nullptr,
+              bool beyond_canvas_only = false);
 
 // The floor grid follows the view: centred under what the camera looks at,
 // spaced by `stage_grid_step` with a brighter line every ten, and the world
@@ -119,6 +120,14 @@ void draw_selection_outlines(gui::UiDrawList& list, const gui::Rect& image,
                              const scene::ModelBoundsProvider& model_bounds,
                              const ViewportProjection* projection = nullptr,
                              std::optional<gui::UiColor> tint = std::nullopt);
+
+// Outlines every layer that reaches past the canvas, so a layer dragged off
+// the picture can still be seen, and picked, on the pasteboard round it.
+void draw_offcanvas_outlines(gui::UiDrawList& list, const gui::Rect& image,
+                             const scene::Scene& view,
+                             const scene::ModelBoundsProvider& model_bounds,
+                             const ViewportProjection* projection,
+                             gui::UiColor color);
 
 // The outline of `surface` in the world. `mesh` is its generated or imported
 // geometry when one is resolved. A camera-anchored stage places the authored

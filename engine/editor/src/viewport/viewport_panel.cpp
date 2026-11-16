@@ -73,7 +73,11 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     // The editor chrome is a clipped 2D pass over the zero-copy scene image.
     // Program stays clean except for selection outlines; Stage adds the spatial
     // guides an operator needs to author the scene.
-    ctx.push_clip(shown_image(f.result.image));
+    // Program draws over its whole pane: the canvas's edge, and what a
+    // layer leaves on the pasteboard past it, are drawn outside the picture.
+    ctx.push_clip(role_ == ViewportRole::Program ? f.pane
+                                                 : shown_image(f.result.image));
+    draw_canvas_frame(f);
     draw_overlays(f);
     draw_layout_overlays(f);
     draw_gizmos(f);
@@ -148,7 +152,9 @@ bool ViewportPanel::begin_frame(Frame& f) {
     // Letterboxed to the canvas, never stretched: a pixel the operator clicks
     // has to be the pixel the renderer drew, or picking lies. A zoomed
     // Program view keeps that shape and is cropped by its pane.
-    if (role_ == ViewportRole::Program && !canvas_fitted_) {
+    if (role_ == ViewportRole::Program &&
+        (!canvas_fitted_ ||
+         (image_bounds.width > 0.0F && image_bounds.height > 0.0F))) {
         frame.image = canvas_view_.to_screen(
             image_bounds, gui::Rect{0.0F, 0.0F, canvas_width, canvas_height});
         ctx.push_clip(image_bounds);

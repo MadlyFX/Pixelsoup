@@ -1,14 +1,16 @@
 # Coordinated Program publication v1
 
 Step 08 publishes a frozen scene through the existing asset cohort and sealed
-control-frame authority. Blender continues to author Preview. The operator takes
-an explicit cut with **PUBLISH** or **File > Scene Link Details > Publish Preview**.
+control-frame authority. This is now optional: linked scenes go on air live, one
+Blender scene per Media Server scene, and publication is only for a Program that
+must not change while Blender keeps editing. The operator freezes it with
+**File > Freeze Blender...** (formerly Publish Preview).
 Publication does not add a second clock, a Blender-to-node connection, or a new
 file-transfer protocol to the session transport.
 
 ## Revision and storage
 
-Configure an absolute Program storage folder in Scene Link Details. The Director
+Configure an absolute Program storage folder in the Freeze Blender dialog. The Director
 needs write access and every required output process needs read access at the
 same absolute path. A shared UNC path is suitable for separate Windows machines;
 a local path works for the same-machine demonstration. Use one publishing
@@ -111,7 +113,7 @@ renderer through the ordinary show workflow. Admission failure retains Program.
 - **Cancel:** before a permit is authorized, cancel the worker, fence stale
   completion, and discard the unused candidate and its first-take rollback clone.
   Already exposed files remain available and count toward storage admission.
-- **Supersede:** Publish Preview again before authorization. A single worker and
+- **Supersede:** Freeze Blender again before authorization. A single worker and
   one latest request prevent an unbounded queue. Completion carries the captured
   project and Program identity; a changed project/Program discards it.
 - **Authorized cut:** cancellation and superseding are disabled during the

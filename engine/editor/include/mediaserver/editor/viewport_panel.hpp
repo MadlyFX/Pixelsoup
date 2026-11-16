@@ -94,6 +94,11 @@ struct ViewportProjection final {
                                     scene::Canvas canvas, float pointer_x,
                                     float pointer_y) noexcept;
 
+// The part of Program's pane a fitted canvas is fitted into: the rest is the
+// pasteboard round the picture, as in an image editor, where a layer that
+// reaches past the canvas's edge is outlined and can still be picked.
+[[nodiscard]] gui::Rect program_canvas_board(const gui::Rect& pane) noexcept;
+
 enum class EmptyCanvasInteraction : core::u8 {
     None,
     // Program/preview canvas: clear editor-local scene selection.
@@ -999,6 +1004,7 @@ class ViewportPanel final {
     void capture_snap(Frame& f, doc::NodeId node);
     void snap_canvas_move(Frame& f, float& dx, float& dy);
     void run_guides(Frame& f);
+    void draw_canvas_frame(Frame& f);
     void draw_layout_overlays(Frame& f);
     void draw_rulers(Frame& f);
     [[nodiscard]] bool press_transform_box(Frame& f);

@@ -36,21 +36,34 @@ void ViewportPanel::begin_interaction(Frame& f) {
     auto& interaction_canvas = f.interaction_canvas;
     auto& canvas_width = f.canvas_width;
     auto& occluded = f.occluded;
-    // The Program view answers across its whole pane: a box handle may
-    // stand outside the picture, and a zoomed picture is cropped by it.
+    // The Program view answers across its whole pane: the pasteboard round
+    // the canvas picks a layer dragged past its edge, a box handle may stand
+    // outside the picture, and a zoomed picture is cropped by the pane.
     const gui::Rect interaction_bounds =
         occluded || frame.keyboard_transform || f.navigating
             ? gui::Rect{}
             : (role_ == ViewportRole::Program ? f.pane : frame.image);
     gui::Interaction it = ctx.grab(id_, interaction_bounds);
-    // Out in the bars beside the picture only a box handle answers: a press
-    // there otherwise starts nothing, as it always has.
-    const bool on_picture =
-        role_ != ViewportRole::Program ||
-        frame.image.contains(ctx.pointer_x(), ctx.pointer_y()) ||
-        frame.box_handle != TransformBoxHandle::None;
-    it.hovered = it.hovered && on_picture;
-    it.pressed = it.pressed && on_picture;
+    // Off the picture a press answers only on a box handle or on a layer
+    // reaching out over the pasteboard; on bare pasteboard it starts nothing.
+    if (role_ == ViewportRole::Program &&
+        !frame.image.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+        frame.box_handle == TransformBoxHandle::None) {
+        it.hovered = false;
+        if (it.pressed) {
+            const CanvasPoint at = to_canvas(frame.image, interaction_canvas,
+                                             ctx.pointer_x(), ctx.pointer_y());
+            const float reach = 12.0F * canvas_width / frame.image.width;
+            const std::vector<scene::ScenePick> hits =
+                projection != nullptr && projection->project
+                    ? scene::pick_scene_all(scene, at.x, at.y,
+                                            projection->project,
+                                            f.model_bounds, reach, false)
+                    : scene::pick_scene_all(scene, scene.canvas, at.x, at.y,
+                                            f.model_bounds, reach, false);
+            it.pressed = !hits.empty();
+        }
+    }
     frame.hovered = it.hovered;
     frame.held = it.held;
     frame.pointer =

@@ -51,8 +51,8 @@ constexpr float rotate_snap_turns = 1.0F / 24.0F;
 [[nodiscard]] gui::CanvasView fitted_view(const gui::Rect& pane,
                                           scene::Canvas canvas) noexcept {
     const gui::Rect fit =
-        fitted(pane, static_cast<float>(canvas.width) /
-                         static_cast<float>(canvas.height));
+        fitted(program_canvas_board(pane), static_cast<float>(canvas.width) /
+                          static_cast<float>(canvas.height));
     gui::CanvasView view{};
     view.zoom = fit.width / static_cast<float>(canvas.width);
     view.pan_x = fit.x - pane.x;
@@ -118,6 +118,14 @@ view_forward_of(const scene::Scene& scene,
 }
 
 }  // namespace
+
+gui::Rect program_canvas_board(const gui::Rect& pane) noexcept {
+    const float margin =
+        std::clamp(std::min(pane.width, pane.height) * 0.06F, 8.0F, 40.0F);
+    return pane.width > margin * 4.0F && pane.height > margin * 4.0F
+               ? gui::inset(pane, margin)
+               : pane;
+}
 
 gui::Rect ViewportPanel::shown_image(const gui::Rect& image) const noexcept {
     if (role_ != ViewportRole::Program || canvas_pane_.width <= 0.0F ||
