@@ -534,6 +534,58 @@ void metadata_and_frame_map_validation_rejects_semantic_drift() {
                 assets::DerivativeState::Missing);
 }
 
+void a_full_size_proxy_of_an_odd_height_source_is_one_row_taller() {
+    // 1920x1013 camera plates: 4:2:0 cannot hold 1013 rows, so the encoder
+    // writes 1014, and that is the one size accepted for this profile.
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "plate.mov";
+    write_file(source, bytes("odd-height-plate"));
+    assets::MediaAsset media = asset(source);
+    media.dimensions = assets::PixelDimensions{1'920U, 1'013U};
+    media.requested_proxy_profile =
+        assets::DerivativeProfileId::ProxySourceCfrHevcMain10;
+
+    const auto attempt = [&](core::u32 encoded_height,
+                             std::string_view cache_name) {
+        const auto state = std::make_shared<BackendState>();
+        server::ProxyBackendOutput output =
+            backend_output(fingerprint(source));
+        output.source_metadata.dimensions =
+            assets::PixelDimensions{1'920U, 1'013U};
+        output.encoded_metadata.dimensions =
+            assets::PixelDimensions{1'920U, encoded_height};
+        output.encoded_metadata.video_codec = assets::DerivativeCodec::Hevc;
+        output.encoded_metadata.pixel_format =
+            assets::DerivativePixelFormat::Yuv420p10;
+        output.encoded_metadata.audio_layout =
+            assets::DerivativeAudioLayout::Stereo;
+        output.encoded_metadata.audio_codec = assets::DerivativeAudioCodec::Aac;
+        output.encoded_metadata.audio_sample_rate = 48'000U;
+        output.encoded_metadata.audio_bitrate = 192'000U;
+        state->output = std::move(output);
+        server::ProxyGenerationService service{
+            open_cache(temporary.path() / std::string{cache_name}),
+            std::make_unique<ControlledBackend>(state),
+            {1U * 1'024U * 1'024U, 100U},
+        };
+        return service.generate(media);
+    };
+
+    const auto taller = attempt(1'014U, "taller");
+    PROXY_CHECK(taller.has_value());
+    PROXY_CHECK(taller.value().encoded_metadata.dimensions ==
+                (assets::PixelDimensions{1'920U, 1'014U}));
+
+    // A row short loses picture, and the odd size is not what 4:2:0 writes.
+    for (const core::u32 height : {1'012U, 1'013U, 1'016U}) {
+        const auto refused =
+            attempt(height, "refused-" + std::to_string(height));
+        PROXY_CHECK(!refused);
+        PROXY_CHECK(refused.error().code ==
+                    server::ProxyGenerationErrorCode::InvalidMetadata);
+    }
+}
+
 void missing_and_oversized_backend_outputs_never_publish() {
     TemporaryDirectory temporary;
     const fs::path source = temporary.path() / "output.mov";
@@ -1065,7 +1117,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 16U> cases{{
+constexpr std::array<Case, 17U> cases{{
     {"unavailable default fails closed without publishing",
      &unavailable_default_fails_closed_without_publishing},
     {"successful backend publishes keyed payload and sidecar",
@@ -1074,6 +1126,8 @@ constexpr std::array<Case, 16U> cases{{
      &source_revision_must_match_before_during_and_after_encode},
     {"metadata and frame map validation rejects semantic drift",
      &metadata_and_frame_map_validation_rejects_semantic_drift},
+    {"a full-size proxy of an odd-height source is one row taller",
+     &a_full_size_proxy_of_an_odd_height_source_is_one_row_taller},
     {"missing and oversized backend outputs never publish",
      &missing_and_oversized_backend_outputs_never_publish},
     {"cancellation stops backend and cleans partial work",

@@ -155,6 +155,18 @@ struct DerivativeProfile final {
 derivative_profile(DerivativeProfileId id) noexcept;
 [[nodiscard]] const DerivativeProfile*
 derivative_profile(std::string_view name) noexcept;
+// The picture size a proxy of `profile` is encoded at for a source of
+// `source` pixels. Encoders and the check of what they wrote both use it.
+//
+// Every proxy is 4:2:0, which needs even dimensions. A ScaleWithinBounds
+// profile shrinks into its bounds and then rounds down to even. A
+// PreserveWithinBounds profile keeps the source size and rounds an odd side
+// up by one, so every source row and column survives into the proxy; a
+// source too large for it is fitted the ScaleWithinBounds way. Zero when
+// either size is zero.
+[[nodiscard]] PixelDimensions
+proxy_encoded_dimensions(PixelDimensions source,
+                         const DerivativeProfile& profile) noexcept;
 [[nodiscard]] Sha256Digest
 derivative_profile_signature(const DerivativeProfile& profile) noexcept;
 

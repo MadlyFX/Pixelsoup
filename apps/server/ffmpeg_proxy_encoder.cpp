@@ -277,20 +277,8 @@ source_metadata(AVFormatContext &format, const AVStream &stream) noexcept {
 [[nodiscard]] assets::PixelDimensions
 fitted_dimensions(assets::PixelDimensions source,
                   const assets::DerivativeProfile &profile) noexcept {
-    core::u64 width = source.width;
-    core::u64 height = source.height;
-    if (width > profile.width) {
-        height = (height * profile.width) / width;
-        width = profile.width;
-    }
-    if (height > profile.height) {
-        width = (width * profile.height) / height;
-        height = profile.height;
-    }
-    width = std::max<core::u64>(2U, width & ~core::u64{1U});
-    height = std::max<core::u64>(2U, height & ~core::u64{1U});
-    return assets::PixelDimensions{static_cast<core::u32>(width),
-                                   static_cast<core::u32>(height)};
+    // The same rule the generation service checks the output against.
+    return assets::proxy_encoded_dimensions(source, profile);
 }
 
 [[nodiscard]] const AVCodec *
@@ -319,7 +307,12 @@ open_encoder(AVCodecContext *&opened, const ProxySourceMetadata &source,
         }
         context->width = static_cast<int>(dimensions.width);
         context->height = static_cast<int>(dimensions.height);
-        context->pix_fmt = hevc_main10 ? AV_PIX_FMT_P010LE : AV_PIX_FMT_YUV420P;
+        // NVENC takes ten-bit 4:2:0 interleaved (P010); x265 takes it planar.
+        // Both write the same Main10 stream, and the frames handed over are
+        // converted to whichever was opened.
+        context->pix_fmt = !hevc_main10        ? AV_PIX_FMT_YUV420P
+                           : name == "libx265" ? AV_PIX_FMT_YUV420P10LE
+                                               : AV_PIX_FMT_P010LE;
         context->time_base =
             AVRational{static_cast<int>(source.frame_rate.denominator),
                        static_cast<int>(source.frame_rate.numerator)};
@@ -360,6 +353,18 @@ open_encoder(AVCodecContext *&opened, const ProxySourceMetadata &source,
         } else if (!bitrate_encoder) {
             av_dict_set(&options, "preset", software_preset(priority), 0);
             av_dict_set(&options, "crf", quality.c_str(), 0);
+        }
+        if (name == "libx265") {
+            // x265 runs its own thread pool and ignores thread_count, so the
+            // budget is passed as its pool size; otherwise a node's
+            // Background transcode would take every core from playback. Its
+            // per-encode banner stays out of the node log.
+            const int threads = codec_thread_count(priority);
+            const std::string parameters =
+                threads > 0 ? "pools=" + std::to_string(threads) +
+                                  ":log-level=error"
+                            : std::string{"log-level=error"};
+            av_dict_set(&options, "x265-params", parameters.c_str(), 0);
         }
         const int result = avcodec_open2(context.get(), codec, &options);
         av_dict_free(&options);

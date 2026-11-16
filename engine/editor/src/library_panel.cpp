@@ -926,6 +926,12 @@ std::string library_proxy_runtime_status(
   return "PROXY FAILED (UNKNOWN)";
 }
 
+bool library_output_decodes_on_cpu(
+    const LibraryProxyRuntimeObservation &observation) noexcept {
+  return observation.media_decode == LibraryMediaDecodeState::CpuOnly &&
+         observation.state != LibraryProxyRuntimeState::ProxyReady;
+}
+
 LibraryPanel::LibraryPanel(gui::UiId id) noexcept
     : id_(id), rename_(id ^ 0x4C49425241525952ULL) {
   for (std::size_t column = 0U; column < library_column_count; ++column) {
@@ -1690,7 +1696,10 @@ LibraryFrame LibraryPanel::draw_impl(
   // Machine-local proxy and decode truth for one media asset.
   struct Runtime final {
     const LibraryProxyRuntimeObservation *proxy{};
+    // The source has no hardware decoder on the output: chooses the proxy.
     bool cpu_decode_only{};
+    // The output is decoding that source now: what the warning shows.
+    bool output_decodes_on_cpu{};
   };
   const auto runtime_for = [&](const assets::Asset &asset) {
     Runtime result;
@@ -1707,6 +1716,9 @@ LibraryFrame LibraryPanel::draw_impl(
     result.cpu_decode_only =
         decode != proxy_runtime.end() &&
         decode->media_decode == LibraryMediaDecodeState::CpuOnly;
+    result.output_decodes_on_cpu =
+        decode != proxy_runtime.end() &&
+        library_output_decodes_on_cpu(*decode);
     return result;
   };
   const auto status_text = [&](const assets::Asset &asset,
@@ -1737,7 +1749,7 @@ LibraryFrame LibraryPanel::draw_impl(
     if (runtime.proxy != nullptr) {
       append(library_proxy_runtime_status(*runtime.proxy));
     }
-    if (runtime.cpu_decode_only) {
+    if (runtime.output_decodes_on_cpu) {
       append("OUTPUT CPU DECODE ONLY");
     }
     const auto *const media = std::get_if<assets::MediaAsset>(&asset);
@@ -2204,7 +2216,7 @@ LibraryFrame LibraryPanel::draw_impl(
         }
         if (column == LibraryColumn::Status) {
           float status_x = cell.x;
-          if (runtime.cpu_decode_only) {
+          if (runtime.output_decodes_on_cpu) {
             draw_cpu_decode_warning(
                 ctx, gui::Rect{status_x, row.y + row.height * 0.5F - 6.0F,
                                12.0F, 11.0F});
@@ -2379,7 +2391,7 @@ LibraryFrame LibraryPanel::draw_impl(
           }
         }
         const Runtime runtime = runtime_for(*entry.asset);
-        if (runtime.cpu_decode_only) {
+        if (runtime.output_decodes_on_cpu) {
           draw_cpu_decode_warning(
               ctx, gui::Rect{image.right() - 16.0F, image.y + 4.0F,
                              12.0F, 11.0F});

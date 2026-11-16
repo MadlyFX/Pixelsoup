@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 namespace {
 
@@ -79,6 +80,42 @@ namespace fs = std::filesystem;
         node.properties.emplace(
             std::string{scene::schema::asset_id},
             doc::PropertyValue{static_cast<std::int64_t>(asset)});
+    }
+    return node;
+}
+
+struct TakePlate final {
+    std::size_t slot{};
+    std::string source;
+    core::u64 asset{};
+};
+
+// A plateset take as plateset authoring writes it: an ordinary clip of its
+// front plate that also names the plate for every slot it fills.
+[[nodiscard]] doc::Node plateset_take(core::u64 id, core::u64 plateset,
+                                      const std::vector<TakePlate>& plates) {
+    doc::Node node = placement(id, scene::schema::media_type,
+                               plates.front().source, plates.front().asset);
+    node.properties.emplace(
+        std::string{scene::schema::plateset_asset},
+        doc::PropertyValue{static_cast<std::int64_t>(plateset)});
+    for (const TakePlate& plate : plates) {
+        node.properties.emplace(
+            scene::schema::plate_property(plate.slot,
+                                          scene::schema::plate_source_suffix),
+            doc::PropertyValue{plate.source});
+        node.properties.emplace(
+            scene::schema::plate_property(plate.slot,
+                                          scene::schema::plate_asset_suffix),
+            doc::PropertyValue{static_cast<std::int64_t>(plate.asset)});
+        node.properties.emplace(
+            scene::schema::plate_property(plate.slot,
+                                          scene::schema::plate_count_suffix),
+            doc::PropertyValue{std::int64_t{6'420}});
+        node.properties.emplace(
+            scene::schema::plate_property(plate.slot,
+                                          scene::schema::plate_offset_suffix),
+            doc::PropertyValue{std::int64_t{0}});
     }
     return node;
 }
@@ -264,6 +301,115 @@ void the_digest_tracks_required_paths_and_nothing_else() {
         std::string{scene::schema::source},
         doc::PropertyValue{src("renamed.mp4")});
     PROJECT_ASSET_CHECK(manifest_of(root.set(repointed)).digest != reference);
+}
+
+void every_plate_of_a_plateset_take_has_to_be_opened() {
+    // Front plate 0 is also the clip's own source; the take fills three more
+    // slots, out of slot order, each from its own Library record.
+    const std::vector<TakePlate> plates{
+        {0U, src("plate-front.mov"), 31U},
+        {4U, src("plate-back.mov"), 35U},
+        {2U, src("plate-right.mov"), 33U},
+        {8U, src("plate-ceiling.mov"), 39U},
+    };
+    doc::Root root;
+    for (const TakePlate& plate : plates) {
+        root = root.set(asset_node(plate.asset, assets::schema::media_type,
+                                   plate.source));
+    }
+    root = root.set(plateset_take(50U, 77U, plates));
+
+    const auto manifest = manifest_of(root);
+    // Four files, not five: the front plate named twice is one requirement.
+    PROJECT_ASSET_CHECK(manifest.assets.size() == 4U);
+    for (const TakePlate& plate : plates) {
+        const auto found = std::find_if(
+            manifest.assets.begin(), manifest.assets.end(),
+            [&](const app::RequiredProjectAsset& required) {
+                return required.source == plate.source;
+            });
+        PROJECT_ASSET_CHECK(found != manifest.assets.end());
+        PROJECT_ASSET_CHECK(found->kind == assets::AssetKind::Media);
+        PROJECT_ASSET_CHECK(found->asset == doc::NodeId{plate.asset});
+    }
+    PROJECT_ASSET_CHECK(manifest.kind_mismatches == 0U);
+
+    // Repointing one non-front plate is a different set of files to check.
+    doc::Node repointed = *root.get(doc::NodeId{50U});
+    repointed.properties.insert_or_assign(
+        scene::schema::plate_property(4U, scene::schema::plate_source_suffix),
+        doc::PropertyValue{src("plate-back-v2.mov")});
+    const auto changed = manifest_of(root.set(repointed));
+    PROJECT_ASSET_CHECK(changed.digest != manifest.digest);
+    PROJECT_ASSET_CHECK(requires_source(changed, src("plate-back-v2.mov")));
+    PROJECT_ASSET_CHECK(!requires_source(changed, src("plate-back.mov")));
+}
+
+void plate_properties_count_only_on_a_clip_from_a_plateset() {
+    // The scene model reads plates only from a clip carrying plateset_asset;
+    // the manifest must agree, or it asks nodes for files nothing draws.
+    doc::Root root;
+    doc::Node clip =
+        placement(20U, scene::schema::media_type, src("clip.mp4"));
+    clip.properties.emplace(
+        scene::schema::plate_property(3U, scene::schema::plate_source_suffix),
+        doc::PropertyValue{src("stray-plate.mov")});
+    root = root.set(clip);
+
+    const auto manifest = manifest_of(root);
+    PROJECT_ASSET_CHECK(manifest.assets.size() == 1U);
+    PROJECT_ASSET_CHECK(manifest.assets[0U].source == src("clip.mp4"));
+}
+
+void a_plate_revision_is_judged_by_size_and_time_alone() {
+    // Readiness has to stay quick on multi-gigabyte plates: the revision is
+    // the file's size and last-write time, and its bytes are never read.
+    TemporaryDirectory temporary;
+    const fs::path front = temporary.path() / "front.mov";
+    const fs::path back = temporary.path() / "back.mov";
+    write(front, "front-plate-bytes");
+    write(back, "back-plate-bytes");
+    const std::string front_source =
+        assets::asset_source_from_path(front);
+    const std::string back_source =
+        assets::asset_source_from_path(back);
+    const auto front_revision = assets::source_fingerprint(front_source);
+    const auto back_revision = assets::source_fingerprint(back_source);
+    PROJECT_ASSET_CHECK(front_revision);
+    PROJECT_ASSET_CHECK(back_revision);
+
+    doc::Root root;
+    root = root.set(fingerprinted_asset_node(
+        31U, assets::schema::media_type, front_source,
+        front_revision.value()));
+    root = root.set(fingerprinted_asset_node(
+        35U, assets::schema::media_type, back_source, back_revision.value()));
+    root = root.set(plateset_take(
+        50U, 77U, {{0U, front_source, 31U}, {4U, back_source, 35U}}));
+    const auto manifest = manifest_of(root);
+    PROJECT_ASSET_CHECK(manifest.assets.size() == 2U);
+
+    // Same length, same timestamp, different bytes: still the same revision.
+    const auto stamp = fs::last_write_time(back);
+    write(back, "BACK-PLATE-BYTES");
+    fs::last_write_time(back, stamp);
+    const auto same = app::check_project_assets(manifest);
+    PROJECT_ASSET_CHECK(same.ready());
+    PROJECT_ASSET_CHECK(same.assets.size() == 2U);
+
+    // A new timestamp is a new revision, reported against that plate only.
+    fs::last_write_time(back, stamp + std::chrono::seconds{90});
+    const auto touched = app::check_project_assets(manifest);
+    PROJECT_ASSET_CHECK(!touched.ready());
+    PROJECT_ASSET_CHECK(touched.mismatched == 1U);
+    const auto stale = std::find_if(
+        touched.assets.begin(), touched.assets.end(),
+        [&](const app::ProjectAssetPresence& presence) {
+            return presence.source == back_source;
+        });
+    PROJECT_ASSET_CHECK(stale != touched.assets.end());
+    PROJECT_ASSET_CHECK(stale->state ==
+                        app::ProjectAssetPresence::State::Sha256Mismatch);
 }
 
 void availability_reports_each_missing_path_against_its_manifest() {
@@ -960,6 +1106,12 @@ constexpr Case cases[]{
      &an_asset_id_naming_the_wrong_role_is_counted_and_repaired},
     {"the digest tracks required paths and nothing else",
      &the_digest_tracks_required_paths_and_nothing_else},
+    {"every plate of a plateset take has to be opened",
+     &every_plate_of_a_plateset_take_has_to_be_opened},
+    {"plate properties count only on a clip from a plateset",
+     &plate_properties_count_only_on_a_clip_from_a_plateset},
+    {"a plate revision is judged by size and time alone",
+     &a_plate_revision_is_judged_by_size_and_time_alone},
     {"availability reports each missing path against its manifest",
      &availability_reports_each_missing_path_against_its_manifest},
     {"the routine scan never reads a source or calls it stale",

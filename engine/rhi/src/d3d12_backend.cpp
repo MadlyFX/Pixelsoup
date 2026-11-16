@@ -3177,11 +3177,7 @@ bool d3d12_upload_texture_rows(
         }
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT chunk_footprint = footprint;
         chunk_footprint.Offset = allocation.offset;
-        // A block-compressed footprint is whole blocks in both directions,
-        // even for a mip such as 6x6 or 3x3 whose edge is a partial block;
-        // D3D12 measures it against the subresource's block-aligned size.
-        chunk_footprint.Footprint.Width = (width + block - 1U) / block * block;
-        chunk_footprint.Footprint.Height = std::min(chunk_rows, rows - copied_rows) * block;
+        chunk_footprint.Footprint.Height = std::min(chunk_rows * block, row_count - copied_rows * block);
         chunks[chunk_count] = TextureUploadChunk{
             allocation.resource, chunk_footprint, copied_rows};
         ++chunk_count;

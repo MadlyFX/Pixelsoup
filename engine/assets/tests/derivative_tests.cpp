@@ -90,6 +90,51 @@ void profile_catalog_freezes_output_semantics() {
     DERIVATIVE_CHECK(full_resolution->keyframe_interval == 30U);
 }
 
+void proxy_sizes_are_even_and_full_size_proxies_lose_no_rows() {
+    const auto* full = assets::derivative_profile(
+        assets::DerivativeProfileId::ProxySourceCfrHevcMain10);
+    const auto* editor = assets::derivative_profile(
+        assets::DerivativeProfileId::Proxy720pCfrH264);
+    DERIVATIVE_CHECK(full != nullptr && editor != nullptr);
+    using Size = assets::PixelDimensions;
+
+    // Even sources keep their size exactly.
+    DERIVATIVE_CHECK(assets::proxy_encoded_dimensions(Size{3840U, 2160U},
+                                                      *full) ==
+                     (Size{3840U, 2160U}));
+    // An odd side grows by one rather than shrinking: 4:2:0 needs even
+    // sides, and a row added keeps every source row where a row dropped
+    // would lose one.
+    DERIVATIVE_CHECK(assets::proxy_encoded_dimensions(Size{1920U, 1013U},
+                                                      *full) ==
+                     (Size{1920U, 1014U}));
+    DERIVATIVE_CHECK(assets::proxy_encoded_dimensions(Size{1279U, 719U},
+                                                      *full) ==
+                     (Size{1280U, 720U}));
+    // Growing onto the bound is still inside it.
+    DERIVATIVE_CHECK(assets::proxy_encoded_dimensions(Size{8191U, 1013U},
+                                                      *full) ==
+                     (Size{8192U, 1014U}));
+    // Past the bound it is fitted, shrinking and rounding down.
+    DERIVATIVE_CHECK(assets::proxy_encoded_dimensions(Size{8193U, 1013U},
+                                                      *full) ==
+                     (Size{8192U, 1012U}));
+    DERIVATIVE_CHECK(assets::proxy_encoded_dimensions(Size{10240U, 4320U},
+                                                      *full) ==
+                     (Size{8192U, 3456U}));
+
+    // The editor's proxy shrinks into 1280x720 and rounds down.
+    DERIVATIVE_CHECK(assets::proxy_encoded_dimensions(Size{1920U, 1013U},
+                                                      *editor) ==
+                     (Size{1280U, 674U}));
+    DERIVATIVE_CHECK(assets::proxy_encoded_dimensions(Size{640U, 361U},
+                                                      *editor) ==
+                     (Size{640U, 360U}));
+
+    DERIVATIVE_CHECK(assets::proxy_encoded_dimensions(Size{0U, 1080U},
+                                                      *full) == (Size{}));
+}
+
 void every_identity_member_changes_the_key() {
     const auto* profile = assets::derivative_profile(
         assets::DerivativeProfileId::Thumbnail320x180Srgb);
@@ -239,7 +284,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
     {"proxy segments cover the source and key apart",
      &proxy_segments_cover_the_source_and_key_apart},
     {"profile catalog freezes output semantics",
@@ -254,6 +299,8 @@ constexpr std::array<Case, 7U> cases{{
      &filmstrip_ordinals_include_exact_endpoints},
     {"state transitions reject impossible shortcuts",
      &state_transitions_reject_impossible_shortcuts},
+    {"proxy sizes are even and full-size proxies lose no rows",
+     &proxy_sizes_are_even_and_full_size_proxies_lose_no_rows},
 }};
 
 } // namespace

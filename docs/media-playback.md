@@ -280,6 +280,14 @@ or the Preview playhead, is playing uses the Background budget instead, so
 generation does not take frames from playback. A render node always
 generates its output proxies at Background, as whole files.
 
+A clip whose source the output nodes can only decode on the CPU, such as
+ProRes, asks for a full-size 10-bit HEVC output proxy when it is switched from
+**Source**. It keeps the source's size, except that an odd side is one pixel
+larger, since 4:2:0 video needs even sides: a 1920x1013 plate becomes
+1920x1014 with no row dropped. Each node encodes it with NVENC
+(`hevc_nvenc`) and, where NVENC cannot open, with the x265 software encoder,
+which is slower and uses the node's CPU at the Background budget.
+
 Measured on an RTX 3090 Director with one 4K H.264 plate, a seek in the
 editor reaches its exact frame in 74 ms on the proxy against 149 ms on the
 source, four plates play every frame at 24 fps (88% on the source), and

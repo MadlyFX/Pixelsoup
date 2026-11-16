@@ -84,6 +84,53 @@ ProjectAssetManifest collect_project_asset_manifest(
         };
         if (node.type == output::schema::surface_type) include_color(output::schema::camera_inverse_lut);
         if (node.type == scene::schema::settings_type) include_color(scene::schema::show_lut);
+        const auto add_required = [&](assets::AssetKind kind, std::string source,
+                                      std::optional<doc::NodeId> authored_asset) {
+            if (!assets::valid_asset_source(source)) {
+                return;
+            }
+            // An image sequence is a '#' run resolved per frame. A machine has
+            // it when its first frame opens - one stat, like any other source -
+            // and there is no single file whose revision a fingerprint could
+            // name.
+            if (const auto run = source.find('#');
+                kind == assets::AssetKind::Media && run != std::string::npos) {
+                auto end = run;
+                while (end < source.size() && source[end] == '#') ++end;
+                const auto* start = find(node.properties, scene::schema::sequence_start);
+                const auto* first = start == nullptr ? nullptr : std::get_if<std::int64_t>(start);
+                auto number = std::to_string(first != nullptr && *first > 0 ? *first : 0);
+                if (number.size() < end - run) number.insert(0U, end - run - number.size(), '0');
+                manifest.assets.push_back(RequiredProjectAsset{
+                    {}, kind, source.substr(0U, run) + number + source.substr(end), {}});
+                return;
+            }
+
+            // A placement's asset_id is the strongest link; exact-source lookup
+            // repairs a placement whose record was deleted and re-imported. A
+            // placement with no record at all is still a file this show opens,
+            // so it belongs in the manifest either way - which is what keeps a
+            // node and the Director agreeing about what has to be present.
+            const assets::Asset* asset = authored_asset.has_value()
+                ? registry.asset(*authored_asset)
+                : nullptr;
+            if (asset != nullptr && assets::asset_kind(*asset) != kind) {
+                if (manifest.kind_mismatches !=
+                    std::numeric_limits<core::u32>::max()) {
+                    ++manifest.kind_mismatches;
+                }
+                asset = nullptr;
+            }
+            if (asset == nullptr) {
+                asset = registry.asset_for_source(source, kind);
+            }
+            manifest.assets.push_back(RequiredProjectAsset{
+                asset == nullptr ? doc::NodeId{} : assets::asset_id(*asset), kind,
+                std::move(source),
+                asset == nullptr
+                    ? std::optional<assets::ContentFingerprint>{}
+                    : assets::asset_fingerprint(*asset)});
+        };
         assets::AssetKind kind{};
         std::string source;
         std::optional<doc::NodeId> authored_asset;
@@ -97,6 +144,26 @@ ProjectAssetManifest collect_project_asset_manifest(
             kind = assets::AssetKind::Media;
             source = text(node.properties, scene::schema::source);
             authored_asset = node_id(node.properties, scene::schema::asset_id);
+            // A plateset take is one clip that plays a plate on every slot
+            // screen of its vehicle track. `source` is only its front plate;
+            // each slot's file is its own required asset, or a node never
+            // learns it has the file and leaves that wall unlit. Read only
+            // from a clip that says it came from a plateset, as the scene
+            // model does. The front plate repeats `source` and is folded into
+            // one entry by the de-duplication below.
+            if (find(node.properties, scene::schema::plateset_asset) != nullptr) {
+                for (std::size_t slot = 0U;
+                     slot < scene::schema::vehicle_slot_count; ++slot) {
+                    add_required(
+                        assets::AssetKind::Media,
+                        text(node.properties,
+                             scene::schema::plate_property(
+                                 slot, scene::schema::plate_source_suffix)),
+                        node_id(node.properties,
+                                scene::schema::plate_property(
+                                    slot, scene::schema::plate_asset_suffix)));
+                }
+            }
         } else if (node.type == scene::schema::model_type) {
             relevant = true;
             kind = assets::AssetKind::Model;
@@ -122,49 +189,9 @@ ProjectAssetManifest collect_project_asset_manifest(
             authored_asset =
                 node_id(node.properties, output::schema::mesh_asset_id);
         }
-        if (!relevant || !assets::valid_asset_source(source)) {
-            continue;
+        if (relevant) {
+            add_required(kind, std::move(source), authored_asset);
         }
-        // An image sequence is a '#' run resolved per frame. A machine has it
-        // when its first frame opens - one stat, like any other source - and
-        // there is no single file whose revision a fingerprint could name.
-        if (const auto run = source.find('#');
-            kind == assets::AssetKind::Media && run != std::string::npos) {
-            auto end = run;
-            while (end < source.size() && source[end] == '#') ++end;
-            const auto* start = find(node.properties, scene::schema::sequence_start);
-            const auto* first = start == nullptr ? nullptr : std::get_if<std::int64_t>(start);
-            auto number = std::to_string(first != nullptr && *first > 0 ? *first : 0);
-            if (number.size() < end - run) number.insert(0U, end - run - number.size(), '0');
-            manifest.assets.push_back(RequiredProjectAsset{
-                {}, kind, source.substr(0U, run) + number + source.substr(end), {}});
-            continue;
-        }
-
-        // A placement's asset_id is the strongest link; exact-source lookup
-        // repairs a placement whose record was deleted and re-imported. A
-        // placement with no record at all is still a file this show opens, so
-        // it belongs in the manifest either way - which is what keeps a node
-        // and the Director agreeing about what has to be present.
-        const assets::Asset* asset = authored_asset.has_value()
-            ? registry.asset(*authored_asset)
-            : nullptr;
-        if (asset != nullptr && assets::asset_kind(*asset) != kind) {
-            if (manifest.kind_mismatches !=
-                std::numeric_limits<core::u32>::max()) {
-                ++manifest.kind_mismatches;
-            }
-            asset = nullptr;
-        }
-        if (asset == nullptr) {
-            asset = registry.asset_for_source(source, kind);
-        }
-        manifest.assets.push_back(RequiredProjectAsset{
-            asset == nullptr ? doc::NodeId{} : assets::asset_id(*asset), kind,
-            std::move(source),
-            asset == nullptr
-                ? std::optional<assets::ContentFingerprint>{}
-                : assets::asset_fingerprint(*asset)});
     }
 
     const auto order = [](const RequiredProjectAsset& left,

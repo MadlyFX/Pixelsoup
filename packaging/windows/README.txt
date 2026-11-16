@@ -122,6 +122,12 @@ right-click media-server.exe > Create memory dump file) can only be read
 against the symbols of the build that wrote it. Send the dump together with
 the logs from %LOCALAPPDATA%\MediaServer\logs.
 
+LICENCES
+
+The FFmpeg libraries in this folder are built with x265 for software HEVC
+encoding, which places them under the GNU General Public License rather than
+the LGPL. The licences of every bundled library are in licenses\.
+
 For the complete command-line reference:
 
   .\media-server.exe --help

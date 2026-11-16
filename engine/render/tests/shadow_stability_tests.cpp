@@ -9,14 +9,12 @@
 #endif
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 namespace core = mediaserver::core;
@@ -33,22 +31,6 @@ template<class T> std::span<const core::u8> bytes(const std::vector<T>& v) {
 }
 rhi::CommandList acquire(rhi::Device& device) {
     auto cmd = device.acquire_commands(); CHECK(cmd); return std::move(cmd).value();
-}
-// A model the cache has decoded can still be pending in the renderer while its
-// textures are prepared on a worker. That finishes during the first recording
-// on an idle machine but not under a parallel test run, so a recording refused
-// only for a pending model is retried; any other refusal fails at once.
-rhi::CommandList render_settled(rhi::Device& device, render::SceneRenderer& renderer,
-                                const scene::Scene& frame, scene::CanvasRect region) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{20};
-    for (;;) {
-        auto cmd = acquire(device);
-        if (renderer.render(cmd, frame, region)) return cmd;
-        CHECK(renderer.stats().models_pending != 0U && renderer.stats().models_failed == 0U
-              && renderer.stats().model_integration_refusals == 0U);
-        CHECK(std::chrono::steady_clock::now() < deadline);
-        std::this_thread::sleep_for(std::chrono::milliseconds{2});
-    }
 }
 std::vector<core::u8> download(rhi::Device& device, rhi::CommandList cmd,
                               const rhi::Texture& target, core::u32 stride) {
@@ -363,7 +345,9 @@ void native_cutouts_and_slices(rhi::Device& device) {
     auto created=render::SceneRenderer::create(device,128U,64U,small_limits(),render::SceneRendererMode::AdvancedLinear);
     CHECK(created); auto renderer=std::move(created).value();
     const auto draw=[&](int product) {
-        auto cmd=render_settled(device,renderer,frame,scene::whole(frame.canvas));
+        auto cmd=acquire(device); const bool okr=renderer.render(cmd,frame,scene::whole(frame.canvas));
+        if(!okr){const auto& st=renderer.stats(); std::cerr<<"DIAG pending "<<st.models_pending<<" failed "<<st.models_failed<<" stale "<<st.models_stale<<" att "<<st.model_integration_attempts<<" ref "<<st.model_integration_refusals<<" inst "<<st.instances<<" dropped "<<st.dropped_instances<<" tex "<<static_cast<int>(st.texture_streaming.state)<<" graphref "<<st.graph.refusals<<" product "<<product<<'\n';}
+        CHECK(okr);
         CHECK(renderer.stats().instances==2U && renderer.stats().models_pending==0U);
         auto& target=product==1?renderer.object_id_target():product==2?renderer.shadow_atlas_target():renderer.target();
         return download(device,std::move(cmd),target,product==0?8U:4U);
@@ -393,7 +377,7 @@ void native_cutouts_and_slices(rhi::Device& device) {
         const auto padded=render::padded_slice_for(frame,slice,slice.width,slice.height,true); CHECK(padded);
         const auto region=padded.value();
         auto node=render::SceneRenderer::create(device,region.render.width,region.render.height,small_limits(),render::SceneRendererMode::AdvancedLinear); CHECK(node);
-        auto cmd=render_settled(device,node.value(),frame,region.render);
+        auto cmd=acquire(device); CHECK(node.value().render(cmd,frame,region.render));
         const auto image=download(device,std::move(cmd),node.value().target(),8U);
         for (core::u32 y=0;y<slice.height;++y) for(core::u32 x=0;x<slice.width;++x) {
             const auto local=(static_cast<std::size_t>(y+region.crop.y)*region.render.width+x+region.crop.x)*8U;

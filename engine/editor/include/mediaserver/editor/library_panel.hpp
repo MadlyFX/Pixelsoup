@@ -163,6 +163,14 @@ struct LibraryProxyRuntimeObservation final {
 [[nodiscard]] std::string
 library_proxy_runtime_status(const LibraryProxyRuntimeObservation &observation);
 
+// Whether the output nodes are decoding this clip on the CPU right now: its
+// source has no hardware decoder there, and they are still playing that
+// source rather than a ready proxy. `media_decode` itself describes the
+// source and is what chooses which proxy to ask for; this is what the
+// operator is warned about.
+[[nodiscard]] bool library_output_decodes_on_cpu(
+    const LibraryProxyRuntimeObservation &observation) noexcept;
+
 enum class LibraryThumbnailRequestPriority : core::u8 {
   Visible,
   Prefetch,

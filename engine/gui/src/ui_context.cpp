@@ -170,6 +170,22 @@ UiContext::UiContext(
 }
 
 void UiContext::new_frame(double time_seconds) {
+    // DEBUG-FOCUS (temporary)
+    if (time_seconds - time_ > 0.25 && time_ > 0.0) {
+        FILE* slow = nullptr;
+        if (fopen_s(&slow, "F:/mediaserver/out/gui-focus-debug.log", "a") == 0 && slow != nullptr) {
+            std::fprintf(slow, "SLOW frame=%llu gap=%.3f\n", static_cast<unsigned long long>(frame_ + 1U), time_seconds - time_);
+            std::fclose(slow);
+        }
+    }
+    if (input_.mouse_pressed(MouseButton::Left)) {
+        FILE* dbg = nullptr;
+        if (fopen_s(&dbg, "F:/mediaserver/out/gui-focus-debug.log", "a") == 0 && dbg != nullptr) {
+            std::fprintf(dbg, "NEWFRAME frame=%llu press=%.0f,%.0f active=%llu focus=%llu\n", static_cast<unsigned long long>(frame_ + 1U),
+                static_cast<double>(pointer_press_x()), static_cast<double>(pointer_press_y()), static_cast<unsigned long long>(active_), static_cast<unsigned long long>(focus_));
+            std::fclose(dbg);
+        }
+    }
     hot_ = none;
     press_consumed_ = false;
     cursor_ = Cursor::Arrow;
@@ -1451,6 +1467,21 @@ bool UiContext::password_field(UiId id, const Rect& bounds,
 
 bool UiContext::edit_field(UiId id, const Rect& bounds, std::string& value,
                            bool masked) {
+    // DEBUG-FOCUS (temporary)
+    if (input_.mouse_pressed(MouseButton::Left)) {
+        FILE* dbg = nullptr;
+        if (fopen_s(&dbg, "F:/mediaserver/out/gui-focus-debug.log", "a") == 0 && dbg != nullptr) {
+            using ull = unsigned long long;
+            const int clip_ok = interaction_clip_stack_.empty() ? 1 : static_cast<int>(interaction_clip_stack_.back().contains(pointer_press_x(), pointer_press_y()));
+            std::fprintf(dbg, "frame=%llu id=%llu active=%llu consumed=%d blocked=%d depth=%u dd=%llu dismissed=%d color=%llu clip=%zu clipok=%d focus=%llu b=%.0f,%.0f,%.0f,%.0f p=%.0f,%.0f\n",
+                static_cast<ull>(frame_), static_cast<ull>(id), static_cast<ull>(active_), static_cast<int>(press_consumed_), static_cast<int>(pointer_blocked()),
+                static_cast<unsigned>(pointer_block_depth_), static_cast<ull>(dropdown_id_), static_cast<int>(dropdown_dismissed_), static_cast<ull>(color_.id),
+                interaction_clip_stack_.size(), clip_ok, static_cast<ull>(focus_),
+                static_cast<double>(bounds.x), static_cast<double>(bounds.y), static_cast<double>(bounds.width), static_cast<double>(bounds.height),
+                static_cast<double>(pointer_press_x()), static_cast<double>(pointer_press_y()));
+            std::fclose(dbg);
+        }
+    }
     const Interaction it = grab(id, bounds);
     cursor_for(it, Cursor::Text);
 
