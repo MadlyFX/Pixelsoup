@@ -253,11 +253,17 @@ record_editor_scene(render::CompositorSceneExecutor &executor,
 
 [[nodiscard]] ProgramOutputExtent program_output_extent(
     const scene::Scene &frame, const output::OutputMap *map,
+    std::span<const output::OutputMap> window,
     const topology::HardwareMap &hardware_map) noexcept {
   core::u32 width = map != nullptr ? map->source.width : frame.canvas.width;
   core::u32 height = map != nullptr ? map->source.height : frame.canvas.height;
 
   if (map != nullptr) {
+    if (const scene::Canvas laid_out = output::viewport_extent(window);
+        laid_out.width > 0U && laid_out.height > 0U) {
+      width = laid_out.width;
+      height = laid_out.height;
+    }
     const topology::RenderServerLookup owner =
         topology::render_server_for_node(hardware_map, map->node_index);
     const topology::HardwareDevice *const match =

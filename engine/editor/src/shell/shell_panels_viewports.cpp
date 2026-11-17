@@ -418,6 +418,24 @@ void EditorShell::Frame::draw_program_panel(const gui::Rect &bounds) {
     static_cast<void>(std::snprintf(
         output_identity.data(), output_identity.size(),
         program_canvas_stage ? "Canvas  -  Preview" : "Canvas"));
+  } else if (program_output != nullptr && program_window.size() > 1U) {
+    // The picture is the whole window; the button names the viewport that
+    // selection and the tools work in.
+    const auto position = static_cast<std::size_t>(
+        program_output - program_window.data());
+    if (program_output->name.empty()) {
+      static_cast<void>(std::snprintf(
+          output_identity.data(), output_identity.size(),
+          "Output %02u  -  viewport %zu", program_output->node_index + 1U,
+          position + 1U));
+    } else {
+      static_cast<void>(std::snprintf(
+          output_identity.data(), output_identity.size(), "Output %02u  -  %.*s",
+          program_output->node_index + 1U,
+          static_cast<int>(std::min<std::size_t>(program_output->name.size(),
+                                                 40U)),
+          program_output->name.data()));
+    }
   } else if (program_output != nullptr) {
     static_cast<void>(std::snprintf(
         output_identity.data(), output_identity.size(),
@@ -433,8 +451,13 @@ void EditorShell::Frame::draw_program_panel(const gui::Rect &bounds) {
   ui.tooltip(output_name,
              impl.program_canvas_view
                  ? "The whole canvas, flat. Click for the first output."
-                 : "What this view shows. Click for the next output, then "
-                   "the whole canvas laid flat.");
+                 : program_window.size() > 1U
+                       ? "The whole output window, every viewport in its "
+                         "place. Selection and the tools work in the "
+                         "viewport named here. Click for the next viewport, "
+                         "then the whole canvas laid flat."
+                       : "What this view shows. Click for the next output, "
+                         "then the whole canvas laid flat.");
   if (chrome_button(ui, gui::ui_id(gui::ui_id("editor.program"), "output"),
                     output_name, output_identity.data(),
                     impl.program_canvas_view)) {

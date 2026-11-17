@@ -227,8 +227,13 @@ struct ProgramOutputExtent final {
   core::u32 preview_height{};
 };
 
+// The size of the picture Program Output shows. Unmapped, the canvas. For
+// an output, its whole window, as the node presents it: the size its Hardware
+// Map entry gives, or else the smallest raster that holds `window`'s
+// viewports, falling back to the selected viewport's source.
 [[nodiscard]] ProgramOutputExtent program_output_extent(
     const scene::Scene &frame, const output::OutputMap *map,
+    std::span<const output::OutputMap> window,
     const topology::HardwareMap &hardware_map) noexcept;
 
 [[nodiscard]] std::string_view

@@ -69,10 +69,14 @@ void EditorShell::Frame::render_views() {
       ~EndMediaFrame() { cache->end_frame(); }
     } end_media_frame{&impl.frame_media_cache};
     bool program_scene_linear = false;
+    // One picture of the show: the canvas when `map` is null, otherwise one
+    // viewport through its own projection - a crop, a physical surface's
+    // off-axis view, or a UV-mesh warp - exactly as the node records it.
     const auto record_program =
         [&](render::CompositorSceneExecutor &executor,
             render::ProjectionMeshWarp &warp, const scene::Scene &frame,
-            const compositor::CompositorGraph *graph) -> const rhi::Texture * {
+            const compositor::CompositorGraph *graph,
+            const output::OutputMap *map) -> const rhi::Texture * {
       if (!program_targets_ready) {
         program_preview_fault = "PROGRAM TARGETS UNAVAILABLE";
         return nullptr;
@@ -81,79 +85,122 @@ void EditorShell::Frame::render_views() {
       // through whichever graph the Compositor panel happens to be editing.
       const compositor::CompositorGraph &program_composite =
           graph != nullptr ? *graph : compositor_graph;
-      if (program_output == nullptr) {
+      if (map == nullptr) {
         return record_editor_scene(executor, commands, frame,
                                    program_composite,
                                    &impl.frame_media_cache);
       }
       return render::record_output_mapped_scene(
-          executor, warp, impl.program_projection_cache, commands,
-          program_composite, frame, *program_output,
-          program_mapping_unavailable, &impl.frame_media_cache);
+          executor, warp, impl.program_projection_caches, commands,
+          program_composite, frame, *map, program_mapping_unavailable,
+          &impl.frame_media_cache);
     };
-
-    if ((switcher.transition_active || switcher.loop_fade_active) &&
-        transition_from_scene != nullptr && transition_to_scene != nullptr) {
-      const rhi::Texture *const from_target = record_program(
-          impl.program_renderer, impl.program_warp, *transition_from_scene,
-          switcher.transition_from_graph);
-      renderer_readiness = impl.program_renderer.renderer_readiness();
-      const rhi::Texture *const to_target = record_program(
-          impl.program_to_renderer, impl.program_to_warp,
-          *transition_to_scene, switcher.transition_to_graph);
-      if (renderer_readiness->satisfied) {
-        // Keep the first unsatisfied side of a transition; otherwise the
-        // incoming side is the most recent exact observation.
-        renderer_readiness =
-            impl.program_to_renderer.renderer_readiness();
+    // Keeps the first unsatisfied readiness across every picture recorded
+    // this frame; otherwise the most recent exact observation.
+    const auto observe_readiness =
+        [&](const render::CompositorSceneExecutor &executor) {
+          if (!renderer_readiness.has_value() ||
+              renderer_readiness->satisfied) {
+            renderer_readiness = executor.renderer_readiness();
+          }
+        };
+    const bool program_mixing =
+        (switcher.transition_active || switcher.loop_fade_active) &&
+        transition_from_scene != nullptr && transition_to_scene != nullptr;
+    // The finished picture of one viewport, or of the canvas: a running
+    // dissolve mixed from both of its scenes, else Program's own scene.
+    const auto record_picture =
+        [&](const output::OutputMap *map) -> const rhi::Texture * {
+      if (program_mixing) {
+        const rhi::Texture *const from_target = record_program(
+            impl.program_renderer, impl.program_warp, *transition_from_scene,
+            switcher.transition_from_graph, map);
+        observe_readiness(impl.program_renderer);
+        const rhi::Texture *const to_target = record_program(
+            impl.program_to_renderer, impl.program_to_warp,
+            *transition_to_scene, switcher.transition_to_graph, map);
+        observe_readiness(impl.program_to_renderer);
+        if (from_target == nullptr || to_target == nullptr ||
+            impl.program_renderer.scene_linear_output() !=
+                impl.program_to_renderer.scene_linear_output() ||
+            !impl.program_mixer.render(commands, *from_target, *to_target,
+                                       switcher.transition_mix)) {
+          program_preview_fault = "PROGRAM TRANSITION RENDER FAILED";
+          return nullptr;
+        }
+        return &impl.program_mixer.target();
       }
-      program_preview_ok =
-          from_target != nullptr && to_target != nullptr &&
-          impl.program_renderer.scene_linear_output() ==
-              impl.program_to_renderer.scene_linear_output() &&
-          impl.program_mixer.render(commands, *from_target, *to_target,
-                                    switcher.transition_mix);
-      if (!program_preview_ok) {
-        program_preview_fault = "PROGRAM TRANSITION RENDER FAILED";
-      }
-      if (program_preview_ok) {
-        program_texture = &impl.program_mixer.target();
-        program_scene_linear =
-            impl.program_renderer.scene_linear_output();
-      }
-    } else {
-      const rhi::Texture *const rendered = record_program(
-          impl.program_renderer, impl.program_warp, *program_render_scene,
-          switcher.program_graph);
-      renderer_readiness = impl.program_renderer.renderer_readiness();
-      program_preview_ok = rendered != nullptr;
-      if (!program_preview_ok) {
+      const rhi::Texture *const rendered =
+          record_program(impl.program_renderer, impl.program_warp,
+                         *program_render_scene, switcher.program_graph, map);
+      observe_readiness(impl.program_renderer);
+      if (rendered == nullptr) {
         program_preview_fault = renderer_readiness->satisfied
                                     ? "PROGRAM RENDER FAILED"
                                     : renderer_readiness->headline();
       }
-      if (program_preview_ok) {
-        program_texture = rendered;
-        program_scene_linear =
-            impl.program_renderer.scene_linear_output();
-      }
-    }
-    if (program_preview_ok) {
-      // The project's authored colour, taken once per frame before the draw.
-      // Project-wide, so the scene being shown and any transition partner
-      // carry the same settings; the region keys the dither to the part of
-      // the wall this preview shows, as the node presenting it does.
-      impl.program_display.adopt_color(
-          program_render_scene->renderer_settings.color, scene::asset_generation_key(*program_render_scene));
-      program_preview_ok = impl.program_display.render(
-          commands, *program_texture,
-          scene::CanvasRect{0U, 0U, program_extent.preview_width,
-                            program_extent.preview_height},
-          program_scene_linear,
-          program_output != nullptr ? program_output->source
-                                    : scene::whole(scene.canvas));
-      if (!program_preview_ok) {
+      return rendered;
+    };
+
+    // The project's authored colour, taken once per frame before the draw.
+    // Project-wide, so the scene being shown and any transition partner
+    // carry the same settings.
+    impl.program_display.adopt_color(
+        program_render_scene->renderer_settings.color,
+        scene::asset_generation_key(*program_render_scene));
+    if (program_output == nullptr) {
+      // The canvas, unmapped: one picture filling the preview.
+      const rhi::Texture *const picture = record_picture(nullptr);
+      program_scene_linear = impl.program_renderer.scene_linear_output();
+      program_preview_ok =
+          picture != nullptr &&
+          impl.program_display.render(
+              commands, *picture,
+              scene::CanvasRect{0U, 0U, program_extent.preview_width,
+                                program_extent.preview_height},
+              program_scene_linear, scene::whole(scene.canvas));
+      if (picture != nullptr && !program_preview_ok) {
         program_preview_fault = "PROGRAM DISPLAY TRANSFORM FAILED";
+      }
+    } else {
+      // The output's whole window, as the node presenting it draws it: every
+      // viewport recorded through its own projection, graded with its wall's
+      // colour, and composited at its place in the window, in order, over
+      // black. One viewport alone, stretched to the panel, is not what the
+      // connector carries.
+      const scene::Canvas window{program_extent.output_width,
+                                 program_extent.output_height};
+      const scene::Canvas picture_extent{program_extent.preview_width,
+                                         program_extent.preview_height};
+      program_preview_ok = impl.program_display.clear(commands);
+      for (const output::OutputMap &map : program_window) {
+        if (map.resolved_surface.has_value() &&
+            !impl.program_display.adopt_wall_color(
+                map.surface, map.resolved_surface->color)) {
+          program_preview_ok = false;
+          program_preview_fault = "PROGRAM WALL COLOUR UNAVAILABLE";
+        }
+      }
+      for (const output::OutputMap &map : program_window) {
+        if (!program_preview_ok) {
+          break;
+        }
+        const scene::CanvasRect viewport =
+            output::scale_viewport(map.viewport, window, picture_extent);
+        if (viewport.width == 0U || viewport.height == 0U) {
+          // Outside the window's raster: the node draws nothing there.
+          continue;
+        }
+        const rhi::Texture *const picture = record_picture(&map);
+        program_scene_linear = impl.program_renderer.scene_linear_output();
+        program_preview_ok =
+            picture != nullptr &&
+            impl.program_display.composite(commands, *picture, viewport,
+                                           program_scene_linear, map.source,
+                                           map.surface);
+        if (picture != nullptr && !program_preview_ok) {
+          program_preview_fault = "PROGRAM DISPLAY TRANSFORM FAILED";
+        }
       }
     }
     if (!program_preview_ok) {
@@ -692,7 +739,6 @@ void EditorShell::Frame::render_views() {
   // a projective UV warp. Give the interactive viewport the matching forward
   // projection so selection, direct manipulation, and outlines register with
   // the final connector image rather than with the authored camera canvas.
-  std::optional<render::MappedProjection> program_mapped_projection;
   if (program_preview_ok) {
     const scene::Canvas output_canvas{program_extent.output_width,
                                       program_extent.output_height};
@@ -706,58 +752,60 @@ void EditorShell::Frame::render_views() {
         return scene::project_to_canvas(scene.camera, scene.canvas, point);
       };
       program_view_projection.emplace(std::move(projection));
-    } else if (program_output->projection ==
-               output::FeedProjection::CanvasSlice) {
-      const scene::CanvasRect source = program_output->source;
-      projection.project = [this, source,
-                            output_canvas](scene::Vec3 point) {
-        scene::CanvasProjection mapped =
-            scene::project_to_canvas(scene.camera, scene.canvas, point);
-        mapped.x =
-            (mapped.x - static_cast<float>(source.x)) *
-            static_cast<float>(output_canvas.width) /
-            static_cast<float>(source.width);
-        mapped.y =
-            (mapped.y - static_cast<float>(source.y)) *
-            static_cast<float>(output_canvas.height) /
-            static_cast<float>(source.height);
-        return mapped;
-      };
-      program_view_projection.emplace(std::move(projection));
     } else {
-      program_mapped_projection =
-          impl.program_projection_cache.resolve(scene, *program_output);
-      if (program_mapped_projection.has_value()) {
-        render::MappedProjection *const mapped =
-            &program_mapped_projection.value();
+      // The picture is the whole window; the selected viewport is one
+      // rectangle of it. Each projection lands in that viewport's own
+      // pixels, then moves to where the viewport sits in the window.
+      const scene::CanvasRect place = program_output->viewport;
+      const scene::Canvas local{std::max(place.width, 1U),
+                                std::max(place.height, 1U)};
+      const auto in_window = [place](scene::CanvasProjection at) {
+        at.x += static_cast<float>(place.x);
+        at.y += static_cast<float>(place.y);
+        return at;
+      };
+      if (program_output->projection == output::FeedProjection::CanvasSlice) {
+        const scene::CanvasRect source = program_output->source;
+        projection.project = [this, source, local,
+                              in_window](scene::Vec3 point) {
+          scene::CanvasProjection mapped =
+              scene::project_to_canvas(scene.camera, scene.canvas, point);
+          mapped.x = (mapped.x - static_cast<float>(source.x)) *
+                     static_cast<float>(local.width) /
+                     static_cast<float>(std::max(source.width, 1U));
+          mapped.y = (mapped.y - static_cast<float>(source.y)) *
+                     static_cast<float>(local.height) /
+                     static_cast<float>(std::max(source.height, 1U));
+          return in_window(mapped);
+        };
+        program_view_projection.emplace(std::move(projection));
+      } else if (std::optional<render::MappedProjection> mapped =
+                     impl.program_projection_cache.resolve(scene,
+                                                           *program_output);
+                 mapped.has_value()) {
         projection.forward = mapped->render_view.forward;
         // In the world, after a camera-anchored stage has carried the surface.
         projection.up = mapped->surface_up;
-        const output::ProjectionMesh *const mesh =
-            mapped->projection_mesh();
-        if (mesh != nullptr && mapped->mesh_view.has_value()) {
-          const output::MeshPerspectiveView *const mesh_view =
-              &mapped->mesh_view.value();
-          const std::optional<output::ProjectionMeshPlacement> mesh_placement =
-              mapped->mesh_placement;
+        // The projection outlives this frame's recording, so it keeps its
+        // own share of the mesh and its own copy of the view.
+        if (mapped->retained_mesh != nullptr && mapped->mesh_view.has_value()) {
           projection.project =
-              [mesh, mesh_view, mesh_placement,
-               output_canvas](scene::Vec3 point) {
-                return mesh_placement.has_value()
-                           ? output::project_through_mesh_warp(
-                                 *mesh, *mesh_view, output_canvas, point,
-                                 *mesh_placement)
-                           : output::project_through_mesh_warp(
-                                 *mesh, *mesh_view, output_canvas, point);
+              [mesh = mapped->retained_mesh, mesh_view = *mapped->mesh_view,
+               mesh_placement = mapped->mesh_placement, local,
+               in_window](scene::Vec3 point) {
+                return in_window(
+                    mesh_placement.has_value()
+                        ? output::project_through_mesh_warp(
+                              *mesh, mesh_view, local, point, *mesh_placement)
+                        : output::project_through_mesh_warp(*mesh, mesh_view,
+                                                            local, point));
               };
         } else {
-          const scene::ViewMatrices matrices =
-              mapped->render_view.matrices;
-          projection.project =
-              [matrices, output_canvas](scene::Vec3 point) {
-                return scene::project_to_canvas(matrices, output_canvas,
-                                                point);
-              };
+          const scene::ViewMatrices matrices = mapped->render_view.matrices;
+          projection.project = [matrices, local,
+                                in_window](scene::Vec3 point) {
+            return in_window(scene::project_to_canvas(matrices, local, point));
+          };
         }
         program_view_projection.emplace(std::move(projection));
       }

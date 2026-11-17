@@ -104,6 +104,7 @@ bool EditorShell::Frame::start() {
     impl.program_panel.fit_canvas();
     impl.pending_scene_delete.reset();
     impl.program_projection_cache.reset();
+    impl.program_projection_caches.reset();
     impl.program_panel.reset_project_state();
     for (Impl::StageViewport &view : impl.stage_views) {
       view.panel.reset_project_state();
@@ -427,7 +428,11 @@ void EditorShell::Frame::prepare_views() {
                        ? nullptr
                        : selected_program_output(feed_map,
                                                  impl.program_output_map_node);
-  program_extent = program_output_extent(scene, program_output, hardware_map);
+  program_window = program_output != nullptr
+                       ? feed_map.maps_for(program_output->node_index)
+                       : std::span<const output::OutputMap>{};
+  program_extent = program_output_extent(scene, program_output, program_window,
+                                         hardware_map);
   // The Canvas view follows the Stage into Preview: the scene being built
   // there is the one its layers are moved about on. A transition needs both
   // Program executors, and a scene with a canvas of another shape would not

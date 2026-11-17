@@ -13,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -880,7 +881,48 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 23U> cases{{
+void a_window_preview_holds_every_viewport_from_the_origin() {
+    std::array<output::OutputMap, 3U> maps{};
+    maps[0U].viewport = scene::CanvasRect{0U, 0U, 1920U, 1080U};
+    maps[1U].viewport = scene::CanvasRect{1920U, 40U, 1536U, 1300U};
+    // An empty viewport neither reaches nor widens the window.
+    maps[2U].viewport = scene::CanvasRect{9000U, 9000U, 0U, 50U};
+    OUTPUT_CHECK(output::viewport_extent(maps)
+                 == scene::Canvas{3456U, 1340U});
+    OUTPUT_CHECK(output::viewport_extent(std::span{maps}.first(1U))
+                 == scene::Canvas{1920U, 1080U});
+    OUTPUT_CHECK(output::viewport_extent({}) == scene::Canvas{});
+}
+
+void a_viewport_scales_into_a_window_preview_edge_by_edge() {
+    const scene::Canvas window{3000U, 1000U};
+    const scene::Canvas picture{1000U, 500U};
+    // Two viewports meeting at x=1001 still meet at one picture column.
+    const auto left = output::scale_viewport(
+        scene::CanvasRect{0U, 0U, 1001U, 1000U}, window, picture);
+    const auto right = output::scale_viewport(
+        scene::CanvasRect{1001U, 0U, 1999U, 1000U}, window, picture);
+    OUTPUT_CHECK(left == scene::CanvasRect{0U, 0U, 333U, 500U});
+    OUTPUT_CHECK(right == scene::CanvasRect{333U, 0U, 667U, 500U});
+    OUTPUT_CHECK(left.x + left.width == right.x);
+    // A sliver keeps one pixel; a viewport past the window has none.
+    OUTPUT_CHECK(output::scale_viewport(scene::CanvasRect{6U, 7U, 1U, 1U},
+                                        window, picture)
+                 == scene::CanvasRect{2U, 3U, 1U, 1U});
+    OUTPUT_CHECK(output::scale_viewport(
+                     scene::CanvasRect{3000U, 0U, 100U, 100U}, window, picture)
+                 == scene::CanvasRect{});
+    // One reaching past the window's edge is clipped to the picture.
+    OUTPUT_CHECK(output::scale_viewport(
+                     scene::CanvasRect{2700U, 900U, 600U, 300U}, window,
+                     picture)
+                 == scene::CanvasRect{900U, 450U, 100U, 50U});
+    OUTPUT_CHECK(output::scale_viewport(scene::CanvasRect{0U, 0U, 10U, 10U},
+                                        scene::Canvas{}, picture)
+                 == scene::CanvasRect{});
+}
+
+constexpr std::array<Case, 25U> cases{{
     {"a project without a stage is world fixed and keeps its digest",
      &a_project_without_a_stage_is_world_fixed_and_keeps_its_digest},
     {"a camera stage reaches every resolved surface and the digest",
@@ -927,6 +969,10 @@ constexpr std::array<Case, 23U> cases{{
      &an_imported_mesh_requires_a_source},
     {"invalid imported mesh scales and nonfinite dormant scales are rejected",
      &invalid_imported_mesh_scales_and_nonfinite_dormant_scales_are_rejected},
+    {"a window preview holds every viewport from the origin",
+     &a_window_preview_holds_every_viewport_from_the_origin},
+    {"a viewport scales into a window preview edge by edge",
+     &a_viewport_scales_into_a_window_preview_edge_by_edge},
 }};
 
 } // namespace

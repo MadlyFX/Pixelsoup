@@ -183,6 +183,9 @@ struct EditorShell::Frame final {
   // the scene itself.
   std::optional<scene::Scene> program_interaction_scene{};
   const output::OutputMap *program_output{};
+  // Every viewport of program_output's window, in compositing order: what
+  // the node presenting that window draws, so what Program Output shows.
+  std::span<const output::OutputMap> program_window{};
   // Program's Canvas view is showing the scene on the Stage rather than the
   // one on air: the two differ (Preview) and no transition holds the
   // executor it draws with. Its picture, once there is one.

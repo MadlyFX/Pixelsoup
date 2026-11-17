@@ -113,6 +113,55 @@ const OutputMap* FeedMap::map_node(doc::NodeId node) const noexcept {
     return nullptr;
 }
 
+scene::Canvas viewport_extent(std::span<const OutputMap> maps) noexcept {
+    core::u64 right = 0U;
+    core::u64 bottom = 0U;
+    for (const OutputMap& map : maps) {
+        if (map.viewport.width == 0U || map.viewport.height == 0U) {
+            continue;
+        }
+        right = std::max(right, static_cast<core::u64>(map.viewport.x) +
+                                    map.viewport.width);
+        bottom = std::max(bottom, static_cast<core::u64>(map.viewport.y) +
+                                      map.viewport.height);
+    }
+    constexpr core::u64 limit = 0xffff'ffffULL;
+    return scene::Canvas{static_cast<core::u32>(std::min(right, limit)),
+                         static_cast<core::u32>(std::min(bottom, limit))};
+}
+
+scene::CanvasRect scale_viewport(scene::CanvasRect viewport,
+                                 scene::Canvas window,
+                                 scene::Canvas picture) noexcept {
+    if (window.width == 0U || window.height == 0U || picture.width == 0U ||
+        picture.height == 0U || viewport.width == 0U ||
+        viewport.height == 0U) {
+        return {};
+    }
+    // One edge in the picture: floor, so a shared edge lands on one pixel
+    // for both of the viewports that meet there.
+    const auto edge = [](core::u64 at, core::u32 from, core::u32 to) {
+        return std::min<core::u64>(at * to / from, to);
+    };
+    const core::u64 left = edge(viewport.x, window.width, picture.width);
+    const core::u64 top = edge(viewport.y, window.height, picture.height);
+    if (left >= picture.width || top >= picture.height) {
+        return {};
+    }
+    const core::u64 right = std::max(
+        edge(static_cast<core::u64>(viewport.x) + viewport.width,
+             window.width, picture.width),
+        left + 1U);
+    const core::u64 bottom = std::max(
+        edge(static_cast<core::u64>(viewport.y) + viewport.height,
+             window.height, picture.height),
+        top + 1U);
+    return scene::CanvasRect{
+        static_cast<core::u32>(left), static_cast<core::u32>(top),
+        static_cast<core::u32>(std::min<core::u64>(right, picture.width) - left),
+        static_cast<core::u32>(std::min<core::u64>(bottom, picture.height) - top)};
+}
+
 const OutputMap* FeedMap::map_for(core::u32 node_index) const noexcept {
     const auto bound = maps_for(node_index);
     return bound.empty() ? nullptr : &bound.front();

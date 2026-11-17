@@ -205,6 +205,20 @@ struct FeedMap final {
     surface_for(doc::NodeId node) const noexcept;
 };
 
+// The smallest window raster, from its origin, that holds every viewport of
+// one output window. What a preview of the window uses when the hardware does
+// not state the window's size. Zero when no viewport has an area.
+[[nodiscard]] scene::Canvas viewport_extent(
+    std::span<const OutputMap> maps) noexcept;
+
+// A viewport authored in a window `window` pixels across, placed in a picture
+// of that same window `picture` pixels across. Edges are scaled, not sizes, so
+// viewports that meet in the window still meet in the picture; one that would
+// shrink below a pixel keeps one. Empty when either extent is empty.
+[[nodiscard]] scene::CanvasRect scale_viewport(scene::CanvasRect viewport,
+                                               scene::Canvas window,
+                                               scene::Canvas picture) noexcept;
+
 // FNV-1a over every map in node-index order. Hashes the authored parameters,
 // not a rendering, so two nodes that agree on the document agree on this.
 // Counts are hashed before contents so a map that is a prefix of another cannot

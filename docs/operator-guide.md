@@ -413,10 +413,17 @@ their defaults. A locked layer shows its numbers and takes no edits.
 
 **Which picture.** The button at the left of the output bar goes round the
 outputs and then to **Canvas**: the whole authored canvas laid flat, with no
-crop or warp. On an output, the box and the numbers follow that output's own
-projection, so a handle is where the layer is on that connector's picture; on
-a curved or warped surface the box's sides stay straight between its corners
-while the picture bends. Canvas is the view to lay things out in.
+crop or warp. An output's picture is its whole window, exactly as the render
+node draws it: every viewport through its own canvas crop, physical view or
+UV-mesh warp, at its place in the window, black where no viewport reaches. The
+window is the size its Hardware Map entry gives, or else just large enough to
+hold its viewports. When a window has several viewports, the button goes round
+them one at a time (`Output 01 - viewport 2`, or the viewport's name): the
+picture stays the whole window, and the box, the numbers and the tools work in
+the viewport named. They follow that viewport's own projection, so a handle is
+where the layer is on that connector's picture; on a curved or warped surface
+the box's sides stay straight between its corners while the picture bends.
+Canvas is the view to lay things out in.
 
 Canvas shows the scene on the Stage. While that is the scene on air it is the
 live picture, and an edit is live. In Preview it is the scene being built: the

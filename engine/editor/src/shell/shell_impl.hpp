@@ -121,7 +121,11 @@ struct EditorShell::Impl final {
   scene::SceneId canvas_preview_scene{};
   render::CompositorSceneExecutor stage_renderer;
   render::OutputTransform stage_display;
+  // The selected viewport's geometry, for picking and overlays.
   render::OutputProjectionCache program_projection_cache;
+  // Every viewport's geometry, for the picture: one slot per viewport of the
+  // window, as on the node that presents it.
+  render::OutputProjectionCacheRegistry program_projection_caches;
   // A missed non-blocking command acquisition holds this last complete image.
   // The operator keeps a stale picture instead of a black panel while the GPU
   // drains; an actual record/submit fault invalidates it explicitly below.
