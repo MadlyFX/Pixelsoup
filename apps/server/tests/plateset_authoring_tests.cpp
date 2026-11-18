@@ -389,6 +389,10 @@ void an_existing_rig_is_reused_replaced_or_joined_by_another() {
   const app::PlatesetPlacementPlan replaced =
       place(root, app::PlatesetRigChoice::Replace);
   PLATESET_CHECK(!replaced.document.contains(doc::NodeId{402U}));
+  // The Scene Layer the wire came from feeds nothing now, so it goes too:
+  // left disconnected it would linger in the graph.
+  PLATESET_CHECK(kept.document.contains(doc::NodeId{401U}));
+  PLATESET_CHECK(!replaced.document.contains(doc::NodeId{401U}));
   PLATESET_CHECK(wired(replaced.document,
                        layer_for(replaced.document, replaced.screens[0]),
                        doc::NodeId{400U}, 0));
@@ -402,6 +406,53 @@ void an_existing_rig_is_reused_replaced_or_joined_by_another() {
   PLATESET_CHECK(of_type(second.document,
                          compositor::schema::led_car_process_type)
                      .size() == 2U);
+}
+
+void replacing_removes_only_what_fed_the_replaced_socket_alone() {
+  doc::Root root = base_show();
+  editor::CompositorAddIntent add{};
+  add.kind = compositor::NodeKind::LedCarProcess;
+  root = root.set(app::make_compositor_node(doc::NodeId{400U}, add,
+                                            doc::NodeId{stage_id.value()}));
+  // FRONT plays layer 410 through a Brightness chain.
+  add.kind = compositor::NodeKind::SceneLayer;
+  add.scene_node = doc::NodeId{999U};
+  root = root.set(app::make_compositor_node(doc::NodeId{410U}, add,
+                                            doc::NodeId{stage_id.value()}));
+  add.kind = compositor::NodeKind::Brightness;
+  add.scene_node = doc::NodeId{};
+  root = root.set(app::make_compositor_node(doc::NodeId{411U}, add,
+                                            doc::NodeId{stage_id.value()}));
+  root = root.set(app::make_compositor_edge(
+      doc::NodeId{412U}, compositor::EdgeEndpoint{doc::NodeId{410U}, 0U},
+      compositor::EdgeEndpoint{doc::NodeId{411U}, 0U}));
+  root = root.set(app::make_compositor_edge(
+      doc::NodeId{413U}, compositor::EdgeEndpoint{doc::NodeId{411U}, 0U},
+      compositor::EdgeEndpoint{doc::NodeId{400U}, 0U}));
+  // Layer 420 plays slot 6 and also slot 3, which the set has no plate for.
+  add.kind = compositor::NodeKind::SceneLayer;
+  add.scene_node = doc::NodeId{998U};
+  root = root.set(app::make_compositor_node(doc::NodeId{420U}, add,
+                                            doc::NodeId{stage_id.value()}));
+  root = root.set(app::make_compositor_edge(
+      doc::NodeId{421U}, compositor::EdgeEndpoint{doc::NodeId{420U}, 0U},
+      compositor::EdgeEndpoint{doc::NodeId{400U}, 6U}));
+  root = root.set(app::make_compositor_edge(
+      doc::NodeId{422U}, compositor::EdgeEndpoint{doc::NodeId{420U}, 0U},
+      compositor::EdgeEndpoint{doc::NodeId{400U}, 3U}));
+
+  const app::PlatesetPlacementPlan replaced =
+      place(root, app::PlatesetRigChoice::Replace);
+  PLATESET_CHECK(replaced.skipped.empty());
+  for (const core::u64 gone : {410U, 411U, 412U, 413U, 421U}) {
+    PLATESET_CHECK(!replaced.document.contains(doc::NodeId{gone}));
+  }
+  PLATESET_CHECK(replaced.document.contains(doc::NodeId{400U}));
+  PLATESET_CHECK(replaced.document.contains(doc::NodeId{420U}));
+  PLATESET_CHECK(replaced.document.contains(doc::NodeId{422U}));
+  PLATESET_CHECK(wired(replaced.document,
+                       layer_for(replaced.document, replaced.screens[1]),
+                       doc::NodeId{400U}, 6));
 }
 
 void a_set_that_is_not_ready_is_refused() {
@@ -874,7 +925,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 13U> cases{{
+constexpr std::array<Case, 14U> cases{{
     {"a rig's layout is authored within the ranges the graph reads",
      &a_rigs_layout_is_authored_within_the_ranges_the_graph_reads},
     {"a slot screen's time offset is authored in whole frames",
@@ -891,6 +942,8 @@ constexpr std::array<Case, 13U> cases{{
      &a_new_rig_composites_over_what_output_already_shows},
     {"an existing rig is reused, replaced or joined by another",
      &an_existing_rig_is_reused_replaced_or_joined_by_another},
+    {"replacing removes only what fed the replaced socket alone",
+     &replacing_removes_only_what_fed_the_replaced_socket_alone},
     {"a set that is not ready is refused", &a_set_that_is_not_ready_is_refused},
     {"another take goes on the same track",
      &another_take_goes_on_the_same_track},

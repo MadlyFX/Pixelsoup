@@ -422,6 +422,65 @@ struct Wiring final {
   std::vector<PlatesetSlot> skipped;
 };
 
+// Removes the wire `edge` and whatever fed it alone: a Scene Layer, or an
+// effect chain ending in one, that no longer reaches anything once the wire
+// is gone. Left behind it would sit disconnected in the graph, and one whose
+// screen has since gone dangles and invalidates the whole graph. A node that
+// still feeds something else stays.
+void erase_wire_and_orphans(doc::Root &document, doc::NodeId edge) {
+  const Nodes nodes = nodes_of(document);
+  std::set<core::u64> erased;
+  const auto erase = [&document, &erased](doc::NodeId id) {
+    if (auto next = document.erase(id)) {
+      document = std::move(*next);
+    }
+    erased.insert(id.value());
+  };
+  const auto source_of = [](const doc::Node &wire) {
+    const auto from = integer(wire, compositor::schema::from_node);
+    return from.has_value() && *from > 0
+               ? doc::NodeId{static_cast<core::u64>(*from)}
+               : doc::NodeId{};
+  };
+  std::vector<doc::NodeId> pending;
+  if (const doc::Node *const wire = document.get(edge)) {
+    pending.push_back(source_of(*wire));
+  }
+  erase(edge);
+  while (!pending.empty()) {
+    const doc::NodeId candidate = pending.back();
+    pending.pop_back();
+    if (candidate == doc::NodeId{} || erased.contains(candidate.value())) {
+      continue;
+    }
+    const doc::Node *const node = document.get(candidate);
+    if (node == nullptr || !compositor::schema::is_node_type(node->type) ||
+        node->type == compositor::schema::output_type ||
+        node->type == compositor::schema::led_car_process_type) {
+      continue;
+    }
+    const auto id = static_cast<std::int64_t>(candidate.value());
+    const bool feeds = std::any_of(
+        nodes.all.begin(), nodes.all.end(), [&](const doc::Node &other) {
+          return other.type == compositor::schema::edge_type &&
+                 !erased.contains(other.id.value()) &&
+                 integer(other, compositor::schema::from_node) == id;
+        });
+    if (feeds) {
+      continue;
+    }
+    erase(candidate);
+    for (const doc::Node &other : nodes.all) {
+      if (other.type == compositor::schema::edge_type &&
+          !erased.contains(other.id.value()) &&
+          integer(other, compositor::schema::to_node) == id) {
+        pending.push_back(source_of(other));
+        erase(other.id);
+      }
+    }
+  }
+}
+
 // Gives each new screen a Scene Layer wired to its slot's socket of an LED
 // Car Process: `join` when the track's other screens already feed one,
 // otherwise the scene's first unless `choice` asks for a new one. A socket
@@ -517,9 +576,7 @@ struct Wiring final {
         wiring.skipped.push_back(slot);
         continue;
       }
-      if (auto erased = document.erase(occupied)) {
-        document = std::move(*erased);
-      }
+      erase_wire_and_orphans(document, occupied);
     }
     const doc::NodeId layer = allocate();
     document = document.set(graph_node(
