@@ -265,7 +265,7 @@ try:
     assert collection in painted.users_collection
     assert close_matrix(media_server_world(part), blender_world(painted))
 
-    # Step 07: a Director pause retains the last complete scene and the pairing.
+    # A Director pause retains the last complete scene and the pairing.
     local('pause')
     paused_revision = rt.revision
     hero.data.vertices[0].co.x -= 0.07

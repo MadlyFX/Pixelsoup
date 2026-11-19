@@ -1463,7 +1463,7 @@ void keyed_media_is_consistent_across_slices_and_explicit_output_views() {
 // front of the sky - cannot reach the composite at all: every layer renders
 // with `transparent_background`, and the composite is an `over` weighted by
 // that alpha, so anything written where alpha is zero is discarded whatever the
-// shader put there. That is a real defect, recorded in step 11, and it is not
+// shader put there. That is a real defect, and it is not
 // this test's subject. Filling the frame keeps this test measuring the thing it
 // can actually hold: that the executor composites the *published* colour rather
 // than the raw one.

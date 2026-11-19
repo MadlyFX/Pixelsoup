@@ -24,7 +24,7 @@ struct DirectorLinkContext {
     scene::SceneId target{}, program{};
     core::u64 project{};
 };
-// Step 12 evidence, recorded on the service worker and published with status.
+// Qualification evidence, recorded on the service worker and published with status.
 // Durations are the Director's own boundary: the first byte of a revision's
 // transfer through the receipt it sends. Blender evaluation and extraction are
 // measured separately by the publisher; the two are never summed into one

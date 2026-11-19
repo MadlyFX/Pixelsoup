@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Step 04 reference publisher: send a portable .mslink to a paired local Director.
+"""Reference publisher: send a portable .mslink to a paired local Director.
 
 This exercises the transport independently of Blender. The Blender collection
-publisher is step 05. Only Python's standard library is required.
+publisher is a separate add-on. Only Python's standard library is required.
 """
 import argparse
 import hashlib

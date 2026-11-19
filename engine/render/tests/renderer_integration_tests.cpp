@@ -3408,7 +3408,7 @@ void the_renderer_reports_which_passes_ran() {
 
 // Ray-traced reflections are refused, not quietly turned into environment ones.
 //
-// This is step 11 part C's central requirement, and it was until now an
+// This is the central reflection requirement, and it was once an
 // untested claim. The plan is explicit that reflections "must be an explicit
 // authored policy that fails closed, not a per-node decision" - and the reason
 // is sharper than it first looks. A node whose device could trace rays and a
@@ -3954,7 +3954,7 @@ void a_bloom_chain_past_the_apron_budget_is_refused() {
 // all of it produces.
 //
 // This is the promise the whole plan is built on, and until it was written
-// nothing tested it for any pass added since step 06. The older halves check
+// nothing tested it for any pass added after the first Advanced passes. The older halves check
 // drives the Basic renderer on a scene that never selects a backend; the
 // environment, temporal antialiasing, occlusion, the shadow atlas and the
 // display transform were each *designed* around cross-node agreement -
@@ -4885,7 +4885,7 @@ void occlusion_darkens_a_crease_and_not_an_open_plane() {
 // takes the canvas-wide matrix and the canvas; a frame rendered from an
 // explicit view - an ICVFX plate, a mapped surface - takes that view's own
 // matrix and its own raster, whatever the authored camera says. This is the
-// regression guard the adversarial review of step 11 asked for and the first
+// regression guard the adversarial review asked for and the first
 // two attempts could not discriminate: it states the property directly rather
 // than hoping a pixel comparison notices.
 void fog_and_bloom_are_keyed_to_the_frustum_they_were_rendered_from() {

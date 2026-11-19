@@ -310,7 +310,7 @@ LinkedStateResult read_linked_scene(const doc::Root& root) {
         if (property(n, ls::parent)) children[ref(n, ls::parent)].push_back(id);
         else ready.insert(id);
     }
-    if (object_count > 8192 || placements.size() > 16384) return error({}, "Linked scene exceeds step 2 document capacity");
+    if (object_count > 8192 || placements.size() > 16384) return error({}, "Linked scene exceeds the document capacity");
     while (!ready.empty()) {
         const auto id = *ready.begin(); ready.erase(ready.begin()); order.push_back(id);
         if (const auto it = children.find(id); it != children.end())
@@ -391,7 +391,7 @@ LinkedStateResult read_linked_scene(const doc::Root& root) {
                     draw_counts[result.scene] += result.batch.empty() ? 1 : result.batch.size()/instance_batch_stride;
                     if (draw_counts[result.scene] > max_scene_models) return error(n.id, "Linked occurrences exceed the scene model budget (4096 including batches)");
                     const Vec3 x{world.m[0],world.m[1],world.m[2]}, y{world.m[4],world.m[5],world.m[6]}, z{world.m[8],world.m[9],world.m[10]};
-                    if (dot(x,cross(y,z)) < 0) return error(n.id, "Reflected linked occurrence is pending renderer parity qualification (step 1)");
+                    if (dot(x,cross(y,z)) < 0) return error(n.id, "Reflected linked occurrences are not supported");
                 }
                 if (const auto* material = lookup(ref(obj, ls::material), ls::material_type)) static_cast<void>(factors(*material, result.material, &result.material_mask));
                 static_cast<void>(factors(n, result.material, &result.material_mask));

@@ -164,7 +164,7 @@ void fields_are_authored_clamped_and_digested() {
 }
 
 void package_freezes_materials_and_compressed_mips() {
-    const auto directory = std::filesystem::temp_directory_path() / "mediaserver-step14";
+    const auto directory = std::filesystem::temp_directory_path() / "mediaserver-material-ingest";
     std::filesystem::create_directories(directory);
     const auto source = (directory / "package-test.obj").string();
     { std::ofstream f{source}; f << "v -1 -1 0\nv 1 -1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0.5 1\nf 1/1 2/2 3/3\n"; }

@@ -356,7 +356,7 @@ void residency_and_sticky_failure() {
   const auto bake = render::bake_lighting(fixture());
   CHECK(bake.ready());
   const auto directory =
-      std::filesystem::temp_directory_path() / "mediaserver-step15-tests";
+      std::filesystem::temp_directory_path() / "mediaserver-baked-lighting-tests";
   std::filesystem::create_directories(directory);
   const auto path = directory / "sticky.msgi";
   std::error_code ec;
@@ -467,7 +467,7 @@ void stale_worker_result_and_handle_release() {
   const auto baked = render::bake_lighting(fixture());
   CHECK(baked.ready());
   const auto directory =
-      std::filesystem::temp_directory_path() / "mediaserver-step15-tests";
+      std::filesystem::temp_directory_path() / "mediaserver-baked-lighting-tests";
   const auto written =
       render::write_probe_asset(*baked.asset, utf8(directory / "fenced"));
   CHECK(written.ready());
@@ -529,7 +529,7 @@ void cancellation_and_snapshot_fencing() {
   s.environment.baked.samples = 65536;
   auto job =
       render::BakeJob::start(s, utf8(std::filesystem::temp_directory_path() /
-                                     "mediaserver-step15-tests" / "cancelled"));
+                                     "mediaserver-baked-lighting-tests" / "cancelled"));
   CHECK(job);
   job->cancel();
   const auto deadline =

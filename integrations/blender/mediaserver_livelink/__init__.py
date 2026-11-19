@@ -1,4 +1,4 @@
-"""Install this directory as a zipped legacy add-on in the pinned Blender build."""
+"""Install this directory as a zipped add-on in the pinned Blender build."""
 # Blender reads this dict with ast.literal_eval before importing the module, so
 # every value must stay a literal. wire.py holds the same version and the
 # negotiated capability list; test_publisher_core.py checks that they agree.
@@ -298,7 +298,7 @@ class MSLinkPanel(bpy.types.Panel):
             environment.prop(settings,'density_seed')
         environment.label(text='Scatter edits apply to groups',icon='INFO')
         active = context.active_object
-        if active and active.type == 'MESH' and not active.get('ms_shot_wrapper'):
+        if active and active.type == 'MESH':
             environment.label(text=active.name)
             environment.prop(active,'ms_link_terrain_size')
             environment.label(text='Authored low detail mesh')

@@ -177,7 +177,7 @@ void wall_residency() {
     for(unsigned i=0;i<30;++i) { CHECK(observed(cache, red).generation==a.generation); CHECK(observed(cache, green).generation==b.generation); }
     CHECK(cache.refresh(red) && cache.wait_for_test()); CHECK(observed(cache, red).generation>a.generation);
     CHECK(observed(cache, green).generation==b.generation);
-    auto broken=red; broken.wall.camera_inverse_lut_source="missing-step30-inverse.cube";
+    auto broken=red; broken.wall.camera_inverse_lut_source="missing-inverse.cube";
     static_cast<void>(observed(cache, broken)); CHECK(cache.wait_for_test()); CHECK(observed(cache, broken).state==render::DisplayLutState::Failed);
 
     const std::string inverse = "LUT_3D_SIZE 2\n0 0 0\n0.5 0 0\n0 1 0\n0.5 1 0\n0 0 1\n0.5 0 1\n0 1 1\n0.5 1 1\n";
@@ -301,7 +301,7 @@ void gpu_walls(rhi::Device& device) {
 }
 
 void gpu_exr_media(rhi::Device& device) {
-    const auto path = std::filesystem::temp_directory_path() / "mediaserver-step30-media.exr";
+    const auto path = std::filesystem::temp_directory_path() / "mediaserver-facility-color-media.exr";
     const auto encoded = encode_exr(std::vector<float>{2.0F,0.5F,0.0F,0.5F}, exr::FLOAT, "lin_rec709");
     { std::ofstream file{path, std::ios::binary}; file.write(reinterpret_cast<const char*>(encoded.data()), encoded.size()); }
     scene::Scene frame; frame.canvas = {32,32}; frame.camera.eye = {0,0,3}; frame.camera.target = {};

@@ -1,4 +1,4 @@
-"""Step 12 delivery checks: installed add-on, negotiated capabilities, the
+"""Qualification delivery checks: installed add-on, negotiated capabilities, the
 scenario matrix Blender owns, and measured event-to-Preview evidence.
 
 Runs inside factory Blender against the real C++ Director fixture. Install,

@@ -141,7 +141,7 @@ void tests() {
     bad_parent=*root.get(id(110)); put(bad_parent,s::animation_enabled,true);
     check(!scene::plan_link_source_update(root,std::array{bad_parent},id(400)),"source animation flags rejected");
     auto reflected=scene::scaling({-1,1,1});
-    check(!scene::plan_link_alignment(root,id(200),reflected),"reflected linked drawing awaits parity qualification");
+    check(!scene::plan_link_alignment(root,id(200),reflected),"reflected linked drawing is refused");
     auto degenerate=scene::identity(); degenerate.m[4]=1; degenerate.m[5]=1e-7F;
     check(!scene::plan_link_alignment(root,id(200),degenerate),"near-collinear hierarchy basis rejected");
     auto shear=scene::identity(); shear.m[4]=0.35F;
@@ -324,7 +324,7 @@ void compositing_overrides() {
     check(styled(root), "a Blender revision keeps the shot opacity and blend mode");
 }
 void artifacts(const std::filesystem::path& reference, const std::filesystem::path& output) {
-    auto base=persist::load_project_file(reference); check(base.has_value(),"load step 1 UI fixture");
+    auto base=persist::load_project_file(reference); check(base.has_value(),"load UI fixture");
     const auto* model=base.value().get(id(10)); check(model!=nullptr,"reference model exists");
     const auto source=std::get<std::string>(model->properties.at(std::string{s::source}));
     auto root=fixture(source);

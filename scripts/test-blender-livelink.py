@@ -21,7 +21,7 @@ parser.add_argument('--environment', action='store_true', help='Qualify procedur
 parser.add_argument('--heavy', action='store_true',
                     help='Measure one dense grid (MS_HEAVY_SIDE quads a side) through the real Director')
 parser.add_argument('--qualification', action='store_true',
-                    help='Step 12 delivery: install/upgrade/removal, capability negotiation, scenario matrix and measured latency')
+                    help='Qualification delivery: install/upgrade/removal, capability negotiation, scenario matrix and measured latency')
 args = parser.parse_args()
 directory = (args.output or repo / 'out/blender-livelink' / (args.build + '-' + uuid.uuid4().hex[:8])).resolve()
 directory.mkdir(parents=True, exist_ok=False)

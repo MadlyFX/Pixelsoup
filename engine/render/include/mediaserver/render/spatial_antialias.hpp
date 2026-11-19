@@ -6,7 +6,7 @@
 #include <mediaserver/render/render_error.hpp>
 #include <mediaserver/rhi/device.hpp>
 
-// The spatial half of step 08's antialiasing.
+// The spatial half of the Advanced renderer's antialiasing.
 //
 // One fullscreen edge-directed blend, holding no state between frames. That
 // is the entire reason it exists next to the temporal resolve: it cannot ghost,

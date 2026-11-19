@@ -174,7 +174,7 @@ void every_primitive_has_a_name_that_round_trips() {
 // See the equivalent constant in scene_math_tests.cpp: this pins the generated
 // geometry itself, so a toolchain that produced different vertices would be
 // caught here rather than on a wall.
-// Step 14 corrects sphere/cylinder and the box X-face winding; the independent
+// The record corrects sphere/cylinder and the box X-face winding; the independent
 // outward-normal check above guards the reason for this new geometry record.
 constexpr core::u64 golden_geometry_digest = 0x0c8555fb5b91156cULL;
 

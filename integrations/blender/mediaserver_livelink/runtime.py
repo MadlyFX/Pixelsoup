@@ -17,7 +17,7 @@ SAVE_DELAY = 3.0
 
 
 def percentile(samples, fraction):
-    """Nearest rank, the convention the step 01 baseline and Director use."""
+    """Nearest rank, the convention the reference measurements and Director use."""
     if not samples:
         return 0
     ordered = sorted(samples)
@@ -83,7 +83,7 @@ class Runtime:
         self.last_kind = ''
         self.last_extract_ms = 0
         self.last_scale = None
-        # Step 12 evidence. Blender time and Director time are recorded apart;
+        # Qualification evidence. Blender time and Director time are recorded apart;
         # the session percentiles cover accepted revisions that changed content.
         self.capabilities = ()
         self.unsupported = ''

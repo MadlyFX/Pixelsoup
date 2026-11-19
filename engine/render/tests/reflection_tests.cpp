@@ -92,7 +92,7 @@ render::BakeResult bake_contract() {
     auto corrupt=encoded; corrupt[corrupt.size()/2]^=1; CHECK(!render::decode_probe_asset(corrupt).ready());
     for (std::size_t cut : {std::size_t{0},std::size_t{59},encoded.size()-1}) CHECK(!render::decode_probe_asset(std::span{encoded}.first(cut)).ready());
     s.environment.baked.reflections[1]=p; CHECK(!render::bake_lighting(s).ready());
-    auto path=std::filesystem::temp_directory_path()/"mediaserver-step27"; std::filesystem::create_directories(path);
+    auto path=std::filesystem::temp_directory_path()/"mediaserver-reflection"; std::filesystem::create_directories(path);
     return render::write_probe_asset(*first.asset,(path/"reflection").string());
 }
 void gpu_contract(rhi::Device& device, const render::BakeResult& baked) {

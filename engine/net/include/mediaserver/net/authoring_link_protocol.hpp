@@ -37,7 +37,7 @@ using LinkDecodeResult = core::Result<LinkMessage, std::string>;
 // instead of failing inside a record they cannot parse. `base` covers objects,
 // prototypes, material records, resource transfer and writeback (ShotState and
 // `absorb` records); `stage` covers StageContext, and the remaining names cover
-// the manifest suffixes added by steps 09-11. A Hello that declares nothing
+// the manifest suffixes. A Hello that declares nothing
 // negotiates `base` alone; see qualification-v1.md.
 [[nodiscard]] std::span<const std::string_view> link_capabilities() noexcept;
 [[nodiscard]] bool link_capability_known(std::string_view name) noexcept;

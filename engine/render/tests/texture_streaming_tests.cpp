@@ -269,7 +269,7 @@ void large_mips_progress_in_bounded_recordings(rhi::Device &device) {
 }
 
 std::string write_scene_fixture() {
-    const auto root = std::filesystem::temp_directory_path() / "mediaserver-step13";
+    const auto root = std::filesystem::temp_directory_path() / "mediaserver-texture-streaming";
     std::filesystem::create_directories(root);
     {
         std::ofstream out(root / "mesh.bin", std::ios::binary | std::ios::trunc);

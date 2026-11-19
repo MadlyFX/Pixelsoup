@@ -1,4 +1,4 @@
-// Step 12 qualification harness. Drives the real Director link service, ingest
+// Qualification harness. Drives the real Director link service, ingest
 // planner, command scheduler and publication path through the documented
 // scenario matrix and its controlled faults, then writes the measured evidence.
 // Blender evaluation is measured separately by the publisher; nothing here sums

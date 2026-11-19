@@ -131,7 +131,7 @@ core::u64 elapsed_ms(Clock::time_point from, Clock::time_point to) {
     return static_cast<core::u64>(std::chrono::duration_cast<std::chrono::milliseconds>(to-from).count());
 }
 // Nearest-rank percentile over this pairing's successful revisions, matching
-// the convention of the step 01 baseline. Never sums unrelated phases.
+// the convention of the reference fixture measurements. Never sums unrelated phases.
 core::u64 percentile(std::vector<core::u64> samples, double fraction) {
     if (samples.empty()) return 0;
     std::sort(samples.begin(), samples.end());

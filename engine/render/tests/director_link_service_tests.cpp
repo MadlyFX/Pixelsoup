@@ -179,7 +179,7 @@ int main(int argc,char** argv) {
           auto scatter=transaction(legacy,"env","",snapshot(hash,"env"));
           scatter.payload.pop_back(); scatter.payload+=" batch \"zz\"\n";
           check(rig.transact(legacy,scatter).payload.starts_with("capability_not_negotiated: environment"),
-              "step 09 suffix refused when the publisher never declared it");
+              "environment suffix refused when the publisher never declared it");
           check(rig.commits==0,"refused capability admits no document"); }
         { Client narrow{rig.status->port}; narrow.pair(*rig.status,{},"capabilities=base");
           check(narrow.request(narrow.message(K::ShotState)).kind==K::ShotState,"writeback state is part of base");

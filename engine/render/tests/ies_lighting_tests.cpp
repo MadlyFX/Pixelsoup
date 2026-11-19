@@ -26,7 +26,7 @@ const std::string web = "IESNA:LM-63-2002\n[TEST] synthetic asymmetric fixture\n
     "100 100 100 0 0\n100 50 0 0 0\n100 0 0 0 0\n";
 const std::string uniform = "IESNA:LM-63-2002\nTILT=NONE\n1 1000 1 2 1 1 2 0 0 0 1 1 10\n0 180\n0\n100 100\n";
 std::filesystem::path directory() {
-    auto result = std::filesystem::temp_directory_path() / "mediaserver-step26-ies";
+    auto result = std::filesystem::temp_directory_path() / "mediaserver-ies";
     std::filesystem::create_directories(result); return result;
 }
 std::string write(const char* name, const std::string& text) {

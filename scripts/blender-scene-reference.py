@@ -1,4 +1,4 @@
-"""Step 01 fixture, run with Blender --background --factory-startup --python.
+"""Reference fixture, run with Blender --background --factory-startup --python.
 
 This is an offline qualification tool, not a publisher or scene-link add-on.
 The checked-in GLBs let importer tests run without Blender on the test host.

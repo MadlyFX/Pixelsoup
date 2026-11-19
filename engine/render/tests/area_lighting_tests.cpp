@@ -204,7 +204,7 @@ void gpu_contract(rhi::Device& device) {
     const auto one_side=fogged(); s.point_lights[0].two_sided=true;
     const auto two_sides=fogged(); CHECK(one_side!=two_sides && two_sides==fogged());
     s.point_lights[0].kind=scene::LocalLightKind::Sphere; CHECK(fogged()!=two_sides);
-    std::ofstream image("step32-area-preview.ppm",std::ios::binary); image<<"P6\n128 64\n255\n";
+    std::ofstream image("area-preview.ppm",std::ios::binary); image<<"P6\n128 64\n255\n";
     for(unsigned y=0;y<64;++y)for(unsigned x=0;x<128;++x)for(unsigned c=0;c<3;++c){const float value=pixel(rough,128,x,y,c); image.put(static_cast<char>(std::clamp(std::pow(value/(1+value),1/2.2F)*255,0.0F,255.0F)));}
 }
 int main() {
