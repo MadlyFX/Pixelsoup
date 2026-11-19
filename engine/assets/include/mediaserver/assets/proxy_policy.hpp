@@ -62,6 +62,10 @@ struct ProxyCacheObservation final {
 struct ProxyFrameMapObservation final {
     DerivativeKey key;
     ProxyFrameMap frame_map;
+    // Set only by whoever already ran valid_proxy_frame_map on this exact
+    // map, off the frame path. The resolver then skips its O(frames) check,
+    // which would otherwise run for every placement on every frame.
+    bool validated{false};
 
     bool operator==(const ProxyFrameMapObservation&) const = default;
 };

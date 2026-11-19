@@ -4,6 +4,7 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -92,6 +93,32 @@ void duplicate_source_times_have_explicit_tie_rules() {
     FRAME_MAP_CHECK(!after_end.value().has_value());
 }
 
+void valid_map_lookup_matches_checked_lookup() {
+    assets::ProxyFrameMap map{
+        {30U, 1U},
+        {time(1U, 10U), time(2U, 15U), time(2U, 15U), time(7U, 10U)},
+    };
+    FRAME_MAP_CHECK(assets::valid_proxy_frame_map(map));
+    // Before the first entry, on a duplicate, between entries, past the end.
+    const std::array<assets::PresentationTime, 4U> probes{
+        time(1U, 20U), time(2U, 15U), time(1U, 2U), time(5U, 1U)};
+    const std::array<std::optional<core::u64>, 4U> expected{
+        std::nullopt, 2U, 2U, 3U};
+    for (std::size_t index = 0U; index < probes.size(); ++index) {
+        const auto fast = assets::proxy_frame_at_or_before_in_valid_map(
+            map, probes[index]);
+        const auto checked =
+            assets::proxy_frame_at_or_before(map, probes[index]);
+        FRAME_MAP_CHECK(fast);
+        FRAME_MAP_CHECK(checked);
+        FRAME_MAP_CHECK(fast.value() == expected[index]);
+        FRAME_MAP_CHECK(checked.value() == expected[index]);
+    }
+    // The source time is still checked: an unreduced fraction is refused.
+    FRAME_MAP_CHECK(!assets::proxy_frame_at_or_before_in_valid_map(
+        map, assets::PresentationTime{2U, 4U}));
+}
+
 void malformed_maps_and_overflow_are_rejected() {
     FRAME_MAP_CHECK(!assets::make_presentation_time(1U, 0U));
     FRAME_MAP_CHECK(!assets::presentation_time_for_frame(
@@ -118,7 +145,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 6U> cases{{
     {"fractional rates remain exact", &fractional_rates_remain_exact},
     {"continued fraction comparison cannot overflow",
      &continued_fraction_comparison_cannot_overflow},
@@ -126,6 +153,8 @@ constexpr std::array<Case, 5U> cases{{
      &identity_maps_round_trip_fractional_frame_ordinals},
     {"duplicate source times have explicit tie rules",
      &duplicate_source_times_have_explicit_tie_rules},
+    {"valid map lookup matches checked lookup",
+     &valid_map_lookup_matches_checked_lookup},
     {"malformed maps and overflow are rejected",
      &malformed_maps_and_overflow_are_rejected},
 }};

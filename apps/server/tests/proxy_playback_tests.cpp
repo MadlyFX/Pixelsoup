@@ -325,6 +325,67 @@ void require_proxy_is_unready_when_the_exact_cache_entry_is_missing() {
     PLAYBACK_CHECK(state->calls == 0U);
 }
 
+// The cache state is remembered between frames rather than read from disk
+// for every placement. A proxy this process publishes is still seen on the
+// very next frame, and a change made outside it is picked up by the worker.
+void remembered_cache_state_follows_publications_and_outside_changes() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "remembered.mov";
+    write_file(source, bytes("remembered-source"));
+    const auto asset = media_asset(
+        source, assets::ProxyPlaybackPolicy::PreferProxy, 57U);
+    const fs::path cache_root = temporary.path() / "cache";
+    auto state = std::make_shared<BackendState>();
+    server::ProxyGenerationService artifacts{
+        open_cache(cache_root),
+        std::make_unique<Backend>(state, *asset.frame_rate,
+                                  *asset.frame_count)};
+    app::ProxyPlaybackService playback{artifacts};
+    const auto reason_now = [&] {
+        const auto resolved = playback.resolve(
+            evaluated_scene(asset), registry(asset), availability(asset));
+        PLAYBACK_CHECK(resolved.has_value());
+        return resolved.value().placements.front().resolution;
+    };
+
+    PLAYBACK_CHECK(reason_now().reason ==
+                   assets::ProxyPlaybackReason::CacheMissing);
+    const core::u64 before = artifacts.publications();
+    PLAYBACK_CHECK(artifacts.generate(asset).has_value());
+    PLAYBACK_CHECK(artifacts.publications() > before);
+    // No wait: the publication alone makes this frame read the cache again.
+    PLAYBACK_CHECK(reason_now().reason !=
+                   assets::ProxyPlaybackReason::CacheMissing);
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    assets::ProxyPlaybackResolution resolution = reason_now();
+    while (resolution.selection != assets::ProxyPlaybackSelection::Proxy &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        resolution = reason_now();
+    }
+    PLAYBACK_CHECK(resolution.selection ==
+                   assets::ProxyPlaybackSelection::Proxy);
+
+    // Removed behind the service's back: nothing publishes, so only the
+    // inspection worker can notice, within a few refreshes.
+    const auto key = assets::requested_proxy_key(asset);
+    PLAYBACK_CHECK(key.has_value());
+    const fs::path entry = assets::derivative_cache_path(cache_root, *key);
+    PLAYBACK_CHECK(fs::remove(entry));
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    while (resolution.reason != assets::ProxyPlaybackReason::CacheMissing &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        resolution = reason_now();
+    }
+    PLAYBACK_CHECK(resolution.reason ==
+                   assets::ProxyPlaybackReason::CacheMissing);
+    PLAYBACK_CHECK(resolution.selection ==
+                   assets::ProxyPlaybackSelection::Source);
+    PLAYBACK_CHECK(state->calls == 1U);
+}
+
 void offline_media_preserves_placements_and_does_not_hold_output() {
     TemporaryDirectory temporary;
     const auto path = temporary.path() / "offline.mov";
@@ -822,7 +883,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 12U> cases{{
+constexpr std::array<Case, 13U> cases{{
     {"editor proxies cover every video larger than the proxy",
      &editor_proxies_cover_every_video_larger_than_the_proxy},
     {"published segments play until the whole proxy is ready",
@@ -835,6 +896,8 @@ constexpr std::array<Case, 12U> cases{{
      &prefer_proxy_falls_back_visibly_but_never_to_another_source},
     {"Require is unready when its exact cache entry is missing",
      &require_proxy_is_unready_when_the_exact_cache_entry_is_missing},
+    {"remembered cache state follows publications and outside changes",
+     &remembered_cache_state_follows_publications_and_outside_changes},
     {"offline media preserves placements and does not hold output",
      &offline_media_preserves_placements_and_does_not_hold_output},
     {"ready proxy uses exact fractional-rate map without identity drift",

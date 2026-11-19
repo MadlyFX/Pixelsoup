@@ -75,5 +75,10 @@ using ProxyFrameLookupResult =
     const ProxyFrameMap& map, const PresentationTime& source_time) noexcept;
 [[nodiscard]] ProxyFrameLookupResult proxy_frame_at_or_after(
     const ProxyFrameMap& map, const PresentationTime& source_time) noexcept;
+// The same at/before lookup for a map the caller already proved with
+// valid_proxy_frame_map: O(log frames) instead of a full re-validation, for
+// lookups made on every frame. Only source_time is checked here.
+[[nodiscard]] ProxyFrameLookupResult proxy_frame_at_or_before_in_valid_map(
+    const ProxyFrameMap& map, const PresentationTime& source_time) noexcept;
 
 } // namespace mediaserver::assets

@@ -1131,6 +1131,8 @@ ProxyGenerationResult ProxyGenerationService::publish_encoded(
     }
     auto published = cache.publish_file(key, artifact_file.path(),
                                           false, stop);
+    // Counted even when it failed: the entry on disk may still have changed.
+    publications_.fetch_add(1U, std::memory_order_release);
     if (!published) {
         return ProxyGenerationResult::failure(
             cache_generation_error(published.error(), asset.id, key));
@@ -1512,6 +1514,10 @@ ProxyGenerationService::inspect(
 
 const fs::path& ProxyGenerationService::cache_root() const noexcept {
     return runtime_root_;
+}
+
+core::u64 ProxyGenerationService::publications() const noexcept {
+    return publications_.load(std::memory_order_acquire);
 }
 
 } // namespace mediaserver::server

@@ -161,8 +161,16 @@ ProxyFrameMapResult make_identity_proxy_frame_map(
 
 ProxyFrameLookupResult proxy_frame_at_or_before(
     const ProxyFrameMap& map, const PresentationTime& source_time) noexcept {
-    if (!valid_proxy_frame_map(map) ||
-        !valid_presentation_time(source_time)) {
+    if (!valid_proxy_frame_map(map)) {
+        return ProxyFrameLookupResult::failure(
+            error(ProxyFrameMapErrorCode::InvalidMap));
+    }
+    return proxy_frame_at_or_before_in_valid_map(map, source_time);
+}
+
+ProxyFrameLookupResult proxy_frame_at_or_before_in_valid_map(
+    const ProxyFrameMap& map, const PresentationTime& source_time) noexcept {
+    if (!valid_presentation_time(source_time)) {
         return ProxyFrameLookupResult::failure(
             error(ProxyFrameMapErrorCode::InvalidMap));
     }
