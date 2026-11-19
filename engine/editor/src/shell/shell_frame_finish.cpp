@@ -225,12 +225,13 @@ void EditorShell::Frame::finish() {
     ui.panel(card, ui.theme().panel);
     ui.outline(card, ui.theme().accent);
     ui.push_clip(card);
-    ui.label({card.x+16,card.y+12,card.width-32,26},"CONNECT TO BLENDER",ui.theme().text);
-    ui.label({card.x+16,card.y+44,card.width-32,22},"Link a Blender that is already open to the Preview scene. The B before a scene's name opens the project's own file.",ui.theme().text_muted);
+    const gui::Rect blender_title{card.x+16,card.y+12,card.width-32,26};
+    ui.label(blender_title,"CONNECT TO BLENDER",ui.theme().text);
+    ui.tooltip(blender_title,"Link a Blender that is already open to the Preview scene. The B before a scene's name opens the project's own file.");
     if (project.blender_instances.empty()) {
-      ui.label({card.x+16,card.y+100,card.width-32,24},"Looking for Blender...",ui.theme().text);
-      ui.label({card.x+16,card.y+132,card.width-32,24},"Open Blender and enable the Pixelsoup Live Link add-on.",ui.theme().text_muted);
-      ui.label({card.x+16,card.y+164,card.width-32,24},"Available instances appear here automatically.",ui.theme().text_muted);
+      const gui::Rect looking{card.x+16,card.y+100,card.width-32,24};
+      ui.label(looking,"Looking for Blender...",ui.theme().text);
+      ui.tooltip(looking,"Open Blender and enable the Pixelsoup Live Link add-on; it appears here automatically");
     } else {
       constexpr std::size_t per_page = 5;
       const auto pages = (project.blender_instances.size()+per_page-1)/per_page;
@@ -253,7 +254,7 @@ void EditorShell::Frame::finish() {
     const auto active = std::find_if(project.blender_instances.begin(),project.blender_instances.end(),
         [&](const auto& item) { return item.id==project.blender_instance; });
     std::string status = active != project.blender_instances.end() ? active->status
-        : project.blender_instance.empty() ? "Select an instance, then Connect." : "Waiting for Blender to become available...";
+        : project.blender_instance.empty() ? "No instance selected" : "Waiting for Blender to become available...";
     if (!project.blender_error.empty()) status=project.blender_error;
     else if (active == project.blender_instances.end() && !project.scene_link_details.empty() && project.blender_connected) status=std::string{project.scene_link_details};
     std::istringstream lines{status}; std::string line; float y=card.y+370;

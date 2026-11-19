@@ -264,23 +264,23 @@ void FeedMappingPanel::draw_work_area(Frame &f) {
   if (feed_map.maps.empty()) {
     gui::Rect message =
         gui::inset(work, gui::Padding{18.0F, 36.0F, 18.0F, 0.0F});
-    ctx.label(gui::cut_top(message, 22.0F), "NO OUTPUT VIEWPORTS CONFIGURED",
-              ctx.theme().text_muted);
-    ctx.label(gui::cut_top(message, 18.0F),
-              "Add a viewport inside an application window to begin.",
-              ctx.theme().text_muted);
+    const gui::Rect empty = gui::cut_top(message, 22.0F);
+    ctx.label(empty, "NO OUTPUT VIEWPORTS CONFIGURED", ctx.theme().text_muted);
+    ctx.tooltip(empty, "Add a viewport inside an application window to begin");
   } else {
     std::array<char, 72U> canvas_text{};
     const int length = std::snprintf(
         canvas_text.data(), canvas_text.size(),
-        "OUTPUT WINDOWS  %u x %u  |  VIEWPORTS INSIDE FIXED RASTERS",
+        "OUTPUT WINDOWS  %u x %u",
         mapping_canvas.width, mapping_canvas.height);
     gui::Rect heading = gui::inset(work, gui::Padding{12.0F, 5.0F, 12.0F, 0.0F});
+    const gui::Rect heading_line = gui::cut_top(heading, 18.0F);
     ctx.label(
-        gui::cut_top(heading, 18.0F),
+        heading_line,
         std::string_view{canvas_text.data(),
                          static_cast<std::size_t>(std::max(length, 0))},
         ctx.theme().text_muted);
+    ctx.tooltip(heading_line, "Viewports sit inside fixed output rasters");
   }
   f.selected_map = selected_map;
   f.mapping_surface = mapping_surface;

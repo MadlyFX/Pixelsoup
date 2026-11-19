@@ -72,16 +72,23 @@ void CompositorPanel::draw_backdrop(Frame &f) {
                   ? "GRAPH ERROR: "
                   : "GRAPH WARNING: ";
     } else {
-      title = "START: ";
     }
     title += diagnostic ? compositor_diagnostic_message(*first_problem)
              : compositor_graph.nodes.empty()
-                 ? std::string_view{"Add a Layer for each scene object"}
-                 : std::string_view{"Wire Layers into Output; until then "
-                                    "Program shows the scene as authored"};
+                 ? std::string_view{"Empty graph"}
+                 : std::string_view{"Output not wired"};
+    const std::string_view next_step =
+        diagnostic ? std::string_view{}
+        : compositor_graph.nodes.empty()
+            ? std::string_view{"Add a Layer for each scene object. "}
+            : std::string_view{"Until Layers are wired into Output, Program "
+                               "shows the scene as authored. "};
     ctx.label(gui::inset(guide, 8.0F, 3.0F), title,
               diagnostic ? ctx.theme().warning : ctx.theme().text_muted);
-    ctx.tooltip(guide, title + " · Connect the output on the right of a node to an input on the left. Layers feed Composite, then Output.");
+    ctx.tooltip(guide, std::string{next_step} +
+                           "Connect the output on the right of a node to an "
+                           "input on the left. Layers feed Composite, then "
+                           "Output.");
   }
 
   for (const compositor::GraphComment &comment : compositor_graph.comments) {

@@ -38,7 +38,8 @@ void HardwareMappingPanel::draw_palette(Frame &f) {
     gui::Rect edge = palette;
     ctx.panel(gui::cut_right(edge, 1.0F), ctx.theme().divider);
   }
-  ctx.label(layout.header, "DRAG TO PLACE", ctx.theme().text_muted);
+  ctx.label(layout.header, "DEVICES", ctx.theme().text_muted);
+  ctx.tooltip(layout.header, "Drag a device onto the floor to place it");
 
   // Every palette picture is drawn after the loop, in one sprite run: one
   // render pass for all of them rather than one per row.

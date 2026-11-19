@@ -1329,14 +1329,17 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
                                  const ElementInfo& element, InspectorFrame& frame) {
     ctx.label(take_row(cursor, row_height), "BLENDER SCENE LINK", ctx.theme().text_muted);
     if (element.linked_batch_instances) {
-        ctx.label(take_row(cursor,row_height),std::to_string(element.linked_batch_instances)+" shared instances",ctx.theme().text);
-        ctx.label(take_row(cursor,row_height),"Placement and visibility edit the scatter group",ctx.theme().text_muted);
+        const gui::Rect instances = take_row(cursor,row_height);
+        ctx.label(instances,std::to_string(element.linked_batch_instances)+" shared instances",ctx.theme().text);
+        ctx.tooltip(instances,"Placement and visibility edit the scatter group");
     }
     if (!element.linked_collection) ctx.label(take_row(cursor, row_height), element.linked_held
         ? "Hold shot placement (world)" : "Follow source with offset (local)", ctx.theme().text);
-    const auto action = [&](std::string_view name, std::string_view label) {
-        if (ctx.button(gui::ui_id(id_, name, element.node.value()), take_row(cursor, row_height), label))
+    const auto action = [&](std::string_view name, std::string_view label, std::string_view tip = {}) {
+        const gui::Rect button = take_row(cursor, row_height);
+        if (ctx.button(gui::ui_id(id_, name, element.node.value()), button, label))
             frame.text_edits.push_back({element.node, "link_action", std::string{name}});
+        if (!tip.empty()) ctx.tooltip(button, tip);
         cursor.space(row_gap);
     };
     if (!element.linked_collection) action(element.linked_held ? "follow" : "hold", element.linked_held
@@ -1372,12 +1375,21 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
         vector("Link stage alignment (meters)", element.linked_alignment, "link_stage_");
     }
     if (!section(ctx, cursor, "BLENDER CONNECTION", linked_open_)) return;
-    ctx.label(take_row(cursor,row_height), element.linked_paused ? "PAUSED - accepted content retained"
-        : element.linked_pending ? "UPDATING - accepted content retained"
-        : element.linked_failed ? "UPDATE REFUSED - accepted content retained"
-        : element.linked_connected ? "SYNCING WITH BLENDER - edits go both ways"
-        : "BLENDER CLOSED OR ON ANOTHER SCENE - saved content shown",
-        element.linked_failed ? ctx.theme().warning : ctx.theme().text_muted);
+    {
+        const gui::Rect link_state = take_row(cursor,row_height);
+        ctx.label(link_state, element.linked_paused ? "Paused"
+            : element.linked_pending ? "Updating"
+            : element.linked_failed ? "Update refused"
+            : element.linked_connected ? "Syncing with Blender"
+            : "Blender not connected",
+            element.linked_failed ? ctx.theme().warning : ctx.theme().text_muted);
+        ctx.tooltip(link_state, element.linked_connected && !element.linked_paused &&
+                !element.linked_pending && !element.linked_failed
+            ? "Edits go both ways"
+            : element.linked_paused || element.linked_pending || element.linked_failed
+            ? "The last accepted content is kept"
+            : "Blender is closed or on another scene; the saved content is shown");
+    }
     if (!element.linked_status.empty()) {
         // Wrap worker diagnostics within the Inspector instead of clipping the
         // reason off the edge of a narrow dock.
@@ -1397,8 +1409,7 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
     if (element.linked_collection) {
         action("duplicate", "Duplicate with shared source");
         action("copy", "Copy independent snapshot");
-        action("unlink", "Unlink collection - keep accepted scene");
-        ctx.label(take_row(cursor,row_height),"Unlink keeps assets, placement and appearance.",ctx.theme().text_muted);
+        action("unlink", "Unlink collection", "Stops following Blender; keeps the accepted assets, placement and appearance");
     }
 }
 
@@ -2341,11 +2352,10 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
                 if (role == 1U) ctx.tooltip(row, "Packed image: roughness in green, metallic in blue");
                 if (role == 2U) ctx.tooltip(row, "Tangent-space normal image; the model must have UVs");
             }
-            ctx.label(take_row(cursor, row_height), "Texture edits can be undone.", ctx.theme().text_muted);
             ctx.label(take_row(cursor, row_height), "Fallback factors", ctx.theme().text_muted);
         }
     } else if (imported_model && element.linked) {
-        ctx.label(take_row(cursor, row_height), "Texture images follow Blender materials.", ctx.theme().text_muted);
+        ctx.label(take_row(cursor, row_height), "Textures come from Blender", ctx.theme().text_muted);
     }
 
     constexpr std::array<std::string_view, 3U> color_properties{{
@@ -3310,8 +3320,8 @@ void InspectorPanel::draw_camera_tracking(
     } else if (sources.empty()) {
         const gui::Rect note = take_row(cursor, row_height);
         cursor.space(row_gap);
-        ctx.label(note, "Add a feed, then bind it to this camera",
-                  ctx.theme().text_muted);
+        ctx.label(note, "No tracking feeds", ctx.theme().text_muted);
+        ctx.tooltip(note, "Add a feed in Project settings, then bind it to this camera");
     }
 
     // How this camera draws its plate. Per camera and not per show, because
@@ -3448,7 +3458,7 @@ InspectorFrame InspectorPanel::draw_selection(
         ctx.label(gui::Rect{bounds.x + panel_inset, bounds.y + panel_inset,
                             std::max(bounds.width - panel_inset * 2.0F, 1.0F),
                             row_height},
-                  "Select an object on Stage or in Scene", ctx.theme().text_muted);
+                  "Nothing selected", ctx.theme().text_muted);
         return frame;
     }
 

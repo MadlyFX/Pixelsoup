@@ -159,8 +159,8 @@ void FeedMappingPanel::draw_details(Frame &f) {
       } else if (selected_map->surface != doc::NodeId{}) {
         ctx.label(assignment_label, "MISSING SURFACE", ctx.theme().warning);
       } else {
-        ctx.label(assignment_label, "DRAG A SURFACE HERE",
-                  ctx.theme().text_muted);
+        ctx.label(assignment_label, "NO SURFACE", ctx.theme().text_muted);
+        ctx.tooltip(surface_choice, "Drag a surface here to assign it");
       }
       if (surface_drag_active) {
         surface_drop_targets.emplace_back(surface_choice, selected_map->node);
@@ -173,7 +173,7 @@ void FeedMappingPanel::draw_details(Frame &f) {
     }
     } else {
       ctx.label(details_column.next(40.0F, 33.0F),
-                "Select an output region to choose its projection.",
+                "No output region selected",
                 ctx.theme().text_muted);
     }
     draw_surface_calibration(f, details, details_column);
@@ -519,12 +519,12 @@ void FeedMappingPanel::draw_surface_calibration(
       details_column.space(10.0F);
       ctx.label(details_column.next(20.0F, 3.0F), "CAMERA IDT INVERSE (.cube)",
                 ctx.theme().text_muted);
-      changed |= ctx.text_field(camera_id, details_column.next(24.0F, 8.0F),
+      const gui::Rect camera_field = details_column.next(24.0F, 8.0F);
+      changed |= ctx.text_field(camera_id, camera_field,
                                 surface_color_.camera_inverse_lut_source);
-      ctx.label(details_column.next(18.0F, 0.0F), "Measured for this wall / camera.",
-                ctx.theme().text_muted);
-      ctx.label(details_column.next(18.0F, 0.0F), "Applied after the show look.",
-                ctx.theme().text_muted);
+      ctx.tooltip(camera_field,
+                  "Measured for this wall and camera; applied after the show "
+                  "look");
       if (changed) {
         emit_surface_edit();
         if (frame.surface_edit) frame.surface_edit->color = surface_color_;
@@ -541,7 +541,7 @@ void FeedMappingPanel::draw_surface_calibration(
     }
   } else {
     ctx.label(details_column.next(40.0F, 0.0F),
-              "Add or select a physical surface to calibrate it.",
+              "No surface selected",
               ctx.theme().text_muted);
   }
 }

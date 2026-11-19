@@ -466,8 +466,8 @@ void AssetViewerPanel::draw_image(Pass &p) {
               text, color);
   };
   if (asset_ == doc::NodeId{}) {
-    centred("Double-click an asset in the Library to view it here",
-            theme.text_muted);
+    centred("No asset open", theme.text_muted);
+    ctx.tooltip(picture_area, "Double-click an asset in the Library to view it here");
     return;
   }
   if (p.asset == nullptr) {

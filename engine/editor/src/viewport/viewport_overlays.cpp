@@ -1056,15 +1056,15 @@ void draw_measurements(gui::UiContext& ctx, gui::UiDrawList& list,
     if (!hint_shown) {
         return;
     }
-    const std::string_view hint =
-        "MEASURE   Click two points.  Shift+click adds to a path.  "
-        "Esc clears; M or Esc again leaves.";
+    const std::string_view hint = "MEASURE";
     gui::Rect corner = gui::inset(image, 6.0F);
     corner = gui::cut_top(corner, 22.0F);
     const gui::Rect box = gui::cut_left(corner, ctx.font_width(hint) + 14.0F);
     ctx.panel(box, measure_shade);
     ctx.label(gui::inset(box, gui::Padding{7.0F, 0.0F, 3.0F, 0.0F}), hint,
               measure_color);
+    ctx.tooltip(box, "Click two points. Shift+click adds to a path. Esc "
+                     "clears; M or Esc again leaves.");
 }
 
 } // namespace mediaserver::editor::viewport

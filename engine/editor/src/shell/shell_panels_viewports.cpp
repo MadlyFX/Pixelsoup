@@ -853,30 +853,10 @@ void EditorShell::Frame::draw_program_options(
     }
     static_cast<void>(gui::cut_right(row, 8.0F));
   }
-  if (!metrics.has_value()) {
-    std::string_view hint = "Select a layer to move, turn and resize it";
-    if (tool == CanvasTool::Hand) {
-      hint = "Drag to move the picture inside the panel";
-    } else if (tool == CanvasTool::Zoom) {
-      hint = "Click to zoom in, Alt+click to zoom out";
-    } else if (tool == CanvasTool::Pen) {
-      hint = "Click to place points, drag to curve them; click the first "
-             "point or press Enter to close";
-    } else if (draws_shape(tool)) {
-      hint = "Drag on a selected layer to mask it, or on bare picture to "
-             "make a new card";
-    } else if (tool == CanvasTool::Gradient) {
-      hint = "On a selected Background with a gradient: drag its middle, "
-             "its end, or a new line across it";
-    }
-    ui.label(row, hint, theme.text_muted);
-    return;
-  }
-  if (mask_program_active) {
-    ui.label(row,
-             "Editing a mask: drag it, its handles or its points. Click "
-             "away or press Esc to go back to the layer",
-             theme.text_muted);
+  // The tool strip's tooltips say what each tool does; with nothing
+  // selected, or while a mask is being edited (the picture says so), the bar
+  // holds no fields.
+  if (!metrics.has_value() || mask_program_active) {
     return;
   }
   const bool editable = !element->locked && !switcher.rehearsal_locked &&

@@ -1273,10 +1273,10 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     }
   }
   if (state.nodes.empty() && list_bounds.height > row_height * 2.0F) {
-    ctx.label(gui::Rect{name_x, y + 6.0F, name_width + 200.0F, detail_line},
-              "Add and cable a Render Server in Hardware Map to drive "
-              "physical outputs",
-              theme.text_muted);
+    const gui::Rect empty{name_x, y + 6.0F, name_width + 200.0F, detail_line};
+    ctx.label(empty, "No render servers", theme.text_muted);
+    ctx.tooltip(empty, "Add and cable a Render Server in Hardware Map to drive "
+                       "physical outputs");
   }
   scroll_.end(ctx, content_height);
 

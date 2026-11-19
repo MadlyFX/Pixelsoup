@@ -753,8 +753,7 @@ void ViewportPanel::draw_mask_overlay(MaskFrame& f) {
     // tab is in front.
     const std::string_view selection_notice =
         role_ == ViewportRole::Program
-            ? std::string_view{"Editing a mask - click away or press Esc "
-                               "to finish"}
+            ? std::string_view{"Editing a mask"}
             : std::string_view{"Can't select while masking"};
     // Centred along the image's foot, 6 above it, sized to its words.
     gui::Rect foot = gui::inset(frame.image, gui::Padding{8.0F, 0.0F, 8.0F, 6.0F});
@@ -766,6 +765,11 @@ void ViewportPanel::draw_mask_overlay(MaskFrame& f) {
               gui::UiColor{0.03F, 0.04F, 0.05F, 0.90F});
     ctx.label(gui::inset(selection_notice_bounds, 8.0F, 0.0F),
               selection_notice, ctx.theme().text_muted);
+    ctx.tooltip(selection_notice_bounds,
+                role_ == ViewportRole::Program
+                    ? std::string_view{"Drag the mask, its handles or its points. "
+                                       "Click away or press Esc to go back to the layer"}
+                    : std::string_view{"Clicks edit masks while the Masks tab is in front"});
     const gui::UiColor coverage_body =
         coverage_interaction.held
         ? ctx.theme().widget_active

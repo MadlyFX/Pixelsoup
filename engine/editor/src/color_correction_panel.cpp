@@ -154,14 +154,18 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
         scroll_.reset();
         constexpr float message_height = 52.0F;
         gui::Rect note = gui::inset(content, m.panel_inset);
-        ctx.label(gui::cut_top(note, message_height),
+        const gui::Rect message = gui::cut_top(note, message_height);
+        ctx.label(message,
                   selected_layer == doc::NodeId{}
-                      ? "Select a layer to grade"
+                      ? "No layer selected"
                       : (colour_effect_switched_off
-                             ? "This layer's colour effects are switched off"
-                             : "Add a colour effect to grade this layer"),
+                             ? "Colour effects switched off"
+                             : "No colour effects"),
                   colour_effect_switched_off ? ctx.theme().warning
                                              : ctx.theme().text_muted);
+        if (selected_layer != doc::NodeId{} && !colour_effect_switched_off) {
+            ctx.tooltip(message, "Add a colour effect to grade this layer");
+        }
         return frame;
     }
 
@@ -980,13 +984,8 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                                          active ? ctx.theme().text
                                                 : section.color);
             }
-            {
-                gui::Rect hint = gui::inset(plot, 7.0F, 4.0F);
-                ctx.label(gui::cut_top(hint, 14.0F),
-                          can_add ? "CLICK TO ADD  /  DRAG POINTS"
-                                  : "DRAG POINTS",
-                          muted);
-            }
+            ctx.tooltip(plot, can_add ? "Click to add a point; drag points to shape the curve"
+                                      : "Drag points to shape the curve");
 
             for (std::size_t point = 1U; point + 1U < points.size(); ++point) {
                 const auto point_field = [&](std::string_view axis,

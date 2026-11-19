@@ -51,7 +51,7 @@ struct PreferencesField final {
   return fields;
 }
 
-constexpr float preferences_card_height = 780.0F;
+constexpr float preferences_card_height = 714.0F;
 
 } // namespace
 
@@ -91,11 +91,6 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   };
 
   gui::FormLayout form{modal.body, m, scroll_.begin(ctx, modal.body)};
-  ctx.label(form.caption(),
-            "This machine only. Never saved in a project or sent to a node.",
-            ctx.theme().text_muted);
-  form.space(m.row_gap);
-
   for (const PreferencesField &field : preferences_fields()) {
     const gui::FormRow row = form.row();
     ctx.label(row.label, field.label, ctx.theme().text);
@@ -139,19 +134,23 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
       password_edited_ = true;
       draft_.render_node_password = false;
     }
-    const std::string_view note =
-        state.render_node_password_overridden
-            ? "This run uses the password given on the command line."
-        : draft_.render_node_password
-            ? "Give each render machine the same password in its setup "
-              "window. Applies when saved."
-            : "No password: any Pixelsoup on this network can start and "
-              "stop render machines. Applies when saved.";
-    ctx.label(form.note(), note,
-              state.render_node_password_overridden ||
-                      !draft_.render_node_password
-                  ? ctx.theme().warning
-                  : ctx.theme().text_muted);
+    ctx.tooltip(row.label,
+                "Give each render machine the same password in its setup "
+                "window. Applies when saved.");
+    // The line is kept either way, so setting a password does not pull the
+    // rest of the form up under the pointer.
+    const gui::Rect note = form.note();
+    if (state.render_node_password_overridden || !draft_.render_node_password) {
+      ctx.label(note,
+                state.render_node_password_overridden ? "Set on the command line"
+                                                      : "No password",
+                ctx.theme().warning);
+      ctx.tooltip(note, state.render_node_password_overridden
+                            ? "This run uses the password given on the "
+                              "command line."
+                            : "Any Pixelsoup on this network can start "
+                              "and stop render machines.");
+    }
   }
 
   // ------------------------------------------------------------- proxies
@@ -176,7 +175,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     } else {
       ctx.panel(input, ctx.theme().track);
       ctx.label(gui::inset(input, m.gap, 0.0F),
-                "Resolved separately for each source", ctx.theme().text_muted);
+                "Next to each source", ctx.theme().text_muted);
     }
     if (preferences_button(ctx, gui::ui_id(id_, "preferences.proxy.browse"), browse,
                            "BROWSE", custom_folder_enabled)) {
@@ -273,7 +272,9 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   }
 
   // ----------------------------------------------------- output playback
-  static_cast<void>(gui::draw_form_section(ctx, form, "OUTPUT PLAYBACK"));
+  ctx.tooltip(gui::draw_form_section(ctx, form, "OUTPUT PLAYBACK").heading,
+              "More buffering smooths output at the cost of latency and "
+              "memory.");
   struct BufferPreset final {
     std::string_view key;
     std::string_view label;
@@ -309,12 +310,6 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   integer_slider_row("Trail", "preferences.playback.trail",
                      draft_.playback_trail_frames, 0U, 16U, "frames");
 
-  ctx.label(form.caption(),
-            "More buffering smooths output at the cost of latency and memory.",
-            ctx.theme().text_muted);
-  ctx.label(form.caption(),
-            "Saved settings apply the next time this program starts.",
-            ctx.theme().text_muted);
   // Kept whether or not there is a message, so one arriving does not change
   // how far the form scrolls.
   const gui::Rect message = form.caption();
@@ -334,6 +329,9 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
       ctx, gui::ui_id(id_, "preferences.cancel"), cancel_button, "CANCEL", true);
   const bool saved = preferences_button(ctx, gui::ui_id(id_, "preferences.save"),
                                         save_button, "SAVE", changed);
+  ctx.tooltip(save_button,
+              "Saved on this machine only, never in a project. Most settings "
+              "apply the next time this program starts.");
   const bool dismissed =
       end_modal(ctx, gui::ui_id(id_, "preferences.scrim"), bounds, modal);
 

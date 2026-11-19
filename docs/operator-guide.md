@@ -407,7 +407,8 @@ they are, and each choice is one undo step.
 (`X`, `Y`), how long its sides are (`W`, `H`) and how far it is turned (`R`, in
 degrees clockwise), all in the pixels of the view shown. Drag a number or
 click it to type. The amber arrows put position, scale and rotation back to
-their defaults. A locked layer shows its numbers and takes no edits.
+their defaults. A locked layer shows its numbers and takes no edits. With
+nothing selected the bar is empty; each tool's tooltip says how it works.
 
 **Which picture.** The button at the left of the output bar goes round the
 outputs and then to **Canvas**: the whole authored canvas laid flat, with no
@@ -442,7 +443,7 @@ The two panels enter that state differently. The Stage edits masks for as long
 as the Masks tab is in front, and says `Can't select while masking`. Program
 Output edits a mask only while one of the selected layer's masks is selected
 and **Select** is the tool - select it by drawing it, by clicking its row in
-Masks, or by clicking it on the Stage. The options bar then reads `Editing a
+Masks, or by clicking it on the Stage. The picture then reads `Editing a
 mask`, and a click away from the mask, or **Esc**, goes back to the layer and
 its box. Choosing a layer and shaping its mask are two states of one tool
 there, not two modes of the panel.
@@ -1610,8 +1611,8 @@ frame rates or mixing drop-frame and non-drop timecode, and no frame every
 plate covers after its offset. These refuse placement. **Decode** compares
 what the plates would decode per second with what this installation was
 measured to keep up with (four 3840x2160 24 fps plates on the reference
-Director); over it is a warning, not a refusal, with **Prefer 720p proxies
-for every plate** to bring it in.
+Director); over it is a warning, not a refusal, with **Use 720p
+proxies** to bring it in.
 
 **Half resolution decode (all plates)** holds every placed plate of the set
 at half size: a quarter of the memory per decoded frame. It does not make

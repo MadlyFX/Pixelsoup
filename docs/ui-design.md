@@ -97,6 +97,13 @@ from `Theme`.
     status words.
   - Name actual state in the operator's terms (on air, preview, held,
     fading), as `AGENTS.md` requires. Keep technical detail for tooltips.
+  - Panels show state, not instructions. An empty state names what is
+    missing ("No layer selected", "No tracking feeds"); how to fix it, what a
+    field means and how a tool is used go in a tooltip on that line, field or
+    button. Do not add captions or notes under fields that explain them.
+  - Keep visible prose for a warning the operator must read to act safely, a
+    refusal that says why an action did not happen, and the keys of a modal
+    gesture that is under way.
 
 ## Values
 

@@ -663,7 +663,7 @@ processor_status_text(const topology::HardwareDevice &device,
     return "Generic, not monitored";
   }
   if (device.address.empty()) {
-    return "Set its IP address to monitor it";
+    return "No IP address, not monitored";
   }
   if (observed == nullptr ||
       observed->reachability == topology::HardwareRuntimeReachability::Probing) {

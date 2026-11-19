@@ -148,7 +148,7 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
                                      edit_bounds, edit_name_));
   } else {
     ctx.panel(edit_bounds, ctx.theme().track);
-    ctx.label(edit_bounds, "SELECT A SET", ctx.theme().text_muted);
+    ctx.label(edit_bounds, "NO SET SELECTED", ctx.theme().text_muted);
   }
 
   constexpr std::size_t action_count = 4U;

@@ -30,12 +30,18 @@ TexturePanelFrame TexturePanel::draw(
     ctx.panel(header, ctx.theme().header);
     ctx.panel(gui::cut_bottom(header, m.divider), ctx.theme().divider);
 
-    // Why there is nothing to edit, in a short paragraph under the header.
-    const auto message = [&](std::string_view text, gui::UiColor color) {
+    // Why there is nothing to edit, under the header; the tooltip says what
+    // would fix it.
+    const auto message = [&](std::string_view text, gui::UiColor color,
+                             std::string_view tip = {}) {
         fields_.cancel(ctx);
         constexpr float message_height = 52.0F;
         gui::Rect note = gui::inset(body, m.panel_inset);
-        ctx.label(gui::cut_top(note, message_height), text, color);
+        const gui::Rect line = gui::cut_top(note, message_height);
+        ctx.label(line, text, color);
+        if (!tip.empty()) {
+            ctx.tooltip(line, tip);
+        }
     };
 
     const scene::EffectInstance* grain{};
@@ -47,10 +53,12 @@ TexturePanelFrame TexturePanel::draw(
         }
     }
     if (grain == nullptr) {
-        message(selected_layer == doc::NodeId{}
-                    ? "Select a layer to edit texture"
-                    : "Add Film Grain from the Effects panel",
-                ctx.theme().text_muted);
+        if (selected_layer == doc::NodeId{}) {
+            message("No layer selected", ctx.theme().text_muted);
+        } else {
+            message("No film grain", ctx.theme().text_muted,
+                    "Add Film Grain from the Effects panel");
+        }
         return frame;
     }
 

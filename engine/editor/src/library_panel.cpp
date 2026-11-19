@@ -2029,13 +2029,17 @@ LibraryFrame LibraryPanel::draw_impl(
   ctx.push_clip(content);
   const gui::Rect visible_content = content;
   if (entries.empty()) {
+    const bool in_folder = folder_ != doc::NodeId{} && !list;
     ctx.label(gui::Rect{content.x + 10.0F, content.y + 6.0F,
                         std::max(content.width - 20.0F, 0.0F), 24.0F},
-              searching          ? "NO LIBRARY RESULTS"
-              : folder_ != doc::NodeId{} && !list
-                  ? "THIS FOLDER IS EMPTY - DRAG ASSETS HERE"
-                  : "NO ASSETS - IMPORT OR DROP FILES HERE",
+              searching   ? "NO LIBRARY RESULTS"
+              : in_folder ? "FOLDER IS EMPTY"
+                          : "NO ASSETS",
               theme.text_muted);
+    if (!searching) {
+      ctx.tooltip(content, in_folder ? "Drag assets here"
+                                     : "Import or drop files here (Ctrl+I)");
+    }
   }
   bool over_row = false;
   if (list) {

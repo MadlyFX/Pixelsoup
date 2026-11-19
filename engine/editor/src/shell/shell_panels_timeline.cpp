@@ -27,15 +27,13 @@ void EditorShell::Frame::draw_cues_panel(const gui::Rect &bounds) {
 }
 
 void EditorShell::Frame::draw_automation_panel(const gui::Rect &bounds) {
-  constexpr std::array<std::string_view, 2U> rows{
-      "No automation lanes", "Use Timeline property diamonds"};
+  constexpr std::array<std::string_view, 1U> rows{"No automation lanes"};
   draw_placeholder(bounds, "AUTOMATION LANES", rows);
   return;
 }
 
 void EditorShell::Frame::draw_macros_panel(const gui::Rect &bounds) {
-  constexpr std::array<std::string_view, 2U> rows{
-      "No macros configured", "+  NEW MACRO (not available yet)"};
+  constexpr std::array<std::string_view, 1U> rows{"No macros configured"};
   draw_placeholder(bounds, "SHOW MACROS", rows);
   return;
 }

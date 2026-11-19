@@ -263,23 +263,14 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
     const float field_x = x + label_width;
     const float field_width = std::max(width - label_width, 0.0F);
     float y = begin_content(ctx, bounds);
-    y = paragraph(ctx, x, y, width,
-                  "This computer will drive part of the wall. Once it is set "
-                  "up, the editor on the control machine starts, stops and "
-                  "feeds it, and this window opens straight to its status.",
-                  theme.text_muted);
-    y = paragraph(ctx, x, y + 6.0F, width,
-                  "Is this the control machine? Open Editor starts the "
-                  "editor here instead; nothing below is needed for it.",
-                  theme.text_muted);
     if (!status.editor_message.empty()) {
-        y = paragraph(ctx, x, y + 6.0F, width, status.editor_message,
-                      theme.warning);
+        y = paragraph(ctx, x, y, width, status.editor_message, theme.warning) +
+            6.0F;
     }
     if (!message_.empty()) {
-        y = paragraph(ctx, x, y + 6.0F, width, message_, theme.warning);
+        y = paragraph(ctx, x, y, width, message_, theme.warning) + 6.0F;
     }
-    y += 14.0F;
+    y += 8.0F;
 
     bool edited = false;
     y = section(ctx, x, y, width, "CONTROL MACHINE");
@@ -301,12 +292,10 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
             gui::Rect{x + width - port_width, y, port_width, row_height};
         edited |= field(ctx, field_port, layout_.port, form_.director_port,
                         "45060");
+        ctx.tooltip(layout_.address,
+                    "Leave empty to discover the control machine for this show "
+                    "on every start, or enter an address and port");
         y += row_height + 6.0F;
-        y = paragraph(ctx, field_x, y, field_width,
-                      "Found automatically for this show. Leave the address "
-                      "empty to discover it on every start, or enter a manual "
-                      "address and port. Clear a saved address to use discovery.",
-                      theme.text_muted);
         if (form_.director_address.empty() && !status.editor_search.empty()) {
             y = paragraph(ctx, field_x, y, field_width, status.editor_search,
                           theme.text_muted);
@@ -322,11 +311,8 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
         layout_.node_index = gui::Rect{field_x, y, index_width, row_height};
         edited |= field(ctx, field_node, layout_.node_index, form_.node_index,
                         "Auto");
-        ctx.label(gui::Rect{field_x + index_width + 12.0F, y,
-                            std::max(field_width - index_width - 12.0F, 0.0F),
-                            row_height},
-                  "Assigned by the editor; leave blank for automatic",
-                  theme.text_muted);
+        ctx.tooltip(layout_.node_index,
+                    "Assigned by the editor; leave blank for automatic");
         y += row_height + 10.0F;
 
         ctx.label(gui::Rect{x, y, label_width, row_height}, "Password",
@@ -353,16 +339,17 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
             form_.password_set = false;
             edited = true;
         }
+        ctx.tooltip(layout_.password,
+                    "The render node password from File > Preferences in the "
+                    "editor on the control machine");
         y += row_height + 6.0F;
-        y = paragraph(ctx, field_x, y, field_width,
-                      form_.password_set
-                          ? "The render node password from File > Preferences "
-                            "in the editor on the control machine."
-                          : "No password: any Pixelsoup on this network "
-                            "can start and stop this machine. Enter the "
-                            "render node password if the control machine's "
-                            "Preferences has one.",
-                      form_.password_set ? theme.text_muted : theme.warning);
+        if (!form_.password_set) {
+            const gui::Rect note{field_x, y, field_width, text_line};
+            ctx.label(note, "No password", theme.warning);
+            ctx.tooltip(note, "Any Pixelsoup on this network can start and "
+                              "stop this machine");
+            y += text_line;
+        }
     }
     y += 14.0F;
 
@@ -379,13 +366,13 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
                   theme.text);
         layout_.show_id = gui::Rect{field_x, y, field_width, row_height};
         edited |= field(ctx, field_show, layout_.show_id, form_.show_id,
-                        "Automatic - use the discovered editor's show");
+                        "Automatic");
+        ctx.tooltip(layout_.control_port,
+                    "Blank uses the assigned node's control port");
+        ctx.tooltip(layout_.show_id,
+                    "Filters which editor this machine joins. Blank uses the "
+                    "discovered editor's show");
         y += row_height + 6.0F;
-        y = paragraph(ctx, field_x, y, field_width,
-                      "Blank values use the assigned node's control port "
-                      "and the discovered editor's show. A show ID filters "
-                      "which editor this machine joins.",
-                      theme.text_muted);
     }
     if (edited) {
         error_.reset();
@@ -422,12 +409,18 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
     constexpr float save_width = 156.0F;
     layout_.save = gui::Rect{bar.x + bar.width - margin - save_width, button_y,
                              save_width, button_height};
+    ctx.tooltip(layout_.save,
+                "This computer drives part of the wall. Once set up, the "
+                "editor on the control machine starts, stops and feeds it");
     if (ctx.button(gui::ui_id("render-machine.save"), layout_.save,
                    "SAVE AND START")) {
         return RenderMachineAction::SaveAndStart;
     }
     layout_.open_editor =
         gui::Rect{bar.x + margin, button_y, 140.0F, button_height};
+    ctx.tooltip(layout_.open_editor,
+                "For the control machine: starts the editor here instead; "
+                "nothing in this form is needed for it");
     if (ctx.button(gui::ui_id("render-machine.open-editor"),
                    layout_.open_editor, "OPEN EDITOR")) {
         return RenderMachineAction::OpenEditor;
@@ -485,6 +478,9 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
         ctx.panel(gui::Rect{x, y + 8.0F, 10.0F, 10.0F}, state_color);
         ctx.label(gui::Rect{x + 18.0F, y, width - 18.0F, row_height},
                   process_text(status.process), state_color);
+        ctx.tooltip(gui::Rect{x, y, width - 100.0F, row_height},
+                    "Output Monitor in the editor on the control machine "
+                    "starts and stops it too");
         constexpr float control_width = 84.0F;
         const float control_y = y - 2.0F;
         const bool running =
@@ -516,10 +512,6 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
             y = paragraph(ctx, x + 18.0F, y, width - 18.0F,
                           status.process_message, theme.text_muted);
         }
-        y = paragraph(ctx, x + 18.0F, y, width - 18.0F,
-                      "Output Monitor in the editor on the control machine "
-                      "starts and stops it too.",
-                      theme.text_muted);
         y += 14.0F;
 
         y = fact(ctx, x, y, width, "Control machine", status.director,
@@ -555,17 +547,16 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
             }
             addresses += address;
         }
+        const float machine_y = y;
         y = fact(ctx, x, y, width, "This machine",
                  addresses.empty() ? std::string{"no network address"}
                                    : addresses,
                  theme.text);
-        y = paragraph(ctx, x, y + 2.0F, width,
-                      "In the editor, open Hardware Map: this machine is "
-                      "listed under DETECTED ON NETWORK. Drag it onto the "
-                      "map, or add a Render Server with the address and "
-                      "port above.",
-                      theme.text_muted);
-        y += 14.0F;
+        ctx.tooltip(gui::Rect{x, machine_y, width, y - machine_y},
+                    "In the editor's Hardware Map this machine is listed under "
+                    "DETECTED ON NETWORK. Drag it onto the map, or add a Render "
+                    "Server with this address and port.");
+        y += 16.0F;
 
         if (status.firewall_supported) {
             y = section(ctx, x, y, width, "WINDOWS FIREWALL");
@@ -577,10 +568,7 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
                 firewall_color = theme.good;
                 break;
             case FirewallStatus::RulesMissing:
-                firewall_text =
-                    "No Pixelsoup rule for these ports. Unless Windows "
-                    "asked about Pixelsoup and you allowed it, the editor "
-                    "can neither find nor control this machine.";
+                firewall_text = "No Pixelsoup rule for these ports.";
                 firewall_color = theme.warning;
                 break;
             case FirewallStatus::Off:
@@ -590,7 +578,14 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
                 firewall_text = "Could not read the Windows Firewall rules.";
                 break;
             }
+            const float firewall_y = y;
             y = paragraph(ctx, x, y, width, firewall_text, firewall_color);
+            if (status.firewall == FirewallStatus::RulesMissing) {
+                ctx.tooltip(gui::Rect{x, firewall_y, width, y - firewall_y},
+                            "Unless Windows asked about Pixelsoup and you "
+                            "allowed it, the editor can neither find nor "
+                            "control this machine.");
+            }
             if (!status.firewall_message.empty()) {
                 y = paragraph(ctx, x, y + 2.0F, width, status.firewall_message,
                               theme.text);
@@ -599,6 +594,9 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
                 status.firewall != FirewallStatus::Off) {
                 y += 8.0F;
                 layout_.firewall = gui::Rect{x, y, 230.0F, button_height};
+                ctx.tooltip(layout_.firewall,
+                            "Windows asks for an administrator first, then "
+                            "adds inbound rules for exactly these ports");
                 if (action_button(ctx, gui::ui_id("render-machine.firewall"),
                                   layout_.firewall,
                                   status.firewall_busy
@@ -608,10 +606,6 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
                     action = RenderMachineAction::AllowFirewall;
                 }
                 y += button_height + 6.0F;
-                y = paragraph(ctx, x, y, width,
-                              "Windows asks for an administrator first, then "
-                              "adds inbound rules for exactly these ports.",
-                              theme.text_muted);
             }
             y += 14.0F;
         }

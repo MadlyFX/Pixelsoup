@@ -227,8 +227,12 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     return value;
   };
   const auto row = [&](std::string_view name, std::string_view value,
-                       gui::UiColor color) {
-    ctx.label(line(name), value, color);
+                       gui::UiColor color, std::string_view tip = {}) {
+    const gui::Rect at = line(name);
+    ctx.label(at, value, color);
+    if (!tip.empty()) {
+      ctx.tooltip(at, tip);
+    }
   };
   const auto plain_row = [&](std::string_view name, std::string_view value) {
     row(name, value, ctx.theme().text);
@@ -236,9 +240,8 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   if (state.cameras.empty()) {
     section("CAMERA TRACKING");
-    row("Status",
-        "No tracked camera. Bind a feed to a camera in the Inspector.",
-        ctx.theme().text_muted);
+    row("Status", "No tracked camera", ctx.theme().text_muted,
+        "Bind a feed to a camera in the Inspector");
   }
 
   // Bottom of the stack first, matching the order the plates are composited
@@ -371,8 +374,8 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
     const InnerFrustumReport report = inner_frustum_report(state, camera);
     if (report == InnerFrustumReport::Off) {
-      row("Plate", "Off. The wall shows the authored camera here.",
-          ctx.theme().text_muted);
+      row("Plate", "Off", ctx.theme().text_muted,
+          "The wall shows the authored camera here");
     } else if (report == InnerFrustumReport::Unknown) {
       // Not "None": the nodes may be drawing a plate the Director cannot
       // place, and the operator needs to know which of the two it is.

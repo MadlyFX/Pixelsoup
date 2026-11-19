@@ -506,15 +506,17 @@ void HardwareMappingPanel::draw_navigation_hint(Frame &f) {
   std::array<char, 64U> navigation_text{};
   const int navigation_length =
       std::snprintf(navigation_text.data(), navigation_text.size(),
-                    "MMB PAN  |  WHEEL ZOOM  |  %d%%",
+                    "%d%%",
                     static_cast<int>(std::lround(view_.zoom * 100.0F)));
   const std::string_view navigation_label{
       navigation_text.data(),
       static_cast<std::size_t>(std::max(navigation_length, 0))};
   const float navigation_width = ctx.font_width(navigation_label);
-  ctx.label(gui::Rect{view.right() - navigation_width - 10.0F,
-                      view.bottom() - 21.0F, navigation_width, 17.0F},
-            navigation_label, ctx.theme().text_muted);
+  const gui::Rect navigation_bounds{view.right() - navigation_width - 10.0F,
+                                    view.bottom() - 21.0F, navigation_width,
+                                    17.0F};
+  ctx.label(navigation_bounds, navigation_label, ctx.theme().text_muted);
+  ctx.tooltip(navigation_bounds, "Zoom. Middle-drag pans, the wheel zooms");
   if (!map.devices.empty() &&
       icon_button(ctx, gui::ui_id(id_, "hardware.frame"),
                   gui::Rect{view.right() - navigation_width - 40.0F,

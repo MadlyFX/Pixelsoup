@@ -201,11 +201,11 @@ void ProjectSettingsPanel::draw_feeds(gui::UiContext &ctx,
                                       const ProjectSettingsState &state,
                                       ProjectSettingsFrame &result) {
   const gui::Metrics &m = ctx.theme().metrics;
-  ctx.label(form.heading(), "TRACKING FEEDS", ctx.theme().accent);
-  ctx.label(form.caption(),
-            "Each feed is one tracking system the Director listens to. "
-            "Pick a camera's feed and rigid body in the Inspector.",
-            ctx.theme().text_muted);
+  const gui::Rect feeds_heading = form.heading();
+  ctx.label(feeds_heading, "TRACKING FEEDS", ctx.theme().accent);
+  ctx.tooltip(feeds_heading,
+              "Each feed is one tracking system the Director listens to. "
+              "Pick a camera's feed and rigid body in the Inspector.");
   {
     gui::Rect strip = form.control();
     if (preferences_button(ctx, gui::ui_id(id_, "feeds.add"),
@@ -235,8 +235,9 @@ void ProjectSettingsPanel::draw_feeds(gui::UiContext &ctx,
           ctx.text_field(gui::ui_id(id_, key, salt), row.field, value));
       ctx.tooltip(row.field, tip);
       if (!valid) {
-        ctx.label(form.note(), "Four numbers 0-255 separated by dots",
-                  ctx.theme().warning);
+        const gui::Rect note = form.note();
+        ctx.label(note, "Not an IP address", ctx.theme().warning);
+        ctx.tooltip(note, "Four numbers 0-255 separated by dots");
       }
     };
     const auto port_row = [&](std::string_view label, std::string_view key,
@@ -298,10 +299,6 @@ void ProjectSettingsPanel::draw_feeds(gui::UiContext &ctx,
                parse_server(draft.server, parsed),
                "The Motive machine's address. Leave empty to find it from "
                "the first frame.");
-      if (draft.server.empty()) {
-        ctx.label(form.note(), "Found from the first frame when empty",
-                  ctx.theme().text_muted);
-      }
       port_row("Command port", "feeds.command", settings.command_port);
       text_row("Multicast", "feeds.multicast", draft.multicast,
                scene::parse_multicast_group(draft.multicast, parsed),
@@ -404,9 +401,6 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // scrolls.
   gui::Rect body = modal.body;
   gui::FormLayout top{body, m};
-  ctx.label(top.caption(),
-            "Saved in the project. Applies to every scene and every node.",
-            ctx.theme().text_muted);
   // A focused category is much quicker to audit in a dark control room than a
   // very tall scrolling form. Keep each tab visible and leave Apply/Cancel
   // fixed at the bottom of the modal.
@@ -461,6 +455,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                   std::string_view note) {
       const gui::FormRow row = form.row();
       ctx.label(row.label, label, ctx.theme().text);
+      ctx.tooltip(row.label, note);
       double edited{};
       if (tracking_fields_.draw(ctx, gui::ui_id(id_, id), row.field, "",
                                 static_cast<double>(value), 1.0, edited, 0) &&
@@ -469,7 +464,6 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             std::clamp(edited, 0.0, static_cast<double>(maximum));
         value = static_cast<core::u32>(std::llround(bounded));
       }
-      ctx.label(form.note(), note, ctx.theme().text_muted);
     };
     unsigned_row("Latency", "icvfx.latency",
                  renderer_draft_.icvfx.latency_frames,
@@ -488,8 +482,11 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                  renderer_draft_.icvfx.jitter_filter_percent, 100U,
                  "0 keeps raw motion; 100 uses the fitted pose. See Live Data errors.");
 
-    static_cast<void>(gui::draw_form_section(
-        ctx, form, "NEW CAMERA DEFAULTS", ctx.theme().accent));
+    const gui::FormSection defaults = gui::draw_form_section(
+        ctx, form, "NEW CAMERA DEFAULTS", ctx.theme().accent);
+    ctx.tooltip(defaults.heading,
+                "A camera keeps its own values once added; edit them in the "
+                "Inspector.");
     unsigned_row("Margin", "icvfx.margin",
                  renderer_draft_.icvfx.camera_defaults.margin_px,
                  scene::max_icvfx_margin_px,
@@ -506,10 +503,6 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                  renderer_draft_.icvfx.camera_defaults.resolution_denominator,
                  scene::max_icvfx_resolution_scale,
                  "Plate resolution denominator. Equal values render 1:1.");
-    ctx.label(form.caption(),
-              "A camera keeps its own values once added; edit them in the "
-              "Inspector.",
-              ctx.theme().text_muted);
   }
 
   if (category_ == Category::Feeds) {
@@ -539,11 +532,13 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                            "LEGACY FOV", camera_available && lens_enabled)) {
       lens_draft_.reset();
     }
-    ctx.label(form.note(),
-              camera_available
-                  ? "Sensor and distortion are calibration; live encoders are status."
-                  : "No active stage camera is available for lens calibration.",
-              ctx.theme().text_muted);
+    if (camera_available) {
+      ctx.tooltip(projection.label,
+                  "Sensor and distortion are calibration; live encoders are "
+                  "status.");
+    } else {
+      ctx.label(form.note(), "No stage camera", ctx.theme().text_muted);
+    }
 
     if (lens_draft_.has_value()) {
       scene::LensProfile &lens = *lens_draft_;

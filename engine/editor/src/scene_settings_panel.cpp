@@ -55,18 +55,33 @@ std::string_view environment_status_text(
 std::string_view color_status_text(ColorStatus status) noexcept {
   switch (status) {
   case ColorStatus::Loading:
-    return "Baking the table on the residency worker.";
+    return "Baking look...";
   case ColorStatus::Ready:
-    return "Baked and live on the output.";
+    return "Look live";
   case ColorStatus::Failed:
-    return "Look could not be read. 3D .cube only; the transform is live "
-           "without it.";
+    return "Not a readable 3D .cube look";
   case ColorStatus::BackendUnsupported:
-    return "Ignored: colour is applied on the scene-linear path, and this "
-           "project is running Basic rather than Advanced.";
+    return "Look ignored on Basic";
   }
-  return "Baked and live on the output.";
+  return "Look live";
 }
+
+namespace {
+std::string_view color_status_tip(ColorStatus status) noexcept {
+  switch (status) {
+  case ColorStatus::Loading:
+    return "Baking the table on the residency worker";
+  case ColorStatus::Ready:
+    return "Baked and live on the output";
+  case ColorStatus::Failed:
+    return "The display transform is live without it";
+  case ColorStatus::BackendUnsupported:
+    return "Colour is applied on the scene-linear path, and this project is "
+           "running Basic rather than Advanced";
+  }
+  return {};
+}
+} // namespace
 
 ColorStatus color_status_for(render::DisplayLutState state) noexcept {
   switch (state) {
@@ -427,8 +442,12 @@ SceneSettingsFrame SceneSettingsPanel::draw(
         check("Dither", renderer.color.dither);
         if (state.color_status != ColorStatus::Ready &&
             !renderer.color.show_lut_source.empty())
-          ctx.label(form.control(), color_status_text(state.color_status),
+        {
+          const gui::Rect status = form.control();
+          ctx.label(status, color_status_text(state.color_status),
                     ctx.theme().warning);
+          ctx.tooltip(status, color_status_tip(state.color_status));
+        }
       }
       if (section(3, "SHADOWS")) {
         number("Cascades", renderer.shadow_cascades, 0, 4, 1, "", 0);
@@ -483,14 +502,14 @@ SceneSettingsFrame SceneSettingsPanel::draw(
     form.space(section_space);
     colour("Sky colour", environment.sky_color, fresh.environment.sky_color);
     form.space(section_space);
-    paragraph("An environment map, physical sky, atmosphere, baked lighting "
-              "and reflections need the Advanced renderer.",
-              ctx.theme().text_muted);
-    form.space(section_space);
-    if (ctx.button(id("use advanced"), form.control(), "Use Advanced renderer")) {
+    const gui::Rect use_advanced = form.control();
+    if (ctx.button(id("use advanced"), use_advanced, "Use Advanced renderer")) {
       renderer.backend = scene::RendererBackend::Advanced;
       changed = true;
     }
+    ctx.tooltip(use_advanced,
+                "An environment map, physical sky, atmosphere, baked lighting "
+                "and reflections need the Advanced renderer");
     // The one hidden value that stops the picture on Basic stays reachable.
     if (environment.physical_sky.enabled) {
       form.space(section_space);
@@ -586,7 +605,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
           result.project.bake = scene::clamped(environment.baked);
           result.project.bake_destination = bake_destination_;
         } else if (!ready) {
-          ctx.label(action, "Enter a bake path", ctx.theme().text_muted);
+          ctx.label(action, "No bake path", ctx.theme().text_muted);
         }
       }
     }

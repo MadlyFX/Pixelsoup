@@ -367,16 +367,16 @@ bool HardwareMappingPanel::draw_server_outputs(
                    row, label)) {
       details_output_binding_ = binding->node;
     }
+    ctx.tooltip(row, "Disconnect its cable to remove this output");
   }
-  ctx.label(rows.line(19.0F, 3.0F),
-            deployment_runtime == nullptr ||
-                    !runtime_inventory_is_usable(deployment_runtime)
-                ? "START LISTENER, THEN WIRE VIDEO OUT"
-                : "WIRE VIDEO OUT TO CREATE OUTPUT",
-            deployment_runtime == nullptr ||
-                    !runtime_inventory_is_usable(deployment_runtime)
-                ? ctx.theme().warning
-                : ctx.theme().text_muted);
+  if (deployment_runtime == nullptr ||
+      !runtime_inventory_is_usable(deployment_runtime)) {
+    const gui::Rect listener = rows.line(19.0F, 3.0F);
+    ctx.label(listener, "LISTENER NOT RUNNING", ctx.theme().warning);
+    ctx.tooltip(listener,
+                "Start the listener on the render machine, then wire Video Out "
+                "to create an output");
+  }
 
   const topology::HardwareOutputBinding *const selected_binding =
       map.output_binding(details_output_binding_);
@@ -482,8 +482,6 @@ bool HardwareMappingPanel::draw_server_outputs(
             changed_binding};
       }
     }
-    ctx.label(rows.line(19.0F, 3.0F), "DISCONNECT CABLE TO REMOVE OUTPUT",
-              ctx.theme().text_muted);
   }
 
   if (!explicit_output_bindings) {

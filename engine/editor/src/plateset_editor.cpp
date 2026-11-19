@@ -447,7 +447,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
     if (over && input.assets != nullptr) {
       const gui::Rect button = line(24.0F);
       if (pill_button(ctx, gui::ui_id(id_, "proxies"), button, std::nullopt,
-                      "Prefer 720p proxies for every plate",
+                      "Use 720p proxies",
                       "Plays each plate from a 720p proxy once it is made, "
                       "falling back to the source until then")) {
         for (const assets::PlatesetSlotAssignment &assignment :
@@ -608,13 +608,14 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
       }
       if (sure < found) {
         gui::Rect note = line(18.0F);
-        const std::string text =
-            sure <= 1U ? "These plates share too little motion to sync "
-                         "from the picture"
-                       : "Red and amber plates are unsure and keep their "
-                         "offsets";
-        ctx.label(note, text, theme.caution);
-        ctx.tooltip(note, text);
+        ctx.label(note,
+                  sure <= 1U ? "Too little shared motion" : "Some plates unsure",
+                  theme.caution);
+        ctx.tooltip(note, sure <= 1U
+                              ? "These plates share too little motion to sync "
+                                "from the picture"
+                              : "Red and amber plates are unsure and keep "
+                                "their offsets");
       }
       gui::Rect row = line(26.0F);
       const gui::Rect apply =

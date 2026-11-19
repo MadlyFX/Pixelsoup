@@ -1026,7 +1026,7 @@ void output_deployment_is_created_by_wiring_and_remains_repairable() {
 
   // The selected binding owns an exact feed field instead of inferring the
   // feed from display order.
-  constexpr float feed_y = 272.0F;
+  constexpr float feed_y = 250.0F;
   static_cast<void>(
       harness.runtime_frame(details_x, feed_y, false, map, two_outputs));
   static_cast<void>(
@@ -1042,9 +1042,9 @@ void output_deployment_is_created_by_wiring_and_remains_repairable() {
 
   // Precision belongs to this physical output; editing it preserves its target.
   for (const core::u32 depth : {10U, 16U, 8U}) {
-    static_cast<void>(harness.runtime_frame(details_x, 326.0F, false, map, two_outputs));
-    static_cast<void>(harness.runtime_frame(details_x, 326.0F, true, map, two_outputs));
-    const auto changed = harness.runtime_frame(details_x, 326.0F, false, map, two_outputs);
+    static_cast<void>(harness.runtime_frame(details_x, 304.0F, false, map, two_outputs));
+    static_cast<void>(harness.runtime_frame(details_x, 304.0F, true, map, two_outputs));
+    const auto changed = harness.runtime_frame(details_x, 304.0F, false, map, two_outputs);
     MAPPING_CHECK(changed.output_binding_edit.has_value());
     MAPPING_CHECK(changed.output_binding_edit->binding.output_bit_depth == depth);
     MAPPING_CHECK(changed.output_binding_edit->binding.target == authored.target);
@@ -1057,7 +1057,7 @@ void output_deployment_is_created_by_wiring_and_remains_repairable() {
   replacement.nodes[0U].video_outputs[0U] =
       two_outputs.nodes[0U].video_outputs[1U];
   // One Refresh row in hertz above it, where a rate and a divisor were.
-  constexpr float repair_y = 435.0F;
+  constexpr float repair_y = 413.0F;
   static_cast<void>(
       harness.runtime_frame(details_x, repair_y, false, map, replacement));
   static_cast<void>(

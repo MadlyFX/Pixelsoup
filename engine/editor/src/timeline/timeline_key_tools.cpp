@@ -192,8 +192,8 @@ void TimelinePanel::draw_key_tools(Pass &p) {
         ctx.label(channel_row, "NO VALUE", ctx.theme().text_muted);
       }
     } else {
-      ctx.label(channel_row, "Select a key to edit its value at the playhead",
-                ctx.theme().text_muted);
+      ctx.label(channel_row, "NO KEY SELECTED", ctx.theme().text_muted);
+      ctx.tooltip(channel_row, "Select a key to edit its value at the playhead");
     }
 
     // SCALE, and how many keys it would act on.

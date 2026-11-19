@@ -3750,7 +3750,7 @@ struct PreferencesHarness final {
 
   // The card is centred in `bounds`; these mirror the panel's own layout.
   static constexpr float card_width = 620.0F;
-  static constexpr float card_height = 780.0F;
+  static constexpr float card_height = 714.0F;
   static constexpr float card_x = (1600.0F - card_width) * 0.5F;
   static constexpr float card_y = (900.0F - card_height) * 0.5F;
 
@@ -3768,37 +3768,37 @@ struct PreferencesHarness final {
                      card_y + card_height - 30.0F, 84.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect first_field() {
-    return gui::Rect{card_x + 14.0F + 132.0F, card_y + 66.0F,
+    return gui::Rect{card_x + 14.0F + 132.0F, card_y + 40.0F,
                      card_width - 28.0F - 132.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect next_to_source_checkbox() {
-    return gui::Rect{card_x + 14.0F, card_y + 402.0F, card_width - 28.0F,
+    return gui::Rect{card_x + 14.0F, card_y + 376.0F, card_width - 28.0F,
                      24.0F};
   }
   [[nodiscard]] static gui::Rect clear_proxy_cache_button() {
-    return gui::Rect{card_x + 14.0F, card_y + 522.0F, 132.0F, 24.0F};
+    return gui::Rect{card_x + 14.0F, card_y + 496.0F, 132.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect low_latency_preset() {
     const float width = (card_width - 28.0F - 18.0F) / 4.0F;
-    return gui::Rect{card_x + 14.0F, card_y + 591.0F, width, 24.0F};
+    return gui::Rect{card_x + 14.0F, card_y + 565.0F, width, 24.0F};
   }
   [[nodiscard]] static gui::Rect balanced_transcode_priority() {
     const float start = card_x + 14.0F + 132.0F;
     const float width = (card_x + card_width - 14.0F - start - 12.0F) / 3.0F;
-    return gui::Rect{start + width + 6.0F, card_y + 492.0F, width, 24.0F};
+    return gui::Rect{start + width + 6.0F, card_y + 466.0F, width, 24.0F};
   }
   // RENDER NODES: the password well, then its CLEAR button.
   [[nodiscard]] static gui::Rect password_field() {
-    return gui::Rect{card_x + 146.0F, card_y + 309.0F, 370.0F, 24.0F};
+    return gui::Rect{card_x + 146.0F, card_y + 283.0F, 370.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect clear_password_button() {
-    return gui::Rect{card_x + card_width - 14.0F - 84.0F, card_y + 309.0F,
+    return gui::Rect{card_x + card_width - 14.0F - 84.0F, card_y + 283.0F,
                      84.0F, 24.0F};
   }
-  // The form is 771px tall (its last line, the status message, ends 765px
-  // below the content's top, plus the 6px margin) in a 710px viewport
+  // The form is 705px tall (its last line, the status message, ends 699px
+  // below the content's top, plus the 6px margin) in a 644px viewport
   // between the 34px header and the 36px footer: 61px of scroll.
-  static constexpr float max_scroll = 771.0F - 710.0F;
+  static constexpr float max_scroll = 705.0F - 644.0F;
 
   editor::PreferencesFrame wheel(float notches) {
     input.new_frame();
@@ -4034,12 +4034,12 @@ struct ProjectSettingsHarness final {
   static constexpr float card_x = (1600.0F - card_width) * 0.5F;
   static constexpr float card_y = (900.0F - card_height) * 0.5F;
 
-  // The default metrics: under the 34px header, the intro caption 6px down
-  // (18px tall, 2px after) and the 24px tabs 6px apart; the fixed part ends
+  // The default metrics: under the 34px header, the 24px tabs 6px down and
+  // 6px apart; the fixed part ends
   // 6px below them, then a 1px rule, then the scrolling pane, whose first
   // row is 6px down. Rows are 24px with 6px between, notes 18px with 2px
   // after, 14px in from the card's sides, fields after a 132px label column.
-  static constexpr float tab_y = card_y + 34.0F + 6.0F + 18.0F + 2.0F;
+  static constexpr float tab_y = card_y + 34.0F + 6.0F;
   static constexpr float content_y = tab_y + 24.0F + 6.0F + 1.0F + 6.0F;
   static constexpr float tab_width = (card_width - 28.0F - 12.0F) / 3.0F;
 
@@ -4070,23 +4070,23 @@ struct ProjectSettingsHarness final {
     return gui::Rect{card_x + 14.0F + 132.0F, content_y + 24.0F, 116.0F,
                      24.0F};
   }
-  // After the Projection row and its note: two columns 14px apart, each a
+  // After the Projection row: two columns 14px apart, each a
   // 66px label, the track, a 6px gap and a 48px value. The track is 18px
   // tall, centred in its row.
   [[nodiscard]] static gui::Rect lens_sensor_width_track() {
-    const float y = content_y + 24.0F + 30.0F + 20.0F;
+    const float y = content_y + 24.0F + 30.0F;
     const float column = (card_width - 28.0F - 14.0F) * 0.5F;
     return gui::Rect{card_x + 14.0F + 66.0F, y + 3.0F,
                      column - 66.0F - 48.0F - 6.0F, 18.0F};
   }
-  // INNER FRUSTUM heading, then the enable checkbox; Latency and its note,
-  // then the prediction checkbox.
+  // INNER FRUSTUM heading, then the enable checkbox; Latency, then the
+  // prediction checkbox.
   [[nodiscard]] static gui::Rect inner_frustum_checkbox() {
     return gui::Rect{card_x + 14.0F, content_y + 24.0F, card_width - 28.0F,
                      24.0F};
   }
   [[nodiscard]] static gui::Rect predict_checkbox() {
-    return gui::Rect{card_x + 14.0F, content_y + 24.0F + 30.0F + 30.0F + 20.0F,
+    return gui::Rect{card_x + 14.0F, content_y + 24.0F + 30.0F + 30.0F,
                      card_width - 28.0F, 24.0F};
   }
 
@@ -4123,7 +4123,7 @@ struct ProjectSettingsHarness final {
   }
 
   // The FEEDS pane for one NatNet feed, laid out with the same form the
-  // panel uses: the heading, its caption and NEW FEED, then the feed's
+  // panel uses: the heading and NEW FEED, then the feed's
   // section with Name, Listening, Protocol, Data port and Motive IP.
   struct FeedRows final {
     gui::Rect protocol;
@@ -4135,7 +4135,6 @@ struct ProjectSettingsHarness final {
     gui::FormLayout form{
         gui::Rect{card_x, content_y - m.gap, card_width, 2000.0F}, m};
     static_cast<void>(form.heading());
-    static_cast<void>(form.caption());
     static_cast<void>(form.control());
     static_cast<void>(form.section());
     static_cast<void>(form.row());
@@ -4511,7 +4510,10 @@ void basic_renderer_hides_the_environment_fields() {
   h.state.environment.map_source="studio.hdr";
   h.state.environment.fog_density=0.25F;
   // Where Advanced has the physical sky switch, Basic has nothing to toggle.
-  UI_CHECK(!h.click(90.0).project.apply && !h.state.environment.physical_sky.enabled);
+  // (Basic puts its way out, Use Advanced renderer, about there instead.)
+  static_cast<void>(h.click(90.0));
+  UI_CHECK(!h.state.environment.physical_sky.enabled);
+  h.state.renderer.backend=scene::RendererSettings{}.backend;
   h.state.environment.physical_sky.enabled=true;
   // Basic draws the plain sky colour, so that control stays: its reset arrow
   // is somewhere on the page.
