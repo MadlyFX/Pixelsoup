@@ -12,6 +12,7 @@
 #include <mediaserver/cmd/command.hpp>
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/show/pointer_overlay.hpp>
 #include <mediaserver/show/transport_state.hpp>
 
 namespace mediaserver::net {
@@ -19,7 +20,7 @@ namespace mediaserver::net {
 // Version 11 adds the priority transport message an operator's stop, pause or
 // seek travels in ahead of the frame stream. All participants must upgrade
 // together.
-inline constexpr core::u16 current_session_format_version = 11U;
+inline constexpr core::u16 current_session_format_version = 12U;
 inline constexpr core::u32 min_heartbeat_response_timeout_ms = 250U;
 inline constexpr core::u32 max_heartbeat_response_timeout_ms = 120'000U;
 inline constexpr core::u32 max_session_node_index = 4'095U;
@@ -654,6 +655,18 @@ struct PriorityTransport final {
 [[nodiscard]] bool valid_priority_anchor(
     const show::TransportAnchor& anchor) noexcept;
 
+// The operator's laser pointer, sent beside the frame stream. Never authored
+// and never acknowledged: a node shows the newest picture from the control
+// frame it carries, and a lost one is replaced by the next.
+struct PointerOverlayMessage final {
+    Id128 session_id;
+    Id128 director_epoch;
+    core::u64 sequence{};
+    show::PointerOverlay overlay;
+
+    bool operator==(const PointerOverlayMessage&) const = default;
+};
+
 // A bidirectional graceful-close notice. sequence belongs to the sender's
 // stream and final_cursor is only that sender's safe externally visible
 // frontier. It must never be used to advance the peer's authoritative state.
@@ -682,7 +695,8 @@ using SessionMessage = std::variant<
     HeartbeatAck,
     Goodbye,
     TrackedCameraPose,
-    PriorityTransport>;
+    PriorityTransport,
+    PointerOverlayMessage>;
 
 enum class SessionEncodeError {
     InvalidClientHello,
@@ -701,6 +715,7 @@ enum class SessionEncodeError {
     InvalidGoodbye,
     InvalidTrackedCameraPose,
     InvalidPriorityTransport,
+    InvalidPointerOverlay,
 };
 
 enum class SessionDecodeError {
@@ -725,6 +740,7 @@ enum class SessionDecodeError {
     InvalidGoodbye,
     InvalidTrackedCameraPose,
     InvalidPriorityTransport,
+    InvalidPointerOverlay,
 };
 
 struct SessionDecodeLimits final {

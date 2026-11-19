@@ -226,6 +226,13 @@ template <typename Acknowledgement>
         && valid_priority_anchor(value.anchor);
 }
 
+[[nodiscard]] bool valid_pointer_overlay(
+    const PointerOverlayMessage& value) noexcept {
+    return static_cast<bool>(value.session_id)
+        && static_cast<bool>(value.director_epoch) && value.sequence != 0U
+        && show::valid(value.overlay);
+}
+
 [[nodiscard]] bool valid_tracked_camera_pose(
     const TrackedCameraPose& value) noexcept {
     if (!static_cast<bool>(value.session_id)
@@ -685,6 +692,10 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    std::get_if<PriorityTransport>(&message)) {
         valid = valid_priority_transport(*priority);
         invalid_error = SessionEncodeError::InvalidPriorityTransport;
+    } else if (const auto* pointer =
+                   std::get_if<PointerOverlayMessage>(&message)) {
+        valid = valid_pointer_overlay(*pointer);
+        invalid_error = SessionEncodeError::InvalidPointerOverlay;
     }
     if (!valid) {
         return core::Result<std::vector<std::byte>, SessionEncodeError>::failure(
@@ -1040,6 +1051,33 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    anchor.last_frame.value(),
                    anchor.loop,
                    anchor.cues_armed)
+                   .Union();
+    } else if (const auto* pointer =
+                 std::get_if<PointerOverlayMessage>(&message)) {
+        const auto session = encode_id(pointer->session_id);
+        const auto epoch = encode_id(pointer->director_epoch);
+        const show::PointerOverlay& overlay = pointer->overlay;
+        std::vector<fb::PointerPoint> points;
+        points.reserve(overlay.points.size());
+        for (const show::PointerPoint point : overlay.points) {
+            points.emplace_back(point.x, point.y);
+        }
+        const auto point_vector = builder.CreateVectorOfStructs(points);
+        const auto end_vector = builder.CreateVector(overlay.stroke_ends);
+        const fb::PointerPoint dot = overlay.dot.has_value()
+            ? fb::PointerPoint{overlay.dot->x, overlay.dot->y}
+            : fb::PointerPoint{};
+        body_type = fb::SessionBody::PointerOverlay;
+        body = fb::CreatePointerOverlay(
+                   builder,
+                   &session,
+                   &epoch,
+                   pointer->sequence,
+                   overlay.control_frame,
+                   overlay.dot.has_value(),
+                   &dot,
+                   point_vector,
+                   end_vector)
                    .Union();
     }
 
@@ -1640,6 +1678,48 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
         }
         return core::Result<SessionMessage, SessionDecodeError>::success(
             SessionMessage{value});
+    }
+    case fb::SessionBody::PointerOverlay: {
+        const auto* source = envelope->body_as_PointerOverlay();
+        if (source == nullptr || source->session_id() == nullptr
+            || source->director_epoch() == nullptr) {
+            return core::Result<SessionMessage, SessionDecodeError>::failure(
+                SessionDecodeError::MissingRequiredField);
+        }
+        const auto* points = source->points();
+        const auto* ends = source->stroke_ends();
+        // Bounded before anything is copied, so a hostile count costs nothing.
+        if ((points != nullptr && points->size() > show::max_pointer_points)
+            || (ends != nullptr && ends->size() > show::max_pointer_strokes)
+            || (source->has_dot() && source->dot() == nullptr)) {
+            return core::Result<SessionMessage, SessionDecodeError>::failure(
+                SessionDecodeError::InvalidPointerOverlay);
+        }
+        PointerOverlayMessage value{};
+        value.session_id = decode_id(*source->session_id());
+        value.director_epoch = decode_id(*source->director_epoch());
+        value.sequence = source->sequence();
+        value.overlay.control_frame = source->control_frame();
+        if (source->has_dot()) {
+            value.overlay.dot =
+                show::PointerPoint{source->dot()->x(), source->dot()->y()};
+        }
+        if (points != nullptr) {
+            value.overlay.points.reserve(points->size());
+            for (const fb::PointerPoint* point : *points) {
+                value.overlay.points.push_back(
+                    show::PointerPoint{point->x(), point->y()});
+            }
+        }
+        if (ends != nullptr) {
+            value.overlay.stroke_ends.assign(ends->begin(), ends->end());
+        }
+        if (!valid_pointer_overlay(value)) {
+            return core::Result<SessionMessage, SessionDecodeError>::failure(
+                SessionDecodeError::InvalidPointerOverlay);
+        }
+        return core::Result<SessionMessage, SessionDecodeError>::success(
+            SessionMessage{std::move(value)});
     }
     case fb::SessionBody::NONE:
     default:

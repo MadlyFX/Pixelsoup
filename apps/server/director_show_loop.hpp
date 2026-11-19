@@ -562,6 +562,11 @@ struct DirectorShowLoop final {
     editor::AssetViewerRendition asset_viewer_rendition{
         editor::AssetViewerRendition::None};
     std::vector<editor::SourceRangeEditIntent> pending_source_edits{};
+    // The laser pointer picture the editor last reported, waiting for the
+    // next authoring pass to stamp it with its control frame and send it;
+    // and the last one sent, so an unchanged picture is not sent again.
+    std::optional<show::PointerOverlay> queued_pointer_overlay{};
+    std::optional<show::PointerOverlay> sent_pointer_overlay{};
     // Who asked for the project load now pending. The start-up reopen and a
     // recovery leave the recovery copy alone; an operator's own Open or New
     // gave the previous project's changes up, so its copy goes.

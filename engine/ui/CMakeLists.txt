@@ -2,6 +2,7 @@ find_package(SDL3 CONFIG REQUIRED)
 
 add_library(mediaserver_ui STATIC
     src/gpu_output_target.cpp
+    src/pointer_overlay_pass.cpp
     src/sdl_presenter.cpp
 )
 add_library(MediaServer::Ui ALIAS mediaserver_ui)
@@ -16,6 +17,8 @@ target_link_libraries(mediaserver_ui
         MediaServer::Show
         MediaServer::Rhi
     PRIVATE
+        # The laser pointer is drawn with the UI's own draw list and pipeline.
+        MediaServer::Gui
         # The scene renderer is an implementation detail of the presenter's 3D
         # path: nothing above ui names it, so it links privately.
         MediaServer::Render

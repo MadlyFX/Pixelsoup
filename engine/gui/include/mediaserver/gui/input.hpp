@@ -135,6 +135,8 @@ enum class MoveKey : core::u8 {
     // Held while moving: snap a vertex of what is dragged onto the vertex
     // under the pointer, as Unreal's V.
     V,
+    // Held for the laser pointer: a dot over the Stage, Program and the wall.
+    L,
 };
 
 class InputState final {
@@ -148,6 +150,10 @@ public:
     void set_mouse_button(MouseButton button, bool down) noexcept;
     void add_wheel(float delta) noexcept;
     void add_text(std::string_view utf8);
+    // Drops every one of `characters` from this frame's typed text: a held
+    // key that has been claimed (the laser pointer's L) must not also reach
+    // the single-key shortcuts its repeats would otherwise fire.
+    void withhold_text(std::string_view characters);
     void add_key(Key key);
     void set_mods(KeyMods mods) noexcept { mods_ = mods; }
     // Raw mouse travel, independent of where the pointer is. It keeps arriving
@@ -215,7 +221,7 @@ public:
 
 private:
     static constexpr std::size_t button_count = 3U;
-    static constexpr std::size_t move_key_count = 7U;
+    static constexpr std::size_t move_key_count = 8U;
     [[nodiscard]] static std::size_t index(MouseButton button) noexcept {
         return static_cast<std::size_t>(button);
     }

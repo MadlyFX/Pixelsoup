@@ -144,6 +144,23 @@ public:
         static_cast<void>(output);
         return PriorityTransportPoll::Unsupported;
     }
+
+    enum class PointerOverlayPoll : std::uint8_t {
+        Unsupported,
+        Empty,
+        Ready,
+    };
+
+    // Takes the laser pointer picture owed to this session, if a new one is
+    // waiting. Newest wins and nothing is retried: the next picture replaces
+    // a lost one, and an empty picture is how the wall is cleared.
+    [[nodiscard]] virtual PointerOverlayPoll try_take_pointer_overlay(
+        Id128 session_id,
+        show::PointerOverlay& output) noexcept {
+        static_cast<void>(session_id);
+        static_cast<void>(output);
+        return PointerOverlayPoll::Unsupported;
+    }
 };
 
 struct DirectorSessionServiceConfig final {
@@ -201,6 +218,7 @@ struct DirectorSessionServiceCounters final {
     std::uint64_t sent_heartbeats{};
     std::uint64_t sent_tracked_poses{};
     std::uint64_t sent_priority_transports{};
+    std::uint64_t sent_pointer_overlays{};
     std::uint64_t heartbeat_timeouts{};
     std::uint64_t graceful_goodbyes{};
     std::uint64_t resync_disconnects{};

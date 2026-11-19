@@ -7,6 +7,7 @@
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/fill_handles.hpp>
 #include <mediaserver/editor/gizmo.hpp>
+#include <mediaserver/editor/laser_pointer.hpp>
 #include <mediaserver/editor/masks_panel.hpp>
 #include <mediaserver/editor/measurement.hpp>
 #include <mediaserver/editor/model_surface_cache.hpp>
@@ -709,6 +710,36 @@ class ViewportPanel final {
         return measure_;
     }
 
+    // The laser pointer over this view, run after draw() with the scene and
+    // projection it drew. While L is held and the pointer is over `image` it
+    // hides the system pointer and draws the dot in its place, and a left or
+    // right drag draws a stroke: on the Stage over the surface under the
+    // pointer (else the floor), on Program in canvas pixels, through a warped
+    // output's projection when there is one. Every mark this view can show is
+    // drawn whether L is held or not. Returns where the pointer is pointing
+    // when it is over this view; `pointer_available` is false while
+    // something floats over the view.
+    std::optional<LaserMark> run_laser(gui::UiContext& ctx,
+                                       LaserPointer& laser,
+                                       const gui::Rect& image,
+                                       const scene::Scene& scene,
+                                       const ViewportProjection* projection,
+                                       bool pointer_available);
+    // Where on the canvas `scene` shows (the scene's own, through
+    // `projection` when given) the line of sight through authored canvas
+    // pixel (x, y) lands. Empty when the view cannot see it.
+    [[nodiscard]] static std::optional<scene::CanvasProjection>
+    laser_canvas_to_view(const scene::Scene& scene,
+                         const ViewportProjection* projection, float x,
+                         float y) noexcept;
+    // The authored canvas pixel whose line of sight lands on view pixel
+    // (x, y) of a projected view, found from `guess`. Empty when it does not
+    // settle, as off the edge of a warped surface.
+    [[nodiscard]] static std::optional<scene::Vec3>
+    laser_view_to_canvas(const scene::Scene& scene,
+                         const ViewportProjection& projection, float x,
+                         float y, scene::Vec3 guess) noexcept;
+
     // The pivot moved by a middle drag from the gizmo's centre, while the
     // selection it was set for is still selected.
     [[nodiscard]] std::optional<scene::Vec3> pivot_override() const noexcept {
@@ -737,6 +768,16 @@ class ViewportPanel final {
     refresh_projection_surface(doc::NodeId surface) noexcept;
 
   private:
+    // The laser stroke this view is drawing: where the pointer was last
+    // added, in panel units, and how far into the scene the last Stage mark
+    // was, for a drag that leaves every surface.
+    bool laser_drawing_{};
+    float laser_last_x_{};
+    float laser_last_y_{};
+    float laser_depth_{10.0F};
+    scene::Vec3 laser_guess_{};
+    bool laser_guess_valid_{};
+
     struct CachedModelBounds final {
         scene::ModelLocalBounds bounds{};
         core::u64 stamp{};

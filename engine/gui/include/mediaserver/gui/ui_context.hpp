@@ -135,6 +135,11 @@ struct Theme final {
     // scale - and the line from a pivot to the pointer during a drag. Off
     // white, because it belongs to no world axis.
     UiColor gizmo_view{0.90F, 0.92F, 0.96F, 0.85F};
+    // The laser pointer's dot and lines (L held over a view). The same red
+    // the wall draws them in (show::pointer_red_*), so what the operator
+    // marks is what the floor sees. Like the gizmo it is drawn over the
+    // picture and keeps its value at night.
+    UiColor pointer{1.0F, 0.16F, 0.12F, 1.0F};
 
     float padding{6.0F};
 
@@ -200,6 +205,8 @@ enum class Cursor : core::u8 {
     Slip,
     Slide,
     Razor,
+    // No pointer at all: the view draws its own, as the laser pointer's dot.
+    Hidden,
     Count,
 };
 

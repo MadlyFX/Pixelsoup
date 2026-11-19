@@ -5,6 +5,7 @@ add_library(mediaserver_show STATIC
     src/frame_boundary_driver.cpp
     src/frame_root_mailbox.cpp
     src/frame_waiter.cpp
+    src/pointer_overlay.cpp
     src/presenter.cpp
     src/show_clock.cpp
     src/switcher_author.cpp
@@ -46,6 +47,19 @@ if(BUILD_TESTING)
     mediaserver_set_project_options(mediaserver_show_clock_tests)
     add_test(NAME mediaserver.show_clock COMMAND mediaserver_show_clock_tests)
     set_target_properties(mediaserver_show_clock_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_pointer_overlay_tests
+        tests/pointer_overlay_tests.cpp
+    )
+    target_link_libraries(mediaserver_pointer_overlay_tests
+        PRIVATE MediaServer::Show
+    )
+    mediaserver_set_project_options(mediaserver_pointer_overlay_tests)
+    add_test(
+        NAME mediaserver.show_pointer_overlay
+        COMMAND mediaserver_pointer_overlay_tests
+    )
+    set_target_properties(mediaserver_pointer_overlay_tests PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_video_reference_tests
         tests/video_reference_tests.cpp

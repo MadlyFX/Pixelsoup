@@ -8,6 +8,8 @@
 #include <mediaserver/ui/gpu_output_target.hpp>
 #include <mediaserver/ui/sdl_presenter.hpp>
 
+#include "../src/pointer_overlay_pass.hpp"
+
 #include <SDL3/SDL.h>
 
 #include <array>
@@ -386,6 +388,98 @@ void one_output_window_presents_multiple_viewports() {
     const auto readback = presenter->readback();
     UI_CHECK(static_cast<bool>(readback));
     UI_CHECK(readback.digest != one_digest);
+}
+
+// A canvas pixel lands in a slice map's viewport by the slice's own offset
+// and scale, the same arithmetic the output transform crops by.
+void a_pointer_lands_in_a_slice_by_its_offset_and_scale() {
+    scene::Scene frame{};
+    frame.canvas = scene::Canvas{1920U, 1080U};
+    ui::PointerMapView map{};
+    map.source = scene::CanvasRect{960U, 0U, 960U, 1080U};
+    map.viewport = scene::CanvasRect{100U, 50U, 480U, 540U};
+    const auto at = ui::pointer_to_window(
+        frame, map, show::PointerPoint{1200.0F, 540.0F});
+    UI_CHECK(at.has_value());
+    UI_CHECK(at->x == 100.0F + 120.0F && at->y == 50.0F + 270.0F);
+    // Left of the slice: still placed, off its viewport, for the clip.
+    const auto left = ui::pointer_to_window(
+        frame, map, show::PointerPoint{0.0F, 0.0F});
+    UI_CHECK(left.has_value() && left->x < 100.0F);
+    // A surface map with no view to project through shows nothing.
+    map.projection = output::FeedProjection::PlanarSurface;
+    UI_CHECK(!ui::pointer_to_window(frame, map,
+                                    show::PointerPoint{1200.0F, 540.0F})
+                  .has_value());
+}
+
+// The laser pointer reaches the window over every map, and taking it away
+// gives back exactly the frame without it.
+void the_laser_pointer_is_drawn_over_the_output() {
+    if (!gpu_window_testable() || !ui::output_output_available()) {
+        std::cout << "      (skipped: needs output shaders and a GPU swapchain)\n";
+        return;
+    }
+    auto settings = config("laser-pointer-output");
+    settings.gpu = true;
+    settings.scene = true;
+    settings.output = true;
+    auto presenter = open(settings);
+
+    const auto bright = solid_scene(scene::Vec3{0.1F, 0.3F, 0.6F});
+    std::array<output::OutputMap, 2U> maps{};
+    maps[0U].node = mediaserver::doc::NodeId{1U};
+    maps[0U].source = scene::CanvasRect{0U, 0U, bright.canvas.width / 2U,
+                                        bright.canvas.height};
+    maps[0U].viewport =
+        scene::CanvasRect{0U, 0U, window_width / 2U, window_height};
+    maps[1U].node = mediaserver::doc::NodeId{2U};
+    maps[1U].source =
+        scene::CanvasRect{bright.canvas.width / 2U, 0U,
+                          bright.canvas.width / 2U, bright.canvas.height};
+    maps[1U].viewport = scene::CanvasRect{window_width / 2U, 0U,
+                                          window_width / 2U, window_height};
+    const auto present = [&] {
+        const auto status = presenter->present(
+            bright, std::span<const output::OutputMap>{maps});
+        UI_CHECK(status == show::PresenterStatus::Presented ||
+                 status == show::PresenterStatus::Skipped);
+        const auto readback = presenter->readback();
+        UI_CHECK(static_cast<bool>(readback));
+        return readback.digest;
+    };
+    const core::u64 plain = present();
+
+    show::PointerOverlay overlay{};
+    overlay.dot = show::PointerPoint{
+        static_cast<float>(bright.canvas.width) * 0.25F,
+        static_cast<float>(bright.canvas.height) * 0.5F};
+    presenter->set_pointer_overlay(&overlay);
+    const core::u64 dot_left = present();
+    UI_CHECK(dot_left != plain);
+
+    // A line across the seam: drawn into both maps.
+    overlay.dot.reset();
+    overlay.points = {
+        {static_cast<float>(bright.canvas.width) * 0.3F,
+         static_cast<float>(bright.canvas.height) * 0.4F},
+        {static_cast<float>(bright.canvas.width) * 0.7F,
+         static_cast<float>(bright.canvas.height) * 0.6F}};
+    overlay.stroke_ends = {2U};
+    const core::u64 line = present();
+    UI_CHECK(line != plain && line != dot_left);
+
+    // Off the canvas altogether: nothing to see.
+    overlay.points.clear();
+    overlay.stroke_ends.clear();
+    overlay.dot = show::PointerPoint{-50'000.0F, -50'000.0F};
+    UI_CHECK(present() == plain);
+
+    // Cleared, and taken away: the frame as it was.
+    overlay.dot.reset();
+    UI_CHECK(present() == plain);
+    presenter->set_pointer_overlay(nullptr);
+    UI_CHECK(present() == plain);
 }
 
 void buffered_output_defers_a_scene_with_pending_media() {
@@ -827,7 +921,7 @@ void a_gpu_request_is_refused_rather_than_downgraded() {
     UI_CHECK(refused.error() == show::PresenterError::DisplayUnavailable);
 }
 
-constexpr std::array<Case, 19U> cases{{
+constexpr std::array<Case, 21U> cases{{
     {"malformed surface refused",
      &a_malformed_surface_is_refused_before_touching_the_platform},
     {"display shows what was rasterised",
@@ -851,6 +945,10 @@ constexpr std::array<Case, 19U> cases{{
      &a_scene_presenter_dissolves_completed_scene_targets},
     {"one output window presents multiple viewports",
      &one_output_window_presents_multiple_viewports},
+    {"a pointer lands in a slice by its offset and scale",
+     &a_pointer_lands_in_a_slice_by_its_offset_and_scale},
+    {"the laser pointer is drawn over the output",
+     &the_laser_pointer_is_drawn_over_the_output},
     {"buffered output defers a scene with pending media",
      &buffered_output_defers_a_scene_with_pending_media},
     {"the compositor graph path composites the inner frustum",

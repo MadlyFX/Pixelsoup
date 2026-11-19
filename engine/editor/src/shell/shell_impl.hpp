@@ -143,6 +143,14 @@ struct EditorShell::Impl final {
   // The show bar's night dim: a calmer palette for the small hours.
   bool night{};
   std::optional<InspectorColorSampleRequest> color_sample_request;
+  // The laser pointer (L held): its marks outlive the frame, and the kept ones
+  // outlive the press. `laser_on_wall` says the last picture reported to the
+  // Director was not empty, so letting go reports one empty picture.
+  LaserPointer laser;
+  bool laser_on_wall{};
+  // When L went down: a tap that drew nothing is the Timeline's
+  // play-forward key, not the pointer.
+  double laser_pressed_at{};
   ViewportPanel program_panel{gui::ui_id("editor.viewport.program"),
                               ViewportRole::Program};
   // The Stage's views. The first fills the Stage alone; in four views it is

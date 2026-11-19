@@ -1164,6 +1164,26 @@ PhaseExit DirectorShowLoop::apply_switcher_request(OperatorFrame &op) {
 
 PhaseExit DirectorShowLoop::apply_show_timing_requests(OperatorFrame &op) {
     const auto &frame = op.frame;
+    // The laser pointer, stamped with the frame this pass authors onto: every
+    // node shows it from that frame, so neighbours change it together. It
+    // travels beside the frame stream and is never authored.
+    if (queued_pointer_overlay.has_value()) {
+        show::PointerOverlay overlay = std::move(*queued_pointer_overlay);
+        queued_pointer_overlay.reset();
+        const bool unchanged =
+            sent_pointer_overlay.has_value() &&
+            sent_pointer_overlay->dot == overlay.dot &&
+            sent_pointer_overlay->points == overlay.points &&
+            sent_pointer_overlay->stroke_ends == overlay.stroke_ends;
+        if (!unchanged) {
+            overlay.control_frame = frame.value();
+            if (barrier.publish_pointer_overlay(overlay) != 0U &&
+                session_service != nullptr) {
+                session_service->wake_workers();
+            }
+            sent_pointer_overlay = std::move(overlay);
+        }
+    }
     if (pending_cues_armed.has_value()) {
         static_cast<void>(
             transport.set_cues_armed(*pending_cues_armed, frame));

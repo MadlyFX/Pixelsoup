@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -73,6 +74,10 @@ struct SessionSlot final {
     // slot, newest wins, like the pose: only the latest stop or seek matters.
     bool has_priority_transport{};
     show::TransportAnchor priority_transport{};
+    // The laser pointer picture this session has not been sent yet. One slot,
+    // newest wins: only the operator's latest stroke is worth drawing.
+    bool has_pointer_overlay{};
+    show::PointerOverlay pointer_overlay{};
 };
 
 struct FrameMember final {
@@ -205,6 +210,9 @@ struct DirectorFrameBarrierControl final {
     // never drained before the next one replaced it.
     std::uint64_t tracked_pose_sequence{};
     std::uint64_t tracked_poses_coalesced{};
+    // The newest laser pointer picture, kept so a session that joins while
+    // the operator is pointing is sent it. Empty once the pointer is let go.
+    std::optional<show::PointerOverlay> pointer_overlay;
     std::size_t active_session_count{};
     std::size_t live_session_count{};
     std::size_t catching_up_session_count{};
@@ -863,6 +871,12 @@ bool DirectorFrameBarrier::register_live(
     available->permit_size = 0U;
     available->has_pose = false;
     available->has_priority_transport = false;
+    available->has_pointer_overlay = false;
+    // A node that joins mid-stroke is owed the picture as it stands.
+    if (control.pointer_overlay.has_value()) {
+        available->has_pointer_overlay = true;
+        available->pointer_overlay = *control.pointer_overlay;
+    }
     available->readiness = registration.committed_cursor == control.tracked_tail
         ? SessionReadiness::Live
         : SessionReadiness::CatchingUp;
@@ -1319,6 +1333,52 @@ std::size_t DirectorFrameBarrier::publish_priority_transport(
         ++published;
     }
     return published;
+}
+
+DirectorSessionObserver::PointerOverlayPoll
+DirectorFrameBarrier::try_take_pointer_overlay(
+    Id128 session_id, show::PointerOverlay& output) noexcept {
+    auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted) {
+        return PointerOverlayPoll::Empty;
+    }
+    auto* session = find_session(control, session_id);
+    if (session == nullptr || !session->has_pointer_overlay) {
+        return PointerOverlayPoll::Empty;
+    }
+    session->has_pointer_overlay = false;
+    output = std::move(session->pointer_overlay);
+    session->pointer_overlay = {};
+    return PointerOverlayPoll::Ready;
+}
+
+std::size_t DirectorFrameBarrier::publish_pointer_overlay(
+    const show::PointerOverlay& overlay) noexcept {
+    auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted || !show::valid(overlay)) {
+        return 0U;
+    }
+    try {
+        if (overlay.empty()) {
+            control.pointer_overlay.reset();
+        } else {
+            control.pointer_overlay = overlay;
+        }
+        std::size_t published = 0U;
+        for (auto& session : control.sessions) {
+            if (!session.active) {
+                continue;
+            }
+            session.has_pointer_overlay = true;
+            session.pointer_overlay = overlay;
+            ++published;
+        }
+        return published;
+    } catch (...) {
+        return 0U;
+    }
 }
 
 core::u64 DirectorFrameBarrier::tracked_poses_coalesced() const noexcept {

@@ -548,6 +548,18 @@ void EditorShell::Frame::finish() {
   }
   result.close_semantic_coalescing = impl.semantic_boundary;
 
+  // Where the laser pointer points now, and the picture the wall shows.
+  // Scene marks reach the wall through Program's camera, the one the wall
+  // is drawn from.
+  impl.laser.point_at(laser_pointed);
+  if (laser_on_wall_due || impl.laser_on_wall) {
+    result.pointer = laser_on_wall_due
+                         ? wall_pointer_overlay(impl.laser, scene.camera,
+                                                scene.canvas)
+                         : show::PointerOverlay{};
+    impl.laser_on_wall = laser_on_wall_due;
+  }
+
   result.program_media = impl.program_panel.drawn_media();
   result.stage_media = std::any_of(
                            impl.stage_views.begin(), impl.stage_views.end(),

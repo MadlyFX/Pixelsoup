@@ -187,6 +187,7 @@ public:
         std::atomic_uint64_t sent_heartbeats{};
         std::atomic_uint64_t sent_tracked_poses{};
         std::atomic_uint64_t sent_priority_transports{};
+        std::atomic_uint64_t sent_pointer_overlays{};
         std::atomic_uint64_t heartbeat_timeouts{};
         std::atomic_uint64_t graceful_goodbyes{};
         std::atomic_uint64_t resync_disconnects{};
@@ -511,6 +512,38 @@ public:
         }
         counters.sent_priority_transports.fetch_add(
             1U, std::memory_order_relaxed);
+        return true;
+    }
+
+    // Sends the laser pointer picture this session is owed. Never retried:
+    // the next picture replaces it.
+    [[nodiscard]] bool drain_pointer_overlay(
+        Worker& worker,
+        Id128 session_id,
+        const std::shared_ptr<DirectorResumeSession>& session) noexcept {
+        show::PointerOverlay overlay{};
+        auto poll = DirectorSessionObserver::PointerOverlayPoll::Unsupported;
+        {
+            const std::lock_guard observer_lock{worker.observer_mutex};
+            if (!worker.observer_registered || observer == nullptr) {
+                set_termination(worker, WorkerTermination::ObserverRejected);
+                return false;
+            }
+            poll = observer->try_take_pointer_overlay(session_id, overlay);
+        }
+        if (poll != DirectorSessionObserver::PointerOverlayPoll::Ready) {
+            return true;
+        }
+        if (worker.termination.load(std::memory_order_acquire)
+            != WorkerTermination::None) {
+            return false;
+        }
+        auto sent = session->send_pointer_overlay(overlay);
+        if (!sent) {
+            set_termination(worker, WorkerTermination::SessionFailure);
+            return false;
+        }
+        counters.sent_pointer_overlays.fetch_add(1U, std::memory_order_relaxed);
         return true;
     }
 
@@ -939,6 +972,10 @@ public:
                 if (!drain_tracked_poses(worker, session_id, session)) {
                     break;
                 }
+                // Beside the poses: it belongs to a frame too.
+                if (!drain_pointer_overlay(worker, session_id, session)) {
+                    break;
+                }
                 if (!service_heartbeat(
                         worker,
                         session,
@@ -1323,6 +1360,8 @@ DirectorSessionServiceCounters DirectorSessionService::counters() const noexcept
         state_->counters.sent_heartbeats.load(std::memory_order_relaxed),
         state_->counters.sent_tracked_poses.load(std::memory_order_relaxed),
         state_->counters.sent_priority_transports.load(
+            std::memory_order_relaxed),
+        state_->counters.sent_pointer_overlays.load(
             std::memory_order_relaxed),
         state_->counters.heartbeat_timeouts.load(std::memory_order_relaxed),
         state_->counters.graceful_goodbyes.load(std::memory_order_relaxed),

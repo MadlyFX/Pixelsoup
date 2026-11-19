@@ -1441,6 +1441,60 @@ void an_operator_anchor_is_handed_to_every_session_once() {
     }
 }
 
+// The laser pointer reaches every session, newest wins; a session that joins
+// while the operator is pointing is owed the picture as it stands, and none
+// once the pointer is let go.
+void the_pointer_picture_is_handed_to_every_session_once() {
+    GatedFixture fixture{{4U, 8U, 8U}};
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(10U, 20U, genesis_cursor())));
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(11U, 21U, genesis_cursor())));
+    show::PointerOverlay taken{};
+    BARRIER_CHECK(
+        fixture.barrier.try_take_pointer_overlay(id(10U), taken)
+        == net::DirectorSessionObserver::PointerOverlayPoll::Empty);
+
+    show::PointerOverlay broken{};
+    broken.points = {{1.0F, 1.0F}};
+    BARRIER_CHECK(fixture.barrier.publish_pointer_overlay(broken) == 0U);
+
+    show::PointerOverlay first{};
+    first.control_frame = 40U;
+    first.dot = show::PointerPoint{5.0F, 6.0F};
+    show::PointerOverlay second = first;
+    second.control_frame = 41U;
+    second.points = {{5.0F, 6.0F}, {9.0F, 6.0F}};
+    second.stroke_ends = {2U};
+    BARRIER_CHECK(fixture.barrier.publish_pointer_overlay(first) == 2U);
+    BARRIER_CHECK(fixture.barrier.publish_pointer_overlay(second) == 2U);
+    for (const std::uint64_t session : {10U, 11U}) {
+        BARRIER_CHECK(
+            fixture.barrier.try_take_pointer_overlay(id(session), taken)
+            == net::DirectorSessionObserver::PointerOverlayPoll::Ready);
+        BARRIER_CHECK(taken == second);
+        BARRIER_CHECK(
+            fixture.barrier.try_take_pointer_overlay(id(session), taken)
+            == net::DirectorSessionObserver::PointerOverlayPoll::Empty);
+    }
+
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(12U, 22U, genesis_cursor())));
+    BARRIER_CHECK(
+        fixture.barrier.try_take_pointer_overlay(id(12U), taken)
+        == net::DirectorSessionObserver::PointerOverlayPoll::Ready);
+    BARRIER_CHECK(taken == second);
+
+    show::PointerOverlay cleared{};
+    cleared.control_frame = 42U;
+    BARRIER_CHECK(fixture.barrier.publish_pointer_overlay(cleared) == 3U);
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(13U, 23U, genesis_cursor())));
+    BARRIER_CHECK(
+        fixture.barrier.try_take_pointer_overlay(id(13U), taken)
+        == net::DirectorSessionObserver::PointerOverlayPoll::Empty);
+}
+
 void catch_up_permit_is_held_then_reuses_the_durable_historical_ordinal() {
     GatedFixture fixture{{6U, 8U, 8U}, 71U};
     BARRIER_CHECK(fixture.barrier.register_live(
@@ -1806,6 +1860,8 @@ int main() {
          &a_node_past_the_lag_limit_leaves_lockstep_without_disconnecting},
         {"operator anchor handed to every session once",
          &an_operator_anchor_is_handed_to_every_session_once},
+        {"pointer picture handed to every session once",
+         &the_pointer_picture_is_handed_to_every_session_once},
         {"losing the only member releases every open frame",
          &losing_the_only_member_releases_every_open_frame},
         {"release failure on leave faults the barrier",

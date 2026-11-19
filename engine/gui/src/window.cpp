@@ -219,6 +219,8 @@ namespace {
         return MoveKey::E;
     case SDL_SCANCODE_V:
         return MoveKey::V;
+    case SDL_SCANCODE_L:
+        return MoveKey::L;
     default:
         return std::nullopt;
     }
@@ -685,6 +687,14 @@ void UiWindow::set_cursor(Cursor cursor) noexcept {
         case Cursor::Slip: shape = create_tool_cursor(Icon::Slip); break;
         case Cursor::Slide: shape = create_tool_cursor(Icon::Slide); break;
         case Cursor::Razor: shape = create_tool_cursor(Icon::Razor); break;
+        case Cursor::Hidden: {
+            // Every bit clear in both data and mask: a cursor with no pixels.
+            constexpr int size = 8;
+            const std::array<Uint8, size * size / 8> blank{};
+            shape = SDL_CreateCursor(blank.data(), blank.data(), size, size,
+                                     0, 0);
+            break;
+        }
         case Cursor::Count: return;
         }
         if (shape == nullptr) shape = SDL_CreateSystemCursor(system);

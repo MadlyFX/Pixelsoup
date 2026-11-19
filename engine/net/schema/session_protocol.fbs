@@ -470,6 +470,27 @@ table Goodbye {
   final_cursor:StreamCursor (required);
 }
 
+// The operator's laser pointer: a dot and strokes in authored canvas pixels,
+// for every node to draw over its outputs. Transient and never authored; the
+// Director sends the newest picture, stamped with the control frame it is
+// for, and a node shows it from that frame on so neighbours change together.
+// sequence consumes the Director outbound stream.
+struct PointerPoint {
+  x:float;
+  y:float;
+}
+
+table PointerOverlay {
+  session_id:Id128 (required);
+  director_epoch:Id128 (required);
+  sequence:ulong;
+  control_frame:ulong;
+  has_dot:bool;
+  dot:PointerPoint;
+  points:[PointerPoint];
+  stroke_ends:[uint];
+}
+
 union SessionBody {
   ClientHello = 1,
   ServerWelcome = 2,
@@ -485,7 +506,8 @@ union SessionBody {
   HeartbeatAck = 12,
   Goodbye = 13,
   TrackedCameraPose = 14,
-  PriorityTransport = 15
+  PriorityTransport = 15,
+  PointerOverlay = 16
 }
 
 table SessionEnvelope {

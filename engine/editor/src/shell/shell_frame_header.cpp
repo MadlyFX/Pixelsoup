@@ -9,6 +9,36 @@ namespace mediaserver::editor {
 void EditorShell::Frame::run_header() {
   ui.set_theme(impl.night ? night_theme(editor_theme()) : editor_theme());
   ui.new_frame(impl.window.time_seconds());
+  // The laser pointer is on for as long as L is held, wherever the pointer
+  // is, unless a field has the keyboard or the eyedropper is armed. While it
+  // is on, L's text (its press and its repeats) is kept from every other
+  // shortcut, so holding it never starts the show. A quick tap that drew
+  // nothing is handed back as L when it is let go: J, K and L still shuttle.
+  {
+    const double now = impl.window.time_seconds();
+    const bool held = ui.move_key_down(gui::MoveKey::L) && !ui.ctrl_held() &&
+                      !ui.alt_held() &&
+                      !impl.color_sample_request.has_value();
+    if (held && !impl.laser.active()) {
+      impl.laser.press();
+      impl.laser_pressed_at = now;
+    } else if (!held && impl.laser.active()) {
+      const bool tap = now - impl.laser_pressed_at < laser_tap_seconds &&
+                       impl.laser.strokes().empty();
+      impl.laser.release();
+      if (tap) {
+        impl.input.add_text("l");
+      }
+    }
+    if (impl.laser.active()) {
+      impl.input.withhold_text("lL");
+    }
+    laser_active = impl.laser.active();
+    laser_on_wall_due = laser_active &&
+                        (now - impl.laser_pressed_at >= laser_tap_seconds ||
+                         !impl.laser.strokes().empty());
+    laser_pointed.reset();
+  }
   if (impl.color_sample_request.has_value() &&
       ui.key_pressed(gui::Key::Escape)) {
     impl.color_sample_request.reset();

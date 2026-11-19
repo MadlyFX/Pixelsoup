@@ -281,6 +281,11 @@ PhaseExit DirectorShowLoop::queue_editor_edits(
     if (editor_frame.cues_armed.has_value()) {
         pending_cues_armed = editor_frame.cues_armed;
     }
+    // Newest wins: only the picture as it stands is worth sending.
+    if (editor_frame.pointer.has_value()) {
+        queued_pointer_overlay = std::move(editor_frame.pointer);
+        editor_frame.pointer.reset();
+    }
     for (const auto &edit : editor_frame.layer_orders) {
         try {
             pending_layer_orders.push_back(edit);

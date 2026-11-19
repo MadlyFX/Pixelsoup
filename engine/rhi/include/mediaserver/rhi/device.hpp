@@ -1046,6 +1046,10 @@ struct PulledDraw final {
     // produced (media over the scene, depth-tested against it). `clear` and
     // `depth_clear` are then ignored.
     bool load{};
+    // With `load`, still clear depth to `depth_clear`: a pass that composes
+    // over an earlier image but brings no depth of its own, such as a 2D
+    // overlay drawn over a finished render.
+    bool clear_depth{};
     // Keep the depth buffer after the pass so a following pass can load and
     // depth-test against it. Off by default: the lit scene pass discards depth,
     // and sets this only when a media pass will follow.

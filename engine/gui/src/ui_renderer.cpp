@@ -841,7 +841,8 @@ bool UiRenderer::render(
     rhi::Color clear,
     const UiDrawList& draw_list,
     core::u32 width,
-    core::u32 height) {
+    core::u32 height,
+    bool compose) {
     if (atlas_.backend_handle() == nullptr) {
         return false; // upload_atlas must run first
     }
@@ -895,7 +896,10 @@ bool UiRenderer::render(
         draw.sampler = nearest ? &nearest_sampler_ : &sampler_;
         // The first pass clears; the rest compose over what it left, so the
         // painter's order across textures is still the CPU draw order.
-        draw.load = !first;
+        // Composing loads the target from the first pass on, but its depth
+        // is still this renderer's own and starts cleared.
+        draw.load = !first || compose;
+        draw.clear_depth = first && compose;
         // Depth is only present to match the pass. It is never written, but a
         // later pass loads and tests against it, so it has to survive.
         draw.store_depth = true;
@@ -944,6 +948,9 @@ bool UiRenderer::render(
         first_pass = false;
     }
 
+    if (first_pass && compose) {
+        return true; // nothing to draw over what is there
+    }
     if (first_pass) {
         // Nothing to draw, but the target still owes its clear.
         batch_scratch_.clear();

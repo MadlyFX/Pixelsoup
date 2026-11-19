@@ -252,6 +252,15 @@ struct PriorityTransportReport final {
     bool operator==(const PriorityTransportReport&) const = default;
 };
 
+// A laser pointer picture sent or accepted beside the frame stream.
+// `sequence` is the Director outbound sequence it consumed.
+struct PointerOverlayReport final {
+    core::u64 sequence{};
+    core::u64 control_frame{};
+
+    bool operator==(const PointerOverlayReport&) const = default;
+};
+
 struct HeartbeatSendReport final {
     core::u64 sequence{};
     core::u32 response_timeout_ms{};
@@ -295,6 +304,7 @@ using NodeLiveInboundReport = std::variant<
     HeartbeatReceivedReport,
     TrackedPoseReport,
     PriorityTransportReport,
+    PointerOverlayReport,
     GoodbyeReport>;
 
 using DirectorLiveInboundReport = std::variant<
@@ -420,6 +430,12 @@ public:
     // in the stream is exact; it is refused unless it is an operator anchor.
     [[nodiscard]] core::Result<PriorityTransportReport, ResumeSessionError>
     send_priority_transport(const show::TransportAnchor& anchor);
+
+    // The operator's laser pointer picture. Same writer lock and outbound
+    // sequence as everything else; refused before any byte is written when
+    // it is not a valid picture.
+    [[nodiscard]] core::Result<PointerOverlayReport, ResumeSessionError>
+    send_pointer_overlay(const show::PointerOverlay& overlay);
 
     // Heartbeat and Goodbye share the exact Director outbound sequence and
     // writer lock with frames and permits. released_through is diagnostic and
@@ -629,6 +645,12 @@ public:
     [[nodiscard]] std::optional<show::TransportAnchor>
     priority_transport() const noexcept;
 
+    // The laser pointer pictures received since the last call, oldest first.
+    // Taken, not read: the render loop holds each until its frame comes (see
+    // `show::PointerOverlayChannel`), so this only has to hand them over.
+    [[nodiscard]] std::vector<show::PointerOverlay>
+    take_pointer_overlays() noexcept;
+
     // Poses this node was sent but overwrote before the render loop drained
     // them. Its own counter, and not the same thing as a gap in the ordinal:
     // a gap means a pose never reached this node, this means one did and this
@@ -694,6 +716,8 @@ private:
     receive_decoded_tracked_pose(const TrackedCameraPose& pose);
     [[nodiscard]] core::Result<PriorityTransportReport, ResumeSessionError>
     receive_decoded_priority_transport(const PriorityTransport& priority);
+    [[nodiscard]] core::Result<PointerOverlayReport, ResumeSessionError>
+    receive_decoded_pointer_overlay(const PointerOverlayMessage& pointer);
     [[nodiscard]] core::Result<GoodbyeReport, ResumeSessionError>
     receive_decoded_goodbye(const Goodbye& goodbye);
 
@@ -729,6 +753,9 @@ private:
     core::u64 tracked_poses_coalesced_{};
     // Guarded by inflight_mutex_, like the pose.
     std::optional<show::TransportAnchor> priority_transport_;
+    // Bounded like the channel the render loop keeps: a render loop that
+    // stopped taking them loses the oldest, never grows this.
+    std::vector<show::PointerOverlay> pointer_overlays_;
     // Latched by the writer when a local Goodbye leaves the socket, consumed
     // once by close(). Written and read from different threads.
     std::atomic_bool sent_goodbye_{};

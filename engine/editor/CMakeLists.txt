@@ -29,6 +29,7 @@ add_library(mediaserver_editor STATIC
     src/viewport/viewport_toolbar.cpp
     src/viewport/viewport_panel.cpp
     src/viewport/viewport_keyboard.cpp
+    src/viewport/viewport_laser.cpp
     src/viewport/viewport_pointer.cpp
     src/viewport/viewport_chrome.cpp
     src/viewport/viewport_masks.cpp
@@ -42,6 +43,7 @@ add_library(mediaserver_editor STATIC
     src/model_surface_cache.cpp
     src/stage_placement.cpp
     src/measurement.cpp
+    src/laser_pointer.cpp
     src/transform_tool.cpp
     src/light_guides.cpp
     src/inspector_panel.cpp
@@ -144,6 +146,8 @@ target_link_libraries(mediaserver_editor
         MediaServer::Gui
         MediaServer::Rhi
         MediaServer::Render
+        # The laser pointer's wall picture is a show type.
+        MediaServer::Show
     PRIVATE
         tinyfiledialogs::tinyfiledialogs
 )
@@ -408,6 +412,22 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_measurement_tests
     )
     set_target_properties(mediaserver_editor_measurement_tests PROPERTIES FOLDER "tests")
+
+    # The laser pointer: its marks, what L and the buttons do to them, the
+    # wall picture, and the pointer driven through headless viewports.
+    add_executable(mediaserver_editor_laser_pointer_tests
+        tests/laser_pointer_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_laser_pointer_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_laser_pointer_tests)
+    add_test(
+        NAME mediaserver.editor_laser_pointer
+        COMMAND mediaserver_editor_laser_pointer_tests
+    )
+    set_target_properties(mediaserver_editor_laser_pointer_tests PROPERTIES FOLDER "tests")
 
     # The Program view as a 2D canvas: its tools, its zoom and pan, and the
     # transform box round the selected layer.

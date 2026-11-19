@@ -13,6 +13,7 @@
 #include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/scene/scene.hpp>
+#include <mediaserver/show/pointer_overlay.hpp>
 #include <mediaserver/show/test_pattern.hpp>
 
 namespace mediaserver::compositor {
@@ -406,6 +407,16 @@ public:
     // ordinals from the previous stream while retaining its displayed image
     // until the replacement is approved and complete. No I/O or GPU wait.
     virtual void begin_document_stream() noexcept {}
+
+    // The operator's laser pointer, drawn over every scene this presenter
+    // shows from the next present() on, until it is replaced. Null clears it.
+    // The pointer is the caller's and must outlive the presents it is set
+    // for; nothing is copied, so a frame that sets one allocates nothing.
+    // The default ignores it: a presenter that cannot draw it shows the
+    // scene unchanged, which is all the pointer would be over.
+    virtual void set_pointer_overlay(const PointerOverlay* overlay) noexcept {
+        static_cast<void>(overlay);
+    }
 
     // Presents this node's slice of a 3D scene put through its feed map: the
     // scene is rendered for the map's source rectangle, then the output stage

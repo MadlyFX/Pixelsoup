@@ -200,6 +200,10 @@ class SdlPresenter final : public show::Presenter {
     [[nodiscard]] show::PresenterPlateStats plates() const noexcept override;
     [[nodiscard]] show::PresenterStatus hold() noexcept override;
     void begin_document_stream() noexcept override;
+    void set_pointer_overlay(
+        const show::PointerOverlay *overlay) noexcept override {
+        pointer_overlay_ = overlay;
+    }
     // Joins or leaves the vendor present barrier through the rhi seam. The
     // GPU path is the only one that can: the CPU path has no swapchain, and a
     // presenter with no barrier backend installed reports Unsupported rather
@@ -268,6 +272,23 @@ class SdlPresenter final : public show::Presenter {
                      const scene::Scene *asset_scene = nullptr,
                      const scene::Scene *asset_partner = nullptr) noexcept;
 
+    // Remembers where one output map landed this frame, for the pointer.
+    void note_pointer_map(const output::OutputMap &map,
+                          const render::MappedProjection *projection) noexcept;
+    // Draws the laser pointer over `shown`, the finished window image, through
+    // the maps noted this frame, and returns it. A pointer that cannot be
+    // drawn is reported once and leaves the image as it was: the wall is
+    // never failed for it.
+    [[nodiscard]] const rhi::Texture *
+    finish_with_pointer(rhi::CommandList &commands, const rhi::Texture *shown,
+                        const scene::Scene &frame) noexcept;
+    // The same for a window that shows one slice of the canvas whole.
+    [[nodiscard]] const rhi::Texture *
+    finish_slice_with_pointer(rhi::CommandList &commands,
+                              const rhi::Texture *shown,
+                              const scene::Scene &frame,
+                              scene::CanvasRect slice) noexcept;
+
     // Counts a failed frame and remembers where it failed.
     [[nodiscard]] show::PresenterStatus
     fail(core::PresentStep step,
@@ -288,6 +309,7 @@ class SdlPresenter final : public show::Presenter {
     // The show frame and output map being drawn, so a failure can name them.
     core::u64 drawing_frame_{};
     core::u64 drawing_map_{};
+    const show::PointerOverlay *pointer_overlay_{};
     show::PresenterSyncRequest sync_request_{};
     show::PresenterBarrierState sync_state_{
         show::PresenterBarrierState::Unknown};

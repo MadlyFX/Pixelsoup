@@ -3487,6 +3487,9 @@ bool d3d12_draw_pulled(
         }
         commands->list->ClearDepthStencilView(
             dsv, D3D12_CLEAR_FLAG_DEPTH, depth_clear, 0U, 0U, nullptr);
+    } else if (draw.clear_depth) {
+        commands->list->ClearDepthStencilView(
+            dsv, D3D12_CLEAR_FLAG_DEPTH, depth_clear, 0U, 0U, nullptr);
     }
     set_viewport(*commands, *color, draw.viewport, draw.raster_viewport);
     set_pipeline(*commands, *pipeline);

@@ -1313,7 +1313,8 @@ bool CommandList::draw_pulled(
     SDL_GPUDepthStencilTargetInfo depth_info{};
     depth_info.texture = static_cast<SDL_GPUTexture*>(depth.handle_);
     depth_info.clear_depth = depth_clear;
-    depth_info.load_op = draw.load ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+    depth_info.load_op = draw.load && !draw.clear_depth ? SDL_GPU_LOADOP_LOAD
+                                                        : SDL_GPU_LOADOP_CLEAR;
     // Discarding depth lets a tiled backend skip writing it to memory, which is
     // the common case; a pass that a media pass will depth-test against keeps
     // it instead.

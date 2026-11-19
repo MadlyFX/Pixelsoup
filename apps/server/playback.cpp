@@ -227,6 +227,9 @@ int run_node_playback(net::NodeSessionService &service,
     // whole - and never extrapolates, because two nodes guessing would guess
     // differently.
     TrackedCameraChannels node_pose_channels;
+    // The operator's laser pointer, each picture held until the frame the
+    // Director stamped it for, so every node changes it on the same frame.
+    show::PointerOverlayChannel node_pointer;
     // The Director's pose-stream ordinal this node last saw, and how many it
     // never saw at all. A gap is a pose that was replaced in this node's
     // mailbox before the session drained it: not a fault, but it means this
@@ -834,11 +837,13 @@ int run_node_playback(net::NodeSessionService &service,
                 node_assets_loaded = node_hardware_loaded = node_sync_loaded = false;
                 node_pose_channels.reset();
                 node_last_pose_sequence = 0U;
+                node_pointer.clear();
                 output_playback_buffer = OutputPlaybackBuffer{
                     options.active_preferences.output_buffer_frames};
                 for (NodeOutputPresenter &slot : output_presenters) {
                     slot.submission.reset();
                     slot.presenter->begin_document_stream();
+                    slot.presenter->set_pointer_overlay(nullptr);
                 }
             }
             node_checkpoint_waiting = false;
@@ -1098,6 +1103,19 @@ int run_node_playback(net::NodeSessionService &service,
                     == track::PoseChannelOutcome::Accepted) {
                     ++entry.accepted;
                 }
+            }
+        }
+
+        // The laser pointer for this frame: whatever pictures arrived, then
+        // the newest whose frame has come. Every presenter draws the same one.
+        for (show::PointerOverlay &overlay : service.take_pointer_overlays()) {
+            static_cast<void>(node_pointer.accept(std::move(overlay)));
+        }
+        {
+            const show::PointerOverlay *const pointer =
+                node_pointer.at(input.control_frame.value());
+            for (NodeOutputPresenter &slot : output_presenters) {
+                slot.presenter->set_pointer_overlay(pointer);
             }
         }
 

@@ -1315,6 +1315,37 @@ DirectorResumeSession::send_priority_transport(
     return Result::success(PriorityTransportReport{sequence, anchor});
 }
 
+core::Result<PointerOverlayReport, ResumeSessionError>
+DirectorResumeSession::send_pointer_overlay(
+    const show::PointerOverlay& overlay) {
+    using Result = core::Result<PointerOverlayReport, ResumeSessionError>;
+    const std::lock_guard send_lock{send_mutex_};
+    if (state() != DirectorSessionState::Live) {
+        return Result::failure(
+            protocol_failure(SessionProtocolErrorCode::WrongState));
+    }
+    if (!show::valid(overlay)
+        || next_sequence_ == std::numeric_limits<core::u64>::max()) {
+        return Result::failure(
+            protocol_failure(SessionProtocolErrorCode::InvalidConfiguration));
+    }
+    const auto sequence = next_sequence_;
+    PointerOverlayMessage pointer{};
+    pointer.session_id = config_.session_id;
+    pointer.director_epoch = config_.director_epoch;
+    pointer.sequence = sequence;
+    pointer.overlay = overlay;
+    auto sent =
+        send_message(stream_, SessionMessage{pointer}, config_.codec_limits);
+    if (!sent) {
+        close();
+        return Result::failure(std::move(sent.error()));
+    }
+    ++next_sequence_;
+    return Result::success(
+        PointerOverlayReport{sequence, overlay.control_frame});
+}
+
 core::Result<HeartbeatSendReport, ResumeSessionError>
 DirectorResumeSession::send_heartbeat(
     const cmd::StreamCursor& released_through,
@@ -2217,6 +2248,14 @@ NodeResumeSession::receive_live_message() {
         }
         return Result::success(NodeLiveInboundReport{processed.value()});
     }
+    if (const auto* pointer =
+            std::get_if<PointerOverlayMessage>(&received.value())) {
+        auto processed = receive_decoded_pointer_overlay(*pointer);
+        if (!processed) {
+            return Result::failure(std::move(processed.error()));
+        }
+        return Result::success(NodeLiveInboundReport{processed.value()});
+    }
     if (const auto* goodbye = std::get_if<Goodbye>(&received.value())) {
         auto processed = receive_decoded_goodbye(*goodbye);
         if (!processed) {
@@ -2405,6 +2444,52 @@ NodeResumeSession::receive_decoded_priority_transport(
         return Result::failure(protocol_failure(*failure));
     }
     return Result::success(report);
+}
+
+core::Result<PointerOverlayReport, ResumeSessionError>
+NodeResumeSession::receive_decoded_pointer_overlay(
+    const PointerOverlayMessage& pointer) {
+    using Result = core::Result<PointerOverlayReport, ResumeSessionError>;
+    std::optional<SessionProtocolErrorCode> failure;
+    PointerOverlayReport report{};
+    {
+        const std::lock_guard inflight_lock{inflight_mutex_};
+        if (state() != NodeSessionState::Live) {
+            failure = SessionProtocolErrorCode::WrongState;
+        } else if (pointer.session_id != session_id_) {
+            failure = SessionProtocolErrorCode::SessionMismatch;
+        } else if (pointer.director_epoch != director_epoch_) {
+            failure = SessionProtocolErrorCode::EpochMismatch;
+        } else if (expected_sequence_
+                       == std::numeric_limits<core::u64>::max()
+                   || pointer.sequence != expected_sequence_) {
+            failure = SessionProtocolErrorCode::SequenceMismatch;
+        } else {
+            ++expected_sequence_;
+            if (pointer_overlays_.size()
+                == show::PointerOverlayChannel::capacity) {
+                pointer_overlays_.erase(pointer_overlays_.begin());
+            }
+            pointer_overlays_.push_back(pointer.overlay);
+            report = PointerOverlayReport{
+                pointer.sequence, pointer.overlay.control_frame};
+        }
+    }
+    if (failure) {
+        if (*failure != SessionProtocolErrorCode::WrongState) {
+            close();
+        }
+        return Result::failure(protocol_failure(*failure));
+    }
+    return Result::success(report);
+}
+
+std::vector<show::PointerOverlay>
+NodeResumeSession::take_pointer_overlays() noexcept {
+    const std::lock_guard inflight_lock{inflight_mutex_};
+    std::vector<show::PointerOverlay> taken;
+    taken.swap(pointer_overlays_);
+    return taken;
 }
 
 std::optional<show::TransportAnchor>

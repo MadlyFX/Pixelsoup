@@ -285,6 +285,15 @@ public:
         Id128 session_id, TrackedCameraFrame& output) noexcept override;
     [[nodiscard]] PriorityTransportPoll try_take_priority_transport(
         Id128 session_id, show::TransportAnchor& output) noexcept override;
+    [[nodiscard]] PointerOverlayPoll try_take_pointer_overlay(
+        Id128 session_id, show::PointerOverlay& output) noexcept override;
+
+    // Hands the operator's laser pointer picture to every session, and
+    // returns how many were given it. A newer picture replaces one not yet
+    // sent; the newest non-empty one is also kept for a session that joins
+    // before the pointer is let go. Refuses a picture that is not valid.
+    [[nodiscard]] std::size_t publish_pointer_overlay(
+        const show::PointerOverlay& overlay) noexcept;
 
     // Hands an operator transport anchor to every session, live or catching
     // up, ahead of the frame stream, and returns how many were given it. A

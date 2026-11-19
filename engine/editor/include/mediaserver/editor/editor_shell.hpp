@@ -927,6 +927,12 @@ struct EditorFrame final {
   // Authors nothing and never reaches a render node.
   MediaRendition program_media{MediaRendition::Proxy};
   MediaRendition stage_media{MediaRendition::Proxy};
+  // The laser pointer as the wall shows it: reported every frame L is held,
+  // and once more, empty, when it is let go. Authors nothing; the Director
+  // stamps it with a control frame and sends it to the nodes beside the
+  // frame stream. The marks the right button keeps are not in it - they are
+  // the operator's alone.
+  std::optional<show::PointerOverlay> pointer;
   // The plateset open in the Asset Viewer, so the Director can return its
   // analysis next frame; and a request to analyse it.
   std::optional<doc::NodeId> plateset_viewed;

@@ -83,6 +83,12 @@ bool InputState::move_key_down(MoveKey key) const noexcept {
     return move_keys_[static_cast<std::size_t>(key)];
 }
 
+void InputState::withhold_text(std::string_view characters) {
+    std::erase_if(text_, [characters](char c) {
+        return characters.find(c) != std::string_view::npos;
+    });
+}
+
 void InputState::add_text(std::string_view utf8) {
     text_.append(utf8);
 }

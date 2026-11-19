@@ -8,6 +8,7 @@
 #include <optional>
 #include <system_error>
 #include <variant>
+#include <vector>
 
 #include <asio/ip/tcp.hpp>
 
@@ -119,6 +120,7 @@ struct NodeSessionServiceCounters final {
     std::uint64_t received_heartbeats{};
     std::uint64_t received_tracked_poses{};
     std::uint64_t received_priority_transports{};
+    std::uint64_t received_pointer_overlays{};
     std::uint64_t received_goodbyes{};
     std::uint64_t flushed_acknowledgements{};
     std::uint64_t graceful_goodbyes{};
@@ -199,6 +201,12 @@ public:
     // boundary_state(), so a render loop may read it on every boundary.
     [[nodiscard]] std::optional<show::TransportAnchor>
     priority_transport() const noexcept;
+
+    // The laser pointer pictures the live session received since the last
+    // call, oldest first. Taken, so a render loop hands each to its
+    // `show::PointerOverlayChannel` once. Empty with no live session.
+    [[nodiscard]] std::vector<show::PointerOverlay>
+    take_pointer_overlays() noexcept;
 
     // Poses this node received and overwrote before draining. See the note on
     // NodeResumeSession: this is the node's own backlog, not a lost pose.

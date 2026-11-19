@@ -976,7 +976,9 @@ of the layer list, for a sheet of every key the Timeline answers; any press or
 
 - **`J`, `K`, `L`** play backwards, stop and play forwards from wherever the
   playhead stands, at the show rate; pressing `J` while playing forwards turns
-  the show round in place, and `L` turns it back. `Space` and the play button
+  the show round in place, and `L` turns it back. Holding `L` instead of
+  tapping it is the laser pointer (see "Pointing things out with the laser
+  pointer"). `Space` and the play button
   always play forwards. There is no faster shuttle: one control frame always
   advances one show frame. In Preview the keys drive the Preview playhead;
   otherwise they drive the live show, as `Space` does.
@@ -2737,6 +2739,29 @@ selects or moves anything, and nothing measured is saved with the show.
 
 An imported model is measured on its own triangles once a moment has passed
 after it first appears; until then points land on its bounding box.
+
+### Pointing things out with the laser pointer
+
+Hold **L** anywhere in the editor to point at something for the people on
+set. Over Stage or Program Output the pointer becomes a red dot, and the same
+dot shows on the LED wall, over the content, wherever that part of the picture
+lands on each output.
+
+While **L** is held:
+
+- **Left drag** draws a red line on the views and the wall. Letting go of
+  **L** clears it everywhere.
+- **Right drag** draws a line that stays on your own screen after **L** is let
+  go. The wall stops showing it when **L** comes up; pressing **L** again
+  clears it.
+
+On Stage a line lands on the surface under the pointer, or the stage floor, so
+it stays on the object it was drawn over when you orbit or change view. On
+Program Output a line stays on the picture, including on a curved or UV-mapped
+output view. While **L** is held the buttons only draw: nothing is selected or
+moved and the Stage camera stays still. A quick tap of **L** that draws
+nothing is still the Timeline's play-forward key. The pointer is never saved
+with the show.
 
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
 In the Scene and Timeline lists, Ctrl toggles a row and Shift selects a visible

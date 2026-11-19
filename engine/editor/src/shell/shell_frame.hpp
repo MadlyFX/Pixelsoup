@@ -240,6 +240,12 @@ struct EditorShell::Frame final {
   SceneSettingsFrame live_scene_settings{};
   std::optional<InspectorPanelRequest> pending_inspector_panel{};
   bool color_sample_active{};
+  // L is held: the views draw the laser pointer instead of running their own
+  // tools, and `laser_pointed` is where the view under the pointer points.
+  bool laser_active{};
+  // L has been held past a tap (or has drawn): the wall may see it.
+  bool laser_on_wall_due{};
+  std::optional<LaserMark> laser_pointed{};
   MasksPanelTarget mask_target{};
   bool mask_authoring_enabled{};
   bool mask_stage_active{};

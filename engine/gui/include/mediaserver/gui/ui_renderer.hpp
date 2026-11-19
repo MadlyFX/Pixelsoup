@@ -383,8 +383,9 @@ public:
         core::u32 width,
         core::u32 height);
 
-    // Records one UI pass into `target`, clearing it to `clear` first. `target`
-    // must be a colour target sized `width` x `height`.
+    // Records one UI pass into `target`, clearing it to `clear` first, or
+    // drawing over what it holds when `compose`. `target` must be a colour
+    // target sized `width` x `height`.
     [[nodiscard]] bool render(
         rhi::Device& device,
         rhi::CommandList& commands,
@@ -392,7 +393,8 @@ public:
         rhi::Color clear,
         const UiDrawList& draw_list,
         core::u32 width,
-        core::u32 height);
+        core::u32 height,
+        bool compose = false);
 
 private:
     UiRenderer(

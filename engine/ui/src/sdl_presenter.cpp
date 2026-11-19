@@ -12,6 +12,7 @@
 #include <mediaserver/render/scene_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/ui/gpu_output_target.hpp>
+#include "pointer_overlay_pass.hpp"
 
 #include <algorithm>
 #include <array>
@@ -138,6 +139,13 @@ struct SdlPresenter::Platform final {
     // so a transition's two scenes do not take turns overwriting each other.
     PlateReasonLog plate_reasons;
     PlateReasonLog plate_reasons_to;
+    // The laser pointer, drawn over the finished window image. Built with the
+    // output stage; empty where the UI shaders are missing, and then the
+    // pointer is simply not drawn. The map lists are reserved for every map a
+    // window may hold, so a frame never grows them.
+    std::optional<PointerOverlayPass> pointer_pass;
+    std::vector<PointerMapView> pointer_maps;
+    std::vector<render::MappedProjection> pointer_projections;
     // Borrowed from one of the targets above. Updated only after a frame has
     // been recorded successfully, so readback always inspects the texture the
     // swapchain was actually given (single scene, mixed scene, mapped output,
@@ -799,6 +807,14 @@ bool SdlPresenter::build_gpu_resources(
             return false;
         }
         platform.output_transform.emplace(std::move(transform).value());
+        platform.pointer_pass = PointerOverlayPass::create(
+            *platform.device, platform.swapchain.format());
+        if (!platform.pointer_pass.has_value()) {
+            std::cerr << "presenter: the laser pointer cannot be drawn on this "
+                         "output (no UI pipeline)\n";
+        }
+        platform.pointer_maps.reserve(output::max_output_maps);
+        platform.pointer_projections.reserve(output::max_output_maps);
     }
     return true;
 }
@@ -1213,6 +1229,75 @@ void SdlPresenter::begin_document_stream() noexcept {
         platform_->asset_gate.reset();
         platform_->assets.visible_commit = 0U;
     }
+}
+
+void SdlPresenter::note_pointer_map(
+    const output::OutputMap &map,
+    const render::MappedProjection *projection) noexcept {
+    if (platform_ == nullptr || pointer_overlay_ == nullptr ||
+        pointer_overlay_->empty()) {
+        return;
+    }
+    auto &platform = *platform_;
+    if (platform.pointer_maps.size() == platform.pointer_maps.capacity() ||
+        platform.pointer_projections.size() ==
+            platform.pointer_projections.capacity()) {
+        return; // never grown during a frame
+    }
+    PointerMapView view{map.viewport, map.source, map.projection, nullptr};
+    if (map.projection != output::FeedProjection::CanvasSlice &&
+        projection != nullptr) {
+        platform.pointer_projections.push_back(*projection);
+        view.mapped = &platform.pointer_projections.back();
+    }
+    platform.pointer_maps.push_back(view);
+}
+
+const rhi::Texture *
+SdlPresenter::finish_with_pointer(rhi::CommandList &commands,
+                                  const rhi::Texture *shown,
+                                  const scene::Scene &frame) noexcept {
+    if (shown == nullptr || platform_ == nullptr ||
+        pointer_overlay_ == nullptr || pointer_overlay_->empty()) {
+        return shown;
+    }
+    auto &platform = *platform_;
+    if (!platform.pointer_pass.has_value() || !platform.output_transform ||
+        shown != &platform.output_transform->target() ||
+        platform.pointer_maps.empty()) {
+        return shown;
+    }
+    try {
+        if (!platform.pointer_pass->record(
+                *platform.device, commands, platform.output_transform->target(),
+                *pointer_overlay_, frame, platform.pointer_maps)) {
+            static_cast<void>(core::report_idle_once(
+                "laser pointer", "the pointer could not be drawn over this output"));
+        }
+    } catch (...) {
+        static_cast<void>(core::report_idle_once(
+            "laser pointer", "the pointer could not be drawn over this output"));
+    }
+    return shown;
+}
+
+const rhi::Texture *SdlPresenter::finish_slice_with_pointer(
+    rhi::CommandList &commands, const rhi::Texture *shown,
+    const scene::Scene &frame, scene::CanvasRect slice) noexcept {
+    if (shown == nullptr || platform_ == nullptr ||
+        pointer_overlay_ == nullptr || pointer_overlay_->empty()) {
+        return shown;
+    }
+    auto &platform = *platform_;
+    platform.pointer_maps.clear();
+    platform.pointer_projections.clear();
+    if (platform.pointer_maps.capacity() == 0U) {
+        return shown;
+    }
+    platform.pointer_maps.push_back(PointerMapView{
+        scene::CanvasRect{0U, 0U, shown->width(), shown->height()}, slice,
+        output::FeedProjection::CanvasSlice, nullptr});
+    return finish_with_pointer(commands, shown, frame);
 }
 
 show::PresenterStatus SdlPresenter::hold() noexcept {
@@ -1784,9 +1869,12 @@ SdlPresenter::present(const mediaserver::scene::Scene &frame,
             const rhi::Texture *const target =
                 record_scene(*platform.scene_from, commands, frame, slice);
             include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
-            return record_display_transform(
+            return finish_slice_with_pointer(
+                commands,
+                record_display_transform(
                 *platform.output_transform, commands, target,
-                platform.scene_from->scene_linear_output(), frame, slice);
+                platform.scene_from->scene_linear_output(), frame, slice),
+                frame, slice);
         },
         &media_complete, &frame);
 }
@@ -1813,9 +1901,12 @@ SdlPresenter::present(const mediaserver::scene::Scene &frame,
             const rhi::Texture *const target = record_scene(
                 *platform.scene_from, commands, graph, frame, slice);
             include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
-            return record_display_transform(
+            return finish_slice_with_pointer(
+                commands,
+                record_display_transform(
                 *platform.output_transform, commands, target,
-                platform.scene_from->scene_linear_output(), frame, slice);
+                platform.scene_from->scene_linear_output(), frame, slice),
+                frame, slice);
         },
         &media_complete, &frame);
 }
@@ -1854,9 +1945,12 @@ SdlPresenter::present(const mediaserver::scene::Scene &from,
                                               *to_target, mix)) {
                 return nullptr;
             }
-            return record_display_transform(
+            return finish_slice_with_pointer(
+                commands,
+                record_display_transform(
                 *platform.output_transform, commands,
-                &platform.scene_mixer->target(), scene_linear, from, slice);
+                &platform.scene_mixer->target(), scene_linear, from, slice),
+                from, slice);
         },
         &media_complete, &from, &to);
 }
@@ -1896,9 +1990,12 @@ show::PresenterStatus SdlPresenter::present(
                                               *to_target, mix)) {
                 return nullptr;
             }
-            return record_display_transform(
+            return finish_slice_with_pointer(
+                commands,
+                record_display_transform(
                 *platform.output_transform, commands,
-                &platform.scene_mixer->target(), scene_linear, from, slice);
+                &platform.scene_mixer->target(), scene_linear, from, slice),
+                from, slice);
         },
         &media_complete, &from, &to);
 }
@@ -1944,6 +2041,8 @@ show::PresenterStatus SdlPresenter::present(
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
+            platform.pointer_maps.clear();
+            platform.pointer_projections.clear();
             for (const output::OutputMap &map : maps) {
                 drawing_map_ = map.node.value();
                 render::MappedProjection projection{};
@@ -1979,8 +2078,10 @@ show::PresenterStatus SdlPresenter::present(
                         "output map draw", "the output transform refused to composite the map into its viewport"));
                     return nullptr;
                 }
+                note_pointer_map(map, &projection);
             }
-            return &platform.output_transform->target();
+            return finish_with_pointer(
+                commands, &platform.output_transform->target(), frame);
         },
         &media_complete, &frame);
     // The fault pattern was drawn and shown, but the frame is still wrong.
@@ -2030,6 +2131,8 @@ show::PresenterStatus SdlPresenter::present(
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
+            platform.pointer_maps.clear();
+            platform.pointer_projections.clear();
             for (const output::OutputMap &map : maps) {
                 drawing_map_ = map.node.value();
                 render::MappedProjection projection{};
@@ -2071,8 +2174,10 @@ show::PresenterStatus SdlPresenter::present(
                         "output map draw", "the output transform refused to composite the map into its viewport"));
                     return nullptr;
                 }
+                note_pointer_map(map, &projection);
             }
-            return &platform.output_transform->target();
+            return finish_with_pointer(
+                commands, &platform.output_transform->target(), frame);
         },
         &media_complete, &frame);
     // The fault pattern was drawn and shown, but the frame is still wrong.
@@ -2122,13 +2227,16 @@ show::PresenterStatus SdlPresenter::present(
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
+            platform.pointer_maps.clear();
+            platform.pointer_projections.clear();
             for (const output::OutputMap &map : maps) {
                 drawing_map_ = map.node.value();
+                render::MappedProjection from_projection{};
                 const rhi::Texture *const from_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
                         platform.projection_meshes, commands, from, map,
-                        mapping_unavailable);
+                        mapping_unavailable, nullptr, &from_projection);
                 const rhi::Texture *const to_target =
                     render::record_output_mapped_scene(
                         *platform.scene_to, *platform.mesh_warp_to,
@@ -2152,8 +2260,10 @@ show::PresenterStatus SdlPresenter::present(
                         scene_linear, map.source, map.surface)) {
                     return nullptr;
                 }
+                note_pointer_map(map, &from_projection);
             }
-            return &platform.output_transform->target();
+            return finish_with_pointer(
+                commands, &platform.output_transform->target(), from);
         },
         &media_complete, &from, &to);
     // The fault pattern was drawn and shown, but the frame is still wrong.
@@ -2208,6 +2318,8 @@ show::PresenterStatus SdlPresenter::present(
             if (!platform.output_transform->clear(commands)) {
                 return nullptr;
             }
+            platform.pointer_maps.clear();
+            platform.pointer_projections.clear();
             for (const output::OutputMap &map : maps) {
                 drawing_map_ = map.node.value();
                 render::MappedProjection from_projection{};
@@ -2262,8 +2374,10 @@ show::PresenterStatus SdlPresenter::present(
                         scene_linear, map.source, map.surface)) {
                     return nullptr;
                 }
+                note_pointer_map(map, &from_projection);
             }
-            return &platform.output_transform->target();
+            return finish_with_pointer(
+                commands, &platform.output_transform->target(), from);
         },
         &media_complete, &from, &to);
     // The fault pattern was drawn and shown, but the frame is still wrong.

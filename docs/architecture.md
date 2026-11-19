@@ -103,6 +103,14 @@ waits on the cluster; a node that lags past the barrier's limit is taken out of
 lockstep rather than holding every output. Operator transport anchors also
 travel ahead of the frame stream, so a stop reaches a cluster that is behind
 (see [cluster operations](../cluster-operations.md), "Lockstep and cluster lag").
+The operator's laser pointer also travels beside the frame stream rather than
+in the document: the editor reports a dot and strokes in authored canvas
+pixels, the Director stamps the picture with the control frame it authors
+onto, and each node holds it until that frame (`show::PointerOverlayChannel`)
+and draws it over every output map after the display transform, carrying each
+canvas pixel's line of sight through the map's own view and warp. It is never
+saved, digested or acknowledged; the newest picture wins and an empty one
+clears the wall.
 This is a control-plane/frame-boundary contract: it answers "are all nodes
 working on the same show state?". Whether every physical output presented that
 state on the same raster boundary is a separate question, owned by the

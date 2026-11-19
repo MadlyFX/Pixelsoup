@@ -59,7 +59,7 @@ void EditorShell::Frame::draw_stage_panel(const gui::Rect &bounds) {
       }
     }
 
-    if (mask_stage_active && !color_sample_active) {
+    if (mask_stage_active && !color_sample_active && !laser_active) {
       const MaskViewportFrame mask_frame = view.panel.draw_masks(
           ui, area, *view.texture, stage_scene,
           mask_viewport_input(stage_scene, nullptr), &scene.camera,
@@ -71,7 +71,7 @@ void EditorShell::Frame::draw_stage_panel(const gui::Rect &bounds) {
       apply_mask_viewport_frame(mask_frame);
     } else {
       const gui::Rect *const interaction_block =
-          color_sample_active
+          color_sample_active || laser_active
               ? &area
               : (floating_occluder.has_value()
                      ? &floating_occluder.value()
@@ -93,6 +93,12 @@ void EditorShell::Frame::draw_stage_panel(const gui::Rect &bounds) {
           plate_overlay, elements);
     }
     stage_viewport_drawn = true;
+    // The laser pointer's marks on this view, and the dot while L is held.
+    if (const auto pointed = view.panel.run_laser(
+            ui, impl.laser, view.frame.image, stage_interaction_scene,
+            nullptr, !floating_occluder.has_value())) {
+      laser_pointed = pointed;
+    }
     if (view.frame.projection_choice.has_value()) {
       view.orbit.projection = *view.frame.projection_choice;
     }
@@ -156,7 +162,7 @@ void EditorShell::Frame::draw_stage_panel(const gui::Rect &bounds) {
                         view.frame.image,
                         *view.texture, pointer_available);
     }
-    if (!color_sample_active && !switcher.rehearsal_locked) {
+    if (!color_sample_active && !laser_active && !switcher.rehearsal_locked) {
       if (view.frame.surface_edit.has_value()) {
         const output::ProjectionSurface &surface =
             *view.frame.surface_edit;
@@ -218,19 +224,20 @@ void EditorShell::Frame::draw_stage_panel(const gui::Rect &bounds) {
           }
         }
       }
-    } else if (!color_sample_active) {
+    } else if (!color_sample_active && !laser_active) {
       draw_panel_warning(ui, area, 38.0F, 312.0F, true,
                          "TRANSITION ACTIVE - REHEARSAL LOCKED");
     }
     // The camera is the operator's own view, so it navigates through a
     // rehearsal lock and while masks are authored, though a mask tool keeps
     // the left button.
-    if (color_sample_active || switcher.rehearsal_locked) {
+    if (color_sample_active || laser_active || switcher.rehearsal_locked) {
       // Nothing may author into the Stage now; a keyboard transform must
       // not keep holding the keyboard waiting for a confirm.
       view.panel.cancel_transform();
     }
-    if (color_sample_active) {
+    if (color_sample_active || laser_active) {
+      // The buttons draw while L is held; the camera stays where it is.
       impl.navigate_left = false;
       impl.navigate_middle = false;
       impl.navigate_right = false;
@@ -529,7 +536,7 @@ void EditorShell::Frame::draw_program_panel(const gui::Rect &bounds) {
     impl.program_panel.set_canvas_tool(CanvasTool::Hand);
   }
   impl.program_panel.set_box_enabled(!switcher.rehearsal_locked &&
-                                     !color_sample_active);
+                                     !color_sample_active && !laser_active);
   // A new card is placed by where its corners are in the scene, which a
   // crop of the canvas still says and a warped surface's pixels do not.
   impl.program_panel.set_card_drawing_enabled(
@@ -588,7 +595,8 @@ void EditorShell::Frame::draw_program_panel(const gui::Rect &bounds) {
   draw_program_options(options_bar, *shown_authored, *shown_view,
                        program_projection, picture_ok);
   gui::Rect program_viewport_image{};
-  if (picture_ok && mask_program_active && !color_sample_active) {
+  if (picture_ok && mask_program_active && !color_sample_active &&
+      !laser_active) {
     // The overlay is measured against the connector image, so a matte the
     // operator is looking at on the wall is the matte their pointer moves.
     const MaskViewportFrame mask_frame = impl.program_panel.draw_masks(
@@ -612,7 +620,7 @@ void EditorShell::Frame::draw_program_panel(const gui::Rect &bounds) {
     }
   } else if (picture_ok) {
     const gui::Rect *const interaction_block =
-        color_sample_active ? &content : nullptr;
+        color_sample_active || laser_active ? &content : nullptr;
     const ViewportFrame program_viewport = impl.program_panel.draw(
         ui, content, *shown_texture, *shown_view,
         impl.scene_selection.members(), impl.anchor(), nullptr,
@@ -622,7 +630,7 @@ void EditorShell::Frame::draw_program_panel(const gui::Rect &bounds) {
         nullptr, doc::NodeId{}, program_projection, plate_overlay,
         elements);
     program_viewport_image = program_viewport.image;
-    if (!color_sample_active && !switcher.rehearsal_locked) {
+    if (!color_sample_active && !laser_active && !switcher.rehearsal_locked) {
       handle_viewport(program_viewport, *shown_authored, *shown_view);
       if (program_viewport.shape.has_value()) {
         author_canvas_shape(*program_viewport.shape, *shown_view,
@@ -677,6 +685,23 @@ void EditorShell::Frame::draw_program_panel(const gui::Rect &bounds) {
                                             0.0F),
                        label_width, 20.0F},
              fault, ui.theme().warning);
+  }
+  if (picture_ok) {
+    bool pointer_available = true;
+    for (const gui::DockLayout::Floating &floating :
+         impl.docks.floating()) {
+      if (floating.node != impl.docks.leaf_of(panel_program) &&
+          floating.frame.contains(ui.pointer_x(), ui.pointer_y())) {
+        pointer_available = false;
+        break;
+      }
+    }
+    // The laser pointer's marks on the picture, and the dot while L is held.
+    if (const auto pointed = impl.program_panel.run_laser(
+            ui, impl.laser, program_viewport_image, *shown_view,
+            program_projection, pointer_available)) {
+      laser_pointed = pointed;
+    }
   }
   if (picture_ok && color_sample_active) {
     bool pointer_available = true;
