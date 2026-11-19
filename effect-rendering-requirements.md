@@ -1,4 +1,4 @@
-# Effect Rendering Requirements
+# Effect rendering requirements
 
 This document is the implementation and review contract for every new
 first-class scene effect. It applies to values represented by
@@ -67,6 +67,8 @@ fails until a complete, correctly indexed entry is supplied.
 | Film Grain / Noise | Inline | Shared scene depth | Material film grain | Amount `0` |
 | Box Blur | Isolated layer | Tests against scene depth | Spatial box blur | Radius `0`; malformed radius/pass tuples fail closed |
 | Directional Blur | Isolated layer | Tests against scene depth | Spatial directional blur | Length `0`; non-finite/out-of-range tuples fail closed |
+| Chroma Key | Isolated layer | Tests against scene depth | Chroma key | Mix `0`; malformed tuples fail closed |
+| Luma Key | Isolated layer | Tests against scene depth | Luma key | Mix `0`; malformed tuples fail closed |
 
 Brightness factors multiply in binary64 across the first-class scene stack and
 downstream compositor modifiers. The product is clamped to `0..16` and the
@@ -121,7 +123,16 @@ premultiplied RGBA layer, so coverage expands with colour while tested-depth
 composition remains explicit. They execute in authored spatial order and
 bypass every pass/statistic when at identity.
 
-The current fixed execution order is Geometry, Inline, Isolated Layer, then
+Chroma Key measures Euclidean distance in Rec.709 Cb/Cr space from a straight
+RGB key colour, with tolerance, softness, spill suppression and a mix. Signed
+morphology of up to 64 authored-canvas pixels dilates (positive) or erodes
+(negative) foreground coverage. Luma Key gives coverage one between a low and a
+high threshold, extends each threshold outward by its own softness, and can
+invert the matte. Layer inputs and results are premultiplied. Final coverage is gated by source
+alpha, so morphology never expands layer bounds, and both are an exact
+identity at mix `0`.
+
+The fixed execution order is Geometry, Inline, Isolated Layer, then
 Full Scene. Active inline effects therefore have to precede Blur. The scene
 planner and compositor graph validate the combined scene-plus-graph sequence;
 a reverse-domain order produces a visible diagnostic or
@@ -234,5 +245,5 @@ ctest --test-dir out/build/windows-msvc-debug-gui --output-on-failure `
   -R "render_(effect_execution|compositor_plan|compositor_scene)"
 ```
 
-Then run the complete Debug suite and rebuild the Release `media-server` target
-used by `scripts/run-editor.ps1`.
+Then run the area and quick presets that cover the change (see AGENTS.md) and
+rebuild the Release `media-server` target used by `scripts/run-editor.ps1`.

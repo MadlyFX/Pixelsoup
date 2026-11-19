@@ -1317,7 +1317,7 @@ public:
     // in and the same bytes out, but a shader whose result depends on the
     // order thread groups happen to finish will disagree between two nodes
     // running identical work. See the note in
-    // `advanced-renderer-status.md`.
+    // `docs/renderer-capabilities.md`.
     [[nodiscard]] bool dispatch(const ComputeDispatch& work) noexcept;
 
     // Puts  into  for the commands recorded after this.

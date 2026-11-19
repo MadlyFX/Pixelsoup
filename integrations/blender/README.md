@@ -76,8 +76,8 @@ Server; restoring it in Blender restores the same linked object.
   in that Blender releases scenes that file does not hold.
 - Right-click a row > **Disconnect Blender** ends that scene's link; the scene keeps the
   last synced content and does not relink until you open it again.
-- **File > Freeze Blender...** still freezes Preview into an immutable revision on
-  shared storage, for a Program that must not change; it is no longer needed to go on air.
+- **File > Freeze Blender...** freezes Preview into an immutable revision on
+  shared storage, for a Program that must not change; it is not needed to go on air.
 
 ## Recovery and status
 
@@ -144,10 +144,12 @@ same connection dialog.
 The sidebar lists adjustments so an artist can refine visual fidelity if needed.
 Automatic translation approximates supported appearance; it does not reproduce
 all Cycles/Eevee shading or bake arbitrary simulation/vertex animation.
-Explicit animation assemblies and base-color baking remain available in Advanced.
-The older [translation contract](../../blender%20live%20scene%20link/materials-and-lighting-v1.md)
+Explicit animation assemblies and base-color baking are available under Advanced.
+The [material and light contract](../../blender%20live%20scene%20link/materials-and-lighting-v1.md)
 and [animation contract](../../blender%20live%20scene%20link/animation-and-stage-v1.md)
-describe the renderer's native representations; 0.8.0 adds the fallbacks above.
+describe the renderer's native representations that the automatic fallbacks above
+produce; the [scene-link reference](../../blender%20live%20scene%20link/README.md)
+lists the other contracts.
 
 ## Upgrade and verification
 

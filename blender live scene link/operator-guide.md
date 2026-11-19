@@ -1,7 +1,7 @@
 # Operator guide — Blender live scene link
 
-For the person standing at the machine. Install, link, adjust, take to air,
-disconnect, rebake, recover. The measured limits and the support boundary are in
+For the person standing at the machine. Link, adjust, take to air, disconnect,
+rebake, recover. The measured limits and the support boundary are in
 [qualification v1](qualification-v1.md); this page is the procedure.
 
 ## Open a scene in Blender
@@ -53,12 +53,14 @@ reopened or rendered offline. They stay Media Server overrides underneath, so Un
 Media Server reverts them (and Blender follows). The latest edit wins: when the artist
 changes the same property in Blender, the artist's value replaces the override.
 
-- **Live updates** (Blender, Advanced) can be cleared to pause; **Publish Now** sends
-  one explicit update.
+- **Live updates** (Blender, Advanced publishing controls) can be cleared to pause;
+  **Publish Now** sends one explicit update.
 - **Pause source updates** (Media Server, linked collection Inspector) blocks new
-  source content while keeping the link. Resuming sends the retained edit.
-- **Follow Source / Hold / Reset placement to source** and **Hide / Show** work as
-  before in the Inspector; Blender shows each result.
+  source content while keeping the link. **Resume source updates** sends the
+  retained edit.
+- **Follow source with offset / Hold shot placement / Reset placement to source**
+  and **Hide / Show this occurrence** are in the Inspector; Blender shows each
+  result.
 - **Delete** in Media Server deletes the object, with its children, in Blender too.
   Deleting it in Blender removes it from Media Server. Undo on either side brings it
   back with its Media Server edits, until the `.blend` is saved and reopened.
@@ -76,9 +78,10 @@ For remote render nodes the linked content in `<project> Blender/Link Resources`
 be visible at the same absolute path on every node: keep the project on such a share. A
 node missing a file reports it in Output Monitor and keeps its last complete picture.
 
-**File > Freeze Blender...** still freezes Preview into an immutable revision on shared
-storage with **Roll back Program**, for a Program that must not change while Blender
-edits; it is not needed to go on air.
+**File > Freeze Blender...** freezes Preview into an immutable revision on shared
+storage, with **Roll back Program** to return to the previous one, for a Program
+that must not change while Blender edits. It is not needed to go on air; see
+[Program publication](program-publication-v1.md).
 
 ## Disconnect and run the show
 
@@ -91,8 +94,8 @@ absolute asset paths. Saved projects reopen offline and evaluate identically.
 
 Baked GI and reflections are tied to a geometry/material/light revision. After a
 Blender revision changes them, the linked scene reports stale lighting and
-publication is refused until you either **rebake** in the Environment controls or
-disable derived lighting. Animated assemblies stay outside static baking.
+**Freeze Blender** is refused until you either **rebake** in the Environment
+controls or disable derived lighting. Animated assemblies stay outside static baking.
 
 ## Recover
 
@@ -100,34 +103,23 @@ disable derived lighting. Animated assemblies stay outside static baking.
 | --- | --- |
 | `pairing_required` | The link was restarted. Click the scene's **B** again. |
 | `Resync required` / stale revision | Click **Resync**: it reconnects, registers the Director's current revision and sends a fresh snapshot. |
-| `source_paused` | Resume source updates in the Inspector, then **Publish Now**. |
+| `source_paused` | Resume source updates in the Inspector; the retained edit is sent. |
 | A capability is not served | The add-on and Media Server are from different deliveries. Clear the named feature to keep working, or install the matching build. |
 | `resource_capacity` / `receipt_capacity` | The pairing is full. **File > Connect to Blender... > Resync Scene** starts a fresh session and snapshot. |
-| `resource_cache_full` | The project's store `<project> Blender/Link Resources/shared` holds 64 GiB of distinct linked content; re-linking reuses it, so this means new content, not repeated pairings. Move the store aside only once no saved project uses it (or re-publish those scenes from Blender); the next link starts an empty store. Older per-pairing directories beside it are not counted: retire the ones no project references to free disk. |
-| Publisher process lost | The add-on stops and says so. **Resync** to reconnect; there is no silent retry loop. |
+| `resource_cache_full` | The project's store `<project> Blender/Link Resources/shared` holds 64 GiB of distinct linked content; re-linking reuses it, so this means new content, not repeated pairings. Move the store aside only once no saved project uses it (or re-publish those scenes from Blender); the next link starts an empty store. |
+| Publisher process lost | The add-on says so and reconnects with bounded backoff. **Resync Scene** reconnects at once. |
 | Blender refuses a name or mesh | The diagnostic names what Media Server cannot represent. Fix the source; nothing partial was admitted. |
 | Editor reopened, Blender gone | Nothing to do. Accepted revisions and overrides are in the project; reopening the `.blend` relinks it. |
 | `director_transaction_failed` | Media Server refused to schedule the revision. Click **Resync Scene**; if it persists, report the build. |
 
-## Delivered sample
+## Sample bundle
 
 `powershell -ExecutionPolicy Bypass -File scripts/run-blender-qualification.ps1
--Build release` writes a bundle you can hand to an operator:
-
-| File | What it is |
-| --- | --- |
-| `mediaserver_livelink.zip` | The installable add-on |
-| `mediaserver_livelink.manifest.json` | Version, protocol, capabilities, file hashes |
-| `sample-collection.blend` | A sample Blender collection ready to link |
-| `evidence/preview.mstage` | A saved Preview project with accepted linked content |
-| `evidence/published.mstage` | The same content published to Program, verifiable offline |
-| `evidence/qualification.json` | The measured report for that machine |
-
-Both projects reference their immutable packages by absolute path, inside the
-bundle directory, so keep the bundle together and at the same path on every
-machine that opens them — the same rule as every other asset in a project.
-
-It then starts a Director editor on the delivered Preview project with isolated
-local settings. `-Gpu` also renders the published revision through the Advanced
-D3D12 renderer; `-NoBlender` skips the sample scene; `-NoLaunch` only builds the
-bundle.
+-Build release` writes a sample bundle (add-on archive and manifest, a sample
+Blender collection, an offline Preview project, the same content frozen to
+Program, and the measured report) and opens the Preview project. Its contents and
+options are described under
+[Delivery bundle](qualification-v1.md#delivery-bundle). The projects reference
+their immutable packages by absolute path inside the bundle directory, so keep
+the bundle together and at the same path on every machine that opens them, as
+with every other asset in a project.

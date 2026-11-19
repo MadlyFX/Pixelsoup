@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Build the step 12 delivery bundle and open the delivered project in the editor.
+Build the qualification delivery bundle and open the delivered project in the editor.
 
 Produces, in one directory: the installable add-on archive and its compatibility
 manifest, the measured qualification report, the offline Preview and published
@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 # Keep the path short: immutable package names must stay inside the legacy
 # Windows path limit, and this directory holds a pairing resource cache.
-if (!$Directory) { $Directory = Join-Path $repo ('out/step12-' + $Build) }
+if (!$Directory) { $Directory = Join-Path $repo ('out/blender-qualification-' + $Build) }
 $Directory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Directory)
 if (Test-Path $Directory) { Remove-Item -Recurse -Force $Directory }
 New-Item -ItemType Directory -Force $Directory | Out-Null

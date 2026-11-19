@@ -1,9 +1,10 @@
 # Materials and lighting v1
 
-Step 10 adds a bounded look translation to the existing evaluated scene link.
-Qualification uses Blender **5.2.0 LTS, fbe6228777e7**, add-on **0.5.0**, and the
-Windows D3D12 Advanced renderer. This is a property translation, not a promise
-of matching Cycles or Eevee pixels. See the [current operator workflow](operator-guide.md).
+A bounded look translation on the evaluated scene link. Qualification uses
+Blender **5.2.0 LTS, fbe6228777e7** and the Windows D3D12 Advanced renderer. This
+is a property translation, not a promise of matching Cycles or Eevee pixels. The
+automatic fallbacks the add-on applies are in the
+[add-on README](../integrations/blender/README.md#automatic-translation).
 
 ## Material contract and importer audit
 
@@ -40,8 +41,9 @@ or a UV Map or Normal Map node that is unnamed or names the active render map
 selects it. A full-strength Multiply Mix of a color texture and a constant (the
 glTF importer's base color factor) keeps the texture with that factor. Named alternate UVs,
 Mapping nodes, `KHR_texture_transform`, triplanar/generated coordinates, UDIMs,
-image sequences, packed/dirty images and nonsaved images are diagnosed. Save or
-unpack PNG/JPEG images before publication. Each input image is at most 4096 pixels
+image sequences, dirty images and unsaved images are diagnosed. PNG/JPEG images
+packed into the .blend are accepted (files over 16 MiB must be unpacked); other
+images must be saved to disk. Each input image is at most 4096 pixels
 per axis and 16 MiB; the publisher retains at most 256 distinct images / 256 MiB.
 The Director additionally enforces its decoded texture and full-scene budgets.
 
@@ -77,7 +79,7 @@ Material records carry a separate look revision, independent of geometry. Source
 factors appear in the Inspector. The eight editable shot factors are base RGB,
 roughness, metallic and emissive RGB. Editing one keeps the other source values;
 Reset material factors clears those overrides. Alpha, textures and extension
-properties remain source-authored in this version. Source updates, slot reorder,
+properties remain source-authored. Source updates, slot reorder,
 duplicate/unlink, persistence and immutable publication preserve the effective
 material values. Select the parent for a whole-object placement gesture or a
 surface row for a surface adjustment.
@@ -157,14 +159,13 @@ publication **retains the previous complete revision** until the operator either
 
 Publication validates the recorded revision and probe file on its worker before
 rewriting paths into shared storage. Probe bytes join the same immutable resource
-set and whole-cohort readiness gate as the models. Legacy untagged fields require
-a rebake before publication. Retained frozen Program revisions are already qualified
+set and whole-cohort readiness gate as the models. Untagged fields require a rebake before publication. Retained frozen Program revisions are already qualified
 and stay usable without Blender.
 
 The existing offline integrator accepts opaque static surfaces. Alpha/transmitting
 surfaces must have **Static geometry** cleared in the Inspector; they still render live but do not
 contribute to the GI/reflection bake. The reference fixture deliberately exercises
-this distinction. This step does not extend the integrator to transparent transport.
+this distinction. The integrator does not model transparent transport.
 
 ## Sources and qualification scope
 

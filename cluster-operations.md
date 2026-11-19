@@ -6,7 +6,7 @@ display timing.
 
 ## Supported envelope
 
-The release gate currently certifies this baseline:
+The release gate certifies this baseline:
 
 - one Director and two render nodes connected over real TCP sessions;
 - 120 control frames per second for ten minutes;
@@ -196,7 +196,7 @@ a restart.
 
 Each node's status line also samples memory at the same interval, in MiB:
 `gpu-local-mib=U/B` is the video memory the process uses (U) against the
-budget the OS currently allows it (B); `gpu-system-mib` is system memory held
+budget the OS allows it (B); `gpu-system-mib` is system memory held
 on the GPU's behalf, including resources demoted out of video memory once U
 reaches B; `gpu-committed-mib` is what the renderer's own textures and geometry
 buffers account for; and `private-mib` is the process's committed private
@@ -210,7 +210,7 @@ accounting: decoder surfaces, upload heaps or driver allocations.
 On the Director those figures are the sealing thread's alone. It seals control
 frames on a thread of its own and takes turns with the thread that evaluates,
 draws the editor and presents (see "Director threads" in
-`media-server-architecture-plan.md`), so the Director line carries four more
+`docs/architecture.md`), so the Director line carries four more
 figures for the same interval: `seal-wait-max-us` and `seal-wait-mean-us`, how
 long sealing waited for the other thread to finish its document work;
 `seal-waited=N/M`, how many of the sealing thread's M wakes waited more than

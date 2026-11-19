@@ -1,8 +1,8 @@
 # Scene manifest v1
 
-Step 03 provides an offline, complete static scene import. Steps 04 and 05 add
-transport and the Blender publisher using this same contract. File extension:
-`.mslink`; UTF-8 without BOM.
+The manifest is the complete scene description that the importer accepts offline
+and that the live link carries as snapshots and deltas ([protocol](protocol-v1.md)).
+File extension: `.mslink`; UTF-8 without BOM.
 Each record occupies one line. Strings use C++ `std::quoted` escaping (`\"` and
 `\\`); blank lines and lines beginning with `#` are ignored. Unknown records,
 extra fields and incomplete values reject the entire candidate.
@@ -23,23 +23,23 @@ next manifest becomes a tombstone; reintroducing its UUID restores its existing
 shot occurrence. Referenced parent/prototype/material records cannot be omitted.
 
 The 16 matrix values are column-major affine transforms in Media Server metres,
-Y-up, using step 01's coordinate conversion. Visibility is 0 or 1. Empty
+Y-up, using the [contract's](contract-v1.md) coordinate conversion. Visibility is 0 or 1. Empty
 prototype means a transform-only parent. Empty material preserves the GLB's
 per-primitive material slots. A material reference applies the eight linked
-scalar factors across that object's imported parts. Step 10's publisher splits
+scalar factors across that object's imported parts. The publisher splits
 meshes into stable material children; see [Materials and lighting v1](materials-and-lighting-v1.md).
-Origin revisions must remain
-stable; changing a pivot is rejected by the existing source-update planner.
+Origin revisions must remain stable; changing a pivot is rejected by the
+source-update planner.
 
 Use per-prototype **embedded GLB** payloads. External glTF buffers/images, `.lod`
 companions, animation, skins, morphs, cameras/lights, non-triangle primitives and
-nonidentity GLB node transforms are outside this initial subset. Export evaluated
+nonidentity GLB node transforms are outside the static subset. Export evaluated
 triangles in prototype-local space and put all scene placement in the manifest.
 The copied hashed GLB has no `.lod` companion, so unrelated sidecar content never
-becomes an implicit dependency. Negative-determinant drawable placement remains
-blocked by step 01's renderer qualification gate.
+becomes an implicit dependency. Negative-determinant drawable placement is
+refused.
 
-Step 11 extends that static subset only for explicitly declared animation assemblies:
+Explicitly declared animation assemblies extend that static subset:
 
 ```text
 object ... M15 animation start_show_frame loop
@@ -52,7 +52,7 @@ places the complete assembly. Animated resources without this suffix reject
 admission. Scatter and animated external LODs are excluded. See the
 [animation contract](animation-and-stage-v1.md) for timing, skinning and budgets.
 
-Step 09 adds two explicit optional suffixes, keeping ordinary records unchanged:
+Two explicit optional suffixes carry environment content, leaving ordinary records unchanged:
 
 ```text
 prototype "prototype-uuid" "base-sha256" "base.glb" lod canvas_pixels "low-sha256" "low.glb"
@@ -69,7 +69,7 @@ remain forbidden. Package identity hashes the base hash, low hash and threshold,
 so either level or the selection rule invalidates the revision. Terrain and
 instance limits are specified in [Environment scale v1](environment-scale-v1.md).
 
-Step 10 adds an optional typed light suffix to an object without a prototype:
+An optional typed light suffix marks an object without a prototype as a light:
 
 ```text
 object ... M15 light "kind" "unit" R G B power range inner_cone outer_cone width height angular_radius
@@ -83,8 +83,8 @@ come from the object matrix; the native light axis is -Y after Blender conversio
 Lights may have transform parents but no drawable prototype or instance batch.
 They use the same object upsert/erase operations as other occurrences. Admission
 counts the complete native scene's four directional and 64 local light slots.
-GLB camera/light extensions remain forbidden; typed lights are explicit manifest
-content. Legacy manifests without this suffix remain valid.
+GLB camera/light extensions are forbidden; typed lights are explicit manifest
+content.
 
 ## Resources and ownership
 
@@ -117,7 +117,7 @@ the independent cache test uses a synthetic RGBA image and compares exact mips.
 
 ## Admission and lifetime limits
 
-| Resource | Initial limit |
+| Resource | Limit |
 | --- | --- |
 | Work | One executing import and one replaceable pending request |
 | Manifest | 1 MiB, 4096 records, 1024 prototype references |
@@ -147,6 +147,5 @@ The Director plans against the current document and commits all changes in one
 transaction. A new UI import always receives a fresh transaction ID. Undo restores
 the previous revision in one step while preserving an intervening shot edit.
 Results are discarded if the project, linked source/attachment, target scene or
-relevant deletion changed during staging. Preview-only imports reject a source
-already attached to Program, since source records are shared across attachments.
-Frame-aligned, complete GPU adoption on multiple render nodes remains step 08.
+relevant deletion changed during staging. Frame-aligned, complete GPU adoption on multiple render nodes follows the asset
+cohort permit described in [Program publication](program-publication-v1.md).

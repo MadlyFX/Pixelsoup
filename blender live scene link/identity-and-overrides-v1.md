@@ -1,9 +1,7 @@
 # Linked identity and shot ownership v1
 
-Step 02 document contract. The public authoring API is
+The persistent document records for linked scenes. The public authoring API is
 [`linked_scene.hpp`](../engine/scene/include/mediaserver/scene/linked_scene.hpp).
-This is the persistent static-scene foundation; ingestion, transport and the
-Blender publisher remain steps 03–05.
 
 ## Persistent records
 
@@ -53,8 +51,7 @@ sixteen double document properties with a prefix and index `0`–`15`:
 An absent matrix means identity. A partially present matrix is an error. Hold
 requires an explicitly captured held-world matrix. Values must remain finite
 after conversion to the renderer's float carrier. The bottom row must be exactly
-`(0,0,0,1)`; this tightens step 01's proposed residual tolerance so a perspective
-residual is never silently discarded. Basis lengths must be in `[1e-6,1e6]` and
+`(0,0,0,1)`, so a perspective residual is never silently discarded. Basis lengths must be in `[1e-6,1e6]` and
 the absolute determinant divided by their product must exceed `1e-6`. Validation
 also checks composed worlds and conversion bases. The full cofactor affine
 inverse supports shear; its singular-input identity fallback is never accepted
@@ -89,68 +86,60 @@ valid revision to fall back to and reports the invalid snapshot.
 
 `link_origin` is an optional source pivot-generation token. Changing it through
 source admission rejects the candidate with an explicit rebase diagnostic.
-The publisher must preserve the existing prototype coordinate frame or provide
-a future explicit geometry/placement rebase operation; quietly moving the pivot
-and compensating only the object origin would lose shot decisions. Arbitrary
-animated source parents and linked placement channels remain outside this static
-hierarchy contract. [Step 11](animation-and-stage-v1.md) adds explicit node/skin
-assemblies: their animated hierarchy stays inside the immutable model package,
-with one outer linked occurrence for shot placement and effective playback settings.
+The publisher must preserve the existing prototype coordinate frame; quietly
+moving the pivot and compensating only the object origin would lose shot
+decisions. Arbitrary animated source parents and linked placement channels are
+outside this static hierarchy contract. [Animation assemblies](animation-and-stage-v1.md)
+keep their animated hierarchy inside the immutable model package, with one outer
+linked occurrence for shot placement and effective playback settings.
 
 Affine reflection can be represented mathematically, but drawable occurrences
-with a negative world determinant are refused pending the step 01 renderer parity
-qualification. Shear and positive nonuniform scale are supported. The step 02
-document admission limits are 8,192 source objects, 16,384 occurrence records,
-and the existing scene model limit per scene; these are admission limits, not
-foliage performance qualification.
+with a negative world determinant are refused because the renderer's front-face parity for reflections is not
+qualified. Shear and positive nonuniform scale are supported. Document admission
+limits are 8,192 source objects, 16,384 occurrence records, and the scene model
+limit per scene; these are admission limits, not performance qualification.
 
 ## Property ownership and recovery
 
 Source visibility and local visibility are separate properties on separate nodes.
 An absent occurrence `visible` follows source visibility. A locally authored value
 overrides that object, while effective parent visibility and source removal still
-gate the subtree. Delete in the editor hides the occurrence. The contextual
-**Follow source visibility** action removes the local property.
+gate the subtree. The Inspector's **Hide this occurrence** / **Show this
+occurrence** author the local value; **Follow source visibility** removes it.
 
 Source removal sets `link_removed = true` on the source object. It suppresses
 descendants and drawing but retains document IDs, source hierarchy and shot
 records. A source undo/restoration clears the tombstone and reuses those same
-occurrences. Removed rows remain selectable in the editor. **Discard retained
-shot record** deliberately removes a selected removed occurrence; the ordinary
-document undo restores it. A later source restoration after discarding allocates
-a fresh occurrence with source defaults. Source updates cannot erase source
-records as an implicit cascade. Prototype/material records remain available
-while tombstones reference them.
+occurrences, so Undo on either side restores the object with every Media Server
+override. Removed objects are not listed in the editor. Source updates cannot
+erase source records as an implicit cascade. Prototype/material records remain
+available while tombstones reference them.
 
 Supported material properties are base-color RGB, roughness, metallic, and
 emissive RGB. Absent shot properties follow their source material factor.
 Per-property masks apply these factors to imported model material slots while
 preserving unoverridden factors, textures and other imported material properties.
-Slot-specific assignments and richer material editing remain step 10. **Reset
-material factors to source** removes the local properties. Material and geometry
+**Reset material factors to source** removes the local properties. Material and geometry
 revision updates cannot overwrite local placement or visibility.
 
 ## Blender identity rules for the publisher
 
-These are requirements for step 05; step 02 does not install a Blender add-on.
-
-1. Persist source scene, object, mesh prototype and material UUIDs as custom
-   properties. The publisher retains a registry of the original owner of each
+1. Source scene, object, mesh prototype and material UUIDs persist as `ms_link_id`
+   custom properties. The publisher keeps a registry of the original owner of each
    UUID. Rename/reorder leaves the UUID untouched.
-2. On a Blender duplicate, retain the UUID only on the registered original and
-   mint/persist a new UUID on the writable copy before publishing. A linked mesh
-   duplicate retains the shared prototype ID when evaluated content/bindings are
-   equivalent; a copied datablock gets a new prototype ID. Generated occurrences
-   require a durable source instance key; array indices are insufficient.
-3. If duplicate UUIDs have no provable original owner, pause publication and ask
-   the author to choose the survivor. Never select a survivor by name, pointer or
-   array order. The Director rejects unresolved duplicates atomically.
-4. For read-only library data, keep a persisted sidecar identity registry keyed
-   by the library's persistent identity and a durable authored source key. File
-   paths and names are locators. If the library supplies no durable key, require
-   an explicit binding or writable local override; do not fabricate stability.
-5. UUID creation/repair belongs to the same Blender undo operation as duplication.
-   Delete/undo restores the same UUID and clears the Director tombstone. Do not
-   reuse a deleted object's UUID for unrelated newly authored content.
+2. On a Blender duplicate, the UUID stays on the registered original and a new UUID
+   is minted and persisted on the writable copy before it is sent. Each source
+   object has its own evaluated-prototype UUID derived from its object UUID; a
+   copied datablock therefore never shares a prototype ID with its original.
+   Generated occurrences use a durable source instance key; array indices are not
+   identity.
+3. Read-only library data uses an authored UUID if one exists; otherwise a
+   persisted `ms_link_library_ids` mapping on the local scene, keyed by library
+   path, ID type and library name (at most 4096 entries). Renaming or moving a
+   library entry with no authored UUID changes that key. A duplicate UUID among
+   library data is refused with a diagnostic naming the block, and the author
+   repairs the ID in the library.
+4. Delete/undo restores the same UUID and clears the Director tombstone. A deleted
+   object's UUID is not reused for unrelated content.
 
-See [current operator workflow](operator-guide.md) for the native editor workflow.
+See the [operator guide](operator-guide.md) for the editor workflow.

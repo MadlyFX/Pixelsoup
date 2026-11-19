@@ -1,4 +1,4 @@
-# Blender scene-link reference v1
+# Blender scene-link reference fixtures
 
 Procedural fixtures authored for this repository by
 `scripts/blender-scene-reference.py`, using Blender 5.2.0 LTS `fbe6228777e7`.
@@ -23,6 +23,6 @@ directory. They are reproduced on demand rather than checked in as opaque binary
 sources. The C++ reference checker creates `.mstage` files and content-addressed
 packages in its scratch directory, never beside these source fixtures.
 
-See [contract](../../../blender%20live%20scene%20link/contract-v1.md),
-[measurements](../../../blender%20live%20scene%20link/baseline-v1.md) and
-[UI checks and known limits](../../../blender%20live%20scene%20link/operator-guide.md).
+See the [contract](../../../blender%20live%20scene%20link/contract-v1.md),
+[measurements](../../../blender%20live%20scene%20link/reference-fixture-measurements.md) and
+[operator guide](../../../blender%20live%20scene%20link/operator-guide.md).

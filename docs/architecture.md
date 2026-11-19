@@ -1,11 +1,7 @@
-# Media Server Architecture and Delivery Status
+# Architecture
 
-This document describes the architecture that is in this repository now, the
-contracts it relies on, and the boundaries that are deliberately still open.
-It replaces the earlier speculative renderer-selection and multi-year delivery
-plan. Media Server remains an early engineering prototype; this is an
-implementation-status document, not a compatibility or production-readiness
-commitment.
+This document describes the architecture of Media Server, the contracts it
+relies on, and its support boundaries.
 
 ## Product shape
 
@@ -16,7 +12,7 @@ draw only the output mapping assigned to their node index. A one-machine
 installation can run all roles; a larger installation separates the Director
 and node processes.
 
-The project currently targets LED-wall-style output: large wall-bounded content
+The project targets LED-wall-style output: large wall-bounded content
 is evaluated locally from replicated state rather than sent as full-wall pixel
 streams. Adjacent rectangular LED regions are designed to share exact pixel
 boundaries, not to rely on cross-node blending. A physical surface or UV warp
@@ -34,10 +30,10 @@ flowchart LR
 ```
 
 The system has role flags for `director`, `render`, `receiver`, `compositor`,
-and `output`. The current executable combines these roles as needed; `render`
-and `output` are the practical node pairing in the supplied demos. `receiver`
-and `compositor` are role vocabulary and seams for later external/video
-pipelines, not evidence that an ST 2110 or NDI receiver exists today.
+and `output`. The executable combines these roles as needed; `render` and
+`output` are the practical node pairing in the supplied demos. `receiver` and
+`compositor` are role vocabulary and seams for external video pipelines: no
+ST 2110 or NDI receiver exists.
 
 ## Architectural principles
 
@@ -68,7 +64,7 @@ pipelines, not evidence that an ST 2110 or NDI receiver exists today.
 | Show runtime | Show clock, transport state, Program/Rehearsal switching, frame mailbox and presenters | `engine/show` |
 | Network | Framed TCP, FlatBuffers sessions, resume/checkpoint, heartbeat, Director barrier | `engine/net` |
 | Authoring projections | Scene/timeline, media/model registry, compositor DAG, feed map, hardware topology | `engine/scene`, `engine/assets`, `engine/compositor`, `engine/output`, `engine/topology` |
-| Graphics | SDL GPU-backed Basic renderer; fail-closed Advanced contract, typed capabilities/native handles, render graph, deterministic scene bridge and histories; media/model loaders, compositor executor, output transform | `engine/rhi`, `engine/render`, `engine/shaders`, `engine/ui` |
+| Graphics | SDL GPU-backed Basic renderer; D3D12 Advanced renderer with typed capabilities/native handles, render graph, deterministic scene bridge and histories; media/model loaders, compositor executor, output transform | `engine/rhi`, `engine/render`, `engine/shaders`, `engine/ui` |
 | Operator surface | Native 2D UI, docking, editor panels, input and file dialogs | `engine/gui`, `engine/editor` |
 | Runtime application | Command-line roles, playback loop, persistence startup, lifecycle agent/process host | `apps/server` |
 
@@ -106,7 +102,7 @@ frames may wait for it - while the Director keeps sealing, so editing never
 waits on the cluster; a node that lags past the barrier's limit is taken out of
 lockstep rather than holding every output. Operator transport anchors also
 travel ahead of the frame stream, so a stop reaches a cluster that is behind
-(see `cluster-operations.md`, "Lockstep and cluster lag").
+(see [cluster operations](../cluster-operations.md), "Lockstep and cluster lag").
 This is a control-plane/frame-boundary contract: it answers "are all nodes
 working on the same show state?". Whether every physical output presented that
 state on the same raster boundary is a separate question, owned by the
@@ -146,23 +142,12 @@ the answer. The newest request wins: a load still waiting is replaced, and an
 answer to a request since replaced is dropped by its ticket. A video's native
 rate is recorded when it is imported, so loading never opens media files.
 
-How late sealing ran, measured on the development machine with an editor open
-on the built-in scene at 24 fps (Debug build; `wake-*` and `seal-wait-*` are
-the Director status line's own figures, described in `cluster-operations.md`):
-
-| | one loop (before) | two threads (now) |
-| --- | --- | --- |
-| idle editor: boundaries sealed more than 2 ms late | 15-19 of 24 | 0 of 24 |
-| idle editor: latest seal | 12-21 ms | 0.1 ms wake + at most 2.5 ms at the gate |
-| every editor frame held 60 ms: boundaries late | 14 of 14 | 0 of 24 |
-| every editor frame held 60 ms: latest seal | 71-75 ms | 0.4 ms wake + at most 1.9 ms at the gate |
-
-What is left is the show thread's document work, which the gate reports as
-`show-hold-max-us`: 2-4 ms in those Debug runs, and 23 ms once, on the frame a
-real project was staged and first evaluated. A Release build of the same runs
-waits at most 0.45 ms at the gate and holds it 0.2-0.8 ms, 4.3 ms on the frame
-that project was staged. Making that smaller means evaluating from a snapshot
-outside the gate; nothing in the split prevents it.
+What remains on the show thread is its document work. The gate reports it as
+`show-hold-max-us`, and the Director status line reports `wake-*` and
+`seal-wait-*` (see `cluster-operations.md`); those figures, not the panel
+frame time, are how late sealing is checked. Evaluating from a snapshot
+outside the gate would shrink the remaining hold; nothing in the split
+prevents it.
 
 One Director is not fully decoupled: one paced by house reference reads the
 reference from its presenter, which only the show thread may call, so it seals
@@ -222,26 +207,16 @@ canvas and effect settings from the loop's scene model instead of keeping a
 second one current. The four small models (assets, feed map, hardware map,
 sync policy) are still rebuilt; together they cost tens of microseconds.
 
-Measured with `mediaserver_director_tick_benchmark` (Release, development
-machine), the model work one machine does when one node moves:
+`mediaserver_director_tick_benchmark` measures the model work one machine does
+when one node moves; its `--check` edits every node of a project in turn and
+compares updated models with rebuilt ones, so run it on a real show after
+changing either model. A moved Blender-linked object costs more than an
+unlinked one because moving it has the link records read again and every
+linked occurrence parsed again.
 
-| project | nodes | rebuilt (before) | updated (now) |
-| --- | --- | --- | --- |
-| `scenetest` (media clips) | 95 | 0.82 ms | 0.05 ms |
-| `scenetest`, drawables x21 | 455 | 5.24 ms | 0.14 ms |
-| `blendtest2` (Blender-linked), a linked object moved | 106 | 1.96 ms | 0.47 ms |
-| `testscene` (Blender-linked), a linked object moved | 220 | 4.46 ms | 1.05 ms |
-
-A linked object still costs most of a millisecond because moving one has the
-link records read again and every linked occurrence parsed again; an unlinked
-object in the same `testscene` project costs 0.08 ms. The same tool's
-`--check` edits every node of a project in turn and compares updated models
-with rebuilt ones; run it on a real show after changing either model.
-
-The work repeated on every loop wake is small by comparison - 0.07 ms for the
-95-node project and 0.29 ms for the 455-node one - once the editor's asset
-manifest, a walk of the whole document, is collected on document change
-instead of on every wake.
+The work repeated on every loop wake is small by comparison, because the
+editor's asset manifest, a walk of the whole document, is collected on
+document change instead of on every wake.
 
 ### Asset presence
 
@@ -261,8 +236,7 @@ modification time.
 
 The scene model is a deterministic projection of document nodes. It evaluates
 geometry, transforms, media quads, imported models, directional/point lights,
-materials, layer styles, first-class brightness/saturation/blur effects, and
-camera/canvas state for a given show frame. Component channels drive position,
+materials, layer styles, first-class scene effects, and camera/canvas state for a given show frame. Component channels drive position,
 rotation, scale, effects, and other exposed properties. Keyframes preserve
 their hold, linear, or cubic interpolation mode in the document view.
 
@@ -271,8 +245,7 @@ trim, and head/tail opacity ramps, all as exact frame counts. The model
 evaluates a clip only inside its own span, maps show frames to source frames
 from the clip's own first frame through the same exact rational resampling a
 looping clip uses, and multiplies the ramps into whatever opacity was authored
-or keyed. A zero duration is the older always-on form, so a project written
-before placement existed evaluates identically. The authored placements are
+or keyed. A zero duration means always on. The authored placements are
 also queryable independently of the playhead, because a timeline has to keep
 showing and editing a clip the show has already passed.
 
@@ -287,18 +260,19 @@ responding differently is a divergence, not a local taste.
 
 Assets are a separate, persistent registry. A scene placement refers to an
 asset rather than making the library disappear when the placement is deleted.
-The registry currently stores exact source paths plus useful probe metadata.
-It intentionally does no path canonicalization, bundling, hashing, or
-distribution. Therefore every render node must have access to compatible media,
-models, and calibration files at the authored path.
+The registry stores exact source paths, probe metadata and an optional content
+fingerprint. It does no path canonicalization, bundling, or distribution.
+Therefore every render node must have access to compatible media, models, and
+calibration files at the authored path.
 
 ### Compositor
 
 The compositor is an authored, typed DAG with bounded capacity and diagnostics.
-Its current nodes are Scene Layer, Brightness, Saturation, Levels,
-Lift/Gamma/Gain, Contrast/Pivot, Colour Matrix, White Balance, Curves, Film
-Grain, Blur, Radial Array, Composite, and Output. Invalid graphs remain visible to the editor but produce
-no executable plan. Valid graphs produce an explicit deterministic pass plan;
+Its nodes are Scene Layer, Brightness, Saturation, Levels, Lift/Gamma/Gain,
+Contrast/Pivot, Colour Matrix, White Balance, Curves, Film Grain, Blur, Box
+Blur, Directional Blur, Chroma Key, Luma Key, Matte, Radial Array, LED Car
+Process, Merge, Background, Composite, and Output. Invalid graphs remain
+visible to the editor but produce no executable plan. Valid graphs produce an explicit deterministic pass plan;
 spatial blur requires an offscreen pass rather than being reduced to a scalar
 property. Brightness and Saturation are inline shared-depth processors, while
 Blur is isolated. Their fixed domain order is validated across both the
@@ -307,13 +281,13 @@ operation authored after Blur fails visibly rather than being silently moved.
 Identity nodes do not constrain that order. Film Grain remains slice-stable by
 hashing its seed, exact show frame, and authored canvas coordinates rather than
 local time or slice-local pixels. The renderer executes the supported
-scene/compositor plan today. Brightness and Saturation carry unbounded binary64
+scene/compositor plan. Brightness and Saturation carry unbounded binary64
 products across the scene/graph boundary so clamping and response shaping occur
 once over the complete inline stack. The current application seam resolves
 modifiers by authored scene-node ID, so validation rejects two Output-reachable
 Scene Layer nodes that reference the same source instead of allowing branch
-effects to merge. This is still a small starter graph, not a full general-
-purpose 2D compositing environment.
+effects to merge. It is a bounded graph, not a general-purpose 2D compositing
+environment.
 
 Because each layer of that plan renders into its own offscreen target, the
 plan also names, per pass, the drawables belonging to other passes that stand
@@ -345,11 +319,11 @@ LED processors, walls, typed ports, and cables. Render Servers store a node
 index and intended output-window mode/placement. It provides up to 32 stable
 logical video-output slots, but current playback launches one feed-map output
 per listener/node index; arbitrary mapping of several feeds to physical
-connectors is intentionally not complete.
+connectors is not supported.
 
 ## Graphics and media path
 
-The current graphics stack has an SDL GPU Basic backend and native D3D12
+The graphics stack has an SDL GPU Basic backend and native D3D12
 Advanced backend behind `engine/rhi`, with HLSL compiled to both SPIR-V and
 DXIL. `engine/render` draws primitives,
 imported glTF/GLB/OBJ/FBX geometry, material textures, media quads, lighting, and
@@ -365,12 +339,11 @@ Advanced raster uses native D3D12, scene-linear `RGBA16F` composition, and the
 complete raster auxiliary set; optional requests report Basic fallback and
 required requests fail renderer/Program readiness when that contract is not
 available. The boundary carries explicit history identity, padded slice/crop,
-deterministic scene-record diffs, and the full advanced product shape. It does
-not claim native Vulkan, Spartan ray queries, Atlas DDGI, ReSTIR, denoising,
-TAAU, motion blur, or GPU-driven submission. The exact implemented/absent matrix
-is [advanced-renderer-status.md](advanced-renderer-status.md), and donor pins
+deterministic scene-record diffs, and the full advanced product shape. The
+exact supported and unsupported matrix is in
+[renderer capabilities and limits](renderer-capabilities.md), and donor pins
 and ownership are recorded in
-[third_party/renderer/PROVENANCE.md](third_party/renderer/PROVENANCE.md).
+[third_party/renderer/PROVENANCE.md](../third_party/renderer/PROVENANCE.md).
 
 Media decoding is behind `MediaSource`. Numbered image sequences/stills and
 FFmpeg-routed video sources decode to CPU pixels, then `MediaCache` manages a
@@ -378,12 +351,13 @@ bounded set of GPU textures. Models are similarly loaded behind a renderer
 seam. Assets are referenced by absolute path and never copied, with per-machine
 presence reported to the operator; this yields a useful local media workflow,
 but it does not supply content distribution, byte-level verification across
-machines, codec certification, GPU decode, or shared storage orchestration.
+machines, codec certification, or shared storage orchestration.
 
-The current output transfer is sRGB with native DXGI presentation for scene
-windows and SDL desktop presentation as the Basic fallback. The project does
-not yet implement OCIO, HDR video output, SDI, NDI, ST 2110,
-tracked-camera ICVFX, Notch/Spout, or vendor-specific calibration APIs.
+Output uses native DXGI presentation for scene windows and SDL desktop
+presentation as the Basic fallback; the colour transform and native output
+formats are in [renderer capabilities and limits](renderer-capabilities.md).
+SDI, NDI, ST 2110, Notch/Spout and vendor-specific calibration APIs are not
+supported.
 
 ### Output synchronization
 
@@ -422,7 +396,7 @@ assets, live render nodes, one exact renderer profile and selected backend
 across the editor and every mapped output node, compatible group timing, sync
 device and reference where the policy asks for them, every group output locked,
 and every swapchain joined to the expected barrier. The renderer observation is
-the last result of a real record attempt and rides the existing version-3 node
+the last result of a real record attempt and rides the node-session
 heartbeat; changing any authored renderer setting immediately makes the prior
 digest stale. Optional Advanced fallback is safe only when the whole cohort
 selects Basic. Until all of that holds, the operator surface names the specific
@@ -444,8 +418,7 @@ telemetry, and replaces neither genlock nor swap lock.
 
 ## Operator and machine control
 
-The editor is a native retained/draw-list UI, not the earlier throwaway ImGui
-prototype. It offers docking/floating panels; Library import and drag/drop;
+The editor is a native retained/draw-list UI. It offers docking/floating panels; Library import and drag/drop;
 Scene/Stage selection, guides, and gizmos; Inspector and Timeline edits;
 Compositor editing; Hardware/Feed mapping; output monitoring; and project
 open/save.
@@ -483,20 +456,17 @@ The project has tests at the boundaries that need deterministic behavior:
 The sustained-rate soak test is built normally but only registered with CTest
 when `MEDIASERVER_ENABLE_SOAK_TESTS=ON` because its normal gate is ten minutes.
 
-## Intentional gaps and delivery boundaries
+## Support boundaries
 
 Current renderer behavior and hardware qualification boundaries are recorded
-in [capabilities and limits](advanced-renderer-status.md). Camera tracking,
-inner-frustum composition, managed color, animation and baked lighting now
-have implementation paths; they must not be treated as unimplemented merely
-because an early delivery table listed them as future work.
+in [capabilities and limits](renderer-capabilities.md).
 
-| Area | Remaining boundary |
+| Area | Not supported |
 | --- | --- |
-| Assets | General production packaging/transfer and operational content management beyond the linked-scene publication path |
-| Outputs | SDI, NDI, ST 2110, pro video interfaces and broader platform/display qualification |
-| Synchronization | Physical NVAPI/genlock/present-barrier qualification, PTP correlation and measured photon timing |
-| Renderer | Native Vulkan, GPU-driven/bindless/RT features, hardware/driver matrix and product-driven compositor completion |
-| Color and tracking | Measured panel/camera calibration, lens agreement and on-stage latency validation |
-| Media | Supported-codec performance/reliability matrix and hardware decode where needed |
-| Operations | Service installation, observability, secure deployment and recovery on real show networks |
+| Assets | Production packaging and transfer, and content management beyond the linked-scene publication path |
+| Outputs | SDI, NDI, ST 2110 and other pro video interfaces |
+| Synchronization | Physical NVAPI/genlock/present-barrier qualification, PTP correlation and measured photon timing are not established by the software checks |
+| Renderer | Native Vulkan, GPU-driven/bindless/RT features |
+| Color and tracking | Panel/camera calibration, lens agreement and on-stage latency validation are not established by the software checks |
+| Media | A codec performance/reliability matrix is not provided |
+| Operations | Service installation, observability and secure deployment beyond the trusted control LAN |

@@ -7,13 +7,6 @@ authored state locally. Windows offers an Advanced D3D12 renderer and an SDL
 GPU Basic fallback. The engine modules also build headless; the media-server
 application needs a GUI build.
 
-Particle effects are not available yet. They are played by ajfx, a separate
-runtime that is still in development and is not needed to build MediaServer.
-A scene that places a particle effect reports it as unsupported.
-
-This is an unreleased prototype. Project and wire schemas may change;
-breaking changes are acceptable without migration support.
-
 ## Build and run
 
 Requirements: CMake 3.28+, Ninja, a C++20 compiler (MSVC 2022, Clang 18+,
@@ -60,14 +53,12 @@ with its address and shared secret. Detailed setup is in the
 | --- | --- |
 | Find code, development rules and relevant tests | [AGENTS.md](AGENTS.md) |
 | Editor, timeline, Program/Preview, assets and project files | [Operator guide](docs/operator-guide.md) |
-| Document, replication and module architecture | [Architecture](media-server-architecture-plan.md) |
-| Renderer behavior, materials, lights and color | [Renderer guide](docs/renderer.md) and [capabilities and limits](advanced-renderer-status.md) |
+| Document, replication and module architecture | [Architecture](docs/architecture.md) |
+| Renderer behavior, materials, lights and color | [Renderer guide](docs/renderer.md) and [capabilities and limits](docs/renderer-capabilities.md) |
 | Cluster recovery, deployment and sync policy | [Cluster operations](cluster-operations.md) |
 | Add or change an effect | [Effect contracts](effect-rendering-requirements.md) |
 | Blender workflow and verification | [Add-on README](integrations/blender/README.md) |
 | Blender protocol and native data contracts | [Scene-link reference](blender%20live%20scene%20link/README.md) |
-| Particle playback and render integration | [Renderer guide](docs/renderer.md#particle-effects) |
-| Physical genlock / wall color validation | [Renderer runbooks](advanced%20icvfx%20renderer/README.md) |
 
 ## Layout
 
@@ -102,8 +93,7 @@ launchers and notices. `-SkipTests` packages the existing build untested. See
 [package instructions](packaging/windows/README.txt).
 
 SDI, NDI, ST 2110, a native Vulkan backend and external render/plugin
-interfaces remain future work. NVAPI synchronization is opt-in and still
-requires physical hardware qualification. GPU conformance checks and
+interfaces are not provided. NVAPI synchronization is opt-in and requires physical hardware qualification. GPU conformance checks and
 loopback tests do not establish scanout, camera calibration or stage-network
-performance; the [renderer limits](advanced-renderer-status.md) and
+performance; the [renderer limits](docs/renderer-capabilities.md) and
 [cluster runbook](cluster-operations.md) describe those boundaries.

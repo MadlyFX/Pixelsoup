@@ -1,28 +1,25 @@
 # Qualification and support boundary v1
 
-This reference retains measured reports from the earlier explicit-publication
-delivery and later geometry benchmarks. The current live project workflow is
-described in the [add-on README](../integrations/blender/README.md),
-[operator guide](operator-guide.md) and [protocol](protocol-v1.md). Older
-Program-side authoring restrictions and add-on versions below describe their
-measurement context; rerun qualification for a new build or hardware setup.
-
 What the Blender live scene link is qualified to do, on what builds, and what it
-does not do. Everything below was measured on the hardware named here; nothing
-is inferred from a different scene size, machine or configuration.
+does not do. The workflow is in the [add-on README](../integrations/blender/README.md),
+[operator guide](operator-guide.md) and [protocol](protocol-v1.md). Everything
+below was measured on the hardware named here; nothing is inferred from a
+different scene size, machine or configuration. The latency tables were recorded
+with add-on 0.7.0 and its explicit freeze-and-publish path; rerun the checks under
+[Reproduce](#reproduce) for a new build or hardware setup.
 
-## Delivered pair
+## Supported pair
 
 | Part | Version | Notes |
 | --- | --- | --- |
-| Blender add-on | `mediaserver_livelink` **0.7.0** | `scripts/package-blender-livelink.py` writes the archive and its `manifest.json` |
+| Blender add-on | `mediaserver_livelink` (version in `bl_info`, currently **0.10.1**) | `scripts/package-blender-livelink.py` writes the archive and its `manifest.json` |
 | Authoring link protocol | **v1** with capability negotiation | Frame version stays 1; optional features are named, see [protocol v1](protocol-v1.md) |
 | Blender | **5.2.0 LTS**, Windows build `fbe6228777e7` | `bl_info` requires 5.2.0; no other build is qualified |
 | Media Server | this checkout, MSVC 14.44, Debug and Release GUI presets | Advanced D3D12 renderer for the GPU checks |
 
-The add-on and the Director are **one delivery**. Install both from the same
-checkout: the capability list below is how a mismatch is caught, not a promise
-that mixed builds interoperate.
+The add-on and the Director are **one pair**. Use both from the same checkout:
+the capability list below is how a mismatch is caught, not a promise that mixed
+builds interoperate.
 
 ## Capability negotiation
 
@@ -31,7 +28,7 @@ Hello carries the pairing code on its first line, then optional declarations:
 ```text
 <64-hex pairing code>
 capabilities=base,stage,environment,materials,animation
-client=mediaserver_livelink/0.10.0 blender/5.2.0
+client=mediaserver_livelink/<add-on version> blender/5.2.0
 ```
 
 Welcome answers with this build's set:
@@ -41,9 +38,9 @@ Welcome answers with this build's set:
 | --- | --- | --- |
 | `base` | Object/prototype/material records, snapshot and delta, resource transfer, writeback (ShotState, `absorb`) | Always negotiated; never refused |
 | `stage` | Stage/camera reference samples (kind 14) | `capability_not_negotiated: stage` |
-| `environment` | `batch` object suffix and `lod` prototype suffix (step 09) | `capability_not_negotiated: environment` |
-| `materials` | `light` object suffix, native linked lights (step 10) | `capability_not_negotiated: materials` |
-| `animation` | `animation` object suffix, node/skin assemblies (step 11) | `capability_not_negotiated: animation` |
+| `environment` | `batch` object suffix and `lod` prototype suffix | `capability_not_negotiated: environment` |
+| `materials` | `light` object suffix, native linked lights | `capability_not_negotiated: materials` |
+| `animation` | `animation` object suffix, node/skin assemblies | `capability_not_negotiated: animation` |
 
 Rules, enforced on both sides:
 
@@ -99,16 +96,15 @@ the payload is, which is why the Debug and Release transfer figures agree while
 ingest, which contains no sleep, falls from 14 ms to 4 ms. Read the columns that way: ingest and adoption measure work;
 transfer, admission and the totals measure work plus a small number of sleep
 quanta. Raising the process timer resolution or waiting on the socket instead of
-sleeping is the lever on the totals; it is a transport change and is **not** part
-of this step.
+sleeping would lower the totals; the transport does neither.
 
-Full reports: [step 12 Debug](evidence/step12-debug-qualification.json),
-[step 12 Release](evidence/step12-release-qualification.json),
-[Blender Debug](evidence/step12-blender-debug.json),
-[Blender Release](evidence/step12-blender-release.json).
+Full reports (recorded with add-on 0.7.0): [Director Debug](evidence/director-debug-qualification.json),
+[Director Release](evidence/director-release-qualification.json),
+[Blender Debug](evidence/blender-addon-debug.json),
+[Blender Release](evidence/blender-addon-release.json).
 
-These are small-fixture, single-machine figures. The step 01
-[baseline](baseline-v1.md) holds the export/upload/adoption numbers for the
+These are small-fixture, single-machine figures. The
+[reference fixture measurements](reference-fixture-measurements.md) hold the export/upload/adoption numbers for the
 larger 256-occurrence dataset. **Do not** present either as a stage-network
 end-to-end latency budget.
 
@@ -128,7 +124,7 @@ no geometry. Blender is busy only during its evaluate-and-copy step. The rendere
 side (`mediaserver_render_geometry_benchmark`, 300 distinct ~100k-triangle parts,
 all in view, 1920x1080, Advanced, D3D12, GPU timestamps per frame) streams the
 29.8M-triangle set into the device arena in about 4 s and then uploads nothing per
-frame. Before and after the show-rate work; "held" is a static camera, "moving"
+frame. Each cell reads "before the show-rate work -> after"; "held" is a static camera, "moving"
 orbits it every show frame:
 
 | Scene | Cascades | Held camera | Moving camera |
@@ -172,7 +168,7 @@ view (authored LODs) or fewer cascades are the levers beyond this.
 
 **Geometry memory is per device, not per view.** The 29.8M-triangle set occupies
 a 1,154 MiB arena (1,031 MiB of meshes). Every renderer on one device with the same
-arena limits now shares one arena: the editor's Program, transition and stage
+arena limits shares one arena: the editor's Program, transition and stage
 views, their Basic and Advanced halves and each planar-reflection child draw the
 same resident meshes instead of each streaming its own copy. A mesh's slots are
 reused only when no renderer holds it and no recording that read or wrote it is
@@ -194,7 +190,6 @@ pending.
 | Copied scene bytes in Blender | 8 GiB evaluated arrays per scene, 4 GiB per mesh, split into 300k-corner resources | publisher `ValueError` before any transfer |
 | Scene geometry | 32 M vertices, 96 M indices, 32 M triangles (renderer arena 48 M / 144 M) | `measure_environment` before admission |
 | Node capacity | 48 M vertices, 144 M indices (old and new revision together), 16 GiB, 16384 nodes per publication | `capacity refused` before Program adoption |
-| Shot claim | 15 s | `shot_claim_expired`, `shot_gesture_already_claimed` |
 | Stage samples | 10 Hz ceiling, latest sample only | empty `StageContext` reply |
 
 ## Qualified scenarios
@@ -234,9 +229,6 @@ resource announcement is refused with the pairing holding exactly 64.
   A different build may work; it has not been measured.
 - No LAN or TLS transport, and no authoring across machines. The pairing is
   loopback-only and is never saved or sent to output nodes.
-- No Program-side authoring: a source attached to Program is refused
-  (`source_used_by_program_step08_required`). Publication is step 08's explicit,
-  frame-aligned path.
 - Mixed builds are refused by capability, not made to interoperate.
 - Unsupported Blender content: vertex caches and shape keys, preserve-volume
   deformation, reflected or sheared sampled transforms, non-square/rectangle area
@@ -260,9 +252,8 @@ cmake --build --preset windows-msvc-debug-gui
 cmake --build --preset windows-msvc-release-gui
 ctest --preset windows-msvc-debug-gui --output-on-failure -R "linked_qualification|director_link|linked_scene_ingest|linked_publication|blender_publisher_unit|scene_linked|linked_animation_stage|linked_look|linked_environment|editor"
 ctest --preset windows-msvc-release-gui --output-on-failure -R "linked_qualification|director_link|linked_scene_ingest|linked_publication|blender_publisher_unit|scene_linked|linked_animation_stage|linked_look|linked_environment|editor"
-powershell -ExecutionPolicy Bypass -File scripts/run-blender-qualification.ps1 -Build release -Gpu
-python scripts/test-blender-livelink.py --build debug --qualification --output out/step12-blender-debug
-python scripts/test-blender-livelink.py --build release --qualification --output out/step12-blender-release
+python scripts/test-blender-livelink.py --build debug --qualification --output out/blender-qualification-debug
+python scripts/test-blender-livelink.py --build release --qualification --output out/blender-qualification-release
 # Detailed geometry: end to end through the Director, and the renderer alone.
 $env:MS_HEAVY_SIDE = '3873'; python scripts/test-blender-livelink.py --build release --heavy
 out/build/windows-msvc-release-gui/engine/render/mediaserver_render_geometry_benchmark.exe 300 223 4
@@ -271,9 +262,75 @@ out/build/windows-msvc-release-gui/engine/render/mediaserver_render_geometry_ben
 out/build/windows-msvc-release-gui/engine/render/mediaserver_render_geometry_benchmark.exe 300 223 4 digest
 ```
 
-`run-blender-qualification.ps1` writes the delivery bundle: the add-on archive
-and manifest, `evidence/qualification.json`, the offline `preview.mstage` and
-`published.mstage` projects, and `sample-collection.blend`. Keep the output
-directory path short — immutable package names must stay inside the legacy
-Windows path limit. See the [operator guide](operator-guide.md) and the
-[delivery checks](ui-checks-step-12.md).
+Each Blender output directory must be new and its path short: immutable package
+names must stay inside the Windows path limit.
+
+`mediaserver_linked_qualification_tests` drives the real link service, ingest
+planner, command scheduler and publication path through 17 scenarios (18 with
+`--gpu`): first publication, rename, duplicate, reparent, origin change, delete,
+undo, resync after undo, interrupted transfer, reconnect, malformed input, a
+24-revision session with repeated resource replacement, cancellation, Director
+restart, save and reopen, resource capacity, two-node publication with controlled
+faults, and Advanced D3D12 rendering of the published revision. It writes
+`qualification.json` with the counters and percentiles.
+
+The installed add-on adds 20 recorded checks against the real Director fixture:
+verified install metadata, capability negotiation, reparent, origin change, three
+texture replacements, a 30-edit session in batches, a refused unrepresentable
+name, explicit recovery, disconnect during an edit, save/reopen/reconnect,
+in-place upgrade and complete removal. Its `results.json` records the measured
+event-to-Preview percentiles and the Blender/Director split of the last revision.
+The Python unit and Blender suites listed in the
+[add-on README](../integrations/blender/README.md#upgrade-and-verification) cover
+the add-on's day-to-day behavior.
+
+### Delivery bundle
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run-blender-qualification.ps1 -Build release -Gpu
+```
+
+One command packages the add-on, runs the qualification harness, writes the
+sample Blender scene and two sample projects, prints the bundle, and starts a
+Director editor on the sample Preview project with isolated local settings.
+`-NoLaunch` builds the bundle only; `-NoBlender` skips the sample scene; `-Gpu`
+also renders the published revision through the Advanced D3D12 renderer.
+
+```text
+mediaserver_livelink.zip                 installable add-on
+mediaserver_livelink.manifest.json       version, protocol, capabilities, file hashes
+sample-collection.blend                  sample collection ready to link
+evidence/preview.mstage                  offline Preview with accepted linked content
+evidence/published.mstage                the same content frozen to Program
+evidence/qualification.json              the measured report for this machine
+```
+
+Open `evidence/preview.mstage` with **File > Open Project** and click **PREVIEW**:
+the **Blender Preview** scene holds the two accepted occurrences the harness
+published, **Renamed hero** (held placement, X 2) and **Duplicate**, with no
+Blender process involved. Open `evidence/published.mstage` and click **PROGRAM**:
+the frozen revision renders from its own immutable packages, so a take runs with
+Blender absent. The **Freeze Blender** dialog (**File > Freeze Blender...**) shows
+**NEGOTIATED CAPABILITIES AND MEASURED LINK**: the publisher build, negotiated and
+served capabilities, accepted/refused/resync counts, event-to-Preview p50/p95, the
+last revision's transfer/ingest/Director split and peak pending bytes. To see a
+mismatch without a second build, publish with the reference client, which
+declares only `base`:
+
+```powershell
+python scripts/scene-link-client.py <manifest.mslink> --port <port> --pairing-code <code>
+```
+
+The Blender sidebar's **Compatibility and evidence** box shows the add-on version,
+protocol, Blender build, the capabilities the Director serves (and any it does not
+serve, with an error icon) and the edit-to-Media-Server percentiles. A genuine
+mismatch is refused by name before any bake or upload without dropping the
+pairing; `tests/blender/test_publisher_core.py` asserts that wording and
+`mediaserver_director_link_service_tests` covers the Director-side refusals. The
+installed add-on folder contains `manifest.json`; compare it with
+`mediaserver_livelink.manifest.json` from the bundle to prove which build is on a
+machine. Every file carries a SHA-256.
+
+This is local process, resource and GPU qualification on one machine. It does not
+claim physical two-machine scanout, genlock, tracker-hardware calibration or lens
+agreement between Blender's reference viewport and calibrated output.

@@ -1,12 +1,13 @@
 # Animation and stage context v1
 
-Implemented by add-on **0.6.0**, qualified against Blender **5.2.0 LTS,
-fbe6228777e7** on Windows. Update the Director and add-on together.
+Qualified against Blender **5.2.0 LTS, fbe6228777e7** on Windows. Update the
+Director and add-on together; the `animation` and `stage` capabilities are
+negotiated at Hello ([protocol](protocol-v1.md#capability-negotiation)).
 
 ## Published animation
 
-Select **Animated assembly** before connecting a collection. **Connect & Publish**
-and **Publish Now** explicitly snapshot the source file and launch a separate
+Enable **Animated assembly** (Advanced publishing controls) before the scene links. **Publish Now**
+explicitly snapshot the source file and launch a separate
 Blender process. That process evaluates the playback range and exports one glTF
 node/skin clip with one sample per source frame. The existing translator supplies
 the supported materials and embedded images. The network worker transfers the
@@ -77,12 +78,12 @@ Source animation is not baked into the assembly's static placement matrix. Follo
 placement composes stage alignment/source placement/shot offset. **Hold placement**
 holds that outer assembly matrix and continues playing the internal animation;
 it does not freeze the current animated pose. A tagged Blender placement empty
-receives the returned shot and parents the authored roots without changing their
-animation channels. Select that empty for two-way shot gestures.
+(**Animation assembly placement**) receives the written-back placement and parents
+the authored roots without changing their animation channels.
 
 Source show-start and loop settings are defaults. Inspector changes are occurrence
-overrides and survive source updates. Snapshot/copy/unlink and step 08 publication
-materialize effective animation settings alongside immutable package references.
+overrides and survive source updates. Snapshot/copy/unlink and Freeze Blender publication
+materialize effective animation settings alongside immutable package references (see [Program publication](program-publication-v1.md)).
 Blender and all its workers can be disconnected during offline show playback.
 Animated assemblies are dynamic GI contributors, including when paused at their
 bind pose; they cannot be opted into the static lighting bake.
@@ -98,7 +99,7 @@ can take time on a large blend file; there is no claim of instant animation expo
 
 ## Stage reference channel
 
-`StageContext` is wire kind **17**, with an empty request payload. Pairing, source,
+`StageContext` is wire kind **14**, with an empty request payload. Pairing, source,
 epoch and scene validation are unchanged. The response is empty if unchanged,
 unavailable, or rate limited. Nonempty responses contain:
 
@@ -123,8 +124,8 @@ a document command, source revision, undo record or persistent tracking history.
 
 Enable **Stage references** to create managed camera and stage-origin objects in
 a separate collection. Their updates bypass source extraction and undo operations.
-In Source display they use inverse stage alignment; Shot display already includes
-alignment, so references use stage coordinates directly. After a delayed sample
+Blender keeps authored coordinates, so the references are transformed back out of
+stage space by the inverse stage alignment. After a delayed sample
 the UI marks the reference held. On disconnect the last managed objects remain
 available, and reconnect starts a fresh sample stream.
 
@@ -140,4 +141,4 @@ off-axis LED-wall slices, feed mapping, projection meshes, inner/outer-frustum
 compositing, plate DOF, facility color, temporal processing, or final calibrated
 output. It is a pose/lens reference for authoring. Media Server remains authoritative
 for every final ICVFX view. Physical tracker hardware accuracy and two-machine
-scanout timing remain qualification work outside this local test.
+scanout timing are not covered by this local test.

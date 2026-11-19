@@ -1,19 +1,22 @@
 # Blender publisher v1
 
-Step 05 implementation: `integrations/blender/mediaserver_livelink`. Current version 0.2.0
-adds [step 06 shot placement](shot-placement-v1.md); step 05 was qualified as 0.1.0,
-qualified on Blender **5.2.0 LTS / fbe6228777e7**, Windows. The add-on checks both
-version tuple and build hash before connecting. Other Blender builds are refused
-until qualified. No third-party Python package is needed.
+The publisher is the add-on in `integrations/blender/mediaserver_livelink`
+(version in `bl_info`, currently 0.10.1), for Blender **5.2.0 LTS / fbe6228777e7**
+or newer on Windows. The add-on checks the Blender version tuple before linking.
+No third-party Python package is needed for the link itself. The workflow it
+serves is in the [add-on README](../integrations/blender/README.md); Media
+Server's edits written back into Blender objects are described under
+[Writeback](protocol-v1.md#writeback).
 
 ## Execution and scheduling
 
 Persistent dependency-graph handlers collect scalar session IDs and invalidation
 flags. Message-bus notifications cover UI names, visibility and mode changes.
 Handlers do not export content. A Blender application timer polls nonblocking IPC
-and processes pending edits after 200 ms of quiet. Idle polling performs no source
-scan, mesh export, hashing, filesystem I/O or network waits. It only polls the
-bounded socket, reaps terminated child processes and redraws the relevant panel.
+and processes pending edits once changes have been quiet for 150 ms (or 500 ms
+after the first unpublished change). Idle polling performs no source scan, mesh
+export, hashing, filesystem I/O or network waits. It only polls the bounded
+socket, reaps terminated child processes and redraws the relevant panel.
 
 All RNA and dependency-graph access occurs on Blender's main thread. A dispatch
 extracts at most one evaluated prototype with `evaluated_get` / `to_mesh` and bulk
@@ -23,12 +26,11 @@ replaced. Completed copies contain numeric arrays and plain metadata only.
 
 Serialization, hashing, GLB generation, resource transfer and Director receipts
 run in a **separate Python process** launched with Blender's bundled interpreter.
-The add-on starts no Python threads. This follows Blender's documented
+The add-on starts no Python threads, following Blender's documented
 [threading limitations](https://docs.blender.org/api/main/info_gotchas_threading.html).
 The [timer API](https://docs.blender.org/api/current/bpy.app.timers.html) provides
 the scheduling context; evaluated mesh lifetime follows the
 [dependency-graph API](https://docs.blender.org/api/5.0/bpy.types.Depsgraph.html).
-The actual pinned build was exercised in background tests and the native GUI.
 
 IPC uses a private loopback listener with a random process handshake. Main-thread
 sends are nonblocking and capped at 256 KiB per dispatch. One extraction batch and
@@ -40,13 +42,14 @@ modifiers can still stall Blender itself, and the panel reports the last duratio
 The declared input limits do not promise a hard latency bound on Blender's own
 dependency evaluation. Split expensive content into manageable prototypes.
 
-Edit/Sculpt mode defers extraction until Object Mode. Undo/redo invalidates copied
-geometry but retains only scalar identity information; no invalid RNA wrapper
-survives between timer calls. File load stops the process, clears the pairing and
-per-file runtime identity maps, and leaves reconnection explicit. Disconnect and
-unregister close sockets and terminate the owned child without a UI-thread join.
-Disable also removes timers, handlers and message-bus subscriptions. On application
-exit, socket closure ends the child's worker loop.
+Edit/Sculpt mode defers extraction until Object Mode, except that Edit Mode
+geometry is flushed to the evaluated mesh without leaving Edit Mode for ordinary
+live sync. Undo/redo invalidates copied geometry but retains only scalar identity
+information; no invalid RNA wrapper survives between timer calls. File load stops
+the process and clears per-file runtime identity maps. Disconnect and unregister
+close sockets and terminate the owned child without a UI-thread join. Disable also
+removes timers, handlers and message-bus subscriptions. On application exit,
+socket closure ends the child's worker loop.
 
 ## Identity and evaluated content
 
@@ -55,49 +58,40 @@ The source UUID is derived from the persisted scene and selected-collection UUID
 The collection stores version/build/source metadata separately from the pairing.
 Renames preserve identity. Session-ID ownership repairs copied custom UUIDs and
 keeps source IDs through Blender undo/redo. As with other Blender document edits,
-save the blend file to retain newly stamped IDs across process exit.
-
-Read-only library IDs use an authored UUID if available, otherwise an explicit
-`ms_link_library_ids` mapping on the local scene. Fallback keys are library path,
-ID type and library name. Renaming/moving an external library entry with no authored
-UUID changes that key; author persistent IDs in the library for rename-stable
-external references. Ordinary editable object identities never use file paths or
-names. The mapping is bounded to 4096 entries and session identity bookkeeping to
-8192 entries, with an explicit refusal when full.
+save the blend file to retain newly stamped IDs across process exit (the add-on's
+**Keep file saved** option does this after sync goes quiet). The identity rules,
+including read-only library data, are in
+[Identity and overrides](identity-and-overrides-v1.md).
 
 Each source object has its own persistent evaluated-prototype UUID derived from
-its object UUID. This conservatively preserves per-object modifier results and
-bindings even for shared mesh datablocks. Identical GLB bytes still deduplicate by
-hash. Prototype hashes identify revisions; they are never object or occurrence IDs.
+its object UUID. This preserves per-object modifier results and bindings even for
+shared mesh datablocks. Identical GLB bytes still deduplicate by hash. Prototype
+hashes identify revisions; they are never object or occurrence IDs.
 Transform-only ancestors outside the collection retain hierarchy and placement.
 
 The serializer writes embedded static GLB with identity nodes, triangle indices,
-split corner normals, active UV0 and per-primitive scalar material slots. Geometry
-and placement follow the established metre/Y-up conversion: `(x, y, z)` becomes
-`(x, z, -y)`; scene unit scale affects geometry and translations once. Origin
-revision stays `origin-v1`. Unchanged prototypes are reused for sparse object
-deltas. Material edits conservatively honor Blender's geometry invalidations;
-the process can rebuild bindings from retained mesh copies when no geometry
-invalidation is reported.
+split corner normals, active UV0, tangents and per-primitive material slots.
+Geometry and placement follow the metre/Y-up conversion `(x, y, z) -> (x, z, -y)`;
+scene unit scale affects geometry and translations once. Origin revision stays
+`origin-v1`. Unchanged prototypes are reused for sparse object deltas. Material
+edits honor Blender's geometry invalidations; the process can rebuild bindings
+from retained mesh copies when no geometry invalidation is reported.
 
-The initial subset is mesh objects, empty/transform parents, evaluated modifiers,
-realized procedural meshes and untextured opaque Principled scalar factors.
-Unsupported object types, non-realized instances (including mixed mesh/instance
-outputs), excluded collections, invalid geometry, reflected/singular drawable
-placement, texture/node-driven shader inputs, transparency and modifier-generated
-material slots produce specific diagnostics. Artist-side realization/baking remains
-an explicit choice. Broad shader translation, scatter and animation interchange
-belong to later steps. Visibility combines object, viewport and selected collection
-hierarchy visibility. A visible child under a hidden selected parent is refused:
-linked hierarchy visibility propagates to children, while Blender's object render
+Supported content is mesh objects, curves/text/surfaces copied as evaluated
+meshes, empty/transform parents, lights, evaluated modifiers and realized
+procedural meshes. Unsupported object types, non-realized instances (including
+mixed mesh/instance outputs), excluded collections, invalid geometry,
+reflected/singular drawable placement and unsupported shader inputs produce
+specific diagnostics; artist-side realization or baking remains an explicit
+choice. Visibility combines object, viewport and selected collection hierarchy
+visibility. A visible child under a hidden selected parent is refused: linked
+hierarchy visibility propagates to children, while Blender's object render
 visibility can be independent. External ancestors are visible transform-only
-records so they cannot accidentally hide the selected content.
-
-Steps 09 and 10 extend that initial subset with shared scatter, terrain/LOD,
-modifier-generated material slots, stable material children, saved role-specific
-images, a bounded Principled subset and typed native lights. The current contract
-is [Materials and lighting v1](materials-and-lighting-v1.md); its explicit base
-color bake produces a supported material copy while retaining the source.
+records so they cannot accidentally hide the selected content. Scatter, terrain
+and LOD, material and light translation, and animation assemblies are specified
+in [Environment scale](environment-scale-v1.md),
+[Materials and lighting](materials-and-lighting-v1.md) and
+[Animation and stage](animation-and-stage-v1.md).
 
 ## Bounds and recovery
 
@@ -113,22 +107,22 @@ color bake produces a supported material copy while retaining the source.
 | IPC send work | 256 KiB per 50 ms active dispatch |
 | Director manifest | 1 MiB / 4096 records |
 
-The existing Director also limits a pairing to 4096 distinct completed resource
-hashes, 16 GiB of resource bytes and 256 final receipts. These session limits can
-be reached during continued editing even if the current collection is small.
-Restart Scene Link and copy its new details to continue; retained resources remain
-subject to the existing cache/disk policy. Large-environment capacity is step 09.
+The Director also limits a pairing to 4096 distinct completed resource hashes,
+16 GiB of resource bytes and 256 final receipts. These session limits can be
+reached during continued editing even if the current collection is small; **Resync
+Scene** starts a fresh pairing, and retained resources remain subject to the
+cache/disk policy in the [protocol](protocol-v1.md#resources-and-capacities).
 
 The worker pairs and registers first, uploads complete resources, then sends a
 snapshot. Later changes use `MSDELTA` against the last acknowledged revision;
 unchanged states send no transaction. Deletions erase source records and become
 Director tombstones. Reintroduction retains the same object UUID and shot state.
-The Director validates the full candidate and schedules one authoring undo action.
-Step 06 isolates incoming authoring history from native local Scene Undo.
+The Director validates the full candidate and schedules one authoring undo action
+in a context separate from local Scene Undo.
 
-Resync starts a fresh worker, reads the Director's actual revision and publishes
-the current collection as a new snapshot. Socket failures, rejections and stale
-bases stop publishing with a visible diagnostic. There is no implicit overwrite
-retry after a conflict. Keepalives detect Director-side revision changes. Live
-updates can pause while the last submitted transaction finishes. The service is
-local and Preview-only. Step 06 adds reverse placement; Program adoption remains step 08.
+Resync starts a fresh worker, reads the Director's actual revision and sends the
+current scene as a new snapshot. Interrupted connections retry with bounded
+backoff; rejections and stale bases stop publishing with a visible diagnostic,
+and there is no implicit overwrite retry after a conflict. Keepalives detect
+Director-side revision changes. Live updates can pause while the last submitted
+transaction finishes.

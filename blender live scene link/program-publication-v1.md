@@ -1,10 +1,9 @@
 # Coordinated Program publication v1
 
-Step 08 publishes a frozen scene through the existing asset cohort and sealed
-control-frame authority. This is now optional: linked scenes go on air live, one
-Blender scene per Media Server scene, and publication is only for a Program that
-must not change while Blender keeps editing. The operator freezes it with
-**File > Freeze Blender...** (formerly Publish Preview).
+A frozen scene is published through the asset cohort and sealed control-frame
+authority. Linked scenes go on air live, one Blender scene per Media Server
+scene; freezing is only for a Program that must not change while Blender keeps
+editing. The operator freezes Preview with **File > Freeze Blender...**.
 Publication does not add a second clock, a Blender-to-node connection, or a new
 file-transfer protocol to the session transport.
 
@@ -32,8 +31,8 @@ mips and package animation data. Arbitrary external model formats and image
 sequence patterns are refused: ingest the model or package the sequence first.
 Freezing a media source removes its mutable Library/proxy identity.
 
-Step 10 qualifies active baked GI/reflections against their dependency revision
-before freezing any paths. Stale or untagged derived lighting refuses the candidate
+Active baked GI/reflections are qualified against their dependency revision
+before any path is frozen. Stale or untagged derived lighting refuses the candidate
 and retains Program. Rebake, or explicitly disable GI and every reflection capture,
 before publishing. Probe v3 stores the input hash and travels in the same immutable
 resource cohort as the models. See [Materials and lighting v1](materials-and-lighting-v1.md).
@@ -90,7 +89,7 @@ agreement does not establish hardware scanout synchronization.
 
 ## Capacity and lifecycle
 
-The initial fixed publication admission envelope is:
+The fixed publication admission envelope is:
 
 | Limit | Value |
 | --- | --- |
@@ -132,6 +131,8 @@ renderer through the ordinary show workflow. Admission failure retains Program.
   output node disconnect follows the existing frame-barrier hold policy. If that
   barrier has stopped control-frame advancement, queued UI changes wait with it.
 
-This implements publication for the supported static collection workflow. Steps
-09–11 still define broader scatter, material translation, animation and stage
-context support. See [current operator workflow](operator-guide.md).
+See the [operator guide](operator-guide.md) for the procedure, and
+[Environment scale](environment-scale-v1.md),
+[Materials and lighting](materials-and-lighting-v1.md) and
+[Animation and stage](animation-and-stage-v1.md) for the content a revision can
+carry.

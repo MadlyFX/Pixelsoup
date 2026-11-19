@@ -1,7 +1,7 @@
 # Environment scale v1
 
-Step 09 qualifies static foliage and terrain on the pinned Windows Blender
-5.2.0 LTS build `fbe6228777e7`, with add-on version 0.4.0. The Director owns
+Static foliage and terrain are qualified on the pinned Windows Blender 5.2.0 LTS
+build `fbe6228777e7` (measurements taken with add-on 0.4.0). The Director owns
 admission and publication; output nodes receive the same immutable packages and
 explicit transforms. They never run a procedural generator or density sampler.
 
@@ -30,10 +30,9 @@ the same UUID returns. A tree's array index never owns a shot override. A render
 history key derived from group and local matrix distinguishes stationary trees;
 it is not a persistent authoring identity. Moving a candidate resets its history.
 
-Use the real Blender emitter or terrain parent for bidirectional shot gestures.
-Generated batch/chunk rows can receive Director-side overrides, but do not create
-editable Blender objects or reverse shot wrappers. Individual-tree detachment is
-not exposed in this version; create an authored prop when it needs its own shot.
+Generated batch/chunk rows can receive Director-side overrides, but they are not
+editable Blender objects, so those overrides stay in Media Server. Individual-tree detachment is
+not available; create an authored prop when it needs its own shot.
 
 ## Density and supported generators
 
@@ -45,7 +44,7 @@ Sampling is probabilistic in count, deterministic in membership. At 100%, every
 candidate is retained; changing the sampling seed then has no effect.
 
 The active view layer must contain the complete deterministic candidate set.
-This version does not invoke a second render-mode dependency graph. Mismatched
+The link does not invoke a second render-mode dependency graph. Mismatched
 modifier viewport/render switches, Is Viewport nodes (including nested groups),
 particle/hair systems, non-mesh instance prototypes, reflected placements and
 unqualified material shaders produce diagnostics. Anonymous procedural geometry
@@ -130,8 +129,8 @@ requires zero failed, pending or dropped models in steady rendering.
 
 This synthetic dataset qualifies storage and submission scale. It does not claim
 photorealistic foliage, alpha-tested leaf materials, real-time performance on every
-GPU, or a new physical two-machine frame-timing qualification. Step 10 now supplies
-[material and lighting translation](materials-and-lighting-v1.md), including stable
-material surfaces within scatter and terrain. That look test does not qualify a
-photorealistic forest at this capacity ceiling. Existing step 08 cohort activation
-tests cover frame-aligned publication.
+GPU, or a physical two-machine frame-timing qualification.
+[Material and lighting translation](materials-and-lighting-v1.md) supplies stable
+material surfaces within scatter and terrain; that look test does not qualify a
+photorealistic forest at this capacity ceiling. Frame-aligned publication is
+covered by the asset cohort activation tests.

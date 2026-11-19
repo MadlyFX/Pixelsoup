@@ -1,24 +1,23 @@
 # Director authoring link protocol v1
 
 Implemented by `net/authoring_link_protocol` and `render/director_link_service`.
-The reference client is `scripts/scene-link-client.py`. Step 05 implements Blender
-collection evaluation and publication in `integrations/blender/mediaserver_livelink`.
+The reference client is `scripts/scene-link-client.py`; the Blender add-on in
+`integrations/blender/mediaserver_livelink` is the production client.
 
 ## Transport and pairing
 
 The Director starts one loopback IPv4 TCP listener per linked scene when Blender
 opens it. The OS selects a port, and each listener has a 256-bit OS-random pairing
 code that the Director hands the add-on through same-user local discovery (below).
-Stop cancels I/O and ingestion and revokes the pairing; Start generates a new code,
-epoch and scene token. Pairing is ephemeral, never saved in a project or sent to
+Closing the link cancels I/O and ingestion and revokes the pairing; opening it
+again generates a new code, epoch and scene token. Pairing is ephemeral, never saved in a project or sent to
 output nodes. There is no LAN or TLS mode in v1. Local clients with the code are
 authorized to edit that scene.
 
-After reviewing the Director/node session and lifecycle seams, the existing
-`TcpFramedStream` was selected for its bounded complete records, size-prefix
+The link uses `TcpFramedStream` for its bounded complete records, size-prefix
 validation, deadlines and poisoned-stream behavior. Authoring uses a separate
 listener and protocol; it cannot submit node replication commands or touch GPU
-state. The new `interrupt()` wakes I/O without joining from the control loop.
+state. `interrupt()` wakes I/O without joining from the control loop.
 
 One connection, one resource transfer and one scene transaction are processed at
 a time. Clients wait for each resource acknowledgement and for the terminal scene
@@ -62,13 +61,13 @@ Unused strings are empty and unused numbers zero.
 | Resync | 11 | Revision, epoch, scene, origin or delta-baseline disagreement |
 | Status | 12 | Admission progress, or client status/keepalive request |
 | ShotState | 13 | Media Server's overrides on the source's occurrences (`MSSHOT 2`, see Writeback); conditional revision polling |
-| StageContext | 14 | Latest camera/lens/show-time sample (step 11) |
+| StageContext | 14 | Latest camera/lens/show-time sample |
 
 ShotState responses can contain up to 1 MiB; other controls retain the 4096-byte
 limit. Incoming authoring uses a dedicated undo context, preserving local Scene Undo
 when source geometry arrives after a local gesture.
 
-## Step 12 capability negotiation
+## Capability negotiation
 
 The frame version stays 1. Optional wire features are named instead, so a
 publisher and Director from different deliveries refuse the specific operation
@@ -102,7 +101,7 @@ for a new source. A mismatched base receives Resync. Clients rebuild their candi
 against the returned revision before retrying. One source is registered per
 connection; reconnect to change sources.
 
-Step 07 allows Register to carry the collection's display name as a UTF-8 text
+Register may carry the collection's display name as a UTF-8 text
 payload of at most 256 bytes, without line breaks or tabs. An empty payload
 preserves an existing name. Names affect the UI only; UUIDs still determine
 identity. The accepted source stores the name with its next revision.
@@ -112,8 +111,9 @@ transactions, including a recheck immediately before Director admission. The
 specific rejection is `source_paused: resume_the_collection_then_publish`.
 It preserves the connection, retained complete resources and last accepted
 revision. Status/keepalive and ShotState remain available. The publisher
-retains its evaluated edit and retries only after the operator resumes the
-collection and explicitly publishes. This requires no new message kind/version.
+retains its evaluated edit; when the operator resumes the collection the
+Director's Status reports `source_resumed` and the publisher sends the retained
+edit.
 
 ## Resources and capacities
 
@@ -132,7 +132,7 @@ resources survive reconnect, re-pairing and Director restart. Prototype paths mu
 be exactly `<hash>.glb` matching the declared hash, and that resource, and an
 authored LOD's, must be complete in this pairing or verified in the store.
 No client path is used as a write destination. Absolute paths, traversal and
-arbitrary resource dependencies are rejected. Step 03 then validates the complete
+arbitrary resource dependencies are rejected. Ingestion then validates the complete
 graph, transforms, materials and embedded static GLB contents before admission.
 
 Limits are 4096 completed resource hashes, 64 MiB per resource and 16 GiB total
@@ -161,9 +161,7 @@ only by rename, so another process never reads a partial file.
 Worker-side admission checks at pairing, resource announcement and scene staging
 stop new work above 64 GiB held by the store; ingest refuses a new package
 generation at 65536 indexes. One already admitted import can add its bounded
-packages before the next check. Pairing directories written by earlier builds
-(`<16 hex digits>/`) are neither counted nor touched, and projects saved with them
-keep rendering from them. Earlier generations remain for undo and offline
+packages before the next check. Earlier generations remain for undo and offline
 playback; there is no automatic garbage collection of anything a project may
 reference. Only staging files more than an hour old are removed, at pairing. Local
 cache locations never serve as persistent object IDs.
@@ -194,7 +192,7 @@ objects become existing recovery tombstones. The resulting full manifest is
 validated and staged; unchanged resource packages are reused. No transaction is
 coalesced across another transaction boundary.
 
-Step 10 uses the existing material records and the manifest's optional typed
+Material look and lights use the material records and the manifest's optional typed
 `light` object suffix. Material look and light-only changes therefore use the same
 delta transaction with no new transport message; no mesh upload is needed for a
 light edit. See [Materials and lighting v1](materials-and-lighting-v1.md).
@@ -208,8 +206,9 @@ transaction in the incoming-authoring undo context, separate from local Scene
 gestures. Remote scheduler IDs use a separate high-bit namespace from local editor
 gestures and are numbered by the Director across every link.
 
-The target may be on Program: a link edits its scene wherever it is (add-on 0.10.0).
-Only a frozen published revision refuses edits (`scene_frozen`). Successful scheduling
+The target may be on Program: a link edits its scene wherever it is. A frozen
+published revision is a separate, unlinked scene (see
+[Program publication](program-publication-v1.md)). Successful scheduling
 produces `Ack(accepted; live)`. This acknowledges the projected document, not GPU
 readiness: an asset change still reaches Program through the existing asset cohort
 permit, revealed by every node on one frame. Network parsing, resource I/O, hashing
@@ -289,7 +288,7 @@ re-pairing; opening a project stops the listener. A frozen published revision
 refuses admission.
 Playback uses accepted immutable packages while the publisher is disconnected.
 
-## Step 09 environment payloads
+## Environment payloads
 
 Snapshot and delta object rows may carry the explicit `batch` suffix, and prototype
 rows may carry one explicit `lod` suffix, as defined in
@@ -298,15 +297,14 @@ the existing hashed resource transfer before admission. Density selection and
 terrain clipping happen on the publisher; the wire carries final transforms and
 chunk resources. The Director validates the complete expanded scene budget before
 offering an atomic candidate to the command thread. No per-output regeneration or
-new transport message type is introduced. Older implementations reject these
-suffixes; a publisher must declare the `environment` capability, and the Director
-and add-on ship as one delivery.
+new transport message type is introduced. A publisher must declare the `environment` capability to use these suffixes,
+and the Director and add-on ship as one delivery.
 
-## Step 11 animation and transient references
+## Animation and transient references
 
 Animation assemblies use the existing hashed GLB upload, with an explicit
 `animation start_frame loop` suffix on their object row. Node/skin data remains
 inside the immutable package. The `StageContext` request/reply (kind 14)
 delivers a bounded latest camera/lens/show-time sample without document commands
-or revision changes. The [step 11 contract](animation-and-stage-v1.md) specifies
+or revision changes. The [animation contract](animation-and-stage-v1.md) specifies
 its fields, 10 Hz service ceiling, camera axes and reference limitations.

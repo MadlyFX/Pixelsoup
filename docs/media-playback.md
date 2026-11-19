@@ -310,7 +310,7 @@ of four proxies and of a 4K source loses no more frames than it does idle.
 Running more than one encode at once makes Fast proxies only about 20%
 sooner: decoding the 4K source on the CPU is the limit. Dragging the playhead shows the frame one display tick behind
 the pointer on proxies; on four 4K sources it can show nothing until the drag
-stops. Playing backwards does not yet reach exact frames on either file.
+stops. Playing backwards does not reach exact frames on either file.
 
 ## Holding a video clip at half resolution
 
@@ -378,14 +378,11 @@ a clip starts its ready ratio runs a few points below full resolution
 
 ## Clips the scene has stopped authoring
 
-A clip removed from a scene gives its memory back, which for a long time it
-did not. Removing one 4K plate from a show on a 6 GB node left around 800 MiB
-held until the show was restarted, because the only eviction keyed on a
-change of authored media hung off the asset generation key - and that key is
-zero for the whole life of any project without a published package, so for
-those projects it never ran at all.
+A clip removed from a scene gives its memory back. Removing a 4K plate from
+a show frees its memory on a node without a restart, whether or not the
+project has a published package.
 
-The cache now compares the authored source list against the one it last saw,
+The cache compares the authored source list against the one it last saw,
 whatever that key says. A source that has gone loses its resident textures,
 its pending uploads and its decoded-frame accounting here, and the decode
 side is asked to let go of it: that retires its ready frames and closes its

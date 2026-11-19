@@ -10,22 +10,21 @@ buffers, pipelines, and three draw shapes (instanced quads, a depth-tested
 pass) - with an SDL GPU Basic backend and a native D3D12 Advanced backend.
 The native path owns its DXGI swapchain and polls command/backbuffer
 availability without waiting on the frame path. Nothing above the RHI names
-either implementation, which leaves room for a Vulkan backend later.
+either implementation, so a second backend would not change them.
 `engine/render` is everything that turns a
 `scene::Scene` value into pixels: it never reads the document, and the scene
 layer never learns a GPU exists. A render node and the editor's Program/Stage
 viewports share this exact path, so what an operator sees while authoring is
 what the wall shows.
 
-`HybridSceneRenderer` now owns backend selection above `SceneRenderer`.
+`HybridSceneRenderer` owns backend selection above `SceneRenderer`.
 Selection and quality policy are replicated scene state. Basic is the current
 SDL GPU implementation; Advanced raster is the native D3D12 scene-linear
 implementation, not a feature alias. Optional requests report an explicit
 Basic fallback when the native product contract cannot be met. Required
-requests return `CapabilityUnsupported` and hold Program. The later RT, DDGI,
-ReSTIR, denoise and TAAU options remain fail-closed until their
-passes exist.
-See [advanced-renderer-status.md](../advanced-renderer-status.md) for the exact
+requests return `CapabilityUnsupported` and hold Program. Options without a pass (RT, DDGI,
+ReSTIR, denoise) fail closed.
+See [renderer capabilities and limits](renderer-capabilities.md) for the exact
 capability and integration matrix.
 
 **The Advanced renderer is built when a scene asks for it.** Every pass that
@@ -71,7 +70,7 @@ eye point and near/far planes untouched (`scene::view_for_slice`). Two adjacent
 nodes therefore evaluate the identical floating-point expression for their
 shared edge. The one-to-one canvas-slice tests check exact shared pixels;
 physical wall agreement still requires the deployed-cohort qualification in
-[capabilities and limits](../advanced-renderer-status.md). A four-node canvas
+[capabilities and limits](renderer-capabilities.md). A four-node canvas
 renders four slices rather than four full frames cropped afterward.
 
 **`SceneRenderer`: one scene, one target.** Given a `Scene` and a slice, it
@@ -160,10 +159,10 @@ bounded maximum of `4`; it runs in linear light for Exposure projects and on
 encoded display values for Gain projects. Both lit geometry and decoded media
 use the same contract. Brightness and Saturation factors retain one product
 across first-class effects and graph modifiers, then apply their final clamp
-and project response once. Blur remains a later isolated spatial operation. A
+and project response once. Blur is a separate, isolated spatial operation. A
 graph or first-class effect stack that authors an active inline operation after
 Blur is rejected visibly instead of being silently reordered; identities are
-inert. Because graph modifiers currently resolve back to authored scene nodes,
+inert. Because graph modifiers resolve back to authored scene nodes,
 an Output-reachable graph also permits only one Scene Layer for a given source;
 a duplicate is diagnosed rather than allowing two branches to leak effects
 into each other.
@@ -297,15 +296,13 @@ sheen, thin transmission, IOR, specular and anisotropy. Select an object and ope
 **Properties > Surface Layers** to edit its numeric factors, or use **Library >
 Models > Import Model** to retain authored glTF factors and maps. Import, Add
 Model and UV Mesh Browse report background job progress and specific refusals.
-See [capabilities and limits](../advanced-renderer-status.md) for unsupported
+See [capabilities and limits](renderer-capabilities.md) for unsupported
 rendering paths and qualification boundaries.
 
 **Model animation.** Imported glTF node animation and skins now follow the exact
 show frame, including Hold and seek. Select a model and use **Properties > Model
 Animation** to choose its clip, looping and start frame, or add deterministic
 foliage wind. Mark moving models **Bake Geometry: Dynamic** before baking.
-The [two-joint example](../advanced%20icvfx%20renderer/fixtures/show-frame-skin.gltf)
-provides a self-contained import fixture.
 
 **HDRI background fog distance.** In **File > Project Settings > Environment >
 Sky and Fog**, enable fog and set **Background distance** in metres. Start with
@@ -350,145 +347,12 @@ so two nodes round the pixel they share identically. Basic input remains a
 straight sample. Applied last, after warp and after the switcher's dissolve;
 per-panel calibration stays on the LED processor.
 
-## Particle effects
-
-Particle effects are played by the ajfx runtime, which is optional and still
-in development. A build configured without it (the default;
-`MEDIASERVER_AJFX_SOURCE_DIR` empty) keeps the scene schema, replication and
-digests for `scene.particle_effect`, but compiles none of the classes below:
-the scene renderer counts every started effect in
-`RenderStats::particles_unsupported`, gives "this build does not include
-particle effects" as `particle_issue`, and refuses readiness. The rest of this
-section describes a build with ajfx (`render::particle_runtime_built`).
-
-A `scene.particle_effect` places an `.ajfx` package exported by ajfx Studio.
-`render::ParticlePackageCache` reads and
-checks packages on a worker, and the scene renderer creates at most one new
-instance a frame. `render::ParticlePass` steps each instance to its show
-frame's simulation step within a per-frame step budget
-(`RendererLimits::particles`), seeking through a preallocated checkpoint ring
-and holding readiness while it catches up. Its kernels run on the RHI through
-`render::ParticleDevice`, which leaves particle records byte-identical to
-ajfx's own D3D12 device on the same GPU. Particles need the Advanced renderer;
-Basic refuses a started effect with the reason.
-
-A package delivered with its cache (`name.ajfx` beside `name.ajfxcache`, as
-ajfx Studio delivers a performed scene) is read with it on the package worker
-and opened as baked (`ajfx::Cache::open_as_baked`). The instance then takes
-the cache's instance seed rather than the placement's, plays the performance
-the cache holds (scene actions are ignored for it), and reads the cached
-emitters on the pass's rigid runner instead of simulating them, so a node's
-seek is a read; live emitters step beside them as they did when baked. A
-cache that does not belong to its package (a changed layer, another effect,
-another version) fails the package, and the reason reaches readiness as the
-particle issue; removing the cache plays the effect live.
-
-- **Drawing.** Sprites face along the camera's axes with the slice's
-  projection, depth-tested without depth writes; blended mesh particles write
-  depth. Alpha-blended emitters sort along the camera's forward axis taken
-  into the effect's space, so slices agree. Full canvas and slices draw
-  byte-identical sprites.
-- **Textures** are staged one recording's upload space at a time, and an
-  effect holds until they land. sRGB is decoded after filtering, as for model
-  textures. A package missing a texture its effect names fails readiness,
-  naming the texture.
-- **Motion vectors.** With temporal antialiasing on, sprites covering at
-  least half a pixel write one flat velocity each, from canvas-wide matrices,
-  so slices write the same bits as the full canvas. Particles are not in
-  object motion blur, and an effect's own placement moving adds no motion.
-- **Soft particles** read scene depth from the velocity product's z, so all
-  effects' colour draws before any effect's motion. Perspective and
-  orthographic views both work.
-- **Grid volumes** (`Effect::volumes`) simulate on the RHI
-  through the same particle device, grid for grid what ajfx's own device
-  leaves. Each is drawn after the props and before the sprites, so particles
-  draw over the smoke as in the reference renderer: the grid's box is
-  rasterised in world space from the effect's placement, and each pixel of
-  its back faces marches the view ray through the cells in 64 fixed steps,
-  absorbing by density times `extinction` and scattering `albedo` of it in
-  `color`, lit by the scene's first directional light through 8 fixed steps
-  back out of the box and that light's shadow cascades (four-tap compare,
-  the sprites' bias), plus the hemisphere, plus every local light (the
-  scene's point and spot lights and the frame's particle lights, by the lit
-  pass's windowed inverse-square falloff and unshadowed by the smoke, so a
-  fire lights its smoke from within), under the scene's exposure. The
-  reference renderer's absorption and single scattering exactly, so a uniform
-  slab draws the same cover and colour on both. Rays come from the camera's
-  eye and forward axis and the box, never from the slice's projection, so
-  slices agree. The pipeline tests no depth: the march stops at the scene's
-  depth read from the velocity product, as soft particles do, so smoke stays
-  behind a wall and surrounds a camera inside its box; props and other
-  effects' particles are not in that depth. Volumes write no motion and
-  cast no shadow on the particles, nor the particles on them.
-- **Lit particles** (`SpriteRenderer::lighting`) take the scene's light: the
-  vertex stage sums every scene light (suns, points, spots with their cones;
-  no shadows, profiles or area shapes) into six directions of the sprite's
-  frame, with the hemisphere ambient and the scene's exposure, and the pixel
-  stage weighs them by the rounded normal, the mesh normal or the six-way
-  maps. A shadowed emitter reads the directional cascades per pixel with a
-  four-tap compare and a constant bias of three texels, choosing the cascade
-  from the world point as the lit pass does. Unlit emitters are drawn as
-  before; the scene renderer hands the pass a `ParticleLighting` each frame,
-  and a pass drawn without one lights from the camera.
-- **Particle lights** go into 64 reserved light slots, written by a compute
-  pass so positions never leave the GPU; an effect that would overrun them is
-  refused with the reason. The Advanced lit pass adds them without shadows,
-  cones or profiles; Basic, reflections and fog do not see them.
-- **Published parameters** (`particle_parameter.<name>.<component>` values
-  and keys under the same name) are sampled as curves at each simulation
-  step. A changed value or key restarts the simulation.
-- **Draw inputs** (`SpriteRenderer::tint`, `brightness`, `opacity` and
-  `size_scale`) multiply each emitter's particles as they are drawn, never
-  as they are simulated: `ajfx::draw_adjustment` is resolved once an
-  advance, against the parameters at the step reached, and reaches the
-  sprite, ribbon and mesh draws (a body kind's own tint and scale multiply
-  on top).
-- **Rigid physics** runs off the frame path: each pass owns one
-  `ajfx::RigidRunner` (`ParticleSettings::rigid_threads` threads, default 2),
-  and an instance whose step the runner has not reached holds. No physics
-  step or checkpoint runs while a frame records.
-- **Props** (a bucket to spill out of, a wall to pile against) are drawn from
-  the same rigid frame as the particles, so what is on screen is one tick of
-  one world. A prop's model is drawn through the mesh-particle path, scaled by
-  the authored `size` and turned by the pose's own orientation, before the
-  emitters so it depth-writes like a scene model and takes the scene's light
-  and shadows like the lit debris around it; a prop takes no particle capacity and does not change where
-  particles sort. Its motion vector comes from the velocity its pose reports,
-  as a particle's does from its own. Meshes are uploaded once per name, so
-  emitters and props drawing the same model share buffers. A prop draws the
-  model it names whatever it collides as, so a bucket collides as a generated
-  hollow cylinder (a collision mesh cannot move) and is still drawn as its
-  model; a prop that names no model draws nothing, and one naming a model its
-  package does not hold fails readiness as any missing mesh does. Props carry
-  no colour or texture of their own, so a drawn one is white.
-- **Actions** (`ParticleEffect::actions`, ajfx's tick-stamped `Action`s) are a
-  host-local input for a tool that acts on the running effect (ajfx Studio's
-  Drop and Delete): never replicated or digested, so a wall plays a
-  performance from its baked cache instead. A host hands a new immutable
-  provider with `actions_from`, the first tick it differs at;
-  `ParticlePass::revise` drops the GPU and rigid checkpoints after that tick
-  and replays from the latest one at or before it, so an action stamped at
-  `render::acting_tick` of the last target replays nothing. An instance with
-  actions runs its rigid physics `ParticleSettings::acting_rigid_lead` steps
-  ahead (default 4) rather than `rigid_lead`, so that tick is soon.
-- **Limits.** One D3D12 recording may touch 1024 device buffers; a sorted
-  emitter uses a dozen or more. From a 512-pixel shorter side, bloom's slice
-  apron is 256 pixels and, with temporal antialiasing and occlusion, passes
-  the default `slice_apron_limit` (256), so such a project must raise it.
-
 **Temporal antialiasing on a held frame.** A paused show renders the same
 show frame over and over. Each repeat is a hold: the temporal resolve returns
 its last image untouched and takes in no new sample, so a paused wall neither
 shimmers nor creeps toward an image playback never reaches. A hold is only
-right while the frame still draws what that image saw. A scene edit already
-resets history through the scene digest; what the digest cannot see is
-reported by the scene renderer as `RenderStats::particle_digest` - each drawn
-particle effect's placement, instance and simulated frame. When it differs
-from the one the held history was made with (a package finished loading, a
-seek finished catching up, or a re-exported package was adopted), the facade
-resolves that frame afresh, as a reset, and publishes `HistoryDisposition::Reset`
-(`RendererDiagnostics::history_content_resets` counts these). Later holds that
-draw nothing new repeat it exactly.
+right while the frame still draws what that image saw. A scene edit resets history through the scene digest, so an edited scene
+resolves afresh rather than holding the old image.
 
 **Orthographic views.** `scene::Camera::orthographic_height`, when positive,
 makes `view_for_slice` orthographic: the window is world-sized at every depth,

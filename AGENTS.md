@@ -21,8 +21,6 @@ document or scanning binary model assets to understand a small change.
 | Director/node entry points and Blender service | `apps/server` |
 | Director frame-loop phases and editor command authoring | `apps/server/director_show_loop.hpp`, `apps/server/director_*.cpp` |
 | Offline lighting bake | `apps/bake` |
-| Particle effects in the scene renderer (ajfx host side, built only with ajfx) | `engine/render/particle_*`, `engine/render/src/scene_renderer_particles*.cpp`, `engine/scene` (`scene.particle_effect`) |
-| ajfx runtime and Studio | Separate, optional ajfx project; not needed to build |
 | Blender publisher | `integrations/blender`, `tests/blender`, `scripts/test-blender-livelink.py` |
 
 Modules have colocated `tests/`; the headless spine also uses `tests/unit/`.
@@ -32,8 +30,7 @@ build inputs and notices and must not be treated as disposable cache.
 
 ## Development contracts
 
-- This software is unreleased. Breaking schema and UI changes are acceptable;
-  do not add migration or compatibility layers without a concrete need.
+- Do not add migration or compatibility layers without a concrete need.
 - Keep expensive file reads, hashing, parsing and blocking waits off control
   and frame recording paths. Use bounded, event-driven worker/cache adoption;
   avoid expensive periodic work on the control thread.
@@ -63,12 +60,7 @@ build inputs and notices and must not be treated as disposable cache.
 
 ## Build and validation
 
-Build from an MSVC developer shell with `VCPKG_ROOT` set. Builds do not
-need ajfx: without it placed particle effects are refused readiness as
-unsupported (`scene_renderer_particles_unavailable.cpp`). Setting
-`MEDIASERVER_AJFX_SOURCE_DIR` to an ajfx checkout defines
-`MEDIASERVER_HAS_AJFX` and builds the particle host and its tests; a change
-to either side must keep both configurations compiling.
+Build from an MSVC developer shell with `VCPKG_ROOT` set.
 `scripts/run-editor.ps1` launches the editor (Director) workflow and
 `scripts/run-output-node.ps1` a render node on another machine; `-Exe`
 selects a particular build. Both log to `%LOCALAPPDATA%\MediaServer\logs`.
@@ -105,7 +97,5 @@ Write disposable builds, logs, captures, demo projects and exports under
 `out/`. Never commit Python bytecode, `.mslink-cache-v1` directories or
 digest-named `.gltf.*.msmodel` / `.glb.*.msmodel` / `.obj.*.msmodel` caches.
 Preserve source assets, test fixtures, third-party notices, user projects and
-local configuration. Keep current behavior in focused reference docs and
-an area's future requirements in its plan document (for example
-`asset-viewer-plan.md`); Git history holds completed step plans, the former
-roadmap and historical review output.
+local configuration. Keep current behavior in focused reference docs;
+Git history holds earlier plans and review output.

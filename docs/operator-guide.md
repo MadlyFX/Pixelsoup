@@ -31,9 +31,7 @@ share Stage's dock. Select an object on Stage or in Scene to edit it in
 Properties. Import content in Library, then drag it onto Stage or a Timeline
 track; double-click it to look at it in the Asset Viewer first. Additional
 panels are available in the Window menu.
-Saved workspaces retain their dock arrangement. A workspace saved by an older
-build is not read; the editor opens this starting layout instead. Panels added
-since a workspace was saved start closed - open them from the Window menu.
+Saved workspaces retain their dock arrangement.
 **View > Reset Workspace** restores this starting layout when you want to adopt
 it or undo dock rearrangements.
 Panel dragging and other editor input target 60 Hz independently of the show's
@@ -751,9 +749,8 @@ opacity or a non-linear screen grade applies per clip rather than to the
 blended result. That is a real difference and it is the reason this is written
 down rather than assumed away.
 
-The document keeps calling this a lane - `lane_id` on a placement, and
-`timeline_lane` nodes - because those names are in saved projects and renaming
-them would not open an older show.
+The document keeps calling this a lane: `lane_id` on a placement, and
+`timeline_lane` nodes.
 
 Drag the In or Out handle on the ruler to move that end of the range; each
 handle answers anywhere down the ruler's height, not only on the range bar.
@@ -1268,7 +1265,7 @@ way a dropped asset is: an outline previews where it will rest. Lights and
 the camera are added where their defaults put them. Right-click an asset, folder or empty
 space for **Open in Asset Viewer** (Enter), **Rename** (F2), **New Folder**, **Move to Top
 Level**, **Remove from Library** (Delete), **Import Media...**, **Import
-Model...**, **Import Particle Effect...** and **Rescan Sources**.
+Model...** and **Rescan Sources**.
 
 **Folders** are organisation only. A folder is an `asset.folder` document
 node, and an asset names its folder in a `folder` field. Neither changes how
@@ -1297,9 +1294,7 @@ What happens on release depends on where it lands:
   **Ctrl** held while it is off), the landing point steps to the 1 m grid
   across a level or upright surface, and a screen's turn steps by 5
   degrees. An imported model is hit on its own triangles a moment after it
-  first appears. Until then, the Stage uses its bounding box. A particle
-  effect has no size until it runs, so its origin lands on the point under
-  the pointer.
+  first appears. Until then, the Stage uses its bounding box.
 - **An empty part of the Timeline:** each asset becomes a new layer.
 - **A compatible Timeline row or Compositor Scene Layer:** the asset replaces
   that source, as described below.
@@ -1308,8 +1303,7 @@ What happens on release depends on where it lands:
 **Files from the desktop** can be dragged straight into the window. Dropped on
 the Library, they are imported into the folder under the pointer. Dropped
 anywhere else, they are imported at the Library's top level. Video and images
-are probed. Models go through the model worker. Particle effects (`.ajfx`
-packages exported by ajfx Studio) need no probe. Files that are none of these
+are probed. Models go through the model worker. Files that are neither
 are named in the status line rather than imported. Import also records the video
 codec, the file's start timecode, and a model's vertex count, texture count
 and largest texture size. Assets imported before this was recorded show those
@@ -1336,50 +1330,6 @@ trims are not changed. Everything one Accept asked
 for is a single Undo. Thumbnails and proxies are keyed by the fingerprint, so
 they regenerate for the new revision. A file that has gone missing is not
 offered; it is reported as missing instead.
-
-**Particle effects** are `.ajfx` packages, exported by ajfx Studio. They are
-not available yet: ajfx is still in development, and builds without it can
-import and place a package but do not play it. The Stage status then reads
-"This build does not include particle effects", and the show is not ready
-until the effect is removed. The rest of this section describes a build that
-includes ajfx. A
-package holds an effect, its precompiled GPU kernels, and any textures its
-sprites use. Smoke and other see-through effects draw back to front from
-every camera, so they layer correctly as you orbit, and the parts of one
-effect (sparks inside smoke, say) layer by depth with each other too. A package that is
-missing a texture its effect names does not play; the Stage status names
-the texture. Drag one onto Stage to place it, then
-select it to set its **Seed** and **Start frame** in the Inspector's
-PARTICLES section. **Start at the playhead** sets the start frame to the
-current show frame. Two placements of one package never draw the same
-particles, even with equal seeds. Below them are the **parameters the
-package publishes** (a spawn rate, a wind, a tint): one row each, with a
-colour well for a colour, a reset arrow back to the package's default, and a
-key diamond. Keys are kept under the parameter's name, so they stay on the
-right parameter after the package is exported again. Once a parameter is
-keyed, typing or dragging a value sets a key at the playhead. Each keyed
-parameter also gets a row under the effect on the Timeline (`wind X` for one
-component of a vector), where its keys move, delete and ease like any
-other. Copy and paste of keys skips parameter keys for now. The effect
-reads keyed values at every simulation step, between show frames as well
-as on them. A parameter shapes everything the effect has done so far, so
-changing a value or a key runs the effect again from its start. It holds
-until it has caught up with the playhead. Effects with solid pieces that
-knock into each other and pile up (debris, a heap of rocks that collapses)
-work their physics out on a thread of their own, a moment ahead of the
-playhead. After a jump the effect holds until that thread has caught up, as
-any effect does. A package exported with its cache beside it (the
-`.ajfxcache` file of the same name, which ajfx Studio writes for a performed
-scene) plays the performance exactly as it was recorded: the effect's own
-seed and actions travel in the cache, so every placement and every node
-plays the same bodies, and a jump is read from the cache rather than worked
-out again. If the cache no longer matches the package, the effect does not
-play and Program says why; export both again, or delete the cache to
-simulate the effect instead. Effects play only in the Advanced renderer.
-In Basic, the Stage and Program status say so, and Program is not ready
-while an effect is due to play. After you export a package again in place,
-**Rescan Sources** makes every renderer read it again. Each keeps drawing the
-old version until the new one is loaded, then switches to it.
 
 To replace an existing source, drag a Library asset onto its **Timeline layer
 row** or the layer's **Scene Layer node in Compositor**. A compatible target is
@@ -1912,7 +1862,7 @@ address means local loopback). Output Monitor derives the endpoint, rejects
 duplicate node indices from lifecycle actions, and displays listener/process
 state plus runtime inventory. Only a cabled card is part of the show: a Render
 Server no cable touches and no output binding names reads `PARKED` on the map -
-an alternative or future configuration - and is never launched, never holds the
+an alternative configuration - and is never launched, never holds the
 Program gate or the asset cohort for the rest of the cluster, and cannot make a
 cabled card's node index a duplicate. The Director still asks a parked card's
 machine for its status and displays, so its real video outputs show on the
@@ -1996,10 +1946,7 @@ A node that could not open its displays reads `OUTPUT FAILED` in Output
 Monitor, and its row names the reason: the bound display not connected, present
 but switched off, mirroring another, claimed by two bindings, or not offering
 the saved mode, or no display bound to its Render Server at all. That is
-reported separately from asset readiness on purpose. A
-node with no outputs has no renderer to report either, which on the Director is
-indistinguishable from one still loading, so the row used to say the assets
-were not ready while the fault was a display.
+reported separately from asset readiness on purpose.
 
 A node that is connected but cannot draw its frames reads `FRAMES FAILING`, and
 the cluster headline reads `A NODE CANNOT DRAW ITS FRAMES`. Such a node holds
@@ -2129,7 +2076,7 @@ type `127.0.0.1:8080` as the card's address); a PUT of `{"data": true}` to
 `/api/override/blackout/enabled` shows an override on the map.
 
 Other processor brands, sync generators, storage, recorders and cameras are
-not on the map yet; see the roadmap.
+not on the map.
 
 ## Output synchronization
 
@@ -2188,7 +2135,7 @@ claim.
 
 See [cluster-operations.md](../cluster-operations.md) for the exact supported
 envelope, soak commands, JSONL diagnostic location, failure recovery procedure,
-firewall/service/secret-rotation guidance, and the explicit future
+firewall/service/secret-rotation guidance, and the explicit
 PTP/genlock/frame-lock integration boundary.
 
 ## Authoring and project files
@@ -2556,8 +2503,7 @@ pitch and roll in turns, turning a camera that looks down -Z with +Y up) in the
 Inspector's TRANSFORM section, keyable from the Inspector and the Timeline. The
 CAMERA section exposes field of view, shutter time, focus distance, and aperture
 with explicit key diamonds. The same four channels appear when the camera is
-expanded in Timeline and evaluate at the exact show frame. A camera saved with the older eye
-and look-at target reads as the rotation that gives the same view.
+expanded in Timeline and evaluate at the exact show frame.
 Every camera of the scene on Stage draws its frustum there, highlighted while
 selected. Select a camera in Scene and it takes the Stage gizmo and the G/R
 keys like any element; it has no scale.

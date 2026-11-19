@@ -1,10 +1,9 @@
-# Advanced renderer capabilities and limits
+# Renderer capabilities and limits
 
-Current implementation overview. For controls and appearance, see the
-[renderer guide](docs/renderer.md); for data flow see the
-[architecture](media-server-architecture-plan.md). The implementation and
-colocated tests are authoritative when an older measurement describes a
-different build.
+What the renderer supports and where its limits are. For controls and
+appearance, see the [renderer guide](renderer.md); for data flow see the
+[architecture](architecture.md). The implementation and colocated tests are
+authoritative.
 
 ## Implemented paths
 
@@ -53,23 +52,18 @@ different build.
 There is no native Vulkan backend, bindless material path, async-compute
 execution, GPU-driven scene culling or submission, BLAS/TLAS/ray-query rendering,
 DDGI/ReSTIR/SVGF pipeline or external-memory interop. The D3D12 RHI does
-provide writable buffers and indirect dispatch and single-batch indirect pulled
-draws (`writable_buffers`, `indirect_dispatch`, `indirect_draw`). Particle
-effects run on them (see [Particle effects](docs/renderer.md) in the
-renderer guide); the Basic renderer and devices without these capabilities
-refuse readiness for a started effect, with the reason, and reflection passes
-do not draw particles. Requested unsupported
-features fail capability/readiness checks. Offline baked GI and probe/planar
-reflections do not establish support for those features.
+provide writable buffers, indirect dispatch and single-batch indirect pulled
+draws (`writable_buffers`, `indirect_dispatch`, `indirect_draw`). Requested
+unsupported features fail capability/readiness checks. Offline baked GI and
+probe/planar reflections do not establish support for those features.
 
 Physical synchronization uses the optional Windows NVAPI provider when built
 with `MEDIASERVER_ENABLE_NVAPI=ON`. A software self-check or an Advanced Ready
 result does not qualify genlock, present barriers, photon-level timing,
-cross-vendor agreement or camera/lens calibration. Follow the
-[two-node bring-up](advanced%20icvfx%20renderer/03-genlock-and-present-barrier-bringup.md)
-and [wall color procedure](advanced%20icvfx%20renderer/10-wall-colour-procedure.md)
-with recorded adapters, drivers and reference hardware. Other platforms lack
-the Windows physical display-inventory provider and refuse unsupported bindings.
+cross-vendor agreement or camera/lens calibration; those need measurements on
+the deployed hardware, with recorded adapters, drivers and reference hardware
+(see [cluster operations](../cluster-operations.md)). Other platforms lack the
+Windows physical display-inventory provider and refuse unsupported bindings.
 
 The renderer uses fixed capacity and approximation limits. Mip residency uses
 CPU-backed model data rather than disk-paged virtual textures. Point/area-light
@@ -77,10 +71,10 @@ shadowing, arbitrary Blender procedural/vertex animation and unrestricted
 material graphs are outside the supported subset. Physical multi-machine seam
 and stage-network claims require measurements on the deployed cohort.
 
-Rendering can still use isolated per-layer work; a complete render-once,
-product-driven compositor is unfinished. Scaled and physical-surface/mesh
-mapping need their own seam qualification rather than inheriting the exact
-one-to-one canvas-slice apron guarantee.
+A layer with an isolated effect renders into its own offscreen target, so
+compositing is not a single product-driven pass. Scaled and physical-surface or
+mesh mapping have the exact one-to-one canvas-slice apron guarantee only where
+their own seam qualification has established it.
 
 ## Relevant code and verification
 
@@ -94,8 +88,6 @@ one-to-one canvas-slice apron guarantee.
 
 Use `ctest --preset windows-msvc-debug-gui -N` to inspect the current test list;
 run affected entries in both GUI configurations. Blender integration and
-qualification commands are in the [add-on README](integrations/blender/README.md)
-and [scene-link reference](blender%20live%20scene%20link/README.md). Historical
-test counts, hashes, captures and completed step plans are recoverable in Git.
-Renderer source provenance remains in
-[PROVENANCE.md](third_party/renderer/PROVENANCE.md).
+qualification commands are in the [add-on README](../integrations/blender/README.md)
+and [scene-link reference](../blender%20live%20scene%20link/README.md). Renderer
+source provenance is in [PROVENANCE.md](../third_party/renderer/PROVENANCE.md).
