@@ -423,7 +423,7 @@ void authentication_and_node_identity_fail_closed() {
 
 // A password becomes the lifecycle key through PBKDF2-HMAC-SHA256; the
 // expected values were computed independently (Python hashlib.pbkdf2_hmac).
-// The empty password is the unsecured configuration: a key every Media Server
+// The empty password is the unsecured configuration: a key every Pixelsoup
 // derives, so an agent started with no password is controllable with none.
 void a_password_derives_the_key_and_no_password_still_connects() {
     LIFECYCLE_CHECK(net::lifecycle_key_from_password("") ==
@@ -1061,7 +1061,7 @@ private:
     value.node_index = 999U;
     value.previous_run_lines = 2U;
     value.dropped_bytes = 4'096U;
-    value.detail = "C:/Users/op/AppData/Local/MediaServer/logs/node-3.log";
+    value.detail = "C:/Users/op/AppData/Local/Pixelsoup/logs/node-3.log";
     value.lines = {"2026-11-08 12:00:00.000 === run started; pid 41",
                    "2026-11-08 12:00:09.250 NODE 3 FELL BEHIND",
                    "2026-11-08 12:00:10.001 === run started; pid 77",

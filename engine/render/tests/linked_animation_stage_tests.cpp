@@ -91,7 +91,7 @@ int main(int argc,char** argv) {
         const auto budget=render::measure_environment(root,preview);check(budget.diagnostic.empty(),budget.diagnostic);
         check(budget.pose_bindings==asset.pose_bindings.size(),"animation palette admission");
         check(bool(persist::save_project_file(output/"preview.mstage",root)),"save offline preview");
-        check(bool(persist::save_recent_project_path(output/"local/MediaServer/settings/recent-project.bin",output/"preview.mstage")),"UI startup");
+        check(bool(persist::save_recent_project_path(output/"local/Pixelsoup/settings/recent-project.bin",output/"preview.mstage")),"UI startup");
         auto reopened=persist::load_project_file(output/"preview.mstage");check(bool(reopened),"restart without Blender");
         scene::SceneModel a,b;a.reset(root);b.reset(reopened.value());
         for (core::u64 f : {0ULL,10ULL,22ULL,33ULL,34ULL,4001ULL,22ULL,0ULL}) {

@@ -3,9 +3,9 @@
 # every value must stay a literal. wire.py holds the same version and the
 # negotiated capability list; test_publisher_core.py checks that they agree.
 bl_info = {
-    'name': 'Media Server LiveLink', 'author': 'Media Server', 'version': (0, 10, 1),
-    'blender': (5, 2, 0), 'location': '3D View > Sidebar > Media Server',
-    'description': 'Live-link Blender scenes with Media Server scenes',
+    'name': 'Pixelsoup Live Link', 'author': 'Pixelsoup', 'version': (0, 10, 1),
+    'blender': (5, 2, 0), 'location': '3D View > Sidebar > Pixelsoup',
+    'description': 'Live-link Blender scenes with Pixelsoup scenes',
     'category': 'Import-Export',
 }
 
@@ -45,9 +45,9 @@ class MSLinkSettings(bpy.types.PropertyGroup):
     advanced: BoolProperty(name='Advanced publishing controls', default=False)
     live: BoolProperty(name='Live updates', default=True, update=live_changed)
     keep_saved: BoolProperty(name='Keep file saved', default=True,
-        description="Save the .blend a few seconds after each change Media Server accepts or writes back, "
-                    "so reopening it - Media Server's B button starts Blender on it - gives the scene "
-                    "Media Server holds")
+        description="Save the .blend a few seconds after each change Pixelsoup accepts or writes back, "
+                    "so reopening it - Pixelsoup's B button starts Blender on it - gives the scene "
+                    "Pixelsoup holds")
     luminous_efficacy: FloatProperty(name='Light efficacy (lm/W)',default=683,min=1,max=683,update=environment_changed,
         description='Explicit RGB approximation: normalized Blender watts become lumens; sun W/m2 becomes lux')
     export_density: IntProperty(name='Export density (%)', default=100, min=0, max=100, update=environment_changed,
@@ -77,7 +77,7 @@ class MSLinkStageView(bpy.types.Operator):
 class MSLinkConnect(bpy.types.Operator):
     bl_idname = 'ms_livelink.connect'
     bl_label = 'Connect & Publish'
-    bl_description = 'Pair with the local Director and sync the selected collection to its Media Server scene'
+    bl_description = 'Pair with the local Director and sync the selected collection to its Pixelsoup scene'
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -141,7 +141,7 @@ class MSLinkBakeColor(bpy.types.Operator):
 
 
 def session_only():
-    """True when Media Server loaded this add-on from beside itself for this
+    """True when Pixelsoup loaded this add-on from beside itself for this
     session only, rather than from Blender's own add-on folder."""
     import os
     installed = bpy.utils.user_resource('SCRIPTS', path='addons')
@@ -153,7 +153,7 @@ class MSLinkInstall(bpy.types.Operator):
     bl_idname = 'ms_livelink.install'
     bl_label = 'Install Add-on Permanently'
     bl_description = ('Copy this add-on into Blender so opening a linked .blend directly '
-                      'also reconnects it to its Media Server scene')
+                      'also reconnects it to its Pixelsoup scene')
 
     def execute(self, context):
         import os
@@ -172,14 +172,14 @@ class MSLinkInstall(bpy.types.Operator):
         except Exception as error:
             self.report({'ERROR'}, 'Could not install the add-on: ' + str(error))
             return {'CANCELLED'}
-        self.report({'INFO'}, 'Media Server LiveLink installed for future Blender sessions')
+        self.report({'INFO'}, 'Pixelsoup Live Link installed for future Blender sessions')
         return {'FINISHED'}
 
 
 class MSLinkAddScene(bpy.types.Operator):
     bl_idname = 'ms_livelink.add_scene'
-    bl_label = 'Add to Media Server'
-    bl_description = 'Create a Media Server scene for this Blender scene and link the two'
+    bl_label = 'Add to Pixelsoup'
+    bl_description = 'Create a Pixelsoup scene for this Blender scene and link the two'
 
     def execute(self, context):
         runtime.add_scene(context.scene)
@@ -187,36 +187,36 @@ class MSLinkAddScene(bpy.types.Operator):
 
 
 class MSLinkPanel(bpy.types.Panel):
-    bl_label = 'Media Server LiveLink'
+    bl_label = 'Pixelsoup Live Link'
     bl_idname = 'VIEW3D_PT_ms_livelink'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Media Server'
+    bl_category = 'Pixelsoup'
 
     def draw(self, context):
         layout = self.layout
         settings = context.scene.ms_livelink
         from .runtime import scene_source
         if runtime.worker and runtime.linked_scene:
-            layout.label(text='Linked to Media Server scene:', icon='LINKED')
+            layout.label(text='Linked to Pixelsoup scene:', icon='LINKED')
             layout.label(text=runtime.linked_scene)
         elif runtime.listed and scene_source(context.scene) not in runtime.links:
             # Another scene of the project's file is linked; this one is not.
             box = layout.box()
-            box.label(text='This scene is not in Media Server', icon='UNLINKED')
+            box.label(text='This scene is not in Pixelsoup', icon='UNLINKED')
             if runtime.create_request and runtime.create_request[0] == scene_source(context.scene):
-                box.label(text='Adding it to Media Server...')
+                box.label(text='Adding it to Pixelsoup...')
             else:
                 box.operator('ms_livelink.add_scene', icon='ADD')
         else:
-            layout.label(text='Changes sync automatically to Media Server')
+            layout.label(text='Changes sync automatically to Pixelsoup')
         if runtime.listed and len(runtime.links) > 1:
             layout.label(text=f'{len(runtime.links)} scenes in this file are linked; the one shown syncs')
         if session_only():
             layout.operator('ms_livelink.install', icon='IMPORT')
         if not runtime.worker:
             if not runtime.listed:
-                layout.label(text='Media Server: click the B before a scene, or')
+                layout.label(text='Pixelsoup: click the B before a scene, or')
                 layout.label(text='File > Connect to Blender')
         else:
             row = layout.row(align=True)
@@ -228,15 +228,15 @@ class MSLinkPanel(bpy.types.Panel):
         writeback = runtime.writeback
         if runtime.connected and (writeback.shown or writeback.skipped or writeback.material_only or writeback.ambiguous):
             edits = layout.box()
-            edits.label(text='Media Server edits', icon='SYNC')
+            edits.label(text='Pixelsoup edits', icon='SYNC')
             if writeback.shown:
-                edits.label(text=f'{writeback.shown} objects show edits made in Media Server')
+                edits.label(text=f'{writeback.shown} objects show edits made in Pixelsoup')
             if writeback.skipped:
-                edits.label(text=f'{writeback.skipped} kept in Media Server only (constraints or animation)')
+                edits.label(text=f'{writeback.skipped} kept in Pixelsoup only (constraints or animation)')
             if writeback.material_only:
-                edits.label(text=f'{writeback.material_only} material overrides kept in Media Server only')
+                edits.label(text=f'{writeback.material_only} material overrides kept in Pixelsoup only')
             if writeback.ambiguous:
-                edits.label(text='Linked twice in this scene: edits stay in Media Server', icon='ERROR')
+                edits.label(text='Linked twice in this scene: edits stay in Pixelsoup', icon='ERROR')
             edits.label(text='Edit anything here: the latest change wins')
         if runtime.unsupported and runtime.worker:
             box = layout.box()
@@ -274,7 +274,7 @@ class MSLinkPanel(bpy.types.Panel):
             else:
                 animation.label(text='Waiting for Director sample')
             animation.label(text='Reference gate; no lens distortion')
-            animation.label(text='Final ICVFX remains in Media Server')
+            animation.label(text='Final ICVFX remains in Pixelsoup')
         look = layout.box()
         look.label(text='Materials and lighting')
         look.prop(settings,'luminous_efficacy')
@@ -336,7 +336,7 @@ class MSLinkPanel(bpy.types.Panel):
         elif runtime.worker:
             support.label(text='Negotiating capabilities...')
         if runtime.latency:
-            support.label(text=f'Edit to Media Server p50 {percentile(runtime.latency, 0.5)} ms'
+            support.label(text=f'Edit to Pixelsoup p50 {percentile(runtime.latency, 0.5)} ms'
                                f' · p95 {percentile(runtime.latency, 0.95)} ms')
             # The two shares are measured, not a partition: the difference is
             # process IPC and the receipt hop.
@@ -346,12 +346,12 @@ class MSLinkPanel(bpy.types.Panel):
 
 
 def header_status(self, context):
-    # Always visible while linked: which Media Server scene this Blender edits.
+    # Always visible while linked: which Pixelsoup scene this Blender edits.
     if not runtime.worker:
         if runtime.listed and runtime.links:
-            self.layout.label(text='Media Server: scene not linked', icon='UNLINKED')
+            self.layout.label(text='Pixelsoup: scene not linked', icon='UNLINKED')
         return
-    text = 'Media Server' + (': ' + runtime.linked_scene if runtime.linked_scene else '')
+    text = 'Pixelsoup' + (': ' + runtime.linked_scene if runtime.linked_scene else '')
     if runtime.busy or runtime.pending:
         text += ' (syncing)'
     self.layout.label(text=text, icon='LINKED' if runtime.connected else 'UNLINKED')
@@ -404,7 +404,7 @@ def history_changed(*args):
     if runtime.worker:
         getattr(runtime.identities, 'packed_images', {}).clear()
         runtime.mark(full=True)
-        # Undo may have restored objects from before a Media Server edit;
+        # Undo may have restored objects from before a Pixelsoup edit;
         # extraction sends what Blender now shows, and the rows are checked again.
         runtime.writeback.refresh = True
 
@@ -444,7 +444,7 @@ def subscribe():
 
 @persistent
 def save_pre(*args):
-    # What Media Server applied goes into the file with the objects it was
+    # What Pixelsoup applied goes into the file with the objects it was
     # applied to, so reopening it extracts Blender's own values correctly.
     runtime.writeback.save({obj['ms_link_id']: obj for obj in bpy.data.objects
                             if isinstance(obj.get('ms_link_id'), str)})

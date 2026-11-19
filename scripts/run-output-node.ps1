@@ -16,7 +16,7 @@
 
   -Password must match the render node password in the control machine's
   Preferences. With none on both sides the node can be controlled without
-  one - by any Media Server on the network.
+  one - by any Pixelsoup on the network.
 
   The agent also answers discovery, so the editor's Hardware Map lists this
   machine under DETECTED ON NETWORK - drag it onto the map and the Render
@@ -28,9 +28,9 @@
   deliberately does not change firewall rules; from an elevated prompt on this
   machine (47840 is node 0's control port; node N uses 47840 + N):
 
-    netsh advfirewall firewall add rule name="Media Server Lifecycle" `
+    netsh advfirewall firewall add rule name="Pixelsoup Lifecycle" `
       dir=in action=allow protocol=TCP localport=47840
-    netsh advfirewall firewall add rule name="Media Server Discovery" `
+    netsh advfirewall firewall add rule name="Pixelsoup Discovery" `
       dir=in action=allow protocol=UDP localport=47839
 
   LOGS: the render process writes everything it prints - status intervals,
@@ -88,7 +88,7 @@
 
 .PARAMETER LogDir
   Folder for node-<NodeIndex>.log and agent-<NodeIndex>.log. Default
-  %LOCALAPPDATA%\MediaServer\logs. The agent passes it to the render
+  %LOCALAPPDATA%\Pixelsoup\logs. The agent passes it to the render
   process, and reads the render log back from it for Output Monitor.
 
 .PARAMETER DryRun
@@ -126,7 +126,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'cluster-common.ps1')
 
-$Exe = Resolve-MediaServerExe -Exe $Exe -Build $Build -ScriptRoot $PSScriptRoot
+$Exe = Resolve-PixelsoupExe -Exe $Exe -Build $Build -ScriptRoot $PSScriptRoot
 if ($Port -lt 1 -or $Port -gt 65535) {
     throw "Director port must be between 1 and 65535 (received $Port)."
 }
@@ -176,7 +176,7 @@ if ($Fullscreen) {
 }
 
 $logFolder = if ([string]::IsNullOrWhiteSpace($LogDir)) {
-    Join-Path $env:LOCALAPPDATA 'MediaServer\logs'
+    Join-Path $env:LOCALAPPDATA 'Pixelsoup\logs'
 } else {
     $LogDir
 }
@@ -212,7 +212,7 @@ $addresses = Get-LocalIPv4Address
 $thisMachine = if ($addresses.Count -gt 0) { $addresses[0] } else { '<this-machine-ip>' }
 
 Write-Host ''
-Write-Host 'Media Server - render/output node' -ForegroundColor Cyan
+Write-Host 'Pixelsoup - render/output node' -ForegroundColor Cyan
 Write-Host "  executable   $Exe"
 Write-Host "  director     ${DirectorHost}:$Port"
 Write-Host "  node index   $NodeIndex"
@@ -227,7 +227,7 @@ if ($Direct) {
     } elseif (-not [string]::IsNullOrWhiteSpace($LifecycleSecretFile)) {
         Write-Host "  password     from $LifecycleSecretFile"
     } else {
-        Write-Host '  password     none - any Media Server on this network can control this node' -ForegroundColor Yellow
+        Write-Host '  password     none - any Pixelsoup on this network can control this node' -ForegroundColor Yellow
     }
     Write-Host "  sync report  $SyncSimulate"
     Write-Host ''

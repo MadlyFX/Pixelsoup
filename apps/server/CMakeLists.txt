@@ -143,7 +143,7 @@ set_target_properties(mediaserver_server PROPERTIES FOLDER "apps")
 add_executable(media-server main.cpp)
 target_link_libraries(media-server PRIVATE mediaserver_server)
 mediaserver_set_project_options(media-server)
-set_target_properties(media-server PROPERTIES FOLDER "apps")
+set_target_properties(media-server PROPERTIES FOLDER "apps" OUTPUT_NAME pixelsoup)
 
 if(BUILD_TESTING)
     # mediaserver_<name>_tests from tests/<name>_tests.cpp, registered as

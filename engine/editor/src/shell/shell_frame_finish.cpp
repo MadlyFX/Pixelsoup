@@ -229,7 +229,7 @@ void EditorShell::Frame::finish() {
     ui.label({card.x+16,card.y+44,card.width-32,22},"Link a Blender that is already open to the Preview scene. The B before a scene's name opens the project's own file.",ui.theme().text_muted);
     if (project.blender_instances.empty()) {
       ui.label({card.x+16,card.y+100,card.width-32,24},"Looking for Blender...",ui.theme().text);
-      ui.label({card.x+16,card.y+132,card.width-32,24},"Open Blender and enable the Media Server LiveLink add-on.",ui.theme().text_muted);
+      ui.label({card.x+16,card.y+132,card.width-32,24},"Open Blender and enable the Pixelsoup Live Link add-on.",ui.theme().text_muted);
       ui.label({card.x+16,card.y+164,card.width-32,24},"Available instances appear here automatically.",ui.theme().text_muted);
     } else {
       constexpr std::size_t per_page = 5;

@@ -23,8 +23,8 @@ struct BlenderAssociation final {
     std::string name, file, source;
 };
 
-// The "<project> Blender" folder beside a saved project, else Media
-// Server/Blender under the user's Documents: where a project's Blender files
+// The "<project> Blender" folder beside a saved project, else
+// Pixelsoup/Blender under the user's Documents: where a project's Blender files
 // and the content Blender sends it live.
 [[nodiscard]] std::filesystem::path blender_project_folder(const std::string& project_path);
 // The content-addressed store linked geometry is ingested into. Scenes refer
@@ -42,7 +42,7 @@ struct BlenderAssociation final {
     doc::NodeId scene, const std::string& fallback);
 // Where Publish stages Program files when the operator has not chosen a shared
 // folder: the saved project's own folder (every node that opens the project
-// from a share sees it at the same path), else Documents/Media Server.
+// from a share sees it at the same path), else Documents/Pixelsoup.
 [[nodiscard]] std::string default_publication_storage(const std::string& project_path);
 // Brings `associations` (every scene: name, Blender file, link source) from
 // `before` to `after` by visiting only the nodes that changed between them.
@@ -61,8 +61,8 @@ void refresh_blender_associations(std::vector<BlenderAssociation>& associations,
 // re-pairing. Each link edits only its own scene, wherever that scene is, so a
 // scene on air follows Blender live.
 //
-// One Blender holds the project: its file has a Blender scene per linked Media
-// Server scene, and every one of them is linked to that Blender at once. It
+// One Blender holds the project: its file has a Blender scene per linked
+// Pixelsoup scene, and every one of them is linked to that Blender at once. It
 // syncs the scene it shows; switching scenes there switches which one syncs.
 // Everything here runs on the control thread and only exchanges bounded state
 // with the services' and discovery's workers.
@@ -80,7 +80,7 @@ public:
         bool running{}, opening{}, connected{}, pending{}, failed{};
         std::string status;
     };
-    // A scene the artist added in Blender, for Media Server to create.
+    // A scene the artist added in Blender, for Pixelsoup to create.
     struct Created final {
         std::string source, name, file;
     };
@@ -141,7 +141,7 @@ public:
     take_status_changes();
     // A linked Blender saved its scene under a new name; the scene follows it.
     [[nodiscard]] std::vector<Moved> take_moved();
-    // Scenes the artist added to Media Server from Blender, once each.
+    // Scenes the artist added to Pixelsoup from Blender, once each.
     [[nodiscard]] std::vector<Created> take_created();
 
 private:

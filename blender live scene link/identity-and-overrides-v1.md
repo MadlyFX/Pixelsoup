@@ -110,7 +110,7 @@ occurrence** author the local value; **Follow source visibility** removes it.
 Source removal sets `link_removed = true` on the source object. It suppresses
 descendants and drawing but retains document IDs, source hierarchy and shot
 records. A source undo/restoration clears the tombstone and reuses those same
-occurrences, so Undo on either side restores the object with every Media Server
+occurrences, so Undo on either side restores the object with every Pixelsoup
 override. Removed objects are not listed in the editor. Source updates cannot
 erase source records as an implicit cascade. Prototype/material records remain
 available while tombstones reference them.

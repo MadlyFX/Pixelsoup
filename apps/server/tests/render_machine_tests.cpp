@@ -122,7 +122,7 @@ void the_form_is_saved_once_and_later_launches_start_from_it() {
     // The agent this machine runs: every interface, this program as the
     // render process, started at once, and found by discovery.
     const std::filesystem::path executable =
-        temporary.file("media-server.exe");
+        temporary.file("pixelsoup.exe");
     const auto agent = app::render_machine_agent_config(config.value(),
                                                         executable);
     RM_CHECK(agent.listen.address().is_unspecified());

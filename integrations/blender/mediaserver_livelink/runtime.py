@@ -31,7 +31,7 @@ class Runtime:
         self.pairing_code = ''
         self.retired = []
         self.identities = Identities()
-        self.status = 'Ready. In Media Server click the B before a scene, or File > Connect to Blender.'
+        self.status = 'Ready. In Pixelsoup click the B before a scene, or File > Connect to Blender.'
         self.auto_connect = False
         self.needs_new_session = False
         self.retry_at = 0
@@ -44,25 +44,25 @@ class Runtime:
         self.scene_id = ''
         self.source = ''
         # Given by the Director with the connection: the identity it holds for
-        # the bound Media Server scene, and that scene's name.
+        # the bound Pixelsoup scene, and that scene's name.
         self.assigned_source = ''
         self.linked_scene = ''
-        # Set when Media Server created this .blend: link identities are stored
+        # Set when Pixelsoup created this .blend: link identities are stored
         # in the file, so it is saved once after the first accepted sync, and
         # reopening it finds the same objects instead of new ones.
         self.save_after_first_sync = ''
         # When the linked file is next due to be saved (see save_if_due).
         self.save_due = 0
         # One .blend holds the project: every linked Blender scene is tagged
-        # with its Media Server scene's source, and the Director sends a
+        # with its Pixelsoup scene's source, and the Director sends a
         # pairing per linked scene. This Blender syncs the scene it shows.
         self.links = {}
         self.listed = False
         self.link_key = None
-        # A scene the artist disconnected here: not synced again until Media
-        # Server shows it, or Blender switches to another scene.
+        # A scene the artist disconnected here: not synced again until
+        # Pixelsoup shows it, or Blender switches to another scene.
         self.declined = ''
-        # A scene the artist asked to add to Media Server: (source, name).
+        # A scene the artist asked to add to Pixelsoup: (source, name).
         self.create_request = None
         self.connected = False
         self.busy = False
@@ -121,14 +121,14 @@ class Runtime:
         settings = context.scene.ms_livelink
         collection = settings.collection or context.scene.collection
         if not settings.code.strip():
-            raise ValueError('In Media Server click the B before a scene, or File > Connect to Blender')
+            raise ValueError('In Pixelsoup click the B before a scene, or File > Connect to Blender')
         self.stop(reconnecting=True)
         self.needs_new_session = False
         self.scene_id = self.identities.identity(context.scene, context.scene)
         self.collection_id = self.identities.identity(collection, context.scene)
         source = self.assigned_source or str(uuid.uuid5(uuid.UUID(self.scene_id), self.collection_id))
         if source != self.source:
-            # What Media Server applied in the scene being left stays with its
+            # What Pixelsoup applied in the scene being left stays with its
             # objects, so returning to that scene reads it back.
             self.writeback.save({obj['ms_link_id']: obj for obj in bpy.data.objects
                                  if isinstance(obj.get('ms_link_id'), str)})
@@ -156,7 +156,7 @@ class Runtime:
         self.requested = True
         self.mark(full=True)
 
-    def stop(self, message='Disconnected; Media Server keeps the last synced scene', reconnecting=False):
+    def stop(self, message='Disconnected; Pixelsoup keeps the last synced scene', reconnecting=False):
         if not reconnecting:
             self.needs_new_session = False
             self.auto_connect = False
@@ -181,7 +181,7 @@ class Runtime:
         self.paused_by_director = False
         self.status = message
         self.stage = StageReference()
-        # Media Server's edits stay in the objects: they are the scene.
+        # Pixelsoup's edits stay in the objects: they are the scene.
         self.writeback.rejected()
 
     def fail(self, error):
@@ -230,12 +230,12 @@ class Runtime:
         entry = self.links.get(source) if source != self.declined else None
         if entry is None:
             if self.worker or self.link_key:
-                self.stop('This Blender scene is not linked to Media Server')
+                self.stop('This Blender scene is not linked to Pixelsoup')
                 self.link_key = None
             if not self.worker:
-                self.status = ("Disconnected; click the scene's B in Media Server to sync it again" if self.declined
-                               else 'Not in Media Server: Add to Media Server to link this scene'
-                               if self.links else 'Ready. In Media Server click the B on a scene.')
+                self.status = ("Disconnected; click the scene's B in Pixelsoup to sync it again" if self.declined
+                               else 'Not in Pixelsoup: Add to Pixelsoup to link this scene'
+                               if self.links else 'Ready. In Pixelsoup click the B on a scene.')
             return
         key = (source, entry['port'], entry['code'])
         if key == self.link_key and (self.worker or self.retry_at):
@@ -261,8 +261,8 @@ class Runtime:
         if target is None and adopt:
             target = bpy.context.scene
         if target is None and name:
-            # A scene of that name whose tag no linked Media Server scene uses
-            # (the Media Server project was not saved after it was linked).
+            # A scene of that name whose tag no linked Pixelsoup scene uses
+            # (the Pixelsoup project was not saved after it was linked).
             target = next((s for s in bpy.data.scenes if s.name == name and s.get(SOURCE) not in self.links), None)
         if target is None:
             shown = bpy.context.scene
@@ -274,7 +274,7 @@ class Runtime:
             elif len(untagged) == 1 and len(bpy.data.scenes) == 1:
                 target = untagged[0]
             else:
-                target = bpy.data.scenes.new(name or 'Media Server Scene')
+                target = bpy.data.scenes.new(name or 'Pixelsoup Scene')
         if target.get(SOURCE) != source:
             target[SOURCE] = source
             if name and target.name != name and name not in bpy.data.scenes:
@@ -284,11 +284,11 @@ class Runtime:
         return target
 
     def add_scene(self, scene):
-        """Ask Media Server to make a scene for `scene` and link it."""
+        """Ask Pixelsoup to make a scene for `scene` and link it."""
         if not isinstance(scene.get(SOURCE), str):
             scene[SOURCE] = str(uuid.uuid4())
         self.create_request = (scene[SOURCE], scene.name)
-        self.status = 'Adding ' + scene.name + ' to Media Server...'
+        self.status = 'Adding ' + scene.name + ' to Pixelsoup...'
 
     def publish_now(self):
         # Explicit refresh must observe repacked bytes even if Blender reused
@@ -301,13 +301,13 @@ class Runtime:
         self.save_due = time.monotonic() + SAVE_DELAY
 
     def save_if_due(self):
-        """Keep the linked .blend holding what Media Server holds.
+        """Keep the linked .blend holding what Pixelsoup holds.
 
-        Media Server can only be given a scene by Blender, so a file left
+        Pixelsoup can only be given a scene by Blender, so a file left
         unsaved is a scene waiting to be lost: the next Blender started on it
-        (Media Server's B button does exactly that when Blender is closed)
+        (Pixelsoup's B button does exactly that when Blender is closed)
         publishes the older file, and objects added since come back with new
-        link identities that Media Server's edits no longer attach to. Once
+        link identities that Pixelsoup's edits no longer attach to. Once
         syncing has been quiet for SAVE_DELAY, an accepted or written-back
         change is written to the file."""
         if not self.save_due or time.monotonic() < self.save_due:
@@ -325,7 +325,7 @@ class Runtime:
         try:
             bpy.ops.wm.save_mainfile()
         except RuntimeError as error:
-            print('Media Server: could not save the linked file -', error)
+            print('Pixelsoup: could not save the linked file -', error)
 
     def tick(self):
         self.discover()
@@ -357,7 +357,7 @@ class Runtime:
                     try:
                         bpy.ops.wm.save_mainfile()
                     except RuntimeError as error:
-                        print('Media Server: could not save link identities -', error)
+                        print('Pixelsoup: could not save link identities -', error)
                 # An accepted revision means the refused feature is gone.
                 self.unsupported = ''
                 self.revision = reply['revision']
@@ -404,7 +404,7 @@ class Runtime:
                     if bpy.context.scene.ms_livelink.stage_reference:
                         self.status = 'Stage reference unavailable: ' + str(error)
         if self.writeback.refresh and self.connected:
-            # Media Server's edits, written into the objects they belong to.
+            # Pixelsoup's edits, written into the objects they belong to.
             scene = bpy.context.scene
             scale = scene.unit_settings.scale_length
             from mathutils import Matrix
@@ -448,7 +448,7 @@ class Runtime:
             if self.capabilities and 'animation' not in self.capabilities:
                 self.pending = False
                 self.requested = False
-                self.unsupported = ('This Media Server build does not support ' + FEATURES['animation']
+                self.unsupported = ('This Pixelsoup build does not support ' + FEATURES['animation']
                                     + "; clear Animated assembly or install the matching build")
                 self.status = self.unsupported
                 return
@@ -530,10 +530,10 @@ class Runtime:
         self.pending = False
         self.requested = False
         self.busy = True
-        self.status = 'Syncing to Media Server...'
+        self.status = 'Syncing to Pixelsoup...'
 
 
-# The Media Server scene a Blender scene belongs to.
+# The Pixelsoup scene a Blender scene belongs to.
 SOURCE = 'ms_scene_source'
 
 

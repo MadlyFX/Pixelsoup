@@ -504,7 +504,7 @@ int main(int argc, char** argv) {
             check(scene::digest(live)==scene::digest(frame),"reopened document matches the live one");
         }
         check(static_cast<bool>(persist::save_recent_project_path(
-            output/"local/MediaServer/settings/recent-project.bin",output/"preview.mstage")),"isolated startup fixture");
+            output/"local/Pixelsoup/settings/recent-project.bin",output/"preview.mstage")),"isolated startup fixture");
         passed("save_reopen");
 
         // Per-pairing resource capacity is refused explicitly, in its own pairing.

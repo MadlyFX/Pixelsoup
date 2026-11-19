@@ -2,11 +2,11 @@ MEDIA SERVER 0.1.0 - WINDOWS X64 TEST BUILD
 ===========================================
 
 This is an early test build. Extract the complete folder before launching; the
-DLL files beside media-server.exe are required.
+DLL files beside pixelsoup.exe are required.
 
 OPEN THE EDITOR
 
-Double-click media-server.exe and press OPEN EDITOR at the bottom of the
+Double-click pixelsoup.exe and press OPEN EDITOR at the bottom of the
 window. The editor opens as this machine's Director, listening for render
 machines on port 45060.
 
@@ -22,7 +22,7 @@ QUICK START FROM POWERSHELL
 
 You can also launch the editor directly from a prompt:
 
-     .\media-server.exe --role=director --playback --edit `
+     .\pixelsoup.exe --role=director --playback --edit `
        --director-listen=0.0.0.0:45060 `
        --show-id=0000000000000001000000000000000B `
        --director-epoch=0000000000000003000000000000000C
@@ -30,7 +30,7 @@ You can also launch the editor directly from a prompt:
 TWO OR MORE MACHINES
 
 Copy and extract this same package on every machine, then use the two halves
-of the split setup. Both scripts find media-server.exe beside this folder, so
+of the split setup. Both scripts find pixelsoup.exe beside this folder, so
 nothing else needs configuring.
 
 1. On the control machine:
@@ -58,7 +58,7 @@ nothing else needs configuring.
    index. You can also drag the machine from DETECTED ON NETWORK onto the
    map. Output Monitor can then START / RESTART / STOP that machine.
 
-Alternatively, double-click media-server.exe on a render machine. Enter the
+Alternatively, double-click pixelsoup.exe on a render machine. Enter the
 control machine's numeric address, node index and matching render-node
 password, then choose SAVE AND START. Existing per-user settings are reused
 when the new executable starts; CHANGE SETTINGS edits them.
@@ -116,11 +116,11 @@ REQUIREMENTS / LIMITATIONS
 
 CRASH AND HANG REPORTS
 
-media-server.pdb and media-bake.pdb are the debug symbols for exactly these
+pixelsoup.pdb and media-bake.pdb are the debug symbols for exactly these
 executables. Keep them with the folder: a dump file (Task Manager > Details >
-right-click media-server.exe > Create memory dump file) can only be read
+right-click pixelsoup.exe > Create memory dump file) can only be read
 against the symbols of the build that wrote it. Send the dump together with
-the logs from %LOCALAPPDATA%\MediaServer\logs.
+the logs from %LOCALAPPDATA%\Pixelsoup\logs.
 
 LICENCES
 
@@ -130,4 +130,4 @@ the LGPL. The licences of every bundled library are in licenses\.
 
 For the complete command-line reference:
 
-  .\media-server.exe --help
+  .\pixelsoup.exe --help

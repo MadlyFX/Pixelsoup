@@ -90,7 +90,7 @@ private:
 
 constexpr const wchar_t* run_key =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr const wchar_t* run_value = L"Media Server Render Machine";
+constexpr const wchar_t* run_value = L"Pixelsoup Render Machine";
 #endif
 
 } // namespace

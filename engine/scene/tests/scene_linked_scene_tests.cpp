@@ -195,7 +195,7 @@ void tests() {
     const auto merged=scene::model_part_material(placement,imported);
     check(merged.roughness==0.2F && merged.base_color==imported.base_color && merged.base_color_texture=="cyan.png","property override reaches imported slots without replacing their colors/textures");
 }
-// Media Server edits a linked prop; the artist then edits the same property in
+// Pixelsoup edits a linked prop; the artist then edits the same property in
 // Blender. The revision carrying the artist's edit absorbs the override in the
 // same plan: the scene shows the artist's value, never both stacked, and only
 // the named property is touched.
@@ -207,7 +207,7 @@ void absorbed_overrides() {
     root = take(scene::plan_linked_edit(root, hero, scene::LinkedEdit::Hide));
     root = take(scene::plan_linked_edit(root, shared, scene::LinkedEdit::Hold));
     auto tinted = *root.get(hero); put(tinted, s::roughness, 0.2); root = take(scene::plan_linked_change(root, root.set(tinted)));
-    // The artist moved the hero in Blender to where Media Server shows it.
+    // The artist moved the hero in Blender to where Pixelsoup shows it.
     auto source_hero = *root.get(id(111));
     const auto parent_world = read(root).occurrences.at(occurrence(root, 200, 110)).world;
     scene::write_link_matrix(source_hero, l::local, scene::multiply(scene::invert_affine(parent_world), moved));
@@ -257,7 +257,7 @@ void deleted_occurrences() {
     state = read(root);
     check(state.occurrences.at(hero).removed && state.occurrences.at(hero).deleted, "Blender's removal keeps the deleted record");
     // The artist brings them back: that revision absorbs the deletion, and the
-    // hero returns with Media Server's placement.
+    // hero returns with Pixelsoup's placement.
     put(removed_parent, l::removed, false); put(removed_hero, l::removed, false);
     root = take(scene::plan_link_source_update(root, std::array{removed_parent, removed_hero}, id(500)));
     check(read(root).occurrences.at(hero).deleted, "restored source objects stay deleted until absorbed");
@@ -346,7 +346,7 @@ void artifacts(const std::filesystem::path& reference, const std::filesystem::pa
     check(persist::save_project_file(output/"source-removed.mstage",removed).has_value(),"save recovery fixture");
     check(persist::save_project_file(output/"source-restored.mstage",root).has_value(),"save restored fixture");
     for (const auto name : {"linked-r1", "linked-r2", "source-removed", "source-restored"})
-        check(persist::save_recent_project_path(output/name/"MediaServer/settings/recent-project.bin",
+        check(persist::save_recent_project_path(output/name/"Pixelsoup/settings/recent-project.bin",
             std::filesystem::absolute(output/(std::string{name}+".mstage"))).has_value(),"isolated UI startup project");
 }
 } // namespace

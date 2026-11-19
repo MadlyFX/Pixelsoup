@@ -310,7 +310,7 @@ int main(int argc, char** argv) {
             require(persist::save_project_file(scratch / ("reference-r" + std::to_string(revision) + ".mstage"),
                 project(package.source)).has_value(), "write UI reference project");
             require(persist::save_recent_project_path(
-                scratch / ("ui-r" + std::to_string(revision)) / "MediaServer/settings/recent-project.bin",
+                scratch / ("ui-r" + std::to_string(revision)) / "Pixelsoup/settings/recent-project.bin",
                 scratch / ("reference-r" + std::to_string(revision) + ".mstage")).has_value(),
                 "write isolated reference-editor startup settings");
         }

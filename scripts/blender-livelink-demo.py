@@ -60,7 +60,7 @@ def prepare():
                 with bpy.context.temp_override(window=window, area=area):
                     area.spaces.active.show_region_ui = True
                     area.spaces.active.region_3d.view_distance = 7
-    print('LiveLink demo ready: Sidebar > Media Server > Connect & Publish')
+    print('LiveLink demo ready: Sidebar > Pixelsoup > Connect & Publish')
     if args.save_demo:
         bpy.ops.wm.save_as_mainfile(filepath=str(args.save_demo.resolve()))
 

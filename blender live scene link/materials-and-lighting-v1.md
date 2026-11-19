@@ -32,7 +32,7 @@ and uses the importer's tangent generation. Normal maps use the glTF/OpenGL +Y
 convention. Color/emission sampling uses sRGB decoding; normal and packed
 metallic/roughness values use linear data sampling and the existing role-specific
 mip/compression path. Scalar colors remain scene linear. Blender display transforms
-and exposure are not baked into these material values; Media Server's facility
+and exposure are not baked into these material values; Pixelsoup's facility
 color/output policy remains authoritative.
 
 Supported image nodes use Flat projection, Repeat or Extend addressing, and

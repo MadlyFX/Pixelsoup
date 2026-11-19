@@ -145,7 +145,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
         : draft_.render_node_password
             ? "Give each render machine the same password in its setup "
               "window. Applies when saved."
-            : "No password: any Media Server on this network can start and "
+            : "No password: any Pixelsoup on this network can start and "
               "stop render machines. Applies when saved.";
     ctx.label(form.note(), note,
               state.render_node_password_overridden ||

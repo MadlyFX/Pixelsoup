@@ -607,8 +607,8 @@ struct BlenderSceneState final {
   // The associated .blend; empty while a Blender opened from the Connect
   // dialog has not been saved yet.
   std::string_view file;
-  // `running` - a Blender with this scene's file is open; `opening` - Media
-  // Server started one and is waiting for it to report in.
+  // `running` - a Blender with this scene's file is open; `opening` -
+  // Pixelsoup started one and is waiting for it to report in.
   bool running{}, opening{}, connected{}, pending{}, failed{};
   std::string_view status;
 };
@@ -1070,7 +1070,7 @@ struct EditorFrame final {
 };
 
 struct EditorConfig final {
-  std::string title{"media-server editor"};
+  std::string title{"Pixelsoup editor"};
   core::u32 width{1600U};
   core::u32 height{900U};
   // Window placement, so the editor and an output node can be arranged side by

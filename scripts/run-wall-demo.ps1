@@ -32,7 +32,7 @@
   demo down.
 
 .PARAMETER Exe
-  Path to media-server.exe. Defaults to the packaged executable beside the
+  Path to pixelsoup.exe. Defaults to the packaged executable beside the
   scripts directory, then the windows-msvc-release-gui build, and finally the
   windows-msvc-debug-gui build.
 
@@ -57,9 +57,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($Exe)) {
-    $packagedExe = Join-Path $PSScriptRoot '../media-server.exe'
-    $releaseExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-release-gui/apps/server/media-server.exe'
-    $debugExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-debug-gui/apps/server/media-server.exe'
+    $packagedExe = Join-Path $PSScriptRoot '../pixelsoup.exe'
+    $releaseExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-release-gui/apps/server/pixelsoup.exe'
+    $debugExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-debug-gui/apps/server/pixelsoup.exe'
     $Exe = if (Test-Path -LiteralPath $packagedExe -PathType Leaf) {
         $packagedExe
     } elseif (Test-Path -LiteralPath $releaseExe -PathType Leaf) {
@@ -69,7 +69,7 @@ if ([string]::IsNullOrWhiteSpace($Exe)) {
     }
 }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
-    throw "media-server.exe not found at $Exe. Extract the complete release package, build a GUI preset, or pass -Exe."
+    throw "pixelsoup.exe not found at $Exe. Extract the complete release package, build a GUI preset, or pass -Exe."
 }
 $Exe = (Resolve-Path -LiteralPath $Exe).ProviderPath
 

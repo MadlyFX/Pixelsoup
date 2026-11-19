@@ -1,7 +1,7 @@
 # Coordinated Program publication v1
 
 A frozen scene is published through the asset cohort and sealed control-frame
-authority. Linked scenes go on air live, one Blender scene per Media Server
+authority. Linked scenes go on air live, one Blender scene per Pixelsoup
 scene; freezing is only for a Program that must not change while Blender keeps
 editing. The operator freezes Preview with **File > Freeze Blender...**.
 Publication does not add a second clock, a Blender-to-node connection, or a new

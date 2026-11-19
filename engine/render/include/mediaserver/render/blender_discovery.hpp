@@ -7,20 +7,20 @@
 namespace mediaserver::render {
 struct BlenderInstance {
     std::string id, label, scene, status;
-    // The open .blend (empty while unsaved), the token Media Server gave the
+    // The open .blend (empty while unsaved), the token Pixelsoup gave the
     // process when it launched it, and the process id used to raise its window.
     std::string file, token;
     unsigned long pid{};
     bool resync_requested{};
     // One Blender holds a project's scenes, each a Blender scene tagged with
-    // its Media Server source identity: the scene Blender shows, and every
+    // its Pixelsoup source identity: the scene Blender shows, and every
     // tagged scene in its file.
     std::string active_source;
     std::vector<std::string> scene_sources;
-    // The artist asked to add the scene they are in to Media Server.
+    // The artist asked to add the scene they are in to Pixelsoup.
     std::string create_source, create_name;
 };
-// A Media Server scene a Blender instance holds, with its pairing.
+// A Pixelsoup scene a Blender instance holds, with its pairing.
 struct BlenderSceneLink {
     std::string source, name, code;
     unsigned port{};

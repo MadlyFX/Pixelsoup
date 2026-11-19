@@ -1,5 +1,5 @@
 if(NOT DEFINED SERVER_EXE OR NOT EXISTS "${SERVER_EXE}")
-    message(FATAL_ERROR "SERVER_EXE must name the built media-server executable")
+    message(FATAL_ERROR "SERVER_EXE must name the built pixelsoup executable")
 endif()
 if(NOT DEFINED TEST_ROOT OR TEST_ROOT STREQUAL "")
     message(FATAL_ERROR "TEST_ROOT is required")
@@ -49,10 +49,10 @@ if(NOT default_result EQUAL 0)
     message(FATAL_ERROR
         "node-only default startup failed: ${default_result}: ${default_error}")
 endif()
-if(EXISTS "${TEST_ROOT}/media-server.wal")
+if(EXISTS "${TEST_ROOT}/pixelsoup.wal")
     message(FATAL_ERROR "node-only startup created the Director WAL")
 endif()
-if(EXISTS "${TEST_ROOT}/media-server.wal.release")
+if(EXISTS "${TEST_ROOT}/pixelsoup.wal.release")
     message(FATAL_ERROR "node-only startup created the Director release ledger")
 endif()
 if(NOT default_output MATCHES "node-session=disabled")
@@ -105,8 +105,8 @@ if(NOT node_connector_output MATCHES "boundary-driver=unwired")
         "node connector validation hid the unwired boundary driver: "
         "${node_connector_output}")
 endif()
-if(EXISTS "${TEST_ROOT}/media-server.wal"
-    OR EXISTS "${TEST_ROOT}/media-server.wal.release")
+if(EXISTS "${TEST_ROOT}/pixelsoup.wal"
+    OR EXISTS "${TEST_ROOT}/pixelsoup.wal.release")
     message(FATAL_ERROR
         "node connector validation created Director persistence files")
 endif()
@@ -363,8 +363,8 @@ if(NOT connector_service_output MATCHES "boundary-driver=unwired")
         "normal node startup hid the unwired boundary driver: "
         "${connector_service_output}")
 endif()
-if(EXISTS "${TEST_ROOT}/media-server.wal"
-    OR EXISTS "${TEST_ROOT}/media-server.wal.release")
+if(EXISTS "${TEST_ROOT}/pixelsoup.wal"
+    OR EXISTS "${TEST_ROOT}/pixelsoup.wal.release")
     message(FATAL_ERROR
         "normal node connector startup created Director persistence files")
 endif()

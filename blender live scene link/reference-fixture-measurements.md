@@ -2,7 +2,7 @@
 
 Measured 2026-09-09 with the add-on of that date; later add-on versions are not re-measured here. Blender 5.2.0 LTS `fbe6228777e7`; Windows 11 Pro
 10.0.26200; AMD Ryzen 7 5800X, 64 GiB installed RAM; NVIDIA GeForce RTX 3090,
-Windows driver 32.0.16.1656. Media Server MSVC 14.44, GUI Release build,
+Windows driver 32.0.16.1656. Pixelsoup MSVC 14.44, GUI Release build,
 native D3D12 for the upload benchmark. Editor inspection used the Debug build's
 Advanced renderer. Local C: filesystem, same host, no asset network transport;
 the isolated editor Director listened on loopback. No remote render-node or

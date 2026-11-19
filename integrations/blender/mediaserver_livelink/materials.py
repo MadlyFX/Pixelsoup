@@ -191,7 +191,7 @@ def describe_material(material, identities, scene, uv=''):
             'KHR_materials_specular': {'specularFactor': 2 * value(shader, 'Specular IOR Level', 0.5)}}
     adjusted = [bounded(v) for v in factors]
     if adjusted != factors:
-        warn(material.name + ': clamped material values for Media Server')
+        warn(material.name + ': clamped material values for Pixelsoup')
     factors = adjusted
     for extension, values in extensions.items():
         for key, number in values.items():
@@ -225,7 +225,7 @@ def describe_light(obj, scale, efficacy):
             or any(getattr(light, k, 1) != 1 for k in ('diffuse_factor', 'specular_factor', 'volume_factor'))
             or light.type in ('POINT', 'SPOT') and light.shadow_soft_size != 0
             or light.type == 'AREA' and light.shape not in ('SQUARE', 'RECTANGLE')):
-        warn(obj.name + ': approximated light settings for Media Server')
+        warn(obj.name + ': approximated light settings for Pixelsoup')
     kind = {'SUN': 'directional', 'POINT': 'point', 'SPOT': 'spot', 'AREA': 'rectangle'}[light.type]
     power = bounded(light.energy * node_strength * efficacy, 0, 1e9)
     outer = bounded(light.spot_size / (4 * math.pi), 0.0001, 0.2489, 0.125) if light.type == 'SPOT' else 0.125

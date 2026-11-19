@@ -129,7 +129,7 @@ int main(int argc,char** argv) {
         auto target=scene::publication::render_scene(installed.value(),program);
         for (int node=0;node<2;++node) check(render::prepare_linked_publication({installed.value(),target,{}, {},true,{}}).diagnostic.empty(),"cohort verifies complete look");
         check(bool(persist::save_project_file(output/"preview.mstage",root)),"save preview");
-        check(bool(persist::save_recent_project_path(output/"local/MediaServer/settings/recent-project.bin",output/"preview.mstage")),"UI startup");
+        check(bool(persist::save_recent_project_path(output/"local/Pixelsoup/settings/recent-project.bin",output/"preview.mstage")),"UI startup");
         check(bool(persist::save_project_file(output/"stale.mstage",moved.value())),"save stale fixture");
         check(bool(persist::save_project_file(output/"published.mstage",installed.value())),"offline publication");
         if (argc>3) {

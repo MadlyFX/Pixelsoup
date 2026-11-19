@@ -71,8 +71,8 @@ struct PlaybackOptions final {
     bool borderless{};
     // The key Output Monitor authenticates with render-machine agents,
     // derived from the render node password (command line, else
-    // Preferences); with no password it is the unsecured key every Media
-    // Server knows. Process configuration, never project data.
+    // Preferences); with no password it is the unsecured key every
+    // Pixelsoup knows. Process configuration, never project data.
     std::string lifecycle_secret;
     // The UDP port render machines answer discovery on, which the Hardware
     // Map asks. Directors advertise their show listener here too, and nodes

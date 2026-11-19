@@ -294,7 +294,7 @@ void draw_timeline(
 
 int main() {
     gui::WindowConfig config{};
-    config.title = "Media Server - bespoke UI preview";
+    config.title = "Pixelsoup - bespoke UI preview";
     config.width = 1440U;
     config.height = 900U;
 

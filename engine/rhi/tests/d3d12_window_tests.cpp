@@ -40,7 +40,7 @@ void check(bool condition, const char *expression, int line) {
 void a_native_d3d12_frame_reaches_a_dxgi_swapchain() {
     WINDOW_CHECK(SDL_Init(SDL_INIT_VIDEO));
     SDL_Window *window = SDL_CreateWindow(
-        "media-server native presentation test", 96, 64, 0U);
+        "pixelsoup native presentation test", 96, 64, 0U);
     if (window == nullptr) {
         SDL_Quit();
         throw std::runtime_error{"could not create the Win32 test window"};

@@ -37,7 +37,7 @@ void check(bool condition, const char *expression, int line) {
 
 void advanced_scene_reaches_the_native_application_presenter() {
   ui::SdlPresenterConfig config{};
-  config.title = "media-server Advanced presenter test";
+  config.title = "pixelsoup Advanced presenter test";
   config.width = 128U;
   config.height = 96U;
   config.resizable = false;
@@ -91,7 +91,7 @@ void advanced_scene_reaches_the_native_application_presenter() {
 
 void buffered_output_keeps_presenting_with_offline_media() {
   ui::SdlPresenterConfig config{};
-  config.title = "media-server offline media output test";
+  config.title = "pixelsoup offline media output test";
   config.width = 96;
   config.height = 64;
   config.gpu = config.scene = config.output = config.buffered_media = true;
@@ -147,7 +147,7 @@ void buffered_output_keeps_presenting_with_offline_media() {
 
 void two_native_outputs_publish_bakes_together_and_a_late_output_holds() {
   ui::SdlPresenterConfig config{};
-  config.title = "media-server baked cohort test";
+  config.title = "pixelsoup baked cohort test";
   config.width = 64;
   config.height = 48;
   config.gpu = config.scene = true;
@@ -295,7 +295,7 @@ void two_native_outputs_publish_bakes_together_and_a_late_output_holds() {
 
 void busy_native_output_defers_and_hold_retires_without_rendering() {
   ui::SdlPresenterConfig config{};
-  config.title = "media-server buffered GPU submission test";
+  config.title = "pixelsoup buffered GPU submission test";
   config.width = 1920;
   config.height = 1080;
   config.resizable = false;
@@ -364,7 +364,7 @@ void fullscreen_output_keeps_presenting_without_keyboard_focus() {
   PRESENTER_CHECK(SDL_GetDisplayBounds(display, &bounds));
 
   ui::SdlPresenterConfig config{};
-  config.title = "media-server fullscreen focus test";
+  config.title = "pixelsoup fullscreen focus test";
   config.width = static_cast<mediaserver::core::u32>(desktop->w);
   config.height = static_cast<mediaserver::core::u32>(desktop->h);
   config.refresh_numerator = static_cast<mediaserver::core::u32>(desktop->refresh_rate_numerator);
@@ -405,7 +405,7 @@ void fullscreen_output_keeps_presenting_without_keyboard_focus() {
 
   // A real second window takes focus, as the editor does during playback.
   auto focus_window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>{
-      SDL_CreateWindow("media-server operator focus test", 320, 200, 0),
+      SDL_CreateWindow("pixelsoup operator focus test", 320, 200, 0),
       &SDL_DestroyWindow};
   PRESENTER_CHECK(focus_window);
   PRESENTER_CHECK(SDL_RaiseWindow(focus_window.get()));
@@ -443,7 +443,7 @@ void fullscreen_output_keeps_presenting_without_keyboard_focus() {
 // but keeps the count and the cause.
 void a_failed_map_is_reported_by_step_and_map() {
   ui::SdlPresenterConfig config{};
-  config.title = "media-server present failure test";
+  config.title = "pixelsoup present failure test";
   config.width = 160;
   config.height = 90;
   config.resizable = false;

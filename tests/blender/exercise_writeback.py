@@ -1,9 +1,9 @@
-"""Pinned Blender acceptance for Media Server writeback, against the real Director
+"""Pinned Blender acceptance for Pixelsoup writeback, against the real Director
 service, importer and scheduler (blender_publisher_host).
 
-Media Server's edits to linked objects are written into the Blender objects
+Pixelsoup's edits to linked objects are written into the Blender objects
 themselves, the source sent back stays Blender's own, and an artist's later
-edit to the same property replaces Media Server's override instead of stacking
+edit to the same property replaces Pixelsoup's override instead of stacking
 on it.
 """
 import json
@@ -56,7 +56,7 @@ def local(action, value=(0, 0, 0), target=None):
     path = directory / 'local-shot.tmp'
     path.write_text(str(rt.writeback.rows[target or identity]['node']) + ' ' + action + ' ' + ' '.join(map(str, value)))
     path.rename(directory / 'local-shot.txt')
-    pump('Media Server ' + action, lambda: done.exists() and done.read_text() == action)
+    pump('Pixelsoup ' + action, lambda: done.exists() and done.read_text() == action)
 
 
 def close_matrix(a, b, tolerance=0.0001):
@@ -106,29 +106,29 @@ try:
     identity, lamp_id = hero['ms_link_id'], lamp['ms_link_id']
     pump('Director state arrives', lambda: identity in rt.writeback.rows and lamp_id in rt.writeback.rows)
 
-    # A Media Server move is written into the object itself: no wrapper empty.
+    # A Pixelsoup move is written into the object itself: no wrapper empty.
     local('world', (4, 3, 2))
-    pump('Media Server placement written into the object',
+    pump('Pixelsoup placement written into the object',
          lambda: close_matrix(hero.matrix_world, Matrix.Translation((4, -2, 3))))
     assert hero.parent == parent
     exports, revision = rt.exports, rt.revision
     stable('writeback produces no source feedback')
     assert rt.exports == exports and rt.revision == revision, (rt.revision, revision)
-    assert not is_identity(rt.writeback.rows[identity]['offset']), 'Media Server keeps its override'
+    assert not is_identity(rt.writeback.rows[identity]['offset']), 'Pixelsoup keeps its override'
 
-    # The artist moves it: their placement replaces Media Server's, never stacks.
+    # The artist moves it: their placement replaces Pixelsoup's, never stacks.
     hero.location.x += 1
     bpy.context.view_layer.update()
     target = hero.matrix_world.copy()
     stable('artist move publishes')
-    pump('Media Server override absorbed', lambda: is_identity(rt.writeback.rows[identity]['offset']))
+    pump('Pixelsoup override absorbed', lambda: is_identity(rt.writeback.rows[identity]['offset']))
     stable('absorb settles')
     assert close_matrix(hero.matrix_world, target)
-    assert close_matrix(media_server_world(identity), blender_world(hero)), 'Media Server shows the artist placement'
+    assert close_matrix(media_server_world(identity), blender_world(hero)), 'Pixelsoup shows the artist placement'
 
-    # Media Server hides it; Blender hides it; the artist shows it again.
+    # Pixelsoup hides it; Blender hides it; the artist shows it again.
     local('hide')
-    pump('Media Server hide reaches Blender', lambda: hero.hide_get() and hero.hide_render)
+    pump('Pixelsoup hide reaches Blender', lambda: hero.hide_get() and hero.hide_render)
     stable('hidden without feedback')
     hero.hide_set(False)
     hero.hide_render = False
@@ -174,14 +174,14 @@ try:
     pump('scatter arrives', lambda: any(row['parent'] == field_id for row in rt.writeback.rows.values()))
     strewn = next(key for key, row in rt.writeback.rows.items() if row['parent'] == field_id)
     local('hide', target=strewn)
-    pump('Media Server hide reaches the instancer', lambda: field.hide_get() and field.hide_render)
+    pump('Pixelsoup hide reaches the instancer', lambda: field.hide_get() and field.hide_render)
     stable('hidden scatter settles')
     rt.mark(full=True)
     stable('hidden scatter extracts again')
-    assert strewn in rt.writeback.rows, 'a hidden scatter stays in Media Server'
+    assert strewn in rt.writeback.rows, 'a hidden scatter stays in Pixelsoup'
     assert not rt.writeback.rows[strewn]['removed'] and not rt.writeback.rows[strewn]['visible']
     local('show', target=strewn)
-    pump('Media Server show reaches the instancer', lambda: not field.hide_get() and not field.hide_render)
+    pump('Pixelsoup show reaches the instancer', lambda: not field.hide_get() and not field.hide_render)
     stable('shown scatter settles')
     assert not rt.writeback.rows[strewn]['removed'] and rt.writeback.rows[strewn]['visible']
 
@@ -200,10 +200,10 @@ try:
     stable('reset settles')
     assert close_matrix(media_server_world(identity), blender_world(hero))
 
-    # A Media Server light edit reaches the light; the artist's edit replaces it.
+    # A Pixelsoup light edit reaches the light; the artist's edit replaces it.
     local('intensity', (5000, 0, 0), lamp_id)
     efficacy = scene.ms_livelink.luminous_efficacy
-    pump('Media Server intensity written into the light', lambda: abs(lamp.data.energy - 5000 / efficacy) < 1e-3)
+    pump('Pixelsoup intensity written into the light', lambda: abs(lamp.data.energy - 5000 / efficacy) < 1e-3)
     stable('light writeback produces no feedback')
     assert rt.writeback.rows[lamp_id]['light'].get('intensity') == 5000
     lamp.data.energy = 20
@@ -211,7 +211,7 @@ try:
     pump('light override absorbed', lambda: not rt.writeback.rows[lamp_id]['light'])
     assert abs(lamp.data.energy - 20) < 1e-6
 
-    # A mesh with a material reaches Media Server as an object and one part
+    # A mesh with a material reaches Pixelsoup as an object and one part
     # per material; moving that part there moves the Blender object.
     bpy.ops.mesh.primitive_cube_add(size=1)
     painted = bpy.context.object
@@ -235,18 +235,18 @@ try:
     stable('artist moves the painted cube')
     pump('part override absorbed', lambda: is_identity(rt.writeback.rows[part]['offset']))
     stable('part absorb settles')
-    assert close_matrix(media_server_world(part), blender_world(painted)), 'Media Server shows the artist placement'
+    assert close_matrix(media_server_world(part), blender_world(painted)), 'Pixelsoup shows the artist placement'
 
-    # Deleting in Media Server takes the object out of the Blender scene, and
-    # Media Server's Undo puts it back where it was.
+    # Deleting in Pixelsoup takes the object out of the Blender scene, and
+    # Pixelsoup's Undo puts it back where it was.
     placed = painted.matrix_world.copy()
     local('delete', target=painted_id)
-    pump('Media Server delete takes the object out of the Blender scene', lambda: not painted.users_collection)
-    pump('the removal reaches Media Server', lambda: rt.writeback.rows[painted_id]['removed']
+    pump('Pixelsoup delete takes the object out of the Blender scene', lambda: not painted.users_collection)
+    pump('the removal reaches Pixelsoup', lambda: rt.writeback.rows[painted_id]['removed']
          and rt.writeback.rows[painted_id]['deleted'] and rt.writeback.rows[part]['deleted'])
     stable('deletion settles')
     local('undo')
-    pump('Media Server Undo puts the object back', lambda: collection in painted.users_collection)
+    pump('Pixelsoup Undo puts the object back', lambda: collection in painted.users_collection)
     pump('the restored object syncs again', lambda: not rt.writeback.rows[painted_id]['removed']
          and not rt.writeback.rows[painted_id]['deleted'] and not rt.writeback.rows[part]['deleted'])
     stable('restore settles')
@@ -271,15 +271,15 @@ try:
     hero.data.vertices[0].co.x -= 0.07
     hero.data.update()
     rt.publish_now()
-    pump('paused geometry remains on the same connection', lambda: not rt.busy and rt.status.startswith('Paused in Media Server'))
+    pump('paused geometry remains on the same connection', lambda: not rt.busy and rt.status.startswith('Paused in Pixelsoup'))
     assert rt.connected and rt.revision == paused_revision
     local('resume')
     pump('resume automatically syncs retained geometry', lambda: not rt.busy and rt.revision != paused_revision)
 
     # Save, reopen and reconnect: the saved record keeps the source Blender's
-    # own, so Media Server's edit is not applied twice.
+    # own, so Pixelsoup's edit is not applied twice.
     local('world', (6, 3, 2))
-    pump('second Media Server move written', lambda: close_matrix(hero.matrix_world, Matrix.Translation((6, -2, 3))))
+    pump('second Pixelsoup move written', lambda: close_matrix(hero.matrix_world, Matrix.Translation((6, -2, 3))))
     stable('second move settles')
     world = hero.matrix_world.copy()
     bpy.ops.wm.save_as_mainfile(filepath=str(directory / 'writeback.blend'))
@@ -295,7 +295,7 @@ try:
     stable('reopen settles')
     assert close_matrix(hero.matrix_world, world)
     assert close_matrix(media_server_world(identity), blender_world(hero)), 'no stacked override after reopen'
-    assert not is_identity(rt.writeback.rows[identity]['offset']), 'Media Server still holds its own edit'
+    assert not is_identity(rt.writeback.rows[identity]['offset']), 'Pixelsoup still holds its own edit'
 
     addon.unregister()
     (directory / 'results.json').write_text(json.dumps({'checks': checks, 'blender': bpy.app.version_string,

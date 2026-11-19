@@ -1,13 +1,13 @@
 """Same-user local discovery. No sockets or Blender API calls off the main thread.
 
 Each enabled Blender advertises a short-lived instance record: its label, the
-scene it shows, its status, the open .blend, the launch token Media Server gave
+scene it shows, its status, the open .blend, the launch token Pixelsoup gave
 the process when Open in Blender started it, its process id, and - since one
-.blend holds a whole Media Server project, each Blender scene tagged with its
-Media Server scene's source identity - the source of the scene shown, every
-tagged scene in the file, and a scene the artist asked to add to Media Server.
+.blend holds a whole Pixelsoup project, each Blender scene tagged with its
+Pixelsoup scene's source identity - the source of the scene shown, every
+tagged scene in the file, and a scene the artist asked to add to Pixelsoup.
 
-Media Server answers with a scene list (a pairing per linked scene) and may ask
+Pixelsoup answers with a scene list (a pairing per linked scene) and may ask
 to show a scene. Both files are consumed and deleted; pairing secrets are never
 stored in the blend file or advertised.
 """
@@ -19,7 +19,7 @@ import uuid
 
 def directory():
     base = Path(os.environ['LOCALAPPDATA']) if os.name == 'nt' else Path.home() / '.cache'
-    return base / 'MediaServer' / 'blender'
+    return base / 'Pixelsoup' / 'blender'
 
 
 def launch_token():

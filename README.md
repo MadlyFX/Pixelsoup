@@ -1,10 +1,10 @@
-# Media Server
+# Pixelsoup
 
 A C++20 virtual-production media server with a native layer/timeline editor,
 media playback, a Blender scene link, and synchronized render/output nodes.
 The Director commits document edits and show frames; nodes render the same
 authored state locally. Windows offers an Advanced D3D12 renderer and an SDL
-GPU Basic fallback. The engine modules also build headless; the media-server
+GPU Basic fallback. The engine modules also build headless; the Pixelsoup
 application needs a GUI build.
 
 ## Build and run
@@ -37,7 +37,7 @@ suites run before packaging. [AGENTS.md](AGENTS.md#build-and-validation)
 lists the areas.
 
 Other presets: `windows-msvc-debug` and `linux-clang-debug` are headless
-(engine modules and their tests, no media-server);
+(engine modules and their tests, no pixelsoup);
 `macos-clang-debug-gui` builds the SDL shell. GUI builds enable the `gui`
 vcpkg feature for SDL3, FFmpeg, model/image import, OpenEXR, OCIO and FreeType.
 Long soak tests require `MEDIASERVER_ENABLE_SOAK_TESTS=ON`.

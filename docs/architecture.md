@@ -1,11 +1,11 @@
 # Architecture
 
-This document describes the architecture of Media Server, the contracts it
+This document describes the architecture of Pixelsoup, the contracts it
 relies on, and its support boundaries.
 
 ## Product shape
 
-Media Server is a document-driven virtual-production media-server foundation.
+Pixelsoup is a document-driven virtual-production pixelsoup foundation.
 A Director owns authoring and control-frame publication. Render/output nodes
 receive the same sealed document changes, evaluate the same project state, and
 draw only the output mapping assigned to their node index. A one-machine
@@ -71,7 +71,7 @@ ST 2110 or NDI receiver exists.
 `MEDIASERVER_ENABLE_GUI=OFF` leaves the project, command, persistence, show,
 network, scene, output, topology, assets, and compositor model layers
 available for headless testing. Enabling GUI adds SDL3, the renderer, native UI,
-editor, the media-server application, and GUI-only dependencies including
+editor, the pixelsoup application, and GUI-only dependencies including
 FFmpeg and import libraries.
 
 ## Control, replication, and frame boundaries

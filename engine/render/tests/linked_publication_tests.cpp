@@ -193,7 +193,7 @@ int main(int argc,char** argv) {
         }
         auto fixture=initial; auto program=*fixture.get(doc::NodeId{10}); program.properties[std::string{pub::storage}]=(directory/"shared").string(); fixture=fixture.set(program);
         check(bool(persist::save_project_file(directory/"preview.mstage",fixture)),"write UI fixture");
-        check(bool(persist::save_recent_project_path(directory/"local/MediaServer/settings/recent-project.bin",directory/"preview.mstage")),"isolated startup fixture");
+        check(bool(persist::save_recent_project_path(directory/"local/Pixelsoup/settings/recent-project.bin",directory/"preview.mstage")),"isolated startup fixture");
         for (core::u64 index=0;index<2;++index) fixture=fixture.set({doc::NodeId{9000+index},"hardware.device",{{"kind",std::string{"render_server"}},{"name",std::string{"Publication node "}+std::to_string(index)},{"node_index",static_cast<core::i64>(index)}}});
         check(bool(persist::save_project_file(directory/"two-nodes.mstage",fixture)),"write two-node fixture");
         std::ofstream evidence{directory/"evidence.json"};

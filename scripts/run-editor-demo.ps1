@@ -23,7 +23,7 @@
   this console to tear the demo down.
 
 .PARAMETER Exe
-  Path to media-server.exe. By default the launcher uses the newest available
+  Path to pixelsoup.exe. By default the launcher uses the newest available
   packaged, release, or debug executable. This avoids silently running a stale
   release build after the current source was compiled only in Debug.
 
@@ -61,9 +61,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($Exe)) {
-    $packagedExe = Join-Path $PSScriptRoot '../media-server.exe'
-    $releaseExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-release-gui/apps/server/media-server.exe'
-    $debugExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-debug-gui/apps/server/media-server.exe'
+    $packagedExe = Join-Path $PSScriptRoot '../pixelsoup.exe'
+    $releaseExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-release-gui/apps/server/pixelsoup.exe'
+    $debugExe = Join-Path $PSScriptRoot '../out/build/windows-msvc-debug-gui/apps/server/pixelsoup.exe'
     $availableExecutables = @($packagedExe, $releaseExe, $debugExe) |
         Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
         ForEach-Object { Get-Item -LiteralPath $_ } |
@@ -73,7 +73,7 @@ if ([string]::IsNullOrWhiteSpace($Exe)) {
     }
 }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
-    throw "media-server.exe not found at $Exe. Extract the complete release package, build a GUI preset, or pass -Exe."
+    throw "pixelsoup.exe not found at $Exe. Extract the complete release package, build a GUI preset, or pass -Exe."
 }
 $Exe = (Resolve-Path -LiteralPath $Exe).ProviderPath
 
@@ -182,7 +182,7 @@ function Start-Role([string[]]$roleArgs, [string]$title) {
 }
 
 try {
-    $workspaceLayout = Join-Path $env:LOCALAPPDATA 'MediaServer/settings/workspace-layout.bin'
+    $workspaceLayout = Join-Path $env:LOCALAPPDATA 'Pixelsoup/settings/workspace-layout.bin'
     Write-Host "Executable:       $Exe"
     Write-Host "Workspace layout: $workspaceLayout"
     Write-Host "Director listening on $listen; opening the editor..."

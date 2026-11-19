@@ -49,7 +49,7 @@ class StageReference:
         try:
             collection = next((c for c in scene.collection.children if c.get(TAG)), None)
             if collection is None:
-                collection = bpy.data.collections.new('Media Server · Stage references')
+                collection = bpy.data.collections.new('Pixelsoup · Stage references')
                 collection[TAG] = True
                 scene.collection.children.link(collection)
             def object_for(role, camera=False):
@@ -63,7 +63,7 @@ class StageReference:
                     collection.objects.link(obj)
                 return obj
             conversion = CONVERSION @ Matrix.Diagonal((scale,scale,scale,1))
-            # Blender keeps authored coordinates - Media Server's edits are
+            # Blender keeps authored coordinates - Pixelsoup's edits are
             # written into them without the stage alignment - so the reference
             # is transformed back out of stage space.
             world_to_source = conversion.inverted() @ matrix(self.latest['alignment']).inverted()

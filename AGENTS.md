@@ -63,7 +63,7 @@ build inputs and notices and must not be treated as disposable cache.
 Build from an MSVC developer shell with `VCPKG_ROOT` set.
 `scripts/run-editor.ps1` launches the editor (Director) workflow and
 `scripts/run-output-node.ps1` a render node on another machine; `-Exe`
-selects a particular build. Both log to `%LOCALAPPDATA%\MediaServer\logs`.
+selects a particular build. Both log to `%LOCALAPPDATA%\Pixelsoup\logs`.
 
 Testing is tiered so a change builds and runs only what it affects:
 
@@ -83,7 +83,7 @@ Testing is tiered so a change builds and runs only what it affects:
 
 Areas and the `slow`/`blender` labels are assigned in
 `cmake/TestGroups.cmake`; a new test directory needs an area there. Only
-`area-server` and the full builds relink `media-server.exe`. Headless changes
+`area-server` and the full builds relink `pixelsoup.exe`. Headless changes
 can also use the headless presets. Blender checks are listed in
 `integrations/blender/README.md`.
 

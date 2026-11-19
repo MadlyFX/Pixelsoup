@@ -344,7 +344,7 @@ std::filesystem::path default_log_directory() {
         if (!root.has_value()) {
             return {};
         }
-        return (*root / "MediaServer" / "logs").lexically_normal();
+        return (*root / "Pixelsoup" / "logs").lexically_normal();
 #else
         auto root = environment_path("XDG_STATE_HOME");
         if (!root.has_value()) {

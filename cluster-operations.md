@@ -226,7 +226,7 @@ restarting a failed show if post-show analysis is required.
 
 ### Process logs
 
-Every media-server process tees what it prints to stdout and stderr - status
+Every pixelsoup process tees what it prints to stdout and stderr - status
 intervals, asset adoption, session and lockstep events, errors - into a
 timestamped, rotating file, so a fullscreen render node with no console still
 leaves a record:
@@ -238,7 +238,7 @@ leaves a record:
 | Lifecycle agent for node N | `agent-N.log` |
 | Render-machine window | `render-machine.log` |
 
-They live in `%LOCALAPPDATA%\MediaServer\logs` (`--log-dir=PATH` moves them;
+They live in `%LOCALAPPDATA%\Pixelsoup\logs` (`--log-dir=PATH` moves them;
 a lifecycle agent passes its own folder to its render process). Each start
 moves the previous run to `NAME.1.log`; a file rotates at 8 MiB and three
 older files are kept. If another live process already writes a name, the new
@@ -346,8 +346,8 @@ run the same agent with the same render-process arguments, so Output Monitor
 cannot tell them apart.
 
 **The render-machine window** is for a machine an operator signs in to.
-Launch `media-server.exe` with no arguments (a double-click, a shortcut, or
-`media-server.exe --render-machine`):
+Launch `pixelsoup.exe` with no arguments (a double-click, a shortcut, or
+`pixelsoup.exe --render-machine`):
 
 1. The first launch opens **SET UP THIS RENDER MACHINE**. The control machine
    is discovered automatically. Leave the address, Node index and Show ID
@@ -383,20 +383,20 @@ Launch `media-server.exe` with no arguments (a double-click, a shortcut, or
    refused request had the wrong password - and this machine's addresses for
    entering it in Hardware Map by hand.
 5. **Start this render machine when I sign in to Windows** adds a per-user
-   Run entry for `media-server.exe --render-machine`; clearing it removes the
+   Run entry for `pixelsoup.exe --render-machine`; clearing it removes the
    entry. Nothing else is registered.
 6. Closing the window asks first: it stops the agent and the render process,
    and Output Monitor cannot start the machine again until it is reopened.
 
 Launched from Explorer, the window closes the console it was given and starts
 the render process without one; started from a terminal it keeps the console,
-and the render process logs to it as under the scripts. `media-server.exe
+and the render process logs to it as under the scripts. `pixelsoup.exe
 --render-machine --validate-startup` prints what a launch would start - node
 index, Director, control port, password set or not - without opening a window,
 a port, or a process.
 
 **Windows Firewall.** The window looks for two inbound allow rules, named for
-their ports: `Media Server Lifecycle (TCP <control port>)` and `Media Server
+their ports: `Pixelsoup Lifecycle (TCP <control port>)` and `Pixelsoup
 Discovery (UDP 47839)`. While either is missing it offers **ALLOW THROUGH
 FIREWALL**, which runs one elevated `netsh` command - Windows asks for an
 administrator first - that deletes any rule with exactly those names and adds
@@ -404,9 +404,9 @@ them again, so pressing it twice leaves one copy. It changes nothing else. The
 equivalent by hand, from an elevated prompt:
 
 ```powershell
-netsh advfirewall firewall add rule name="Media Server Lifecycle (TCP 47840)" `
+netsh advfirewall firewall add rule name="Pixelsoup Lifecycle (TCP 47840)" `
   dir=in action=allow protocol=TCP localport=47840
-netsh advfirewall firewall add rule name="Media Server Discovery (UDP 47839)" `
+netsh advfirewall firewall add rule name="Pixelsoup Discovery (UDP 47839)" `
   dir=in action=allow protocol=UDP localport=47839
 ```
 
@@ -414,22 +414,22 @@ The rules allow any remote address. Where the control VLAN is shared, narrow
 them with `remoteip=` to the control machine, as the next section recommends.
 A rule found is not proof of reachability: Windows' own "allow access" prompt,
 answered Cancel when the agent first listened, can leave a block rule for
-`media-server.exe` that wins over any allow rule. If the window reports the
+`pixelsoup.exe` that wins over any allow rule. If the window reports the
 rules present but the editor still cannot find or reach the machine, look for
 such a rule under Windows Defender Firewall > Advanced settings > Inbound
 Rules.
 
 **A service** is for a machine nobody signs in to, or one that must come up
-before anyone does: run `media-server.exe --lifecycle-listen=... ` with the
+before anyone does: run `pixelsoup.exe --lifecycle-listen=... ` with the
 options in the README's lifecycle section (or `scripts/run-output-node.ps1`)
 under a service manager. The command-line agent reads no stored settings, so
 a service's configuration is exactly its command line.
 
 ### Remote control for development builds
 
-When render machines run `media-server.exe` from a shared build folder, a new
+When render machines run `pixelsoup.exe` from a shared build folder, a new
 build cannot link while any machine still has that file open, and the
-lifecycle agent is itself `media-server.exe`. Output Monitor's Stop ends only
+lifecycle agent is itself `pixelsoup.exe`. Output Monitor's Stop ends only
 the render process, so the agent keeps the file locked. For development
 machines, `scripts/node-remote-control.py` owns `run-output-node.ps1` as a
 child process and lets the control machine stop and start the whole tree - agent
@@ -451,7 +451,7 @@ own console (`--hidden` suppresses it). Allow the port from an elevated
 prompt, and narrow it with `remoteip=` on a shared VLAN:
 
 ```powershell
-netsh advfirewall firewall add rule name="Media Server Remote Control" `
+netsh advfirewall firewall add rule name="Pixelsoup Remote Control" `
   dir=in action=allow protocol=TCP localport=47850
 ```
 
@@ -468,18 +468,18 @@ Invoke-RestMethod "http://<render-ip>:47850/log?lines=200" -Headers $h
 
 | Request | Effect |
 | --- | --- |
-| `GET /status` | Whether the node script is running, its uptime and command, and every `media-server.exe` on the machine. |
-| `POST /start` | Starts the node script unless it is running. Refuses while a `media-server.exe` it did not start is running (a node started by hand or by an earlier run of the script); `?force=1` overrides. |
-| `POST /stop` | Ends the node script's whole process tree with `taskkill /T /F`, then waits up to ten seconds for every `media-server.exe` to exit so a build started next can link. `?all=1` also ends processes it did not start. |
+| `GET /status` | Whether the node script is running, its uptime and command, and every `pixelsoup.exe` on the machine. |
+| `POST /start` | Starts the node script unless it is running. Refuses while a `pixelsoup.exe` it did not start is running (a node started by hand or by an earlier run of the script); `?force=1` overrides. |
+| `POST /stop` | Ends the node script's whole process tree with `taskkill /T /F`, then waits up to ten seconds for every `pixelsoup.exe` to exit so a build started next can link. `?all=1` also ends processes it did not start. |
 | `POST /restart` | Stop, then start. |
 | `GET /log` | Plain text. `file=node` (default), `agent` or `control`; `previous=1` for the previous run's `.1.log`; `lines=N` (default 400, at most 20,000, `0` for the whole file up to its last 16 MiB); `grep=TEXT` keeps matching lines. |
 
 Logs are read from the node script's `-LogDir`, otherwise
-`%LOCALAPPDATA%\MediaServer\logs`, using its `-NodeIndex` (default 0);
+`%LOCALAPPDATA%\Pixelsoup\logs`, using its `-NodeIndex` (default 0);
 `--log-dir` overrides. The script records its own requests in
 `remote-control-<index>.log` beside them. Processes holding under 1 MB are
 ignored by the start guard and the stop wait: Windows can leave an unreaped
-`media-server.exe` of a few kilobytes behind that no longer holds the file.
+`pixelsoup.exe` of a few kilobytes behind that no longer holds the file.
 
 Closing the script leaves a running node running, and a restarted script does
 not track it. `--autostart` then reports the node already running instead of
@@ -511,7 +511,7 @@ that do not need remote rebuilds.
   access to the media paths the show references, and the required output-device
   access.
 - Set a render node password for any show network that is not fully
-  isolated: without one an agent accepts any Media Server on the network, and
+  isolated: without one an agent accepts any Pixelsoup on the network, and
   Output Monitor shows `No password` to say so. The editor keeps it in
   Preferences as a PBKDF2-derived key; on a render machine prefer
   `--lifecycle-secret-file` (a file holding the password, ACL'd to the

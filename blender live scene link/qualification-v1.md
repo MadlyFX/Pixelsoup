@@ -15,7 +15,7 @@ with add-on 0.7.0 and its explicit freeze-and-publish path; rerun the checks und
 | Blender add-on | `mediaserver_livelink` (version in `bl_info`, currently **0.10.1**) | `scripts/package-blender-livelink.py` writes the archive and its `manifest.json` |
 | Authoring link protocol | **v1** with capability negotiation | Frame version stays 1; optional features are named, see [protocol v1](protocol-v1.md) |
 | Blender | **5.2.0 LTS**, Windows build `fbe6228777e7` | `bl_info` requires 5.2.0; no other build is qualified |
-| Media Server | this checkout, MSVC 14.44, Debug and Release GUI presets | Advanced D3D12 renderer for the GPU checks |
+| Pixelsoup | this checkout, MSVC 14.44, Debug and Release GUI presets | Advanced D3D12 renderer for the GPU checks |
 
 The add-on and the Director are **one pair**. Use both from the same checkout:
 the capability list below is how a mismatch is caught, not a promise that mixed
@@ -238,7 +238,7 @@ resource announcement is refused with the pairing holding exactly 64.
   [materials](materials-and-lighting-v1.md) and [animation](animation-and-stage-v1.md).
 - No physical two-machine scanout, genlock, tracker-hardware calibration or lens
   distortion agreement is claimed. The Blender reference viewport is a reference
-  gate only; final calibrated output stays in Media Server.
+  gate only; final calibrated output stays in Pixelsoup.
 - No automatic garbage collection of resource caches or Program storage. Retire
   directories by hand once no project references them.
 - The measured figures cover the fixtures named above. Large unique meshes,

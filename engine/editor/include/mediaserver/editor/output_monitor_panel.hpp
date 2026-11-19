@@ -223,7 +223,7 @@ struct OutputMonitorState final {
     core::u64 lockstep_demotions{};
     core::u64 present_failures{};
     bool diagnostics_recording{};
-    // Render machines are controlled with no password: any Media Server on
+    // Render machines are controlled with no password: any Pixelsoup on
     // the network could start and stop them too.
     bool control_unsecured{};
     // These remain false until an explicit platform/vendor implementation

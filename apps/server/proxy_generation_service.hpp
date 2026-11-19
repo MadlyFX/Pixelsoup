@@ -194,7 +194,7 @@ struct ProxyCacheClearResult final {
     [[nodiscard]] explicit operator bool() const noexcept { return !error; }
 };
 
-// Removes only MediaServer-owned children from one dedicated proxy root. The
+// Removes only Pixelsoup-owned children from one dedicated proxy root. The
 // root itself and unrelated files alongside those children are preserved.
 [[nodiscard]] ProxyCacheClearResult clear_proxy_cache_root(
     const std::filesystem::path& root) noexcept;

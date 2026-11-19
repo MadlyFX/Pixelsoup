@@ -14,9 +14,9 @@ the supported materials and embedded images. The network worker transfers the
 immutable GLB through the existing hashed resource path; Director ingests and
 admits it as one complete revision. A source edit during export discards the
 completion. Disconnect/file replacement cancels the worker. Scrubbing the Blender
-timeline does not publish poses or drive Media Server playback.
+timeline does not publish poses or drive Pixelsoup playback.
 
-The collection is one selectable assembly in Media Server. Its persistent object
+The collection is one selectable assembly in Pixelsoup. Its persistent object
 and prototype UUIDs derive from the collection identity; the internal node and
 bone hierarchy remains inside the model package. The assembly is the unit of
 shot placement and look overrides. Use separate linked collections for independently
@@ -139,6 +139,6 @@ do not change the scene raster or playhead. Show time is informational in the pa
 Blender's reference gate does not reproduce Brown–Conrady distortion, overscan,
 off-axis LED-wall slices, feed mapping, projection meshes, inner/outer-frustum
 compositing, plate DOF, facility color, temporal processing, or final calibrated
-output. It is a pose/lens reference for authoring. Media Server remains authoritative
+output. It is a pose/lens reference for authoring. Pixelsoup remains authoritative
 for every final ICVFX view. Physical tracker hardware accuracy and two-machine
 scanout timing are not covered by this local test.

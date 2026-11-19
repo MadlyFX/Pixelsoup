@@ -7,7 +7,7 @@ No external assets or textures are used.
 - `reference-r1.glb` and `reference-r2.glb`: full visible reference scene, with
   stable custom object IDs and camera, shared mesh, parenting and signed scale.
 - `prop-r1.glb` and `prop-r2.glb`: the same shared mesh at identity placement for
-  per-occurrence assembly in Media Server. Revision 2 slopes the top +X edge.
+  per-occurrence assembly in Pixelsoup. Revision 2 slopes the top +X edge.
 - `.expected`: first line is triangle-corner count, then eleven floats per corner:
   world XYZ, world normal XYZ, linear base RGB, metallic, roughness. Generated
   from Blender evaluated meshes independently of GLB export. Corner order is

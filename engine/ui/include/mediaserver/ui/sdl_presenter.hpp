@@ -16,7 +16,7 @@
 namespace mediaserver::ui {
 
 struct SdlPresenterConfig final {
-    std::string title{"media-server"};
+    std::string title{"pixelsoup"};
     core::u32 width{960U};
     core::u32 height{540U};
     // Window placement, so a Director preview and its node outputs can be

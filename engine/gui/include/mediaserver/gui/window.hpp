@@ -40,7 +40,7 @@ enum class WindowError : core::u8 {
 };
 
 struct WindowConfig final {
-    std::string title{"Media Server"};
+    std::string title{"Pixelsoup"};
     core::u32 width{1600U};
     core::u32 height{900U};
     // Negative leaves placement to the window manager. The operator editor

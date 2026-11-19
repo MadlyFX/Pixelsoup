@@ -22,7 +22,7 @@ but must resolve inside this complete manifest. A source object omitted from the
 next manifest becomes a tombstone; reintroducing its UUID restores its existing
 shot occurrence. Referenced parent/prototype/material records cannot be omitted.
 
-The 16 matrix values are column-major affine transforms in Media Server metres,
+The 16 matrix values are column-major affine transforms in Pixelsoup metres,
 Y-up, using the [contract's](contract-v1.md) coordinate conversion. Visibility is 0 or 1. Empty
 prototype means a transform-only parent. Empty material preserves the GLB's
 per-primitive material slots. A material reference applies the eight linked

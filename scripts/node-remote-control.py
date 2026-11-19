@@ -3,7 +3,7 @@
 
 Run this on the render machine instead of starting run-output-node.ps1 by
 hand. It owns the node script as a child process, so the control machine can
-start it, stop it (which releases media-server.exe on a shared build folder so
+start it, stop it (which releases pixelsoup.exe on a shared build folder so
 a new build can link), restart it, and ask whether it is running.
 
 Standard library only. Windows only (it starts PowerShell and uses taskkill).
@@ -24,12 +24,12 @@ From the control machine (PowerShell):
 or curl:  curl -X POST -H "X-Token: SECRET" http://192.168.25.61:47850/stop
 
 Endpoints (JSON unless noted):
-  GET  /status   whether the node script is running, and every media-server.exe
+  GET  /status   whether the node script is running, and every pixelsoup.exe
   GET  /log      the node's log as plain text (see below)
   POST /start    start the node script if it is not already running; refuses
-                 while another media-server.exe runs unless ?force=1
+                 while another pixelsoup.exe runs unless ?force=1
   POST /stop     stop the node script and its whole process tree; with
-                 ?all=1 also end media-server.exe processes it did not start
+                 ?all=1 also end pixelsoup.exe processes it did not start
   POST /restart  stop, then start
 
 /log query parameters:
@@ -44,7 +44,7 @@ Endpoints (JSON unless noted):
 
 Windows Firewall must allow the port (TCP) inbound. From an elevated prompt:
 
-  netsh advfirewall firewall add rule name="Media Server Remote Control" ^
+  netsh advfirewall firewall add rule name="Pixelsoup Remote Control" ^
     dir=in action=allow protocol=TCP localport=47850
 
 Anyone who can reach the port and knows the token can start and stop the
@@ -68,7 +68,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-EXE_NAME = "media-server.exe"
+EXE_NAME = "pixelsoup.exe"
 CREATE_NEW_CONSOLE = 0x00000010
 CREATE_NO_WINDOW = 0x08000000
 MAX_LOG_LINES = 20000
@@ -134,7 +134,7 @@ def run_quiet(argv: list[str], timeout: float = 15.0) -> subprocess.CompletedPro
 
 
 def media_server_processes() -> list[dict]:
-    """Every media-server.exe on this machine, as {pid, memory}."""
+    """Every pixelsoup.exe on this machine, as {pid, memory}."""
     try:
         result = run_quiet(
             ["tasklist", "/FI", f"IMAGENAME eq {EXE_NAME}", "/FO", "CSV", "/NH"]
@@ -221,7 +221,7 @@ class NodeController:
                 # still holds the display and the director slot.
                 return {
                     "ok": False,
-                    "message": "media-server.exe is already running but was not started "
+                    "message": "pixelsoup.exe is already running but was not started "
                     "by this script; POST /stop?all=1 first, or /start?force=1",
                     "media_server_processes": strays,
                 }
@@ -294,7 +294,7 @@ class LogFiles:
 
 def make_handler(controller: NodeController, logs: LogFiles, token: str | None):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "MediaServerNodeControl/1"
+        server_version = "PixelsoupNodeControl/1"
 
         def log_message(self, fmt: str, *args) -> None:  # noqa: N802 (stdlib name)
             log(f"{self.client_address[0]} {fmt % args}")
@@ -384,7 +384,7 @@ def main() -> int:
         return 2
     here = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
-        description="Start and stop a Media Server render node remotely.",
+        description="Start and stop a Pixelsoup render node remotely.",
         epilog='Arguments after "--" go to run-output-node.ps1, '
         'for example: -- -DirectorHost 192.168.200.154 -Build release',
     )
@@ -411,7 +411,7 @@ def main() -> int:
         type=Path,
         default=None,
         help="folder holding node-<index>.log (default: the node script's -LogDir, "
-        r"else %%LOCALAPPDATA%%\MediaServer\logs)",
+        r"else %%LOCALAPPDATA%%\Pixelsoup\logs)",
     )
     parser.add_argument("--autostart", action="store_true", help="start the node immediately")
     parser.add_argument(
@@ -435,7 +435,7 @@ def main() -> int:
     if log_dir is None:
         script_log_dir = script_option(script_args, "-LogDir")
         log_dir = Path(script_log_dir) if script_log_dir else (
-            Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "MediaServer" / "logs"
+            Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Pixelsoup" / "logs"
         )
     node_index = script_option(script_args, "-NodeIndex") or "0"
     global _control_log_path

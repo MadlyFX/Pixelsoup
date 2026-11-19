@@ -83,8 +83,8 @@ existing semantic coalescing. Source revisions use a separate history context so
 local placement undo retains subsequently accepted geometry.
 
 Writeback needs one unambiguous attachment: when the same source is attached
-twice in a Blender scene, geometry still updates every attachment but Media
-Server's edits stay in Media Server and the Blender sidebar says so. Use an
+twice in a Blender scene, geometry still updates every attachment but
+Pixelsoup's edits stay in Pixelsoup and the Blender sidebar says so. Use an
 independent snapshot when a freely editable copy does not need continued syncing.
 
 ## Persistence

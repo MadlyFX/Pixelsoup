@@ -1,12 +1,12 @@
-"""Open a Media Server scene's .blend with the LiveLink add-on running.
+"""Open a Pixelsoup scene's .blend with the LiveLink add-on running.
 
-Media Server's Open in Blender starts:
+Pixelsoup's Open in Blender starts:
 
     blender [project.blend] --python mediaserver_open.py --
         --mediaserver-file <project.blend> --mediaserver-addon <this directory>
         [--mediaserver-scene-source <uuid> --mediaserver-scene-name <name>]
 
-One .blend holds the project, a Blender scene per Media Server scene. The
+One .blend holds the project, a Blender scene per Pixelsoup scene. The
 scene source picks which one Blender shows: an existing scene tagged with it,
 else the file's startup scene, else a new scene.
 
@@ -14,8 +14,8 @@ else the file's startup scene, else a new scene.
   installed in Blender is missing, disabled or older, so the Director and the
   add-on always speak the same protocol. Preferences are not changed.
 * A file that does not exist yet is created from Blender's startup scene and
-  saved where Media Server asked, so the scene and its .blend stay associated.
-* The process advertises the launch token Media Server put in its environment;
+  saved where Pixelsoup asked, so the scene and its .blend stay associated.
+* The process advertises the launch token Pixelsoup put in its environment;
   the Director recognizes it and connects without any further selection.
 """
 import ast
@@ -53,7 +53,7 @@ def ensure_addon(directory):
     if loaded and (not bundled or installed >= bundled):
         return 'installed ' + '.'.join(map(str, installed))
     if not bundled:
-        # No copy shipped beside Media Server: enable the installed add-on.
+        # No copy shipped beside Pixelsoup: enable the installed add-on.
         addon_utils.enable(ADDON, default_set=False)
         return 'installed'
     if loaded:
@@ -83,7 +83,7 @@ def show_sidebar():
                 for region in area.regions:
                     if region.type == 'UI':
                         try:
-                            region.active_panel_category = 'Media Server'
+                            region.active_panel_category = 'Pixelsoup'
                         except (AttributeError, TypeError, ValueError):
                             pass
     except (AttributeError, ReferenceError):
@@ -92,7 +92,7 @@ def show_sidebar():
 
 def create(path, splash, source, name):
     # Runs once the window manager is up; a new file is saved immediately so
-    # Media Server keeps pointing at the file the artist is editing.
+    # Pixelsoup keeps pointing at the file the artist is editing.
     bpy.context.preferences.view.show_splash = splash
     try:
         from mediaserver_livelink.runtime import runtime
@@ -105,21 +105,21 @@ def create(path, splash, source, name):
             # The new file has no link identities yet; keep them once assigned.
             runtime.save_after_first_sync = bpy.data.filepath
     except Exception as error:
-        print('Media Server: could not open', path, '-', error)
+        print('Pixelsoup: could not open', path, '-', error)
     show_sidebar()
     return None
 
 
 options = arguments()
-# The splash would cover the scene Media Server just opened. It is decided
+# The splash would cover the scene Pixelsoup just opened. It is decided
 # after this script runs, so hide it now and restore the preference once the
 # window is up.
 show_splash = bpy.context.preferences.view.show_splash
 bpy.context.preferences.view.show_splash = False
 try:
-    print('Media Server LiveLink:', ensure_addon(options.get('--mediaserver-addon', '')))
+    print('Pixelsoup Live Link:', ensure_addon(options.get('--mediaserver-addon', '')))
 except Exception as error:
-    print('Media Server: the LiveLink add-on could not be enabled -', error)
+    print('Pixelsoup: the LiveLink add-on could not be enabled -', error)
 bpy.app.timers.register(lambda: create(options.get('--mediaserver-file', ''), show_splash,
                                        options.get('--mediaserver-scene-source', ''),
                                        options.get('--mediaserver-scene-name', '')), first_interval=0.3)

@@ -1,35 +1,35 @@
-# Media Server LiveLink for Blender
+# Pixelsoup Live Link for Blender
 
 Add-on **0.10.1**, Blender **5.2 or newer**, authoring link protocol **v1**.
 Tested with Blender 5.2.0 LTS (fbe6228777e7) on Windows.
 
 ## One project, one Blender file
 
-A Media Server project has one `.blend`: `<project> Blender/<project>.blend` beside the
-saved project (`Documents/Media Server/Blender` while the project is unsaved). Each
-Media Server scene is a Blender scene in that file, tagged with the scene's identity.
+A Pixelsoup project has one `.blend`: `<project> Blender/<project>.blend` beside the
+saved project (`Documents/Pixelsoup/Blender` while the project is unsaved). Each
+Pixelsoup scene is a Blender scene in that file, tagged with the scene's identity.
 
 1. In **PROJECT SCENES**, point at a scene and click the orange **B** that appears
    before its name (or right-click the row > **Open in Blender**).
-2. The first time, Media Server creates the file, starts Blender with the LiveLink
+2. The first time, Pixelsoup creates the file, starts Blender with the LiveLink
    add-on running, and turns the file's first scene into this scene. The **B** on
    another scene switches that same Blender to it, creating an empty Blender scene the
-   first time. Blender's 3D view header reads **Media Server: <scene>**.
+   first time. Blender's 3D view header reads **Pixelsoup: <scene>**.
 3. Edit Blender normally. The whole Blender scene syncs, including models imported into
    new collections. The **B** stays before the names of scenes Blender holds: filled
    while Blender is syncing that scene, outlined while Blender shows another scene or
    is closed. Clicking it brings Blender to that scene, reopening Blender if needed.
 
 Every scene in the file stays linked at once; Blender syncs the scene it shows, so
-switching scenes in Blender's scene selector switches which Media Server scene follows.
-A scene made in Blender (**Scene > New**) shows **Add to Media Server** in the Media
-Server sidebar tab: Media Server creates a scene of that name, in Preview, linked to it.
+switching scenes in Blender's scene selector switches which Pixelsoup scene follows.
+A scene made in Blender (**Scene > New**) shows **Add to Pixelsoup** in the
+Pixelsoup sidebar tab: Pixelsoup creates a scene of that name, in Preview, linked to it.
 
-Nothing needs installing first: Media Server finds the newest Blender 5.2+ (set
+Nothing needs installing first: Pixelsoup finds the newest Blender 5.2+ (set
 `MEDIASERVER_BLENDER` to `blender.exe` to choose another) and runs the add-on that
 ships beside it for that Blender session, unless the installed copy is the same or
 newer. **Install Add-on Permanently** in the Blender sidebar installs it, so opening the
-project's `.blend` by hand relinks every scene in it, even after Media Server restarts.
+project's `.blend` by hand relinks every scene in it, even after Pixelsoup restarts.
 
 ## Live, both ways
 
@@ -39,34 +39,34 @@ scene to Program with the ordinary switcher. Placement, lights and materials str
 while you are still dragging; a mesh or texture edit is loaded by every node and
 revealed on the same frame (Program briefly holds its last frame while nodes load).
 
-Edits made in Media Server to a Blender object are written into that object in Blender:
+Edits made in Pixelsoup to a Blender object are written into that object in Blender:
 placement (including Hold), visibility and light settings. The `.blend` therefore holds
-what the wall shows, so reopening it or rendering it offline gives that scene. Media
-Server keeps its edit as its own override, so Media Server's Undo still works on it;
+what the wall shows, so reopening it or rendering it offline gives that scene.
+Pixelsoup keeps its edit as its own override, so Pixelsoup's Undo still works on it;
 Blender shows the result. Whoever edits a property last wins: when the artist then moves,
-shows/hides or relights that object in Blender, the artist's value replaces Media
-Server's override in the same update.
+shows/hides or relights that object in Blender, the artist's value replaces
+Pixelsoup's override in the same update.
 
-- A mesh with materials reaches Media Server as an object and a part per material.
+- A mesh with materials reaches Pixelsoup as an object and a part per material.
   Moving the single part of a one-material mesh moves the Blender object. Parts of a
   multi-material mesh moved apart, material overrides, and objects driven by constraints
-  or animation keep their Media Server edits in Media Server only; the sidebar counts them.
-- Media Server's edits are applied as their own Blender undo step: the artist's Ctrl+Z
-  undoes the most recent change, Media Server's included, and Media Server follows.
+  or animation keep their Pixelsoup edits in Pixelsoup only; the sidebar counts them.
+- Pixelsoup's edits are applied as their own Blender undo step: the artist's Ctrl+Z
+  undoes the most recent change, Pixelsoup's included, and Pixelsoup follows.
 - **File > Connect to Blender...** links a Blender you opened yourself to the Preview
   scene and adopts its file.
 - **Keep file saved** (on by default; the sidebar's advanced controls) saves the `.blend`
   a few seconds after syncing goes quiet following an accepted or written-back change.
-  Media Server can only be given a scene by Blender, so an unsaved file is a scene
-  waiting to be lost: the next Blender Media Server's `B` starts on it would publish the
-  older file, and objects added since would come back with new link identities that Media
-  Server's edits no longer attach to.
+  Pixelsoup can only be given a scene by Blender, so an unsaved file is a scene
+  waiting to be lost: the next Blender Pixelsoup's `B` starts on it would publish the
+  older file, and objects added since would come back with new link identities that
+  Pixelsoup's edits no longer attach to.
 
 Transforms, geometry, names, materials, lights, collection membership and removals sync
 automatically. Edit Mode geometry is flushed to the evaluated mesh without leaving Edit
 Mode. Sync adjustments do not change authored materials, lights or object types.
-Deleting a light in Blender also removes its illumination and Stage handle in Media
-Server; restoring it in Blender restores the same linked object.
+Deleting a light in Blender also removes its illumination and Stage handle in
+Pixelsoup; restoring it in Blender restores the same linked object.
 
 - Content Blender sends is stored beside the project in `<project> Blender/Link
   Resources`. **Remote render nodes** read it at the same absolute path, so keep the
@@ -89,7 +89,7 @@ connections retry automatically with bounded backoff, and a connection request
 Blender missed is sent again. A full transfer cache requests a fresh session
 automatically.
 
-The add-on must be running in a Blender process for Media Server to see it. Discovery
+The add-on must be running in a Blender process for Pixelsoup to see it. Discovery
 is local to the same OS user. Instance records expire after ten seconds, and
 connection credentials are consumed from a temporary local request, never stored in
 a blend file or shown in the editor. Disabling the add-on removes its record.
@@ -97,7 +97,7 @@ a blend file or shown in the editor. Disabling the add-on removes its record.
 The Blender sidebar normally shows sync status, adjustments and recovery controls.
 **Advanced publishing controls** reveals collection-limited publishing, pause,
 animation, stage references and export options.
-Media Server's linked collection Inspector can pause source updates. Resuming
+Pixelsoup's linked collection Inspector can pause source updates. Resuming
 there automatically sends the retained edits. **Blender connection...** opens the
 same connection dialog.
 
@@ -108,7 +108,7 @@ same connection dialog.
 - Curves, text and surfaces are copied as evaluated meshes. Modifiers are evaluated;
   constraints and animated objects use their current pose for ordinary live sync.
 - Point and spot radius, custom contribution settings, temperature, non-normalized
-  lights and disk/ellipse area lights are approximated using Media Server's light
+  lights and disk/ellipse area lights are approximated using Pixelsoup's light
   representation. Power, dimensions and cone values are clamped to valid ranges.
 - Supported Principled values and directly assigned PNG/JPEG textures are retained.
   Oversized textures are resized to at most 1024 pixels in a separate Blender
@@ -178,7 +178,7 @@ ctest --preset windows-msvc-debug-gui -R "server_blender_links|director_link|sce
 The workflow suite installs the ZIP into an isolated Blender profile and exercises
 actual C++ discovery, instance selection, full-scene import/update/removal, material
 fallback, light conversion, reconnect, resync, and credential cleanup. The writeback
-suite drives Media Server edits into Blender objects and back. Use `--build release`
+suite drives Pixelsoup edits into Blender objects and back. Use `--build release`
 to run them against the optimized build. Other suites cover collection publishing and
 native material fidelity; `exercise_shading.py` checks material alpha modes, UV maps
 and mirrored tangent frames against Blender itself. The Python unit tests also run in

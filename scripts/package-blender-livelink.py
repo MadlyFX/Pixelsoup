@@ -42,7 +42,7 @@ manifest = {
     'capabilities': list(wire.CAPABILITIES),
     'blender_minimum': '.'.join(map(str, wire.BLENDER_REQUIRED)),
     'blender_qualified': '5.2.0 LTS fbe6228777e7',
-    'install': 'Edit > Preferences > Add-ons > Install from Disk, then enable Media Server LiveLink',
+    'install': 'Edit > Preferences > Add-ons > Install from Disk, then enable Pixelsoup Live Link',
     'upgrade': 'Install the newer archive over the enabled add-on, then restart Blender',
     'remove': 'Disable and Remove in Preferences > Add-ons; no project or preference data is retained',
     'recover': 'File > Connect to Blender > Resync Scene; interrupted connections retry automatically',

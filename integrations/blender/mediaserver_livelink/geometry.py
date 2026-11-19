@@ -82,7 +82,7 @@ def glb(mesh, materials):
         raise ValueError('Invalid tangent handedness')
     if len(vertices) and (vertices.min() < 0 or vertices.max() >= len(positions) // 3):
         raise ValueError('Invalid evaluated vertex index')
-    doc = {'asset': {'version': '2.0', 'generator': 'Media Server LiveLink 0.1.0'},
+    doc = {'asset': {'version': '2.0', 'generator': 'Pixelsoup Live Link 0.1.0'},
            'scene': 0, 'scenes': [{'nodes': [0]}], 'nodes': [{'mesh': 0}],
            'meshes': [{'primitives': []}], 'buffers': [], 'bufferViews': [], 'accessors': [],
            'materials': []}
@@ -183,7 +183,7 @@ def manifest(source, revision, rows, previous=None, absorbs=()):
     else:
         lines.extend('erase ' + key[0] + ' ' + quoted(key[1]) for key in sorted(previous.keys() - rows.keys()))
         lines.extend('upsert ' + rows[key] for key in sorted(rows) if rows[key] != previous.get(key))
-    # Media Server overrides the artist has just replaced (writeback).
+    # Pixelsoup overrides the artist has just replaced (writeback).
     lines.extend('absorb ' + quoted(identity) + ' ' + kind for identity, kind in absorbs)
     result = '\n'.join(lines) + '\n'
     # A very large replacement can exceed delta operation capacity; snapshot instead.

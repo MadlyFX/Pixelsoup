@@ -31,7 +31,7 @@ history key derived from group and local matrix distinguishes stationary trees;
 it is not a persistent authoring identity. Moving a candidate resets its history.
 
 Generated batch/chunk rows can receive Director-side overrides, but they are not
-editable Blender objects, so those overrides stay in Media Server. Individual-tree detachment is
+editable Blender objects, so those overrides stay in Pixelsoup. Individual-tree detachment is
 not available; create an authored prop when it needs its own shot.
 
 ## Density and supported generators

@@ -126,7 +126,7 @@ separate control machine, start the editor half on the control machine:
 ```
 
 That opens the editor and a Director listener, and prints this machine's
-address and the port. Without a script, double-click `media-server.exe` and
+address and the port. Without a script, double-click `pixelsoup.exe` and
 press **OPEN EDITOR** in the window it opens: the editor starts as this
 machine's Director, listening on port 45060 on every interface unless File >
 Preferences stores another Director endpoint, show ID or epoch. Its
@@ -134,7 +134,7 @@ write-ahead log lives in the per-user settings folder unless Preferences names
 one. On a machine not set up as a render machine the small window then closes;
 on a render machine it stays, so one computer can be both.
 
-**A render machine needs no command line.** Put `media-server.exe` on it, with
+**A render machine needs no command line.** Put `pixelsoup.exe` on it, with
 the files beside it (the release package, or a GUI build directory), and
 double-click it. The first time, a small window discovers the editor on the
 local network and asks for this machine's settings:
@@ -174,8 +174,8 @@ and readiness state confirms whether the node has joined and can render.
 
 **SAVE AND START** stores them in this machine's per-user Preferences - never
 in a project - and waits for an editor to assign identity, then starts the
-lifecycle agent and render process. From then on, double-clicking `media-server.exe` (or a shortcut
-to it, or `media-server.exe --render-machine`) skips the form and runs with
+lifecycle agent and render process. From then on, double-clicking `pixelsoup.exe` (or a shortcut
+to it, or `pixelsoup.exe --render-machine`) skips the form and runs with
 those settings; **CHANGE SETTINGS** edits them. The window shows the render
 process with local START, STOP and RESTART, the control port Output Monitor
 reaches it on, whether it has a password, how many control requests were
@@ -183,16 +183,16 @@ accepted or refused, and this machine's addresses for entering it by hand.
 Closing it asks first, because it stops the output. Tick **Start this render
 machine when I sign in to Windows** to have it come back after a restart.
 Launched from Explorer it closes the console window it was given; started from
-a terminal it keeps logging there. `media-server.exe --render-machine
+a terminal it keeps logging there. `pixelsoup.exe --render-machine
 --validate-startup` prints what a launch would start without opening anything.
 
-On Windows the window also checks for Media Server's inbound firewall rules -
+On Windows the window also checks for Pixelsoup's inbound firewall rules -
 the control port (TCP 47840 + node index) and discovery (UDP 47839) - and while
 one is missing offers **ALLOW THROUGH FIREWALL**: Windows asks for an
 administrator, then exactly those two rules are added, replacing any earlier
 copy. Nothing else is changed. If Windows showed its own "allow access" prompt
 when the agent started, Allow does the same job; Cancel can leave a block rule
-for `media-server.exe`, which wins over any allow rule - remove it under
+for `pixelsoup.exe`, which wins over any allow rule - remove it under
 Windows Defender Firewall > Advanced settings > Inbound Rules.
 
 The script does the same from a command line, and is still the way to pass
@@ -208,7 +208,7 @@ Preferences > Render nodes** on the control machine - it applies as soon as it
 is saved, no restart - and give each render machine the same password in its
 setup window (`-Password` to the script, `--lifecycle-password=` on the
 executable). With no password on
-either side everything still works, but any Media Server on the network could
+either side everything still works, but any Pixelsoup on the network could
 control those machines too; Output Monitor shows `No password` while that is
 so, and a machine started with a different password reads `password rejected`.
 The password is kept on this machine only as the key it derives
@@ -219,7 +219,7 @@ distinct per render machine; the 128-bit node identity is derived from it.
 `-Fullscreen` drives a real wall, `-Windowed` is easier while setting up.
 
 Both scripts take `-Build auto|packaged|release|debug`. `auto` prefers a
-packaged `media-server.exe` beside the scripts directory, then the
+packaged `pixelsoup.exe` beside the scripts directory, then the
 `windows-msvc-release-gui` build, then `windows-msvc-debug-gui`, so the same
 scripts work from the repository and from an extracted release package on a
 machine with no build tree. `-DryRun` prints the exact command line without
@@ -248,14 +248,14 @@ Map Host field take IPv4/IPv6 literals, not host names.
 To open only the editor, provide a Director listener and stable show identity:
 
 ```powershell
-out/build/windows-msvc-debug-gui/apps/server/media-server.exe `
+out/build/windows-msvc-debug-gui/apps/server/pixelsoup.exe `
   --role=director --director-listen=127.0.0.1:45000 `
   --show-id=00000000000000010000000000000002 `
   --director-epoch=00000000000000030000000000000004 `
   --playback --edit --surface=1600x900 --wal=editor-test.wal
 ```
 
-Run `media-server.exe --help` for the complete option reference. `--playback`
+Run `pixelsoup.exe --help` for the complete option reference. `--playback`
 starts the show clock; `--scene` opens an ordinary scene-output window; and
 `--output` selects the feed-mapped output path. The editor is Director-only.
 
@@ -507,17 +507,17 @@ is reported on the Output Monitor and never gates the switcher - distributing
 content to nodes is an external concern in this build.
 
 **Scenes from Blender.** A project has one `.blend` beside it with a Blender
-scene per Media Server scene. The orange `B` before a `PROJECT SCENES` row's name
+scene per Pixelsoup scene. The orange `B` before a `PROJECT SCENES` row's name
 (shown on hover for other rows) opens it (created the first time) with the LiveLink
 add-on running and shows that scene. It stays on scenes Blender holds: filled for the
 one Blender syncs, outlined otherwise. A linked scene is live wherever it is - Blender edits reach Program and every
-output node as the artist drags - and Media Server's edits to Blender objects are
+output node as the artist drags - and Pixelsoup's edits to Blender objects are
 written back into them, so the `.blend` always holds what the wall shows. The
 add-on keeps that true on disk: a few seconds after syncing goes quiet following
-a change Media Server accepted or wrote back, it saves the `.blend` (Keep file
+a change Pixelsoup accepted or wrote back, it saves the `.blend` (Keep file
 saved, on by default). A Blender the `B` starts later - Blender closed, a crash,
-"Don't Save" - therefore opens the scene Media Server holds, with the same link
-identities, instead of an older file whose objects Media Server's edits no
+"Don't Save" - therefore opens the scene Pixelsoup holds, with the same link
+identities, instead of an older file whose objects Pixelsoup's edits no
 longer attach to. Take a linked scene to air with the ordinary switcher. See
 [integrations/blender](../integrations/blender/README.md).
 
@@ -1813,15 +1813,15 @@ Choose a render node password, set it in the editor's Preferences, and give
 every render machine's agent the same one with `--lifecycle-password=TEXT` or
 `--lifecycle-secret-file=PATH` (a file holding the password, which keeps it
 out of process listings; restrict it to the service account). An agent with
-neither runs unsecured and accepts any Media Server on the network. For
+neither runs unsecured and accepts any Pixelsoup on the network. For
 example, this agent supervises node 0:
 
 ```powershell
-media-server.exe `
+pixelsoup.exe `
   --lifecycle-listen=10.20.0.21:47840 `
   --lifecycle-node-index=0 `
-  --lifecycle-secret-file=C:\ProgramData\MediaServer\lifecycle.secret `
-  --lifecycle-child=C:\MediaServer\media-server.exe `
+  --lifecycle-secret-file=C:\ProgramData\Pixelsoup\lifecycle.secret `
+  --lifecycle-child=C:\Pixelsoup\pixelsoup.exe `
   --lifecycle-autostart `
   --lifecycle-child-arg=--role=render,output `
   --lifecycle-child-arg=--director-connect=10.20.0.10:45000 `
@@ -2219,7 +2219,7 @@ visible. The result embeds the image in a new immutable model package under
 source in one undoable edit. Other placements keep their appearance. Keep that
 referenced package available at the same path on every render node. Blender-linked
 models continue to take textures from their Blender materials; create an independent
-snapshot before editing their images in Media Server.
+snapshot before editing their images in Pixelsoup.
 
 Effects can be applied to a selected element or connected in that scene's
 compositor graph. The graph's **Add Node** palette uses searchable, expandable
@@ -2905,7 +2905,7 @@ project safely falls back to untitled startup.
 
 While a project has unsaved changes the editor keeps a recovery copy of it,
 refreshed within ten seconds of each change, in
-`%LOCALAPPDATA%\MediaServer\settings\recovery`. An untitled project has one
+`%LOCALAPPDATA%\Pixelsoup\settings\recovery`. An untitled project has one
 too. The copy is written on its own thread, so it never holds a frame. Saving
 the project removes it, and so does closing the editor, opening another project
 or starting a new one once you have agreed to discard the changes. If the

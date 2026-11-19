@@ -59,7 +59,7 @@ try {
         '--surface=1600x900','--status-interval=10','--show-id=0000000000000012000000000000001a',
         '--director-epoch=0000000000000012000000000000001b',
         ('--wal="' + (Join-Path $Directory 'director.wal') + '"'))
-    $director = Start-Process -FilePath (Join-Path $buildDirectory 'apps/server/media-server.exe') -ArgumentList $editorArguments `
+    $director = Start-Process -FilePath (Join-Path $buildDirectory 'apps/server/pixelsoup.exe') -ArgumentList $editorArguments `
         -WorkingDirectory $repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $Directory 'director.log') `
         -RedirectStandardError (Join-Path $Directory 'director.err')
     Write-Output "Director PID: $($director.Id) - open $project from File > Open Project"

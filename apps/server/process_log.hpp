@@ -12,7 +12,7 @@
 #include <string_view>
 #include <vector>
 
-// Persistent diagnostics for every media-server process: what it prints to
+// Persistent diagnostics for every pixelsoup process: what it prints to
 // stdout and stderr is also written, timestamped, to a rotating file under a
 // per-user log folder. A render node is often a fullscreen release build with
 // no console, and the machine-local lifecycle agent reads its log back from
@@ -61,7 +61,7 @@ inline constexpr std::string_view process_log_dropped_marker{"[log] dropped "};
 process_log_file(const std::filesystem::path& directory,
                  std::string_view name, std::size_t generation = 0U);
 
-// %LOCALAPPDATA%\MediaServer\logs on Windows; $XDG_STATE_HOME/mediaserver/logs
+// %LOCALAPPDATA%\Pixelsoup\logs on Windows; $XDG_STATE_HOME/mediaserver/logs
 // or ~/.local/state/mediaserver/logs elsewhere. Empty when neither exists.
 [[nodiscard]] std::filesystem::path default_log_directory();
 

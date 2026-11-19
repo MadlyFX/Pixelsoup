@@ -187,7 +187,7 @@ void exited_blender_records_are_ignored() {
     LINKS_CHECK(!fs::exists(root / (gone + ".instance")));
 }
 
-// One Blender holding the project's file: every Media Server scene in it is
+// One Blender holding the project's file: every Pixelsoup scene in it is
 // linked at once through one scene list, the Blender is switched to a scene
 // on Open in Blender, a scene the artist added there is created once, and a
 // scene disconnected leaves the list.

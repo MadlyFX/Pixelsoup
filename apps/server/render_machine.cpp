@@ -453,11 +453,11 @@ std::vector<FirewallRule>
 render_machine_firewall_rules(std::uint16_t control_port,
                               std::uint16_t discovery_port) {
     std::vector<FirewallRule> rules;
-    rules.push_back(FirewallRule{"Media Server Lifecycle (TCP " +
+    rules.push_back(FirewallRule{"Pixelsoup Lifecycle (TCP " +
                                      std::to_string(control_port) + ")",
                                  "TCP", control_port});
     if (discovery_port != 0U) {
-        rules.push_back(FirewallRule{"Media Server Discovery (UDP " +
+        rules.push_back(FirewallRule{"Pixelsoup Discovery (UDP " +
                                          std::to_string(discovery_port) + ")",
                                      "UDP", discovery_port});
     }

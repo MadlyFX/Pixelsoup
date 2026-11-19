@@ -126,7 +126,7 @@ int run_node_playback(net::NodeSessionService &service,
     // A node output window is input-inert on purpose: what it shows is
     // replicated state, so keyboard transport there would be a lie.
     auto presenter = make_presenter(
-        options, "media-server node " + std::to_string(options.node_index),
+        options, "Pixelsoup node " + std::to_string(options.node_index),
         false);
     if (presenter == nullptr) {
         return 1;
@@ -937,7 +937,7 @@ int run_node_playback(net::NodeSessionService &service,
                             presenter_options(options, deployed.window);
                         auto replacement = make_presenter(
                             applied,
-                            "media-server node " +
+                            "Pixelsoup node " +
                                 std::to_string(options.node_index) +
                                 " output " +
                                 std::to_string(deployed.logical_port) +
@@ -996,7 +996,7 @@ int run_node_playback(net::NodeSessionService &service,
                 } else if (*wanted != active_presenter_settings) {
                     auto replacement =
                         make_presenter(presenter_options(options, *wanted),
-                                       "media-server node " +
+                                       "Pixelsoup node " +
                                            std::to_string(options.node_index),
                                        false, &*wanted);
                     if (replacement == nullptr) {
@@ -1874,7 +1874,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             }
         }
         editor::EditorConfig editor_config{};
-        editor_config.title = "media-server editor";
+        editor_config.title = "Pixelsoup editor";
         // Honour an explicit --surface, but keep the editor usably large when
         // the caller left the small test-pattern default in place.
         editor_config.width =
@@ -1987,7 +1987,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         clip_source = write_demo_clip();
     }
     if (!options.edit) {
-        presenter = make_presenter(options, "media-server director", true);
+        presenter = make_presenter(options, "Pixelsoup director", true);
         if (presenter == nullptr) {
             return 1;
         }
@@ -2246,7 +2246,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     core::u64 blender_link_transactions{};
     // The name an unsaved project's .blend gets, chosen when it first opens.
     std::string unsaved_blender_name;
-    // Scenes the artist added in Blender, each created as a Media Server scene
+    // Scenes the artist added in Blender, each created as a Pixelsoup scene
     // through the ordinary Create Scene path; `blender_scene_creating` is the
     // one that path is creating now.
     std::deque<BlenderLinks::Created> blender_scene_requests;

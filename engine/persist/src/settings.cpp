@@ -1324,7 +1324,7 @@ environment_path(const char *name) {
                 make_error(SettingsErrorCode::SettingsUnavailable));
         }
         auto file =
-            (*root / "MediaServer" / "settings" / file_name).lexically_normal();
+            (*root / "Pixelsoup" / "settings" / file_name).lexically_normal();
         if (!file.is_absolute()) {
             return settings_path_failure(
                 make_error(SettingsErrorCode::SettingsUnavailable));

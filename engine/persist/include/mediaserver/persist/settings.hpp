@@ -161,7 +161,7 @@ struct Preferences final {
     // hex characters, net::lifecycle_key_from_password) rather than as the
     // password. Empty means no password: render-machine agents started
     // without one can be controlled from here - and by anyone else on the
-    // network running Media Server.
+    // network running Pixelsoup.
     std::string lifecycle_password_key;
     // The Director write-ahead log.
     std::string wal_path;
@@ -179,7 +179,7 @@ struct Preferences final {
     ProxyTranscodePriority proxy_transcode_priority{
         default_proxy_transcode_priority};
 
-    // This machine as a render machine: what `media-server` launched with no
+    // This machine as a render machine: what `pixelsoup` launched with no
     // arguments runs. An empty director means it has not been set up, and that
     // launch opens the setup window instead. The agent it runs requires
     // lifecycle_password_key above - the render node password is one setting

@@ -236,8 +236,8 @@ PhaseExit DirectorShowLoop::apply_blender_links(OperatorFrame &op) {
     // Operator Blender requests run here, at a control frame, where
     // recording a scene's Blender file and source identity is an
     // ordinary edit. A scene opened for the first time joins the
-    // project's .blend - one file with a Blender scene per Media
-    // Server scene; one linked from the Connect dialog adopts the
+    // project's .blend - one file with a Blender scene per
+    // Pixelsoup scene; one linked from the Connect dialog adopts the
     // file that Blender already has open.
     const auto blender_association = [&](doc::NodeId target, const std::string& instance_file,
                                          bool choose_file) -> std::optional<BlenderAssociation> {

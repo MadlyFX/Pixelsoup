@@ -222,7 +222,7 @@ def main():
         source_paused = False
         def shots():
             nonlocal shot_revision
-            # Media Server's overrides on this scene, for writeback.
+            # Pixelsoup's overrides on this scene, for writeback.
             reply = director.request(SHOT_STATE, base=shot_revision)
             if reply['kind'] != SHOT_STATE:
                 raise RuntimeError(reply['payload'])
@@ -258,7 +258,7 @@ def main():
                 # The serializer retains the latest copied geometry. Pause is
                 # recoverable on this pairing; an explicit Publish retries it.
                 source_paused = True
-                send(sock, {'kind': 'paused', 'message': 'Paused in Media Server. Resume source updates there to sync automatically.'})
+                send(sock, {'kind': 'paused', 'message': 'Paused in Pixelsoup. Resume source updates there to sync automatically.'})
             shots()
     except Exception as error:
         try:

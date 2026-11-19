@@ -246,4 +246,4 @@ ctest --test-dir out/build/windows-msvc-debug-gui --output-on-failure `
 ```
 
 Then run the area and quick presets that cover the change (see AGENTS.md) and
-rebuild the Release `media-server` target used by `scripts/run-editor.ps1`.
+rebuild the Release `pixelsoup` target used by `scripts/run-editor.ps1`.

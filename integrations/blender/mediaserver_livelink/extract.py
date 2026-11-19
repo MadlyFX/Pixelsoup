@@ -20,7 +20,7 @@ CONVERSION = Matrix(((1, 0, 0, 0), (0, 0, 1, 0), (0, -1, 0, 0), (0, 0, 0, 1)))
 
 def qualified():
     if bpy.app.version < (5, 2, 0):
-        raise ValueError('Media Server LiveLink requires Blender 5.2 or newer')
+        raise ValueError('Pixelsoup Live Link requires Blender 5.2 or newer')
 
 
 class Identities:
@@ -122,7 +122,7 @@ def hidden_instances(obj, depsgraph):
     """The instances `obj` makes while hidden, as (prototype, local matrix).
 
     The depsgraph's instance iterator skips hidden objects, and hiding one is
-    how Media Server's visibility override shows in Blender. Its evaluated
+    how Pixelsoup's visibility override shows in Blender. Its evaluated
     geometry still holds the instances, so a hidden instancer keeps its scatter
     (sent hidden) instead of losing it as though deleted."""
     result = []
@@ -218,7 +218,7 @@ def describe(scene, collection, identities):
                 raise ValueError('Hidden instance enumeration exceeds 65536 entries; isolate the linked collection')
             scattered(obj, prototype, matrix)
     ids = {name: identities.identity(bpy.data.objects[name], scene) for name in names}
-    # Media Server's edits are shown in these objects; what was applied comes
+    # Pixelsoup's edits are shown in these objects; what was applied comes
     # off again here, so the source sent stays Blender's own.
     from .runtime import runtime
     writeback = runtime.writeback

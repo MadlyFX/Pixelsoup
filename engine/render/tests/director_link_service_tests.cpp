@@ -260,7 +260,7 @@ int main(int argc,char** argv) {
         changed=rig.context; changed.program=changed.target;
         { const auto on_air=render::DirectorLinkService::plan(c,changed);
           check(on_air || on_air.error().message.find("frozen") == std::string::npos,"Program scene accepts edits"); }
-        // Writeback: Blender reads Media Server's overrides on its objects as one
+        // Writeback: Blender reads Pixelsoup's overrides on its objects as one
         // MSSHOT 2 state, recomputed only when the document changes.
         check(rig.transact(restarted,transaction(restarted,"shot-source","r4",snapshot(hash,"shot-source",15))).kind==K::Ack,"restore for writeback");
         auto state_request = restarted.message(K::ShotState);
@@ -300,7 +300,7 @@ int main(int argc,char** argv) {
         shown.payload += "absorb \"" + uuid(20) + "\" visibility\n";
         check(rig.transact(restarted,shown).kind==K::Ack && scene::read_linked_scene(rig.context.document).value().occurrences.at(hero).visible,
             "absorbed visibility follows the source");
-        // Deleted in Media Server: the writeback state says so, and the artist
+        // Deleted in Pixelsoup: the writeback state says so, and the artist
         // bringing the object back absorbs the deletion.
         auto removal = scene::plan_linked_edit(rig.context.document,hero,scene::LinkedEdit::Delete);
         check(static_cast<bool>(removal),"local delete");

@@ -567,8 +567,8 @@ namespace mediaserver::app {
             });
     }
     // Include hidden occurrences, so showing one never depends on whether it
-    // happens to draw in this frame. Objects deleted in Blender or in Media
-    // Server are gone from every list: their records stay in the document only
+    // happens to draw in this frame. Objects deleted in Blender or in
+    // Pixelsoup are gone from every list: their records stay in the document only
     // so Undo on either side can bring them back. This is a cached projection.
     std::map<std::pair<doc::NodeId,doc::NodeId>,doc::NodeId> linked_nodes;
     std::set<doc::NodeId> linked_collections;

@@ -96,7 +96,7 @@ describe_start_failure(const LifecycleAgentStartError& error,
 
 int run_render_machine_window(RenderMachineWindowOptions options) {
     gui::WindowConfig window_config{};
-    window_config.title = "Media Server - Render Machine";
+    window_config.title = "Pixelsoup - Render Machine";
     window_config.width = render_machine_window_width;
     window_config.height = render_machine_window_height;
     window_config.logical_size = true;

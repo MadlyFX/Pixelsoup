@@ -4,8 +4,8 @@ The publisher is the add-on in `integrations/blender/mediaserver_livelink`
 (version in `bl_info`, currently 0.10.1), for Blender **5.2.0 LTS / fbe6228777e7**
 or newer on Windows. The add-on checks the Blender version tuple before linking.
 No third-party Python package is needed for the link itself. The workflow it
-serves is in the [add-on README](../integrations/blender/README.md); Media
-Server's edits written back into Blender objects are described under
+serves is in the [add-on README](../integrations/blender/README.md);
+Pixelsoup's edits written back into Blender objects are described under
 [Writeback](protocol-v1.md#writeback).
 
 ## Execution and scheduling

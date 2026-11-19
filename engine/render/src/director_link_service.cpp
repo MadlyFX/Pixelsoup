@@ -141,7 +141,7 @@ core::u64 percentile(std::vector<core::u64> samples, double fraction) {
 }
 // The wire never accepts paths: even an authenticated authoring client may only
 // refer to a completed, verified hash.glb in the shared store. `absorb` records
-// are not content: they name objects whose Media Server override this revision
+// are not content: they name objects whose Pixelsoup override this revision
 // replaces, and leave with the revision instead of joining the retained rows.
 Rows merge_rows(const LinkMessage& m, Rows rows, const std::set<std::string>& negotiated,
         std::vector<std::pair<std::string, std::string>>& absorbed) {
@@ -433,7 +433,7 @@ struct DirectorLinkService::Impl {
                             response(m,K::StageContext,linked_stage_text(sample,stage_alignment)); continue;
                         }
                         if (m.kind == K::ShotState) {
-                            // Media Server's overrides on this scene, for writeback.
+                            // Pixelsoup's overrides on this scene, for writeback.
                             if (shot_cached_document.version() != current->document.version() || shot_cached_text.empty()) {
                                 shot_cached_text = linked_shot_state(*current, source);
                                 shot_cached_revision = hash_text(shot_cached_text);

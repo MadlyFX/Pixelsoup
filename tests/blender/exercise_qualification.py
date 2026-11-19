@@ -166,7 +166,7 @@ try:
         time.sleep(0.02)
     assert rt.worker is None and 'control characters' in rt.status, rt.status
     hero.name = 'Hero'
-    checks.append('a name Media Server cannot represent is refused by name, not silently dropped')
+    checks.append('a name Pixelsoup cannot represent is refused by name, not silently dropped')
 
     # Recovery after that refusal: reconnect, register and send a snapshot.
     bpy.ops.ms_livelink.connect()

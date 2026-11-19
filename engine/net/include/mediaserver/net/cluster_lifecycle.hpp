@@ -529,8 +529,8 @@ private:
 // characters (a valid shared_secret for the configs here).
 //
 // The empty password is a working choice, not an error: it derives a key every
-// Media Server knows, so a render machine's agent can be controlled with no
-// setup at all - and by anyone on the network who runs Media Server. A
+// Pixelsoup knows, so a render machine's agent can be controlled with no
+// setup at all - and by anyone on the network who runs Pixelsoup. A
 // password is what makes the channel private. Either way the protocol, its
 // nonces and its message authentication are unchanged.
 inline constexpr std::uint32_t lifecycle_password_iterations = 100'000U;

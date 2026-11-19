@@ -109,7 +109,7 @@ int main(int argc,char** argv) {
             check(cohort.evaluate(target,{}).models.size()==4096,"frozen batch survives cohort document replay");
         }
         check(bool(persist::save_project_file(output/"preview.mstage",root)),"save UI fixture");
-        check(bool(persist::save_recent_project_path(output/"local/MediaServer/settings/recent-project.bin",output/"preview.mstage")),"isolated UI startup");
+        check(bool(persist::save_recent_project_path(output/"local/Pixelsoup/settings/recent-project.bin",output/"preview.mstage")),"isolated UI startup");
         check(bool(persist::save_project_file(output/"published.mstage",installed.value())),"offline publication save");
         auto reopened=persist::load_project_file(output/"published.mstage"); check(bool(reopened),"offline reopen");
         scene::SceneModel offline; offline.reset(reopened.value()); check(offline.evaluate(target,{}).models.size()==4096,"offline compact content");

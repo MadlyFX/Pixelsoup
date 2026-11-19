@@ -1800,7 +1800,7 @@ void report_breadcrumbs(const D3d12Device& state) noexcept {
         char root[MAX_PATH]{};
         if (GetEnvironmentVariableA("LOCALAPPDATA", root, MAX_PATH) > 0U) {
             const std::string path =
-                std::string{root} + "\\MediaServer\\logs\\gpu-breadcrumbs.txt";
+                std::string{root} + "\\Pixelsoup\\logs\\gpu-breadcrumbs.txt";
             std::FILE* file = nullptr;
             if (fopen_s(&file, path.c_str(), "ab") == 0 && file != nullptr) {
                 std::fwrite(report.data(), 1U, report.size(), file);

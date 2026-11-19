@@ -358,7 +358,7 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
                       form_.password_set
                           ? "The render node password from File > Preferences "
                             "in the editor on the control machine."
-                          : "No password: any Media Server on this network "
+                          : "No password: any Pixelsoup on this network "
                             "can start and stop this machine. Enter the "
                             "render node password if the control machine's "
                             "Preferences has one.",
@@ -537,7 +537,7 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
         y = fact(ctx, x, y, width, "Password",
                  status.password_set
                      ? "Set"
-                     : "None - any Media Server on this network can control "
+                     : "None - any Pixelsoup on this network can control "
                        "this machine",
                  status.password_set ? theme.text : theme.warning);
         std::string requests =
@@ -578,8 +578,8 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
                 break;
             case FirewallStatus::RulesMissing:
                 firewall_text =
-                    "No Media Server rule for these ports. Unless Windows "
-                    "asked about Media Server and you allowed it, the editor "
+                    "No Pixelsoup rule for these ports. Unless Windows "
+                    "asked about Pixelsoup and you allowed it, the editor "
                     "can neither find nor control this machine.";
                 firewall_color = theme.warning;
                 break;

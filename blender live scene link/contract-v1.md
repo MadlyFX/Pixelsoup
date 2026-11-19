@@ -1,6 +1,6 @@
 # Scene link contract v1
 
-This contract defines how a Blender scene is represented in Media Server:
+This contract defines how a Blender scene is represented in Pixelsoup:
 identities, units and matrices, the placement policies, and what content the
 link carries. The reference fixture and its importer checks are executable
 (see the [fixture README](../tests/fixtures/blender-scene-link/README.md)).
@@ -26,12 +26,12 @@ external assets.
 | --- | --- |
 | Source scene | Persisted UUID identifying the Blender scene, independent of its file path. |
 | Linked collection | Persisted source UUID selecting the subtree/content to link. A collection's display name is editable. |
-| Link instance | Media Server UUID for one attachment of a source scene/collection. Two attachments have independent stage alignment and shot decisions. |
+| Link instance | Pixelsoup UUID for one attachment of a source scene/collection. Two attachments have independent stage alignment and shot decisions. |
 | Source object | Persisted Blender UUID for an authored object, including transform-only parents; renaming/reordering does not replace it. |
 | Geometry prototype | UUID for local-space evaluated mesh identity. Distinct content hashes identify its immutable revisions. |
 | Material | Persisted UUID plus immutable resource revision; material binding and editable factor overrides are separate. |
 | Occurrence | Persistent identity within a link instance for a placed prototype. Direct objects use the link/object pair; generated instances use a stable source key. Array order, pointer and content hash are not occurrence IDs. |
-| Shot override | Property-level Media Server state owned by an occurrence, separate from source properties and stage alignment. |
+| Shot override | Property-level Pixelsoup state owned by an occurrence, separate from source properties and stage alignment. |
 | Revision | Immutable candidate containing a consistent hierarchy, bindings and exact resource revisions; ordered within a link session, with source/base revision checks. It is not an object identity. |
 
 The fixture uses deterministic UUIDv5 constants so regeneration is comparable.
@@ -45,7 +45,7 @@ production IDs from mutable names.
 
 All link distances are meters. Fixture Blender `scale_length` is 1. A publisher
 applies `scale_length` to geometry and local translations exactly once. Blender
-uses right-handed Z-up; Media Server uses right-handed Y-up with -Z view
+uses right-handed Z-up; Pixelsoup uses right-handed Y-up with -Z view
 forward. A point converts as `C * p`, where the rows of C are:
 
 ```text
@@ -95,8 +95,8 @@ floating-point rules.
 
 The composition camera is perspective, square pixels, 1280x720, horizontal sensor
 fit, 36 mm sensor, 45 mm lens, zero shift, near/far 0.05/200 m. It looks from
-Blender `(7,-10,6)` to `(0,0,0.75)`, or Media Server `(7,6,10)` to `(0,0.75,0)`.
-Media Server's world-up hint is `(0,1,0)`; camera world orientation derives from
+Blender `(7,-10,6)` to `(0,0,0.75)`, or Pixelsoup `(7,6,10)` to `(0,0.75,0)`.
+Pixelsoup's world-up hint is `(0,1,0)`; camera world orientation derives from
 the converted camera matrix. Vertical FOV in turns is
 `2*atan((sensor_width/aspect)/(2*focal_length))/(2*pi)` (recorded in
 reference.json). Blender camera-local -Z is forward and +Y is up; no additional
@@ -128,11 +128,11 @@ edit. They are refused (`Origin changes require an explicit geometry/placement
 rebase`) and the last complete revision stays, because compensating only the
 object origin would lose shot decisions. Constraints, rigs, animated parents and
 shear in a written-back object refuse reverse placement with a specific
-diagnostic; the edit stays in Media Server (see [Writeback](protocol-v1.md#writeback)).
+diagnostic; the edit stays in Pixelsoup (see [Writeback](protocol-v1.md#writeback)).
 
 Reference scenario for placement and geometry edits together:
 
-1. Link revision 1, place the Hero prop relative to the camera in Media Server,
+1. Link revision 1, place the Hero prop relative to the camera in Pixelsoup,
    and receive that placement in Blender.
 2. Raise the shared mesh's top +X edge by 0.25 m in Blender local Z. Every shared
    occurrence changes geometry, with each shot placement unchanged in both
@@ -158,11 +158,11 @@ Reference scenario for placement and geometry edits together:
 Reference appearance: copper side faces `(0.8,0.2,0.1)`, metallic 0.7, roughness
 0.35; cyan top `(0.05,0.75,0.9)`, metallic 0.1, roughness 0.8; neutral gray
 floor 0.18, roughness 0.9. Values are linear. The fixture has no texture maps.
-Blender's area light and Media Server's directional light provide visibility for
+Blender's area light and Pixelsoup's directional light provide visibility for
 inspection, not a photometric image match. Display transforms are not baked into
 factors.
 
-| Fixture object | Expected Media Server world placement in revision 1 |
+| Fixture object | Expected Pixelsoup world placement in revision 1 |
 | --- | --- |
 | Placement parent | Translation `(1,0,0)`, +90 degrees around Y. |
 | Hero prop, renamed from Prop before rename | Translation `(1,1,-1)`; matrix rows `[0,0,1,1]`, `[0,0.5,0,1]`, `[-2,0,0,-1]`, `[0,0,0,1]`. |

@@ -137,7 +137,7 @@ def export(path, objects):
 
 def oracle(path, objects):
     # Triangle-corner positions/normals/material factors from Blender's evaluated
-    # geometry, independently of glTF exporter output and Media Server's loader.
+    # geometry, independently of glTF exporter output and Pixelsoup's loader.
     rows = []
     for obj in objects:
         if obj.type != "MESH":

@@ -1087,7 +1087,7 @@ void EditorShell::Frame::offer_recovery() {
     return;
   }
   impl.recovery_asked = true;
-  std::string message{"Media Server stopped before the changes to "};
+  std::string message{"Pixelsoup stopped before the changes to "};
   if (project.recovery_project.empty()) {
     message.append("an untitled project");
   } else {

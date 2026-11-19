@@ -52,7 +52,7 @@ struct DirectorLinkCandidate {
     core::u64 ticket{};
     std::string base_revision, transaction, origin;
     std::stop_token cancellation;
-    // Objects whose Media Server override the artist replaced in this
+    // Objects whose Pixelsoup override the artist replaced in this
     // revision, with the property ("placement", "visibility", "light" or
     // "material"): the override goes in the same transaction, so the scene
     // never shows both edits stacked.

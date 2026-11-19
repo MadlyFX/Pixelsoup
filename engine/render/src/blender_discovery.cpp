@@ -216,7 +216,7 @@ bool parse_blender_instance(const std::string& text, BlenderInstance& item) {
     };
     // Label, the scene shown, status, ready|resync, the open .blend, launch
     // token, process id, the source of the scene shown, every tagged scene's
-    // source, and a scene the artist asked to add to Media Server.
+    // source, and a scene the artist asked to add to Pixelsoup.
     std::string magic, kind, pid, sources, create;
     if (!line(magic) || magic != "MSBLENDER 2" || !line(item.label) || !line(item.scene) || !line(item.status)
         || !line(kind) || !line(item.file) || !line(item.token) || !line(pid)
@@ -270,7 +270,7 @@ struct BlenderDiscovery::Impl {
             const auto integration = integration_directory();
             const auto script = integration / "mediaserver_open.py";
             if (!regular(script))
-                throw std::runtime_error{"The LiveLink add-on files were not found beside media-server; reinstall or run from the build tree."};
+                throw std::runtime_error{"The LiveLink add-on files were not found beside pixelsoup; reinstall or run from the build tree."};
             const auto file = fs::absolute(launch.file);
             fs::create_directories(file.parent_path());
             std::vector<fs::path> arguments{executable};
@@ -409,12 +409,12 @@ fs::path BlenderDiscovery::default_directory() {
 #ifdef _WIN32
     char* base{}; std::size_t length{};
     static_cast<void>(_dupenv_s(&base, &length, "LOCALAPPDATA"));
-    const auto path = (base ? fs::path{base} : fs::temp_directory_path()) / "MediaServer" / "blender";
+    const auto path = (base ? fs::path{base} : fs::temp_directory_path()) / "Pixelsoup" / "blender";
     std::free(base);
     return path;
 #else
     const auto* base = std::getenv("HOME");
-    return (base ? fs::path{base} / ".cache" : fs::temp_directory_path()) / "MediaServer" / "blender";
+    return (base ? fs::path{base} / ".cache" : fs::temp_directory_path()) / "Pixelsoup" / "blender";
 #endif
 }
 fs::path BlenderDiscovery::find_executable() {

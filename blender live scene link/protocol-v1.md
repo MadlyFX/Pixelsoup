@@ -60,7 +60,7 @@ Unused strings are empty and unused numbers zero.
 | Reject | 10 | Specific diagnostic; prior document remains intact |
 | Resync | 11 | Revision, epoch, scene, origin or delta-baseline disagreement |
 | Status | 12 | Admission progress, or client status/keepalive request |
-| ShotState | 13 | Media Server's overrides on the source's occurrences (`MSSHOT 2`, see Writeback); conditional revision polling |
+| ShotState | 13 | Pixelsoup's overrides on the source's occurrences (`MSSHOT 2`, see Writeback); conditional revision polling |
 | StageContext | 14 | Latest camera/lens/show-time sample |
 
 ShotState responses can contain up to 1 MiB; other controls retain the 4096-byte
@@ -146,7 +146,7 @@ Director receipts are retained per pairing; reaching capacity requires re-pairin
 and a fresh snapshot rather than silently evicting replay history.
 
 Storage is `<project> Blender/Link Resources` beside the saved project; an
-unsaved project uses `Documents/Media Server/Blender/Link Resources`. Every
+unsaved project uses `Documents/Pixelsoup/Blender/Link Resources`. Every
 pairing, including the concurrent links of different scenes,
 shares one content-addressed store, `shared/`, which grows only with distinct
 content. Completed resources are `<hash>.glb` and the store is also the ingest
@@ -219,14 +219,14 @@ commands.
 
 ## Writeback
 
-Media Server's edits to linked occurrences remain overrides on the occurrence. The
+Pixelsoup's edits to linked occurrences remain overrides on the occurrence. The
 publisher shows them in its own objects and keeps sending its own source values
 underneath:
 
 - `ShotState` returns `MSSHOT 2`, then one line per occurrence of the source in the
   target scene (at most 512): node, attachment, object uuid, held, visibility override
   (-1 none, 0 hidden, 1 shown), effective visibility, removed (by the source), deleted
-  (in Media Server, itself or through an ancestor), the offset, held-world,
+  (in Pixelsoup, itself or through an ancestor), the offset, held-world,
   attachment-alignment and world matrices (16 column-major values each), then three
   quoted fields - light overrides and material overrides as `key=value,...`, and the
   uuid of the object's source parent. The reply's `revision` hashes the text; a request
@@ -234,29 +234,29 @@ underneath:
   one Blender object; its single part's overrides apply to it.
 - A deleted object is unlinked from the Blender scene's collections but kept, so the
   next revision removes the source object and the Director keeps both records. If
-  Media Server's Undo clears the deletion the add-on links the object back; if the
+  Pixelsoup's Undo clears the deletion the add-on links the object back; if the
   artist brings it back (Blender's Undo) the revision absorbs `deleted`.
 - A snapshot or delta may carry
   `absorb "<object uuid>" <placement|visibility|light|material|deleted>` lines. They
-  name objects whose Media Server override the artist has just replaced in Blender.
+  name objects whose Pixelsoup override the artist has just replaced in Blender.
   They are not retained rows: the Director plans the revision, then returns that
   property of the object's occurrence in the target scene to the source, in the same
   transaction. An object with two attachments in the scene is not absorbed.
 
-Objects removed by the source or deleted in Media Server are not listed in the editor.
+Objects removed by the source or deleted in Pixelsoup are not listed in the editor.
 Their records stay in the document so Undo on either side restores them with every
-Media Server override.
+Pixelsoup override.
 
 ## One Blender, many scenes (discovery)
 
 The add-on holds a project's scenes in one `.blend` and tags each Blender scene with
-its Media Server scene's source identity (`ms_scene_source`). Its instance record,
-`<id>.instance` in `%LOCALAPPDATA%/MediaServer/blender`, is `MSBLENDER 2` followed by
+its Pixelsoup scene's source identity (`ms_scene_source`). Its instance record,
+`<id>.instance` in `%LOCALAPPDATA%/Pixelsoup/blender`, is `MSBLENDER 2` followed by
 ten lines: label, the scene shown, status, `ready` or `resync`, the open file, the
 launch token Open in Blender gave the process, its process id, the source of the scene
 it shows, a comma-separated list of every tagged scene in the file, and an optional
-`<source>\t<name>` asking Media Server to create a scene for an untagged Blender scene.
-Media Server answers with:
+`<source>\t<name>` asking Pixelsoup to create a scene for an untagged Blender scene.
+Pixelsoup answers with:
 
 - `<id>.links` - `MSLINKS 1` then `<source>\t<port>\t<pairing code>\t<name>` per linked
   scene, replacing the previous list (empty unlinks everything). The add-on pairs with

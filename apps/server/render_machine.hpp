@@ -17,7 +17,7 @@
 
 // A render machine with no command line.
 //
-// `media-server` launched with no arguments - a double-click, a shortcut, a
+// `pixelsoup` launched with no arguments - a double-click, a shortcut, a
 // sign-in entry - runs this machine's lifecycle agent from settings kept in
 // its per-user Preferences, and the agent starts the render process exactly
 // as scripts/run-output-node.ps1 would. The first launch, with nothing

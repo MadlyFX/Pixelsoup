@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Creates a portable Windows x64 Media Server test package.
+  Creates a portable Windows x64 Pixelsoup test package.
 
 .DESCRIPTION
   Copies the optimized executable and its PDB symbols, app-local dependency
@@ -51,12 +51,12 @@ if ($SkipTests) {
 
 $BuildDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BuildDir)
 $Destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
-$executable = Join-Path $BuildDir 'apps/server/media-server.exe'
+$executable = Join-Path $BuildDir 'apps/server/pixelsoup.exe'
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Release executable not found at $executable. Build the windows-msvc-release-gui preset first."
 }
 
-$packageName = "MediaServer-$Version-windows-x64"
+$packageName = "Pixelsoup-$Version-windows-x64"
 $packageRoot = Join-Path $Destination $packageName
 $zipPath = Join-Path $Destination "$packageName.zip"
 $checksumPath = "$zipPath.sha256"
@@ -131,7 +131,7 @@ foreach ($script in $packagedScripts) {
 Copy-Item -LiteralPath (Join-Path $repository 'packaging/windows/README.txt') `
     -Destination (Join-Path $packageRoot 'README.txt')
 
-# Open in Blender starts Blender with this add-on and script; media-server.exe
+# Open in Blender starts Blender with this add-on and script; pixelsoup.exe
 # finds them in blender/ beside itself.
 $blenderRoot = Join-Path $packageRoot 'blender'
 New-Item -ItemType Directory -Path (Join-Path $blenderRoot 'mediaserver_livelink') | Out-Null

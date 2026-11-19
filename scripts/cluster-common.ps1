@@ -8,13 +8,13 @@
   machines; nothing here starts a process.
 #>
 
-# Locates media-server.exe for a -Build choice.
+# Locates pixelsoup.exe for a -Build choice.
 #
 # 'packaged' looks beside the scripts directory, which is the layout the
 # release ZIP extracts to, so these scripts work unchanged on a machine that
 # has no repository and no build tree. 'auto' prefers that, then an optimized
 # build, then a debug build.
-function Resolve-MediaServerExe {
+function Resolve-PixelsoupExe {
     param(
         [string]$Exe,
         [string]$Build,
@@ -23,14 +23,14 @@ function Resolve-MediaServerExe {
 
     if (-not [string]::IsNullOrWhiteSpace($Exe)) {
         if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
-            throw "media-server.exe not found at $Exe."
+            throw "pixelsoup.exe not found at $Exe."
         }
         return (Resolve-Path -LiteralPath $Exe).ProviderPath
     }
 
-    $packaged = Join-Path $ScriptRoot '../media-server.exe'
-    $release = Join-Path $ScriptRoot '../out/build/windows-msvc-release-gui/apps/server/media-server.exe'
-    $debug = Join-Path $ScriptRoot '../out/build/windows-msvc-debug-gui/apps/server/media-server.exe'
+    $packaged = Join-Path $ScriptRoot '../pixelsoup.exe'
+    $release = Join-Path $ScriptRoot '../out/build/windows-msvc-release-gui/apps/server/pixelsoup.exe'
+    $debug = Join-Path $ScriptRoot '../out/build/windows-msvc-debug-gui/apps/server/pixelsoup.exe'
 
     $candidates = switch ($Build) {
         'packaged' { , $packaged }
@@ -47,7 +47,7 @@ function Resolve-MediaServerExe {
 
     $tried = ($candidates | ForEach-Object { "  $_" }) -join [Environment]::NewLine
     throw @"
-media-server.exe not found for -Build $Build. Tried:
+pixelsoup.exe not found for -Build $Build. Tried:
 $tried
 Extract the release package, build a GUI preset, or pass -Exe.
 "@

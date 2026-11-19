@@ -124,9 +124,9 @@ class Director:
     def require(self, capability):
         """Refuse one unsupported operation by name, without disconnecting."""
         if capability not in self.capabilities:
-            raise CapabilityError('This Media Server build does not support '
+            raise CapabilityError('This Pixelsoup build does not support '
                 + FEATURES.get(capability, capability) + " (capability '" + capability
-                + "'); install the Media Server and add-on from one delivery")
+                + "'); install the Pixelsoup and add-on from one delivery")
 
     def request(self, kind, **fields):
         self.socket.sendall(encode(dict(self.envelope, kind=kind, **fields)))

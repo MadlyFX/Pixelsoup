@@ -21,7 +21,7 @@
     "long session batch 3",
     "long session settles",
     "a long placement session coalesces without new mesh extraction",
-    "a name Media Server cannot represent is refused by name, not silently dropped",
+    "a name Pixelsoup cannot represent is refused by name, not silently dropped",
     "explicit recovery after a refusal",
     "disconnect during an edit retains the accepted revision and reaps its worker",
     "reopen a saved blend and reconnect to the same source",

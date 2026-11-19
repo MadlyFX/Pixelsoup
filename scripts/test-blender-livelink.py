@@ -13,7 +13,7 @@ parser.add_argument('--blender', type=Path, default=Path('C:/Program Files/Blend
 parser.add_argument('--build', choices=('debug', 'release'), default='debug')
 parser.add_argument('--output', type=Path)
 parser.add_argument('--writeback', action='store_true',
-                    help='Run the Media Server writeback acceptance suite')
+                    help='Run the Pixelsoup writeback acceptance suite')
 parser.add_argument('--workflow', action='store_true', help='Qualify automatic discovery, whole-scene sync, translation and recovery')
 parser.add_argument('--materials', action='store_true', help='Qualify textured materials, native lights and explicit base color baking')
 parser.add_argument('--animation', action='store_true', help='Qualify node/skin assemblies and managed stage references')

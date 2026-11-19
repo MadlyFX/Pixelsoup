@@ -11,20 +11,20 @@
   On start it prints what the other machine needs: this machine's addresses
   and the Director port. Output Monitor controls render machines with the
   render node password set in the editor's Preferences (none by default, which
-  any Media Server on the network can use). -Password overrides it for one run.
+  any Pixelsoup on the network can use). -Password overrides it for one run.
 
   The Director listens on 0.0.0.0 by default so a node on another machine can
   reach it. Windows Firewall will normally prompt, or block silently, the first
   time. If nodes cannot connect, allow the port yourself from an elevated
   prompt - this script deliberately does not change firewall rules:
 
-    netsh advfirewall firewall add rule name="Media Server Director" `
+    netsh advfirewall firewall add rule name="Pixelsoup Director" `
       dir=in action=allow protocol=TCP localport=45060
 
   Render machines can discover this editor automatically on the local IPv4
   network. Allow its discovery port as well:
 
-    netsh advfirewall firewall add rule name="Media Server Discovery" `
+    netsh advfirewall firewall add rule name="Pixelsoup Discovery" `
       dir=in action=allow protocol=UDP localport=47839
 
   The Director's console lines (status intervals, session and lockstep
@@ -35,11 +35,11 @@
 
 .PARAMETER Build
   Which executable to run: auto (default), packaged, release, or debug.
-  'auto' prefers a packaged media-server.exe beside the scripts directory,
+  'auto' prefers a packaged pixelsoup.exe beside the scripts directory,
   then the windows-msvc-release-gui build, then windows-msvc-debug-gui.
 
 .PARAMETER Exe
-  Explicit path to media-server.exe. Overrides -Build.
+  Explicit path to pixelsoup.exe. Overrides -Build.
 
 .PARAMETER ListenAddress
   Numeric address the Director listens on. Default 0.0.0.0 (all interfaces).
@@ -58,7 +58,7 @@
 
 .PARAMETER LogDir
   Folder for the Director's rotating log. Default
-  %LOCALAPPDATA%\MediaServer\logs, the executable's own default.
+  %LOCALAPPDATA%\Pixelsoup\logs, the executable's own default.
 
 .PARAMETER DryRun
   Print the exact command line and exit without starting anything.
@@ -70,7 +70,7 @@ param(
     [string]$ListenAddress = '0.0.0.0',
     [int]$Port = 45060,
     [string]$Password = '',
-    [string]$Wal = (Join-Path $env:LOCALAPPDATA 'MediaServer/editor.wal'),
+    [string]$Wal = (Join-Path $env:LOCALAPPDATA 'Pixelsoup/editor.wal'),
     [string]$Surface = '1600x900',
     [string]$WindowAt = '40,40',
     [string]$ShowId = '0000000000000001000000000000000B',
@@ -84,7 +84,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'cluster-common.ps1')
 
-$Exe = Resolve-MediaServerExe -Exe $Exe -Build $Build -ScriptRoot $PSScriptRoot
+$Exe = Resolve-PixelsoupExe -Exe $Exe -Build $Build -ScriptRoot $PSScriptRoot
 if ($Port -lt 1 -or $Port -gt 65535) {
     throw "Director port must be between 1 and 65535 (received $Port)."
 }
@@ -115,13 +115,13 @@ if (-not [string]::IsNullOrEmpty($Password)) {
     $argv += "--lifecycle-password=$Password"
 }
 if ([string]::IsNullOrWhiteSpace($LogDir)) {
-    $LogDir = Join-Path $env:LOCALAPPDATA 'MediaServer\logs'
+    $LogDir = Join-Path $env:LOCALAPPDATA 'Pixelsoup\logs'
 } else {
     $argv += "--log-dir=$LogDir"
 }
 
 Write-Host ''
-Write-Host 'Media Server - Director + editor' -ForegroundColor Cyan
+Write-Host 'Pixelsoup - Director + editor' -ForegroundColor Cyan
 Write-Host "  executable   $Exe"
 Write-Host "  listening    ${ListenAddress}:$Port"
 Write-Host "  wal          $Wal"

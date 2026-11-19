@@ -77,7 +77,7 @@ fs::path utf8_path(const std::string& value) {
 }
 
 fs::path blender_project_folder(const std::string& project_path) {
-    if (project_path.empty()) return documents_directory() / "Media Server" / "Blender";
+    if (project_path.empty()) return documents_directory() / "Pixelsoup" / "Blender";
     const auto project = fs::absolute(utf8_path(project_path));
     return project.parent_path() / (project.stem().u8string() + u8" Blender");
 }
@@ -107,7 +107,7 @@ std::string shared_blender_file(std::span<const BlenderAssociation> associations
 
 std::string default_publication_storage(const std::string& project_path) {
     if (!project_path.empty()) return path_utf8(fs::absolute(utf8_path(project_path)).parent_path());
-    return path_utf8(documents_directory() / "Media Server");
+    return path_utf8(documents_directory() / "Pixelsoup");
 }
 
 void refresh_blender_associations(std::vector<BlenderAssociation>& associations,
@@ -390,7 +390,7 @@ void BlenderLinks::poll(std::span<const BlenderAssociation> associations, const 
                 + "; changes sync to " + scene.name + ".";
             it = launches_.erase(it);
         } else if (now > it->deadline) {
-            message_ = "Blender did not report in. Check that it opened and that the Media Server LiveLink add-on is enabled.";
+            message_ = "Blender did not report in. Check that it opened and that the Pixelsoup Live Link add-on is enabled.";
             it = launches_.erase(it);
         } else ++it;
     }
@@ -454,7 +454,7 @@ void BlenderLinks::poll(std::span<const BlenderAssociation> associations, const 
     }
     if (state_) {
         // A Blender whose file holds linked scenes is linked to all of them -
-        // reopened by hand, or after Media Server restarted.
+        // reopened by hand, or after Pixelsoup restarted.
         for (const auto& item : state_->instances) {
             if (!item.token.empty() && std::any_of(launches_.begin(), launches_.end(),
                     [&](const Launch& launch) { return launch.token == item.token; })) continue;
@@ -477,7 +477,7 @@ void BlenderLinks::poll(std::span<const BlenderAssociation> associations, const 
                 bound->bound_at = now;
                 bound->missing_since = {};
             }
-            // A scene the artist added in Blender: Media Server creates it once.
+            // A scene the artist added in Blender: Pixelsoup creates it once.
             if (!item.create_source.empty()
                 && std::none_of(associations.begin(), associations.end(),
                     [&](const BlenderAssociation& entry) { return entry.source == item.create_source; })

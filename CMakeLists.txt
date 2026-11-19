@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 project(
     MediaServer
     VERSION 0.1.0
-    DESCRIPTION "Cross-platform virtual production media server"
+    DESCRIPTION "Cross-platform virtual production media server (Pixelsoup)"
     # C only for the vendored ufbx FBX reader.
     LANGUAGES C CXX
 )
@@ -17,7 +17,7 @@ option(MEDIASERVER_ENABLE_GUI "Build the SDL3 window output shell" OFF)
 # headless build covers the engine modules only.
 include(CMakeDependentOption)
 cmake_dependent_option(MEDIASERVER_BUILD_SERVER
-    "Build the media-server executable" ON "MEDIASERVER_ENABLE_GUI" OFF)
+    "Build the Pixelsoup executable" ON "MEDIASERVER_ENABLE_GUI" OFF)
 option(MEDIASERVER_WARNINGS_AS_ERRORS "Treat project warnings as errors" ON)
 # The sustained-rate gate runs for ten minutes, so it is registered with CTest
 # only on request. Its binary is built either way and takes --seconds.
@@ -58,7 +58,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 # list of bare addresses: the optimized package is what runs on a wall, so it
 # is the build whose dumps we get. /Z7 keeps debug info in each object rather
 # than one compile PDB, so parallel Ninja compiles never contend for it; the
-# linker still writes a single media-server.pdb beside the executable. /DEBUG
+# linker still writes a single pixelsoup.pdb beside the executable. /DEBUG
 # turns off reference elimination and COMDAT folding unless asked, so both are
 # asked for and the shipped code stays what it was. Debug keeps its default.
 if(MSVC)

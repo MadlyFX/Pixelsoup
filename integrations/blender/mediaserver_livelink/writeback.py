@@ -1,6 +1,6 @@
-"""Media Server's edits to linked objects, shown in the objects themselves.
+"""Pixelsoup's edits to linked objects, shown in the objects themselves.
 
-Media Server keeps an operator's edit to a linked object as an override on top
+Pixelsoup keeps an operator's edit to a linked object as an override on top
 of what Blender sent: a placement offset (or a held world position), a
 visibility, light settings, or a deletion. This module writes the result into
 the Blender object - its transform, its hide flags, its light data, whether it
@@ -8,7 +8,7 @@ is in the scene at all - so the .blend holds what the wall shows: reopening it,
 or rendering it offline, gives that scene.
 
 What was applied is remembered per object, so extraction can still send
-Blender's own value underneath it: Media Server's Undo keeps working on its
+Blender's own value underneath it: Pixelsoup's Undo keeps working on its
 overrides. When the artist then edits one of those properties in Blender, the
 edit replaces the override: the next revision sends the artist's value and
 names the property to absorb, and the Director drops the override in the same
@@ -18,8 +18,8 @@ The record lives in the add-on, not on the objects, because Blender's own Undo
 restores object properties along with transforms and would make a reverted
 write look untouched. It is written into the .blend when the file is saved and
 read back when it is opened. Each write is pushed as its own Blender undo step,
-so the artist's Ctrl+Z reverts the most recent change - Media Server's included
-- and the revert then reaches Media Server like any other edit.
+so the artist's Ctrl+Z reverts the most recent change - Pixelsoup's included
+- and the revert then reaches Pixelsoup like any other edit.
 """
 import json
 import math
@@ -32,7 +32,7 @@ from mathutils import Matrix
 from .placement import source_parent, source_local, matrix, flatten
 
 RECORD = 'ms_link_applied'
-# Media Server light fields Blender can show, in describe_light's order.
+# Pixelsoup light fields Blender can show, in describe_light's order.
 LIGHT_INDEX = {'color_r': 0, 'color_g': 1, 'color_b': 2, 'intensity': 3, 'range': 4,
                'inner_cone_turns': 5, 'outer_cone_turns': 6, 'light_width': 7,
                'light_height': 8, 'angular_radius_turns': 9}
@@ -98,7 +98,7 @@ def is_identity(values):
 
 
 def movable(obj):
-    """Placement Media Server can write: a plain object-parented transform."""
+    """Placement Pixelsoup can write: a plain object-parented transform."""
     return not (obj.library or obj.override_library or obj.constraints or obj.animation_data
                 or (obj.parent and obj.parent_type != 'OBJECT'))
 
@@ -109,7 +109,7 @@ class Writeback:
         self.rows = {}
         self.ambiguous = False
         self.refresh = False
-        # Identity -> what Media Server last applied: {'placement': {...},
+        # Identity -> what Pixelsoup last applied: {'placement': {...},
         # 'visible': {...}, 'light': {...}}. Survives Blender's Undo.
         self.applied = {}
         self.known = set()
@@ -156,10 +156,10 @@ class Writeback:
     def effective_rows(self, objects):
         """The row whose placement and visibility each Blender object shows.
 
-        A mesh with materials reaches Media Server as a transform-only object
+        A mesh with materials reaches Pixelsoup as a transform-only object
         and a part per material. A single part is the whole mesh, so an edit to
         it is the object's edit. Several parts moved apart cannot be shown by
-        one Blender object; their edits stay in Media Server."""
+        one Blender object; their edits stay in Pixelsoup."""
         parts = {}
         for identity, row in self.rows.items():
             if identity not in objects and row['parent'] in objects:
@@ -202,7 +202,7 @@ class Writeback:
             if isinstance(record, dict):
                 self.applied[identity] = record
 
-    # Writing Media Server's edits into Blender ------------------------------
+    # Writing Pixelsoup's edits into Blender ------------------------------
     def objects(self, scene, collection):
         if scene.ms_livelink.publish_animation:
             # An animated assembly is placed by its managed anchor.
@@ -274,12 +274,12 @@ class Writeback:
         return wrote
 
     def delete(self, scene, collection, objects, effective):
-        """Take objects Media Server deleted out of the scene, and put back
-        those whose deletion Media Server undid.
+        """Take objects Pixelsoup deleted out of the scene, and put back
+        those whose deletion Pixelsoup undid.
 
         A deleted object is unlinked from its collections rather than removed:
         until the file is saved and reopened it can come back, with everything
-        Media Server applied to it, whichever side's Undo asks."""
+        Pixelsoup applied to it, whichever side's Undo asks."""
         if scene.ms_livelink.publish_animation:
             return False
         changed = False
@@ -288,7 +288,7 @@ class Writeback:
             if not (row and row['deleted']) or identity in self.absorbing:
                 continue
             if 'deleted' in self.applied.get(identity, {}):
-                # Back in the scene though Media Server still deletes it: the
+                # Back in the scene though Pixelsoup still deletes it: the
                 # artist restored it (Blender's Undo), which replaces the deletion.
                 self.absorb(identity, 'deleted')
                 changed = True
@@ -334,11 +334,11 @@ class Writeback:
         have = record.get('placement')
         same = bool(want and have and want['kind'] == have['kind'] and close(want['matrix'], have['matrix'], 1e-6))
         # A held object is rewritten whenever its parent moved; any other
-        # placement only when Media Server's override changed.
+        # placement only when Pixelsoup's override changed.
         if (want is None and have is None) or (same and want['kind'] != 'held'):
             return False
         if not movable(obj):
-            raise ValueError(obj.name + ': constraints, animation or a non-object parent; kept in Media Server')
+            raise ValueError(obj.name + ': constraints, animation or a non-object parent; kept in Pixelsoup')
         local = conversion @ source_local(obj) @ inverse
         source = self.source_of(local, have)
         parent = source_parent(obj)
@@ -364,7 +364,7 @@ class Writeback:
 
     @staticmethod
     def source_of(local, placement):
-        """Blender's own placement under what Media Server applied (MS axes)."""
+        """Blender's own placement under what Pixelsoup applied (MS axes)."""
         if not placement:
             return local
         if placement['kind'] == 'held':
@@ -421,13 +421,13 @@ class Writeback:
 
     def undo_step(self):
         # One undo step per write: the artist's next Ctrl+Z reverts the most
-        # recent change, Media Server's included. No window in background runs.
+        # recent change, Pixelsoup's included. No window in background runs.
         window = bpy.context.window_manager.windows[0] if bpy.context.window_manager.windows else None
         if window is None:
             return
         try:
             with bpy.context.temp_override(window=window):
-                bpy.ops.ed.undo_push(message='Media Server edit')
+                bpy.ops.ed.undo_push(message='Pixelsoup edit')
         except (RuntimeError, TypeError):
             pass
 
@@ -445,7 +445,7 @@ class Writeback:
         self.absorbing[identity] = time.monotonic() + 5
 
     def restored(self, identity):
-        """An object Media Server deleted is in the scene again: the artist
+        """An object Pixelsoup deleted is in the scene again: the artist
         brought it back (Blender's Undo), which replaces the deletion."""
         if 'deleted' in self.applied.get(identity, {}):
             self.absorb(identity, 'deleted')
@@ -458,7 +458,7 @@ class Writeback:
             if close(flatten(source_local(obj)), placement['local']):
                 result = self.source_of(local, placement)
             else:
-                # The artist moved it: their placement replaces Media Server's.
+                # The artist moved it: their placement replaces Pixelsoup's.
                 self.absorb(identity, 'placement')
         values = flatten(result)
         previous = self.placements.get(identity)

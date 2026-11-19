@@ -32,7 +32,7 @@ inline constexpr std::string_view material = "link_material";
 inline constexpr std::string_view revision = "link_revision";
 inline constexpr std::string_view origin = "link_origin";
 inline constexpr std::string_view removed = "link_removed";
-// On an occurrence: the operator deleted it in Media Server. Writeback removes
+// On an occurrence: the operator deleted it in Pixelsoup. Writeback removes
 // the object from the Blender scene, whose next revision then removes the
 // source. Like the other overrides it is undone, or absorbed when the artist
 // brings the object back in Blender.
@@ -68,7 +68,7 @@ struct LinkedOccurrence final {
     doc::PropertyMap light;
     ModelAnimation animation{false};
     bool animated{};
-    // Deleted in Media Server, itself or through an ancestor. Never drawn or
+    // Deleted in Pixelsoup, itself or through an ancestor. Never drawn or
     // listed; kept, like a source tombstone, so Undo on either side restores
     // the occurrence with its overrides.
     bool deleted{};
@@ -118,7 +118,7 @@ enum class LinkedEdit {
     const doc::Root& root, doc::NodeId occurrence, const Mat4& world);
 [[nodiscard]] LinkedPlanResult plan_link_alignment(
     const doc::Root& root, doc::NodeId instance, const Mat4& alignment);
-// Media Server's edits to a linked object are overrides on its occurrence;
+// Pixelsoup's edits to a linked object are overrides on its occurrence;
 // Blender shows them in the object itself. When the artist then edits that
 // property in Blender, the revision carrying the edit names it here, and the
 // occurrence's override returns to the source in the same transaction - the

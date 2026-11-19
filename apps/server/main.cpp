@@ -114,11 +114,11 @@ struct DiskLog final {
     void start(const std::filesystem::path &directory, std::string name,
                int argc, char **argv) {
         if (directory.empty()) {
-            std::cerr << "media-server log: off (no per-user folder; pass "
+            std::cerr << "pixelsoup log: off (no per-user folder; pass "
                          "--log-dir=PATH)\n";
             return;
         }
-        std::string header = "media-server " + name;
+        std::string header = "pixelsoup " + name;
         constexpr std::string_view password_prefix = "--lifecycle-password=";
         for (int index = 1; index < argc; ++index) {
             const std::string_view argument{argv[index]};
@@ -134,7 +134,7 @@ struct DiskLog final {
         config.header = std::move(header);
         auto opened = mediaserver::app::ProcessLog::open(std::move(config));
         if (!opened) {
-            std::cerr << "media-server log: off (" << opened.error() << ")\n";
+            std::cerr << "pixelsoup log: off (" << opened.error() << ")\n";
             return;
         }
         log = std::move(opened).value();
@@ -142,11 +142,11 @@ struct DiskLog final {
         if (!capture) {
             log->write("stdout and stderr could not be captured; only this "
                        "line is logged\n");
-            std::cerr << "media-server log: console output could not be "
+            std::cerr << "pixelsoup log: console output could not be "
                          "captured\n";
             return;
         }
-        std::cout << "media-server log " << path_argument(log->file())
+        std::cout << "pixelsoup log " << path_argument(log->file())
                   << '\n';
     }
 };
@@ -494,7 +494,7 @@ void report_release_ledger_error(
     while (stop_requested == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds{100});
     }
-    std::cout << "media-server stopping\n";
+    std::cout << "pixelsoup stopping\n";
     return 0;
 }
 
@@ -510,7 +510,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{100});
     }
-    std::cout << "media-server stopping\n";
+    std::cout << "pixelsoup stopping\n";
     return 0;
 }
 
@@ -550,7 +550,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         if (!config) {
             if (config.error().issue ==
                 mediaserver::app::RenderMachineConfigIssue::NotSetUp) {
-                std::cout << "media-server render machine validated; "
+                std::cout << "pixelsoup render machine validated; "
                              "not set up - a launch opens the setup window\n";
                 return 0;
             }
@@ -559,7 +559,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             return 2;
         }
         if (config.value().automatic_index || !config.value().show_id) {
-            std::cout << "media-server render machine validated; editor assigns node index and show identity at launch\n";
+            std::cout << "pixelsoup render machine validated; editor assigns node index and show identity at launch\n";
             return 0;
         }
         auto agent_config = mediaserver::app::render_machine_agent_config(
@@ -572,7 +572,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         try {
             const mediaserver::app::LifecycleAgent agent{
                 std::move(agent_config)};
-            std::cout << "media-server render machine validated; node-index="
+            std::cout << "pixelsoup render machine validated; node-index="
                       << config.value().node_index
                       << "; director=" << (config.value().discover_director
                           ? std::string{"auto"} : endpoint_text(config.value().director))
@@ -598,11 +598,11 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         mediaserver::app::run_render_machine_window(std::move(options));
     if (result != 0 && headless) {
         mediaserver::app::show_error_dialog(
-            "Media Server",
+            "Pixelsoup",
             "The render machine window could not open: this machine needs a "
-            "display and a GPU Media Server can use. A machine without one "
+            "display and a GPU Pixelsoup can use. A machine without one "
             "can still run the lifecycle agent from the command line (see "
-            "media-server --help).");
+            "pixelsoup --help).");
     }
     return result;
 }
@@ -618,7 +618,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
     }
 #endif
     std::uint32_t roles = bits(Role::Output);
-    std::filesystem::path wal_path{"media-server.wal"};
+    std::filesystem::path wal_path{"pixelsoup.wal"};
     bool wal_path_was_explicit = false;
     bool validate_startup = false;
     std::optional<asio::ip::tcp::endpoint> director_listen;
@@ -684,7 +684,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         }
         if (argument == "--help") {
             std::cout
-                << "usage: media-server [--render-machine] "
+                << "usage: pixelsoup [--render-machine] "
                    "[--role=director,render,receiver,compositor,output] "
                    "[--wal=PATH] [--durable-frames] [--validate-startup] "
                    "[--director-listen=ADDRESS:PORT "
@@ -761,7 +761,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                    "its --node-index automatically. A password "
                    "(--lifecycle-password, or the contents of "
                    "--lifecycle-secret-file) must match the editor's render "
-                   "node password; with none, any Media Server on the network "
+                   "node password; with none, any Pixelsoup on the network "
                    "can control the agent. "
                    "--lifecycle-autostart starts that fixed local child before "
                    "the agent accepts control requests; it is useful for "
@@ -784,7 +784,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                 << "       every process tees its stdout and stderr to a "
                    "rotating log: director.log, node-N.log or agent-N.log "
                    "(render-machine.log for the window) in --log-dir, by "
-                   "default %LOCALAPPDATA%\\MediaServer\\logs. Each start "
+                   "default %LOCALAPPDATA%\\Pixelsoup\\logs. Each start "
                    "moves the previous run to NAME.1.log; files rotate at 8 "
                    "MiB and three are kept. A lifecycle agent passes its "
                    "folder to its render process and serves that log to "
@@ -1326,7 +1326,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         try {
             mediaserver::app::LifecycleAgent agent{std::move(agent_config)};
             if (validate_startup) {
-                std::cout << "media-server lifecycle agent validated; "
+                std::cout << "pixelsoup lifecycle agent validated; "
                           << "node-index=" << *lifecycle_node_index
                           << "; child=" << path_argument(child) << '\n';
                 return 0;
@@ -1355,7 +1355,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
             }
             const auto child_status =
                 agent.apply(mediaserver::net::ClusterLifecycleCommand::Status);
-            std::cout << "media-server lifecycle agent ready; listen="
+            std::cout << "pixelsoup lifecycle agent ready; listen="
                       << endpoint_text(started.value())
                       << "; node-index=" << *lifecycle_node_index
                       << "; process="
@@ -1366,7 +1366,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                              lifecycle_sync_simulation)
                       << "; password="
                       << (agent.unsecured()
-                              ? "none (UNSECURED: any Media Server on "
+                              ? "none (UNSECURED: any Pixelsoup on "
                                 "this network can control this node)"
                               : "set")
                       << "; discovery=" << agent.discovery_text() << '\n'
@@ -1685,7 +1685,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                 return 1;
             }
         }
-        std::cout << "media-server 0.1.0 "
+        std::cout << "pixelsoup 0.1.0 "
                   << (validate_startup ? "validated" : "ready")
                   << "; role-mask=" << roles << "; document-version="
                   << command_bus.document().version().value()
@@ -1926,7 +1926,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         }
     }
 
-    std::cout << "media-server 0.1.0 "
+    std::cout << "pixelsoup 0.1.0 "
               << (validate_startup ? "validated" : "ready")
               << "; role-mask=" << roles << "; document-version="
               << runtime.local_node.document().version().value()
@@ -2013,15 +2013,15 @@ int wmain(int argc, wchar_t **argv) {
         argument_pointers.push_back(nullptr);
         return run_utf8_main(argc, argument_pointers.data());
     } catch (const std::bad_alloc &) {
-        std::cerr << "could not initialize media-server: allocation failed\n";
+        std::cerr << "could not initialize pixelsoup: allocation failed\n";
         return 1;
     } catch (const std::length_error &error) {
-        std::cerr << "could not initialize media-server: invalid command line "
+        std::cerr << "could not initialize pixelsoup: invalid command line "
                      "capacity: "
                   << error.what() << '\n';
         return 1;
     } catch (const std::exception &error) {
-        std::cerr << "could not initialize media-server: " << error.what()
+        std::cerr << "could not initialize pixelsoup: " << error.what()
                   << '\n';
         return 1;
     }
@@ -2031,10 +2031,10 @@ int main(int argc, char **argv) {
     try {
         return run_utf8_main(argc, argv);
     } catch (const std::bad_alloc &) {
-        std::cerr << "could not initialize media-server: allocation failed\n";
+        std::cerr << "could not initialize pixelsoup: allocation failed\n";
         return 1;
     } catch (const std::exception &error) {
-        std::cerr << "could not initialize media-server: " << error.what()
+        std::cerr << "could not initialize pixelsoup: " << error.what()
                   << '\n';
         return 1;
     }
