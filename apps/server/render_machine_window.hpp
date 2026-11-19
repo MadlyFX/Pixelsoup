@@ -94,6 +94,8 @@ struct RenderMachinePanelLayout final {
     gui::Rect clear_password;
     gui::Rect control_port;
     gui::Rect show_id;
+    // The heading that folds and unfolds the ADVANCED fields.
+    gui::Rect advanced;
     gui::Rect save;
     gui::Rect cancel;
     gui::Rect start;
@@ -161,6 +163,8 @@ private:
     std::optional<RenderMachineFormError> error_;
     bool setup_open_{};
     bool can_cancel_{};
+    // Whether node index, control port and show ID are unfolded.
+    bool advanced_open_{};
     bool confirm_close_{};
     float scroll_{};
     // How tall the last frame's content was, unscrolled.

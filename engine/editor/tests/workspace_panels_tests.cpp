@@ -3750,7 +3750,7 @@ struct PreferencesHarness final {
 
   // The card is centred in `bounds`; these mirror the panel's own layout.
   static constexpr float card_width = 620.0F;
-  static constexpr float card_height = 714.0F;
+  static constexpr float card_height = 664.0F;
   static constexpr float card_x = (1600.0F - card_width) * 0.5F;
   static constexpr float card_y = (900.0F - card_height) * 0.5F;
 
@@ -3772,33 +3772,44 @@ struct PreferencesHarness final {
                      card_width - 28.0F - 132.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect next_to_source_checkbox() {
-    return gui::Rect{card_x + 14.0F, card_y + 376.0F, card_width - 28.0F,
+    return gui::Rect{card_x + 14.0F, card_y + 226.0F, card_width - 28.0F,
                      24.0F};
   }
   [[nodiscard]] static gui::Rect clear_proxy_cache_button() {
-    return gui::Rect{card_x + 14.0F, card_y + 496.0F, 132.0F, 24.0F};
+    return gui::Rect{card_x + 14.0F, card_y + 346.0F, 132.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect low_latency_preset() {
     const float width = (card_width - 28.0F - 18.0F) / 4.0F;
-    return gui::Rect{card_x + 14.0F, card_y + 565.0F, width, 24.0F};
+    return gui::Rect{card_x + 14.0F, card_y + 415.0F, width, 24.0F};
   }
   [[nodiscard]] static gui::Rect balanced_transcode_priority() {
     const float start = card_x + 14.0F + 132.0F;
     const float width = (card_x + card_width - 14.0F - start - 12.0F) / 3.0F;
-    return gui::Rect{start + width + 6.0F, card_y + 466.0F, width, 24.0F};
+    return gui::Rect{start + width + 6.0F, card_y + 316.0F, width, 24.0F};
   }
   // RENDER NODES: the password well, then its CLEAR button.
   [[nodiscard]] static gui::Rect password_field() {
-    return gui::Rect{card_x + 146.0F, card_y + 283.0F, 370.0F, 24.0F};
+    return gui::Rect{card_x + 146.0F, card_y + 133.0F, 370.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect clear_password_button() {
-    return gui::Rect{card_x + card_width - 14.0F - 84.0F, card_y + 283.0F,
+    return gui::Rect{card_x + card_width - 14.0F - 84.0F, card_y + 133.0F,
                      84.0F, 24.0F};
   }
-  // The form is 705px tall (its last line, the status message, ends 699px
-  // below the content's top, plus the 6px margin) in a 644px viewport
-  // between the 34px header and the 36px footer: 61px of scroll.
-  static constexpr float max_scroll = 705.0F - 644.0F;
+  // The folded Advanced heading after OUTPUT PLAYBACK, and once unfolded the
+  // Show ID field, the first row under it.
+  [[nodiscard]] static gui::Rect advanced_heading() {
+    return gui::Rect{card_x + 14.0F, card_y + 580.0F, card_width - 28.0F,
+                     18.0F};
+  }
+  [[nodiscard]] static gui::Rect show_id_field() {
+    return gui::Rect{card_x + 146.0F, card_y + 604.0F, card_width - 28.0F - 132.0F,
+                     24.0F};
+  }
+  // Folded, the form (its last line, the status message, ending 588px below
+  // the content's top, plus the 6px margin) fits the 594px viewport between
+  // the 34px header and the 36px footer. The three Advanced rows, each a
+  // field and a note, add 150px of scroll.
+  static constexpr float max_scroll = 744.0F - 594.0F;
 
   editor::PreferencesFrame wheel(float notches) {
     input.new_frame();
@@ -3937,6 +3948,14 @@ void preferences_scroll_stops_at_the_end_of_the_form() {
   harness.panel.open(harness.state.stored);
   static_cast<void>(harness.frame(0.0F, 0.0F, false));
 
+  // Folded, everything fits: the wheel moves nothing.
+  static_cast<void>(harness.wheel(-40.0F));
+  static_cast<void>(harness.click(PreferencesHarness::balanced_transcode_priority()));
+  UI_CHECK(harness.panel.draft().proxy_transcode_priority ==
+           editor::EditorPreferences::TranscodePriority::Balanced);
+
+  // Unfolding Advanced makes the form taller than the card.
+  static_cast<void>(harness.click(PreferencesHarness::advanced_heading()));
   static_cast<void>(harness.wheel(-40.0F));
   gui::Rect preset = PreferencesHarness::low_latency_preset();
   preset.y -= PreferencesHarness::max_scroll;
@@ -4011,12 +4030,48 @@ void only_a_click_outside_the_card_dismisses_it() {
   // away whatever the operator has typed so far.
   static_cast<void>(harness.click(gui::Rect{
       PreferencesHarness::card_x + 20.0F,
-      PreferencesHarness::card_y + PreferencesHarness::card_height - 70.0F,
+      PreferencesHarness::card_y + PreferencesHarness::card_height - 50.0F,
       10.0F, 10.0F}));
   UI_CHECK(harness.panel.is_open());
 
   static_cast<void>(harness.click(gui::Rect{4.0F, 4.0F, 10.0F, 10.0F}));
   UI_CHECK(!harness.panel.is_open());
+}
+
+// Show ID, Director epoch and the write-ahead log are generated for the
+// operator, so they stay folded under Advanced until asked for - except while
+// a command-line argument overrides one, whose notice must be visible.
+void advanced_preferences_are_folded_until_opened() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+  static_cast<void>(harness.frame(0.0F, 0.0F, false));
+
+  // Folded: where Show ID would be is not a field.
+  static_cast<void>(harness.click(PreferencesHarness::show_id_field()));
+  static_cast<void>(harness.frame(0.0F, 0.0F, false, "7"));
+  UI_CHECK(harness.panel.draft() == harness.state.stored);
+
+  static_cast<void>(harness.click(PreferencesHarness::advanced_heading()));
+  static_cast<void>(harness.click(PreferencesHarness::show_id_field()));
+  static_cast<void>(harness.frame(0.0F, 0.0F, false, "7"));
+  UI_CHECK(harness.panel.draft().show_id !=
+           harness.state.stored.show_id);
+
+  // Reopening folds it again.
+  static_cast<void>(harness.click(PreferencesHarness::cancel_button()));
+  harness.panel.open(harness.state.stored);
+  static_cast<void>(harness.click(PreferencesHarness::show_id_field()));
+  static_cast<void>(harness.frame(0.0F, 0.0F, false, "7"));
+  UI_CHECK(harness.panel.draft() == harness.state.stored);
+
+  // An override this run holds it open, and the heading cannot fold it.
+  harness.state.director_epoch_overridden = true;
+  static_cast<void>(harness.click(PreferencesHarness::advanced_heading()));
+  static_cast<void>(harness.click(PreferencesHarness::show_id_field()));
+  static_cast<void>(harness.frame(0.0F, 0.0F, false, "7"));
+  UI_CHECK(harness.panel.draft().show_id !=
+           harness.state.stored.show_id);
 }
 
 // The Project Settings dialog shares Preferences' modal card geometry, and
@@ -4770,7 +4825,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 141U> cases{{
+constexpr std::array<Case, 142U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -5035,6 +5090,8 @@ constexpr std::array<Case, 141U> cases{{
      &transcode_priority_is_part_of_the_saved_machine_draft},
     {"only a click outside the card dismisses it",
      &only_a_click_outside_the_card_dismisses_it},
+    {"advanced preferences are folded until opened",
+     &advanced_preferences_are_folded_until_opened},
 }};
 
 } // namespace

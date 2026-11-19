@@ -107,13 +107,24 @@ void a_first_run_is_filled_in_with_the_keyboard_and_saved_with_enter() {
     static_cast<void>(harness.click(harness.panel.layout().address));
     static_cast<void>(harness.type("192.168.1.20"));
     // Tab moves on to the port with its value selected, so typing replaces
-    // it; Tab again reaches the node index.
+    // it; Tab again reaches the password, then wraps past the folded
+    // ADVANCED fields back to the address.
     static_cast<void>(harness.key(gui::Key::Tab));
     static_cast<void>(harness.type("45100"));
+    PANEL_CHECK(harness.panel.layout().node_index.width == 0.0F);
     static_cast<void>(harness.key(gui::Key::Tab));
-    static_cast<void>(harness.type("3"));
+    static_cast<void>(harness.type("pw"));
+    static_cast<void>(harness.key(gui::Key::Tab));
+    PANEL_CHECK(harness.panel.form().password == "pw");
     PANEL_CHECK(harness.panel.form().director_address == "192.168.1.20");
     PANEL_CHECK(harness.panel.form().director_port == "45100");
+
+    // Unfolded, Tab goes on from the password into the node index.
+    static_cast<void>(harness.click(harness.panel.layout().advanced));
+    PANEL_CHECK(harness.panel.layout().node_index.width > 0.0F);
+    static_cast<void>(harness.click(harness.panel.layout().password));
+    static_cast<void>(harness.key(gui::Key::Tab));
+    static_cast<void>(harness.type("3"));
     PANEL_CHECK(harness.panel.form().node_index == "3");
 
     PANEL_CHECK(harness.key(gui::Key::Enter) ==

@@ -141,8 +141,10 @@ local network and asks for this machine's settings:
 
 - leave the control machine address empty for automatic discovery; its
   current address and port appear in the window when found;
-- leave Node index and the advanced Show ID empty too: the editor assigns a
-  free node index and supplies its show ID;
+- leave the folded **Advanced** fields (node index, control port and show ID)
+  alone: the editor assigns a free node index and supplies its show ID, and
+  the control port follows the node index. The section opens on its own when
+  any of them has been set;
 - the render node password from **File > Preferences** on the control machine,
   or nothing if none is set there.
 
@@ -1178,8 +1180,11 @@ blur node would be five things an operator scrolls past forever.
 ## Preferences
 
 The machine-local settings an operator would otherwise retype on every launch
-live in **File > Preferences**: the Director listen endpoint, show ID, Director
-epoch, render node password, and write-ahead log path. They describe this
+live in **File > Preferences**: the Director listen endpoint, render node
+password, proxy cache and output playback buffering. The show ID, Director
+epoch and write-ahead log path are generated automatically, so they sit folded
+under **Advanced** at the bottom of the dialog; it unfolds on its own while a
+command-line argument overrides one of them. These settings describe this
 installation, not the show, so none of them is written into a `.mstage` or sent
 to a render node.
 

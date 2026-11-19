@@ -14,6 +14,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -33,25 +34,33 @@ struct PreferencesField final {
   bool EditorPreferencesState::*overridden;
 };
 
-[[nodiscard]] const std::array<PreferencesField, 4U> &preferences_fields() {
-  static const std::array<PreferencesField, 4U> fields{{
-      {"Director listen", "ADDRESS:PORT render nodes connect to",
-       &EditorPreferences::director_listen,
-       &EditorPreferencesState::director_listen_overridden},
-      {"Show ID", "32 hexadecimal characters, same on every node",
+[[nodiscard]] const PreferencesField &director_listen_field() {
+  static const PreferencesField field{
+      "Director listen", "ADDRESS:PORT render nodes connect to",
+      &EditorPreferences::director_listen,
+      &EditorPreferencesState::director_listen_overridden};
+  return field;
+}
+
+// Identity and recovery settings that are generated automatically and almost
+// never need touching. They sit folded away at the bottom of the dialog.
+[[nodiscard]] const std::array<PreferencesField, 3U> &advanced_fields() {
+  static const std::array<PreferencesField, 3U> fields{{
+      {"Show ID", "Automatic - same on every node",
        &EditorPreferences::show_id,
        &EditorPreferencesState::show_id_overridden},
-      {"Director epoch", "32 hexadecimal characters",
+      {"Director epoch", "Automatic",
        &EditorPreferences::director_epoch,
        &EditorPreferencesState::director_epoch_overridden},
-      {"Write-ahead log", "Director recovery journal",
+      {"Write-ahead log", "Automatic - Director recovery journal",
        &EditorPreferences::wal_path,
        &EditorPreferencesState::wal_path_overridden},
   }};
   return fields;
 }
 
-constexpr float preferences_card_height = 714.0F;
+// Tall enough for everything but the folded Advanced fields, which scroll.
+constexpr float preferences_card_height = 664.0F;
 
 } // namespace
 
@@ -59,6 +68,7 @@ void PreferencesPanel::open(const EditorPreferences &stored) {
   draft_ = stored;
   password_draft_.clear();
   password_edited_ = false;
+  advanced_open_ = false;
   scroll_.reset();
   open_ = true;
 }
@@ -91,7 +101,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   };
 
   gui::FormLayout form{modal.body, m, scroll_.begin(ctx, modal.body)};
-  for (const PreferencesField &field : preferences_fields()) {
+  const auto text_row = [&](const PreferencesField &field) {
     const gui::FormRow row = form.row();
     ctx.label(row.label, field.label, ctx.theme().text);
     const gui::UiId field_id = gui::ui_id(id_, field.label);
@@ -108,7 +118,8 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
       text.append("  (command line)");
       ctx.label(note, text, ctx.theme().warning);
     }
-  }
+  };
+  text_row(director_listen_field());
 
   // ------------------------------------------------------- render nodes
   // The password Output Monitor controls render machines with. It is typed,
@@ -309,6 +320,40 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
                           "MiB");
   integer_slider_row("Trail", "preferences.playback.trail",
                      draft_.playback_trail_frames, 0U, 16U, "frames");
+
+  // ------------------------------------------------------------ advanced
+  // Folded away unless opened, or unless a command-line argument is
+  // overriding one of them this run - then the notice must be seen.
+  {
+    bool overridden = false;
+    for (const PreferencesField &field : advanced_fields()) {
+      overridden = overridden || state.*(field.overridden);
+    }
+    const gui::FormSection section = form.section();
+    ctx.panel(section.rule, ctx.theme().divider);
+    const gui::UiId toggle_id = gui::ui_id(id_, "preferences.advanced");
+    const gui::Interaction it = ctx.grab(toggle_id, section.heading);
+    if (it.clicked && !overridden) {
+      advanced_open_ = !advanced_open_;
+    }
+    const bool open = advanced_open_ || overridden;
+    ctx.cursor_for(it, gui::Cursor::Hand);
+    draw_twirl(ctx, section.heading.x + 6.0F,
+               section.heading.y + section.heading.height * 0.5F, open,
+               it.hovered ? ctx.theme().accent : ctx.theme().text_muted);
+    ctx.label(gui::Rect{section.heading.x + 18.0F, section.heading.y,
+                        section.heading.width - 18.0F,
+                        section.heading.height},
+              "Advanced", ctx.theme().text);
+    ctx.tooltip(section.heading,
+                "Show identity and recovery journal. These are set "
+                "automatically; change them only to match another setup.");
+    if (open) {
+      for (const PreferencesField &field : advanced_fields()) {
+        text_row(field);
+      }
+    }
+  }
 
   // Kept whether or not there is a message, so one arriving does not change
   // how far the form scrolls.

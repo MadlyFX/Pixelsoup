@@ -2,12 +2,14 @@
 // panel tests drive it with synthetic input and no window, agent, or network.
 #include "render_machine_window.hpp"
 
+#include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/layout.hpp>
 
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <span>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -201,6 +203,9 @@ float fact(gui::UiContext& ctx, float x, float y, float width,
 void RenderMachinePanel::open_setup(RenderMachineForm form, std::string message,
                                     bool can_cancel) {
     form_ = std::move(form);
+    // Already-set advanced values are shown, so nothing pinned is hidden.
+    advanced_open_ = !form_.node_index.empty() ||
+                     !form_.control_port.empty() || !form_.show_id.empty();
     message_ = std::move(message);
     error_.reset();
     setup_open_ = true;
@@ -305,16 +310,6 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
 
     y = section(ctx, x, y, width, "THIS MACHINE");
     {
-        ctx.label(gui::Rect{x, y, label_width, row_height}, "Node index",
-                  theme.text);
-        constexpr float index_width = 72.0F;
-        layout_.node_index = gui::Rect{field_x, y, index_width, row_height};
-        edited |= field(ctx, field_node, layout_.node_index, form_.node_index,
-                        "Auto");
-        ctx.tooltip(layout_.node_index,
-                    "Assigned by the editor; leave blank for automatic");
-        y += row_height + 10.0F;
-
         ctx.label(gui::Rect{x, y, label_width, row_height}, "Password",
                   theme.text);
         constexpr float clear_width = 76.0F;
@@ -353,8 +348,39 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
     }
     y += 14.0F;
 
-    y = section(ctx, x, y, width, "ADVANCED");
+    // Node index, control port and show ID are all worked out automatically;
+    // they stay folded away unless opened or already set.
     {
+        ctx.panel(gui::Rect{x, y, width, 1.0F}, theme.divider);
+        layout_.advanced = gui::Rect{x, y + 8.0F, width, text_line};
+        const gui::Interaction it =
+            ctx.grab(gui::ui_id("render-machine.advanced"), layout_.advanced);
+        if (it.clicked) {
+            advanced_open_ = !advanced_open_;
+        }
+        ctx.cursor_for(it, gui::Cursor::Hand);
+        editor::draw_twirl(ctx, x + 6.0F, y + 8.0F + text_line * 0.5F,
+                           advanced_open_,
+                           it.hovered ? theme.accent : theme.text_muted);
+        ctx.label(gui::Rect{x + 18.0F, y + 8.0F, width - 18.0F, text_line},
+                  "ADVANCED", theme.text_muted);
+        ctx.tooltip(layout_.advanced,
+                    "Node index, control port and show ID. All automatic; "
+                    "set them only to pin this machine to one editor or "
+                    "port");
+        y += 32.0F;
+    }
+    if (advanced_open_) {
+        ctx.label(gui::Rect{x, y, label_width, row_height}, "Node index",
+                  theme.text);
+        constexpr float index_width = 72.0F;
+        layout_.node_index = gui::Rect{field_x, y, index_width, row_height};
+        edited |= field(ctx, field_node, layout_.node_index, form_.node_index,
+                        "Auto");
+        ctx.tooltip(layout_.node_index,
+                    "Assigned by the editor; leave blank for automatic");
+        y += row_height + 10.0F;
+
         ctx.label(gui::Rect{x, y, label_width, row_height}, "Control port",
                   theme.text);
         layout_.control_port = gui::Rect{field_x, y, 140.0F, row_height};
@@ -382,11 +408,21 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
     }
     end_content(ctx, bounds, y);
 
-    // Tab and Shift+Tab walk the fields; Enter in any of them saves.
-    constexpr std::array<gui::UiId, 6U> order{field_address, field_port,
-                                              field_node,    field_password,
-                                              field_control, field_show};
-    const auto focused = std::find(order.begin(), order.end(), focused_before);
+    // Tab and Shift+Tab walk the visible fields; Enter in any of them saves.
+    const std::array<std::pair<gui::UiId, const std::string*>, 6U> all{{
+        {field_address, &form_.director_address},
+        {field_port, &form_.director_port},
+        {field_password, &form_.password},
+        {field_node, &form_.node_index},
+        {field_control, &form_.control_port},
+        {field_show, &form_.show_id},
+    }};
+    const std::size_t count = advanced_open_ ? all.size() : 3U;
+    const auto order = std::span{all}.first(count);
+    const auto focused =
+        std::find_if(order.begin(), order.end(), [&](const auto& entry) {
+            return entry.first == focused_before;
+        });
     if (focused != order.end() && ctx.focus() == gui::UiId{}) {
         if (ctx.key_pressed(gui::Key::Tab)) {
             const std::size_t at =
@@ -394,11 +430,8 @@ RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
             const std::size_t next =
                 ctx.shift_held() ? (at + order.size() - 1U) % order.size()
                                  : (at + 1U) % order.size();
-            const std::array<const std::string*, 6U> values{
-                &form_.director_address, &form_.director_port,
-                &form_.node_index,       &form_.password,
-                &form_.control_port,     &form_.show_id};
-            ctx.focus_text_field_selected(order[next], *values[next]);
+            ctx.focus_text_field_selected(order[next].first,
+                                          *order[next].second);
         } else if (ctx.key_pressed(gui::Key::Enter)) {
             return RenderMachineAction::SaveAndStart;
         }
@@ -514,9 +547,13 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
         }
         y += 14.0F;
 
+        const float director_y = y;
         y = fact(ctx, x, y, width, "Control machine", status.director,
                  theme.text);
-        y = fact(ctx, x, y, width, "Show", status.show_id, theme.text);
+        // The show ID matters only when diagnosing a machine that joined
+        // the wrong editor, so it waits in the tooltip.
+        ctx.tooltip(gui::Rect{x, director_y, width, y - director_y},
+                    "Show: " + status.show_id);
         if (status.director == "Automatic discovery") {
             y = paragraph(ctx, x, y, width, status.editor_search, theme.text_muted);
         }

@@ -114,6 +114,9 @@ private:
   // The password being typed, and whether the operator touched it at all.
   std::string password_draft_;
   bool password_edited_{};
+  // Whether the Advanced fields (show ID, Director epoch, write-ahead log)
+  // are unfolded. Folded each time the dialog opens.
+  bool advanced_open_{};
 };
 
 } // namespace mediaserver::editor
