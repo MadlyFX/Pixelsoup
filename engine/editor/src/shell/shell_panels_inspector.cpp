@@ -214,9 +214,17 @@ void EditorShell::Frame::draw_inspector_panel(const gui::Rect &bounds) {
       }
     }
   }
+  impl.inspector_panel.set_tracking_feeds(live_data.feeds);
   const InspectorFrame inspector = impl.inspector_panel.draw(
       ui, bounds, std::span<const ElementInfo>{inspector_elements}, anchor,
       keyframes, timeline.show_frame, effects, tracking_sources);
+  if (inspector.open_feed_settings) {
+    impl.project_settings_panel.open(project_settings.settings,
+                                     project_settings.renderer,
+                                     project_settings.lens_profile,
+                                     project_settings.environment);
+    impl.project_settings_panel.show_feeds();
+  }
   if (inspector.file_picker) {
     const FilePickerRequest &request = *inspector.file_picker;
     if (request.clear_texture) {

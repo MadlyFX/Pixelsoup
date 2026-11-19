@@ -273,6 +273,155 @@ std::optional<core::u16> natnet_message_id(
     return id;
 }
 
+std::array<std::byte, 4U> natnet_model_definitions_request() noexcept {
+    return {std::byte{natnet_request_model_definitions_message}, std::byte{0},
+            std::byte{0}, std::byte{0}};
+}
+
+core::Result<NatNetModelDefinitions, TrackerParseError>
+parse_natnet_model_definitions(std::span<const std::byte> datagram,
+                               NatNetVersion version) noexcept {
+    using DefinitionsResult =
+        core::Result<NatNetModelDefinitions, TrackerParseError>;
+    Reader reader{datagram};
+    core::u16 id = 0U;
+    core::u16 payload_bytes = 0U;
+    // The header's payload length is sixteen bits and a large description
+    // overflows it, so the datagram's own length is what bounds the walk.
+    if (!reader.read_u16(id) || !reader.read_u16(payload_bytes)) {
+        return DefinitionsResult::failure(TrackerParseError::Truncated);
+    }
+    if (id != natnet_model_definitions_message) {
+        return DefinitionsResult::failure(
+            TrackerParseError::UnrecognizedMessage);
+    }
+    core::u32 datasets = 0U;
+    if (!reader.read_count(datasets)) {
+        return DefinitionsResult::failure(refusal(reader));
+    }
+
+    NatNetModelDefinitions result{};
+    const auto keep = [&result](const NatNetRigidBodyDescription& body) noexcept {
+        if (result.rigid_body_count < result.rigid_bodies.size()) {
+            result.rigid_bodies[result.rigid_body_count++] = body;
+        }
+    };
+    // A name as the description spells it, truncated to fit.
+    const auto read_name =
+        [&datagram](Reader& from,
+                    std::array<char, max_natnet_rigid_body_name_bytes>& into)
+        noexcept {
+        const std::size_t start = from.position();
+        if (!from.skip_cstring()) {
+            return false;
+        }
+        const std::size_t length =
+            std::min(from.position() - start - 1U, into.size() - 1U);
+        std::memcpy(into.data(), datagram.data() + start, length);
+        into[length] = '\0';
+        return true;
+    };
+    // A whole rigid body description in the shape `version` writes it, for
+    // the versions before 4.1 that do not say how long it is.
+    const auto walk_rigid_body_description =
+        [&](NatNetRigidBodyDescription& body) noexcept {
+        if (version.major >= 2U && !read_name(reader, body.name)) {
+            return false;
+        }
+        core::i32 parent = 0;
+        if (!reader.read_i32(body.id) || !reader.read_i32(parent)
+            || !reader.skip(12U)) {
+            return false;
+        }
+        if (version.major >= 3U) {
+            // Positions then required labels, one of each per marker.
+            core::u32 markers = 0U;
+            if (!reader.read_count(markers)
+                || !reader.skip(static_cast<std::size_t>(markers) * 16U)) {
+                return false;
+            }
+            if (version.major >= 4U) {
+                for (core::u32 marker = 0U; marker < markers; ++marker) {
+                    if (!reader.skip_cstring()) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    };
+
+    constexpr core::i32 marker_set_kind = 0;
+    constexpr core::i32 rigid_body_kind = 1;
+    constexpr core::i32 skeleton_kind = 2;
+    for (core::u32 dataset = 0U; dataset < datasets; ++dataset) {
+        core::i32 kind = 0;
+        if (!reader.read_i32(kind)) {
+            return DefinitionsResult::failure(refusal(reader));
+        }
+        if (sized_sections(version)) {
+            // 4.1 and later say how long each dataset is, so only a rigid
+            // body's leading name and id are read and the rest is skipped by
+            // its declared size, whatever newer fields it carries.
+            core::u32 bytes = 0U;
+            if (!reader.read_count(bytes)) {
+                return DefinitionsResult::failure(refusal(reader));
+            }
+            if (bytes > reader.remaining()) {
+                return DefinitionsResult::failure(TrackerParseError::Truncated);
+            }
+            const std::size_t end = reader.position() + bytes;
+            if (kind == rigid_body_kind) {
+                Reader inner{datagram.first(end)};
+                static_cast<void>(inner.skip(reader.position()));
+                NatNetRigidBodyDescription body{};
+                if (!read_name(inner, body.name) || !inner.read_i32(body.id)) {
+                    return DefinitionsResult::failure(
+                        TrackerParseError::Truncated);
+                }
+                keep(body);
+            }
+            static_cast<void>(reader.skip(end - reader.position()));
+            continue;
+        }
+        bool walked = false;
+        if (kind == marker_set_kind) {
+            // A name, then each marker's name.
+            core::u32 markers = 0U;
+            walked = reader.skip_cstring() && reader.read_count(markers);
+            for (core::u32 marker = 0U; walked && marker < markers; ++marker) {
+                walked = reader.skip_cstring();
+            }
+        } else if (kind == rigid_body_kind) {
+            NatNetRigidBodyDescription body{};
+            walked = walk_rigid_body_description(body);
+            if (walked) {
+                keep(body);
+            }
+        } else if (kind == skeleton_kind) {
+            // A skeleton's bones are rigid bodies too, but not ones a camera
+            // is mounted on, so they are walked and not listed.
+            core::i32 skeleton_id = 0;
+            core::u32 bones = 0U;
+            walked = reader.skip_cstring() && reader.read_i32(skeleton_id)
+                && reader.read_count(bones);
+            for (core::u32 bone = 0U; walked && bone < bones; ++bone) {
+                NatNetRigidBodyDescription ignored{};
+                walked = walk_rigid_body_description(ignored);
+            }
+        } else {
+            // A kind with no size and no reader here: what came before it is
+            // still a true answer, so it is reported as partial.
+            return DefinitionsResult::success(result);
+        }
+        if (!walked) {
+            return DefinitionsResult::failure(refusal(reader));
+        }
+    }
+    result.complete = true;
+    return DefinitionsResult::success(result);
+}
+
 std::array<std::byte, 4U> natnet_connect_request() noexcept {
     // Message id 0, payload length 0. The same four zero bytes the SDK's
     // sample client sends as its ping.

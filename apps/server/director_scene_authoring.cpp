@@ -629,6 +629,50 @@ map_transport(editor::TransportRequest request) noexcept {
                                 : scene::schema::freed_protocol;
         updated.properties.insert_or_assign(
             edit.property, doc::PropertyValue{std::string{protocol}});
+        if (protocol == scene::schema::natnet_protocol) {
+            // A feed switched to NatNet starts on Motive's own ports, so the
+            // common case - Motive left at its defaults - needs nothing typed.
+            // A port the operator already chose is left alone.
+            const auto port = updated.properties.find(
+                std::string{scene::schema::tracking_port});
+            const auto* const authored_port = port == updated.properties.end()
+                ? nullptr
+                : std::get_if<std::int64_t>(&port->second);
+            if (authored_port == nullptr || *authored_port == 0) {
+                updated.properties.insert_or_assign(
+                    std::string{scene::schema::tracking_port},
+                    doc::PropertyValue{static_cast<std::int64_t>(
+                        scene::natnet_default_data_port)});
+            }
+            updated.properties.try_emplace(
+                std::string{scene::schema::tracking_command_port},
+                doc::PropertyValue{static_cast<std::int64_t>(
+                    scene::natnet_default_command_port)});
+        }
+    } else if (edit.property == scene::schema::tracking_source_name &&
+               edit.text.has_value()) {
+        if (existing->type != scene::schema::tracking_source_type ||
+            edit.text->empty()) {
+            return true;
+        }
+        updated.properties.insert_or_assign(edit.property,
+                                            doc::PropertyValue{*edit.text});
+    } else if (edit.property == scene::schema::tracking_server_address &&
+               edit.text.has_value()) {
+        // Empty clears it back to discovering the server from its frames.
+        std::array<core::u8, 4U> address{};
+        if (existing->type != scene::schema::tracking_source_type ||
+            (!edit.text->empty() &&
+             !scene::parse_ipv4_address(*edit.text, address))) {
+            return true;
+        }
+        if (!scene::ipv4_address_set(address)) {
+            updated.properties.erase(edit.property);
+        } else {
+            updated.properties.insert_or_assign(
+                edit.property,
+                doc::PropertyValue{scene::ipv4_address_text(address)});
+        }
     } else if (edit.property == scene::schema::tracking_multicast_group &&
                edit.text.has_value()) {
         // Spelled as the operator typed it, once it parses as a group: the

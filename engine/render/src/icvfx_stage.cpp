@@ -3,6 +3,7 @@
 #include <mediaserver/core/idle_report.hpp>
 
 #include <algorithm>
+#include <optional>
 #include <utility>
 
 namespace mediaserver::render {
@@ -34,8 +35,8 @@ using Result = core::Result<IcvfxStage, RenderError>;
 // every camera, so it has to satisfy the hungriest of them; a camera that asked
 // for less is rendered into a corner of it at its own plate size.
 [[nodiscard]] std::pair<core::u32, core::u32> inner_target_extent(
-    const scene::Scene &frame,
-    const output::PhysicalSurface &surface) noexcept {
+    const scene::Scene &frame, core::u32 base_width,
+    core::u32 base_height) noexcept {
     core::u32 numerator = 1U;
     core::u32 denominator = 1U;
     for (const scene::TrackedCameraView &view : frame.tracked_cameras) {
@@ -47,8 +48,62 @@ using Result = core::Result<IcvfxStage, RenderError>;
             denominator = camera.resolution_denominator;
         }
     }
-    return {inner_extent(surface.raster.width, numerator, denominator),
-            inner_extent(surface.raster.height, numerator, denominator)};
+    return {inner_extent(base_width, numerator, denominator),
+            inner_extent(base_height, numerator, denominator)};
+}
+
+// The raster extent the plate render is sized from: the wall's raster, or -
+// when this output shows its slice of that raster in fewer pixels than the
+// raster has - the raster at the output's own density. A plate rendered at the
+// full raster of a wall shown at a quarter of it spends four times the pixels
+// of everything the output can show, and a full second renderer at an
+// 11520-wide raster is gigabytes of video memory: enough, beside the outer
+// render, to exhaust a render node's GPU and have the device removed.
+//
+// Never above the raster, so a flat wall shown at or above its raster keeps
+// exactly the plate it had.
+[[nodiscard]] core::u32 shown_extent(core::u32 raster, core::u32 slice,
+                                     core::u32 shown) noexcept {
+    if (shown == 0U || slice == 0U || shown >= slice) {
+        return raster;
+    }
+    const core::u64 scaled =
+        (static_cast<core::u64>(raster) * shown + slice - 1U) / slice;
+    return static_cast<core::u32>(
+        std::clamp<core::u64>(scaled, 1U, raster));
+}
+
+// Why a plate render failed, said once per cause. Every cause but media
+// adoption fails the frame, so the log is the only place an operator learns
+// which step it was.
+void report_plate_render_failure(std::optional<RenderError> error) noexcept {
+    const char *reason = "the plate render produced no image";
+    if (error.has_value()) {
+        switch (*error) {
+        case RenderError::Unavailable:
+            reason = "the plate render is waiting for its media to be "
+                     "adopted";
+            break;
+        case RenderError::ShaderFormatUnsupported:
+            reason = "the plate render has no usable shaders";
+            break;
+        case RenderError::CapabilityUnsupported:
+            reason = "the plate render lacks a required renderer capability";
+            break;
+        case RenderError::InvalidConfiguration:
+            reason = "the plate render refused its view as an invalid "
+                     "configuration";
+            break;
+        case RenderError::AllocationFailed:
+            reason = "the plate render could not allocate its targets";
+            break;
+        case RenderError::BackendFailure:
+            reason = "the plate render failed in the GPU backend";
+            break;
+        }
+    }
+    static_cast<void>(
+        core::report_idle_once("inner frustum: plate not recorded", reason));
 }
 
 } // namespace
@@ -104,12 +159,22 @@ IcvfxStats IcvfxStage::stats() const noexcept {
 }
 
 bool IcvfxStage::ensure_inner(
-    const scene::Scene &frame,
-    const output::PhysicalSurface &surface) noexcept {
+    const scene::Scene &frame, const output::PhysicalSurface &surface,
+    scene::CanvasRect slice, scene::Canvas shown) noexcept {
     if (device_ == nullptr) {
         return false;
     }
-    const auto [width, height] = inner_target_extent(frame, surface);
+    // A high-water mark, so outputs that show their walls at different
+    // densities through one stage settle on the largest rather than
+    // reallocating the plate renderer between them every frame.
+    base_width_ = std::max(
+        base_width_,
+        shown_extent(surface.raster.width, slice.width, shown.width));
+    base_height_ = std::max(
+        base_height_,
+        shown_extent(surface.raster.height, slice.height, shown.height));
+    const auto [width, height] =
+        inner_target_extent(frame, base_width_, base_height_);
     if (inner_ && inner_width_ == width && inner_height_ == height) {
         return true;
     }
@@ -134,12 +199,68 @@ bool IcvfxStage::ensure_inner(
     return true;
 }
 
+bool IcvfxStage::ensure_plate_warp() noexcept {
+    if (device_ == nullptr || !inner_) {
+        return false;
+    }
+    if (plate_warp_) {
+        // Same class of work as the inner executor's resize: a canvas or
+        // density edit, never a per-frame plate size.
+        return plate_warp_->resize(*device_, inner_width_, inner_height_);
+    }
+    auto created = ProjectionMeshWarp::create(
+        *device_, inner_width_, inner_height_, ProjectionMeshWarpLimits{},
+        working_format_);
+    if (!created) {
+        static_cast<void>(core::report_idle_once(
+            "inner frustum: plate warp",
+            created.error() == RenderError::ShaderFormatUnsupported
+                ? "the mesh warp shaders are unavailable, so no plate can be "
+                  "drawn on a curved or UV-mesh wall"
+                : "the plate warp target could not be allocated"));
+        return false;
+    }
+    plate_warp_.emplace(std::move(created).value());
+    return true;
+}
+
 const rhi::Texture *IcvfxStage::record(
     rhi::CommandList &commands, const scene::Scene &frame,
     const output::PhysicalSurface &surface, scene::CanvasRect slice,
     std::span<const scene::InnerFrustumRegion> regions,
-    const rhi::Texture &outer, MediaCache *shared_media_cache) noexcept {
+    const rhi::Texture &outer, MediaCache *shared_media_cache,
+    scene::Canvas shown) noexcept {
+    return record_stack(commands, frame, surface, nullptr, slice, regions,
+                        outer, shared_media_cache, shown);
+}
+
+const rhi::Texture *IcvfxStage::record(
+    rhi::CommandList &commands, const scene::Scene &frame,
+    const output::PhysicalSurface &surface, const IcvfxSurfaceMesh &mesh,
+    scene::CanvasRect slice,
+    std::span<const scene::InnerFrustumRegion> regions,
+    const rhi::Texture &outer, MediaCache *shared_media_cache,
+    scene::Canvas shown) noexcept {
+    if (mesh.mesh == nullptr) {
+        last_plans_.clear();
+        static_cast<void>(core::report_idle_once(
+            "inner frustum: no plate on this output",
+            "the complete surface mesh is not available on this node"));
+        return &outer;
+    }
+    return record_stack(commands, frame, surface, &mesh, slice, regions,
+                        outer, shared_media_cache, shown);
+}
+
+const rhi::Texture *IcvfxStage::record_stack(
+    rhi::CommandList &commands, const scene::Scene &frame,
+    const output::PhysicalSurface &surface, const IcvfxSurfaceMesh *mesh,
+    scene::CanvasRect slice,
+    std::span<const scene::InnerFrustumRegion> regions,
+    const rhi::Texture &outer, MediaCache *shared_media_cache,
+    scene::Canvas shown) noexcept {
     last_plans_.clear();
+    plate_pending_ = false;
     const std::size_t count =
         std::min(frame.tracked_cameras.size(), regions.size());
     last_plans_.reserve(count);
@@ -177,7 +298,13 @@ const rhi::Texture *IcvfxStage::record(
                 : "the planner refused every plate for this frame"));
         return &outer;
     }
-    if (!ensure_inner(frame, surface)) {
+    if (!ensure_inner(frame, surface, slice, shown)) {
+        static_cast<void>(core::report_idle_once(
+            "inner frustum: plate not recorded",
+            "the plate renderer could not be created at the plate density"));
+        return nullptr;
+    }
+    if (mesh != nullptr && !ensure_plate_warp()) {
         return nullptr;
     }
 
@@ -192,30 +319,113 @@ const rhi::Texture *IcvfxStage::record(
         if (!plan.active || plan.skipped) {
             continue;
         }
-        // The plate: an off-axis perspective from this camera's tracked eye
-        // through its rectangle on the wall, built by the same call the outer
-        // frustum uses.
-        //
-        // A surface that refuses the eye - behind the wall, or coplanar with
-        // it - leaves this camera out of the stack rather than failing the
-        // frame. The refusal is derived entirely from replicated state, so
-        // every node drops the same camera on the same frame, and the plates
-        // below it still composite.
-        const auto view = inner_frustum_view(
-            frame, frame.tracked_cameras[index], surface, plan);
-        if (!view.has_value()) {
-            continue;
-        }
-        const auto rendered =
-            inner_->execute(commands, frame, *view, shared_media_cache);
-        if (!rendered || rendered.value() == nullptr) {
-            return nullptr;
+        // The plate texture the compositor reads: a render that covers the
+        // plate rectangle exactly, in either wall shape.
+        const rhi::Texture *plate = nullptr;
+        if (mesh == nullptr) {
+            // The plate: an off-axis perspective from this camera's tracked
+            // eye through its rectangle on the wall, built by the same call
+            // the outer frustum uses.
+            //
+            // A surface that refuses the eye - behind the wall, or coplanar
+            // with it - leaves this camera out of the stack rather than
+            // failing the frame. The refusal is derived entirely from
+            // replicated state, so every node drops the same camera on the
+            // same frame, and the plates below it still composite.
+            const auto view = inner_frustum_view(
+                frame, frame.tracked_cameras[index], surface, plan);
+            if (!view.has_value()) {
+                continue;
+            }
+            const auto rendered =
+                inner_->execute(commands, frame, *view, shared_media_cache);
+            if (!rendered && rendered.error() == RenderError::Unavailable) {
+                // Still adopting this frame's media - see `plate_pending`.
+                plate_pending_ = true;
+                report_plate_render_failure(rendered.error());
+                continue;
+            }
+            if (!rendered || rendered.value() == nullptr) {
+                report_plate_render_failure(rendered ? std::nullopt
+                                                     : std::optional{rendered.error()});
+                return nullptr;
+            }
+            plate = rendered.value();
+        } else {
+            // A curved or UV-mesh wall: one render from the tracked eye fitted
+            // to the wall under the rectangle, then warped through those same
+            // triangles into the rectangle. Refused the same way a flat wall
+            // refuses an eye behind it - dropped, reported, the rest drawn.
+            const auto view = inner_frustum_mesh_view(
+                frame, frame.tracked_cameras[index], surface, *mesh, plan);
+            if (!view) {
+                const char *reason =
+                    "no plate view fits the wall under the plate";
+                switch (view.error()) {
+                case output::PerspectiveMappingError::MeshBehindEye:
+                    reason = "part of the wall under the plate is behind the "
+                             "tracked camera";
+                    break;
+                case output::PerspectiveMappingError::DegenerateFrustum:
+                    reason = "no part of the surface mesh lies under the "
+                             "plate rectangle";
+                    break;
+                case output::PerspectiveMappingError::InvalidClipRange:
+                    reason = "the tracked camera's clip range is not valid";
+                    break;
+                case output::PerspectiveMappingError::InvalidEye:
+                    reason = "the tracked camera's eye is not valid";
+                    break;
+                case output::PerspectiveMappingError::InvalidMesh:
+                    reason = "the surface mesh has unusable vertices";
+                    break;
+                case output::PerspectiveMappingError::InvalidSurface:
+                    reason = "the surface placement or mesh scale is not "
+                             "valid";
+                    break;
+                default:
+                    break;
+                }
+                static_cast<void>(core::report_idle_once(
+                    "inner frustum: plate dropped on a mesh wall", reason));
+                continue;
+            }
+            if (frame.renderer_settings.plate_depth_of_field
+                && frame.renderer_settings.plate_dof_radius > 0U) {
+                static_cast<void>(core::report_idle_once(
+                    "plate depth of field",
+                    "not applied on a curved or UV-mesh wall, which has no "
+                    "single wall plane to subtract; the plate is drawn "
+                    "without it"));
+            }
+            const auto rendered = inner_->execute(
+                commands, frame, view.value().render, shared_media_cache);
+            if (!rendered && rendered.error() == RenderError::Unavailable) {
+                plate_pending_ = true;
+                report_plate_render_failure(rendered.error());
+                continue;
+            }
+            if (!rendered || rendered.value() == nullptr) {
+                report_plate_render_failure(rendered ? std::nullopt
+                                                     : std::optional{rendered.error()});
+                return nullptr;
+            }
+            const output::MeshDestinationWindow window{surface.raster,
+                                                       plan.inner_rect};
+            if (!plate_warp_->render(commands, *rendered.value(), *mesh->mesh,
+                                     view.value().mesh_view, mesh->placement,
+                                     &window)) {
+                return nullptr;
+            }
+            plate = &plate_warp_->target();
         }
         // Alternating, so this composite never samples the target it writes.
         IcvfxCompositor &compositor = compositors_[next_compositor];
         next_compositor = 1U - next_compositor;
-        if (!compositor.render(commands, plan, slice, *source,
-                               rendered.value())) {
+        if (!compositor.render(commands, plan, slice, *source, plate)) {
+            static_cast<void>(core::report_idle_once(
+                "inner frustum: plate not recorded",
+                "the plate composite was refused"));
             return nullptr;
         }
         source = &compositor.target();

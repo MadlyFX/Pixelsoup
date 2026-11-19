@@ -14,7 +14,9 @@
 #include <mediaserver/ui/gpu_output_target.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -25,6 +27,73 @@
 #include <SDL3/SDL.h>
 
 namespace mediaserver::ui {
+namespace {
+
+// What each output map last said about its plate, so the node log says it
+// again whenever that changes.
+//
+// `core::report_idle_once` says a reason once per process, which is right for
+// set-up faults and wrong here: one output drives several maps, each map
+// arrives at its own answer every frame, and a wall that legitimately sees no
+// plate (a side wall the camera is not facing) said "the tracked frustum meets
+// no part of this wall" first and thereby silenced the same words - and every
+// other answer it shared - for the map the camera *was* facing. Keyed by map
+// and spoken only on a change, this costs nothing on a settled frame and never
+// lets one wall's state stand in for another's.
+class PlateReasonLog final {
+public:
+    // `camera`, when given, is printed beside a refusal that depends on where
+    // the tracked camera is, which is the first thing to check on a stage.
+    void say(doc::NodeId map, const char *reason,
+             const scene::Camera *camera = nullptr) noexcept {
+        Entry *entry = nullptr;
+        for (Entry &candidate : entries_) {
+            if (candidate.map == map.value()) {
+                entry = &candidate;
+                break;
+            }
+        }
+        if (entry == nullptr) {
+            entry = &entries_[next_];
+            next_ = (next_ + 1U) % entries_.size();
+            entry->map = map.value();
+            entry->reason = nullptr;
+        }
+        if (entry->reason == reason) {
+            return;
+        }
+        entry->reason = reason;
+        if (camera != nullptr) {
+            const scene::Vec3 forward =
+                scene::normalize(camera->target - camera->eye);
+            static_cast<void>(std::fprintf(
+                stderr,
+                "inner frustum: map %llu: %s (tracked eye %.3f %.3f %.3f, "
+                "looking %.3f %.3f %.3f)\n",
+                static_cast<unsigned long long>(map.value()), reason,
+                static_cast<double>(camera->eye.x),
+                static_cast<double>(camera->eye.y),
+                static_cast<double>(camera->eye.z),
+                static_cast<double>(forward.x),
+                static_cast<double>(forward.y),
+                static_cast<double>(forward.z)));
+        } else {
+            static_cast<void>(std::fprintf(
+                stderr, "inner frustum: map %llu: %s\n",
+                static_cast<unsigned long long>(map.value()), reason));
+        }
+    }
+
+private:
+    struct Entry final {
+        core::u64 map{};
+        const char *reason{};
+    };
+    std::array<Entry, output::max_output_maps> entries_{};
+    std::size_t next_{};
+};
+
+} // namespace
 
 struct SdlPresenter::Platform final {
     SDL_Window *window{};
@@ -65,6 +134,10 @@ struct SdlPresenter::Platform final {
     // sticky until the operator explicitly refreshes it or authored mapping
     // identity changes; no timer or frame-count work retries it.
     render::OutputProjectionCacheRegistry projection_meshes;
+    // Per-map plate state, said again whenever it changes: one log per stage,
+    // so a transition's two scenes do not take turns overwriting each other.
+    PlateReasonLog plate_reasons;
+    PlateReasonLog plate_reasons_to;
     // Borrowed from one of the targets above. Updated only after a frame has
     // been recorded successfully, so readback always inspects the texture the
     // swapchain was actually given (single scene, mixed scene, mapped output,
@@ -226,27 +299,38 @@ record_scene(render::CompositorSceneExecutor &executor,
 
 // The plate for one mapped output, composited over the wall image.
 //
-// Only planar surfaces. The inner frustum is a region of a *wall*, and a
-// planar surface is the one projection policy that hands back an image still
-// in surface-raster coordinates - a mesh-warped output has already been
-// resampled into connector space by the time it gets here, and outlining a
-// plate on it would need the complete surface mesh rather than the region this
-// node owns. A curved wall therefore shows the outer frustum until that path
-// exists, which is honest; drawing an approximately-placed plate would not be.
+// Every surface shape. A flat wall's image is in surface-raster pixels over
+// `map.source`; so is a mesh-warped wall's, because the warp's destination UV0
+// is that same raster region. The plate therefore composites over either in
+// the same space - only how the plate itself is found and drawn differs:
+//
+// - planar: the rectangle from the wall plane, the plate through it;
+// - horizontal arc / imported UV mesh: the rectangle from the *complete*
+//   surface mesh (never this node's region mesh, or two nodes would disagree
+//   about where the plate ends), and the plate fitted to and warped through
+//   the triangles under that rectangle.
+//
+// `projection` is the projection the wall image was just drawn with - the
+// same frozen mesh observation - so the plate and the wall under it come from
+// one geometry. A mesh this node does not hold yet refuses with that reason;
+// it never draws an approximately placed plate.
 //
 // Returns `scene_target` untouched whenever there is nothing to draw, so an
 // untracked show and a node whose slice misses the plate both cost nothing.
 [[nodiscard]] const rhi::Texture *
 record_inner_frustum(std::optional<render::IcvfxStage> &stage,
-                     rhi::CommandList &commands,
+                     PlateReasonLog &reasons, rhi::CommandList &commands,
                      const scene::Scene &frame, const output::OutputMap &map,
-                     const rhi::Texture *scene_target) noexcept {
-    // Why this output is drawing no plate, said once per reason. See
-    // core/idle_report.hpp: every condition below is a legitimate reason to
-    // draw nothing, and from the wall they are all the same black rectangle.
-    const auto once = [](const char *reason) noexcept {
-        static_cast<void>(core::report_idle_once(
-            "inner frustum: no plate on this output", reason));
+                     const render::MappedProjection *projection,
+                     const rhi::Texture *scene_target,
+                     bool &plate_pending) noexcept {
+    plate_pending = false;
+    // Why this map is drawing no plate, said whenever it changes - see
+    // PlateReasonLog. Every condition below is a legitimate reason to draw
+    // nothing, and from the wall they are all the same missing plate.
+    const auto once = [&](const char *reason,
+                          const scene::Camera *camera = nullptr) noexcept {
+        reasons.say(map.node, reason, camera);
     };
     if (scene_target == nullptr) {
         return scene_target;
@@ -264,7 +348,7 @@ record_inner_frustum(std::optional<render::IcvfxStage> &stage,
         return scene_target;
     }
     if (!map.perspective_ready()) {
-        once("this output is not mapped to a planar LED surface");
+        once("this output shows a canvas slice, not an LED surface");
         return scene_target;
     }
     if (map.resolved_surface->stage.anchor == output::StageAnchor::Camera) {
@@ -274,11 +358,31 @@ record_inner_frustum(std::optional<render::IcvfxStage> &stage,
              "wall for a tracked plate");
         return scene_target;
     }
+    // The complete surface mesh a curved or UV-mesh wall's plate is found on.
+    // Planar walls leave this empty and keep their exact flat-wall path.
+    const output::ResolvedProjectionSurface &surface = *map.resolved_surface;
+    const bool mesh_wall =
+        surface.shape != output::ProjectionSurfaceShape::Planar;
+    render::IcvfxSurfaceMesh surface_mesh{};
+    if (mesh_wall) {
+        if (projection == nullptr || projection->surface_mesh == nullptr) {
+            once(surface.shape == output::ProjectionSurfaceShape::ImportedMesh
+                     ? "the surface's UV mesh is not loaded on this node"
+                     : "the complete arc mesh could not be built on this node");
+            return scene_target;
+        }
+        surface_mesh.mesh = projection->surface_mesh.get();
+        surface_mesh.placement = projection->mesh_placement.has_value()
+            ? &*projection->mesh_placement
+            : nullptr;
+    }
     // One region per tracked camera, in the scene's composite order, so the
     // stage draws the stack the same way round the scene named it.
     std::array<scene::InnerFrustumRegion, scene::max_tracked_cameras> regions{};
     std::size_t count = 0U;
     bool any = false;
+    // The first drawing camera's eye, for a refusal that depends on it.
+    std::optional<scene::Camera> first_tracked;
     for (const scene::TrackedCameraView &view : frame.tracked_cameras) {
         if (count >= regions.size()) {
             break;
@@ -287,6 +391,9 @@ record_inner_frustum(std::optional<render::IcvfxStage> &stage,
             // The same eye the plate is rendered from - see
             // `tracked_stage_camera`.
             const scene::Camera tracked = render::tracked_stage_camera(view);
+            if (!first_tracked.has_value()) {
+                first_tracked = tracked;
+            }
             // Sized by the camera's own calibrated lens when it has one.
             //
             // The plate rectangle used to come from a field of view the
@@ -301,21 +408,31 @@ record_inner_frustum(std::optional<render::IcvfxStage> &stage,
             // field, which is what stops a wide lens photographing outer
             // frustum at the corners of its own plate. The render stays
             // undistorted; only this coverage is widened.
-            const auto region = view.authored.lens_profile.has_value()
-                ? output::inner_frustum_region(
-                      map.resolved_surface->geometry, tracked,
-                      *view.authored.lens_profile, view.encoders,
-                      scene::clamped(view.icvfx).margin_px)
-                : output::inner_frustum_region(
-                      map.resolved_surface->geometry, tracked,
-                      view.pose.aspect_ratio,
-                      scene::clamped(view.icvfx).margin_px);
-            // Both the rectangle above and the view the stage builds from it
-            // are in this surface's raster, which is the space `map.source`
-            // is already in.
-            if (region) {
-                regions[count] = region.value();
-                any = any || region.value().valid;
+            const core::u32 margin = scene::clamped(view.icvfx).margin_px;
+            if (mesh_wall) {
+                // Over the complete mesh, in its shared destination raster -
+                // the surface raster `map.source` is a region of.
+                const scene::InnerFrustumRegion region =
+                    render::inner_frustum_mesh_region(
+                        surface_mesh, surface.geometry.raster, tracked, view,
+                        margin);
+                regions[count] = region;
+                any = any || region.valid;
+            } else {
+                const auto region = view.authored.lens_profile.has_value()
+                    ? output::inner_frustum_region(
+                          surface.geometry, tracked,
+                          *view.authored.lens_profile, view.encoders, margin)
+                    : output::inner_frustum_region(
+                          surface.geometry, tracked, view.pose.aspect_ratio,
+                          margin);
+                // Both the rectangle above and the view the stage builds from
+                // it are in this surface's raster, which is the space
+                // `map.source` is already in.
+                if (region) {
+                    regions[count] = region.value();
+                    any = any || region.value().valid;
+                }
             }
         }
         ++count;
@@ -334,13 +451,26 @@ record_inner_frustum(std::optional<render::IcvfxStage> &stage,
         once(drawing_any
                  ? "the tracked frustum meets no part of this wall"
                  : (pose_any ? "the camera is not asking for a plate"
-                             : "this node has no pose for its tracked camera"));
+                             : "this node has no pose for its tracked camera"),
+             first_tracked.has_value() ? &*first_tracked : nullptr);
         return scene_target;
     }
-    return stage->record(
-        commands, frame, map.resolved_surface->geometry, map.source,
-        std::span<const scene::InnerFrustumRegion>{regions.data(), count},
-        *scene_target);
+    once(mesh_wall ? "plate found on this curved or UV-mesh wall"
+                   : "plate found on this flat wall");
+    const std::span<const scene::InnerFrustumRegion> stack{regions.data(),
+                                                           count};
+    // The plate is rendered at the density this map is shown at, not at the
+    // wall raster's: see IcvfxStage::record.
+    const scene::Canvas shown{map.viewport.width, map.viewport.height};
+    const rhi::Texture *const plated = mesh_wall
+        ? stage->record(commands, frame, surface.geometry, surface_mesh,
+                        map.source, stack, *scene_target, nullptr, shown)
+        : stage->record(commands, frame, surface.geometry, map.source, stack,
+                        *scene_target, nullptr, shown);
+    // A plate left off because its renderer is still adopting this frame's
+    // media makes the frame incomplete, whatever the wall image says.
+    plate_pending = stage->plate_pending();
+    return plated;
 }
 
 void include_media_readiness(const render::CompositorSceneExecutor &executor,
@@ -1451,6 +1581,18 @@ show::PresenterStatus SdlPresenter::fail(const core::PresentStep step,
                             ? drawing_map_ : 0U;
     failure_.show_frame = drawing_frame_;
     failure_.ongoing = true;
+    // A lost device fails every frame from here on, and "the GPU did not
+    // accept the frame" does not say that nothing ever will again. Name it
+    // once, with the runtime's reason; with MEDIASERVER_GPU_BREADCRUMBS=1 the
+    // same call writes the DRED report naming the work that faulted.
+    if (platform_ != nullptr && platform_->device) {
+        const std::string_view lost = platform_->device->lost_reason();
+        if (!lost.empty()) {
+            static_cast<void>(core::report_idle_once(
+                "GPU device lost, the output cannot draw until it restarts",
+                lost.data()));
+        }
+    }
     return show::PresenterStatus::Failed;
 }
 
@@ -1804,11 +1946,12 @@ show::PresenterStatus SdlPresenter::present(
             }
             for (const output::OutputMap &map : maps) {
                 drawing_map_ = map.node.value();
+                render::MappedProjection projection{};
                 const rhi::Texture *scene_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
                         platform.projection_meshes, commands, frame, map,
-                        mapping_unavailable);
+                        mapping_unavailable, nullptr, &projection);
                 include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
                 if (scene_target == nullptr) {
                     return mapping_unavailable
@@ -1816,8 +1959,12 @@ show::PresenterStatus SdlPresenter::present(
                                      commands, *platform.output_transform)
                                : nullptr;
                 }
+                bool plate_pending = false;
                 scene_target = record_inner_frustum(
-                    platform.icvfx_from, commands, frame, map, scene_target);
+                    platform.icvfx_from, platform.plate_reasons, commands,
+                    frame, map, &projection, scene_target, plate_pending);
+                media_complete = media_complete &&
+                                 (!buffered_media_ || !plate_pending);
                 if (scene_target == nullptr) {
                     static_cast<void>(core::report_idle_once(
                         "output map draw", "the inner frustum plate could not be recorded"));
@@ -1885,11 +2032,13 @@ show::PresenterStatus SdlPresenter::present(
             }
             for (const output::OutputMap &map : maps) {
                 drawing_map_ = map.node.value();
+                render::MappedProjection projection{};
                 const rhi::Texture *scene_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
                         platform.projection_meshes, commands, graph,
-                        frame, map, mapping_unavailable);
+                        frame, map, mapping_unavailable, nullptr,
+                        &projection);
                 include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
                 if (scene_target == nullptr) {
                     return mapping_unavailable
@@ -1902,8 +2051,12 @@ show::PresenterStatus SdlPresenter::present(
                 // path - a node presents through the compositor graph - so
                 // without this an authored inner frustum would never reach a
                 // wall however correctly the rest of it was derived.
+                bool plate_pending = false;
                 scene_target = record_inner_frustum(
-                    platform.icvfx_from, commands, frame, map, scene_target);
+                    platform.icvfx_from, platform.plate_reasons, commands,
+                    frame, map, &projection, scene_target, plate_pending);
+                media_complete = media_complete &&
+                                 (!buffered_media_ || !plate_pending);
                 if (scene_target == nullptr) {
                     static_cast<void>(core::report_idle_once(
                         "output map draw", "the inner frustum plate could not be recorded"));
@@ -2057,16 +2210,20 @@ show::PresenterStatus SdlPresenter::present(
             }
             for (const output::OutputMap &map : maps) {
                 drawing_map_ = map.node.value();
+                render::MappedProjection from_projection{};
+                render::MappedProjection to_projection{};
                 const rhi::Texture *from_target =
                     render::record_output_mapped_scene(
                         *platform.scene_from, *platform.mesh_warp_from,
                         platform.projection_meshes, commands, from_graph,
-                        from, map, mapping_unavailable);
+                        from, map, mapping_unavailable, nullptr,
+                        &from_projection);
                 const rhi::Texture *to_target =
                     render::record_output_mapped_scene(
                         *platform.scene_to, *platform.mesh_warp_to,
                         platform.projection_meshes, commands, to_graph,
-                        to, map, mapping_unavailable);
+                        to, map, mapping_unavailable, nullptr,
+                        &to_projection);
                 include_media_readiness(*platform.scene_from, media_complete, buffered_media_);
                 include_media_readiness(*platform.scene_to, media_complete, buffered_media_);
                 if (from_target == nullptr || to_target == nullptr) {
@@ -2079,10 +2236,17 @@ show::PresenterStatus SdlPresenter::present(
                 // Mixing first and plating after would show one plate for two
                 // scenes and cross-dissolve the wall behind it, which is a
                 // different shot from the one either scene describes.
+                bool plate_pending = false;
+                bool to_plate_pending = false;
                 from_target = record_inner_frustum(
-                    platform.icvfx_from, commands, from, map, from_target);
+                    platform.icvfx_from, platform.plate_reasons, commands,
+                    from, map, &from_projection, from_target, plate_pending);
                 to_target = record_inner_frustum(
-                    platform.icvfx_to, commands, to, map, to_target);
+                    platform.icvfx_to, platform.plate_reasons_to, commands,
+                    to, map, &to_projection, to_target, to_plate_pending);
+                media_complete =
+                    media_complete &&
+                    (!buffered_media_ || (!plate_pending && !to_plate_pending));
                 if (from_target == nullptr || to_target == nullptr) {
                     return nullptr;
                 }

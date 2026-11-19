@@ -142,6 +142,65 @@ tracked_stage_camera(const scene::TrackedCameraView& view) noexcept;
     const scene::Scene& scene, const scene::TrackedCameraView& view,
     const output::PhysicalSurface& surface, const IcvfxPlan& plan) noexcept;
 
+// The wall a plate is drawn on when it is not flat: a horizontal arc or an
+// imported UV mesh.
+//
+// `mesh` is the **complete** surface mesh, whose UV0 spans the surface's whole
+// raster - never one output's region mesh - so the plate rectangle, the view
+// and the warp are the same on every node. `placement` is null for a mesh
+// already in stage space (a generated arc) and carries the calibration for an
+// imported mesh, whose cached vertices stay file-local.
+struct IcvfxSurfaceMesh final {
+    const output::ProjectionMesh* mesh{};
+    const output::ProjectionMeshPlacement* placement{};
+};
+
+// The plate rectangle on a mesh wall: the mesh form of
+// `output::inner_frustum_region` over the complete surface mesh, sized by the
+// camera's calibrated lens when it has one and by the sensor aspect when it
+// does not - the same choice the flat-wall path makes. One definition, called
+// by the nodes that draw the plate and by the Director that reports it, so the
+// two can never describe different rectangles. `tracked` is
+// `tracked_stage_camera(view)`. Invalid when no mesh is given.
+[[nodiscard]] scene::InnerFrustumRegion inner_frustum_mesh_region(
+    const IcvfxSurfaceMesh& mesh, scene::Canvas raster,
+    const scene::Camera& tracked, const scene::TrackedCameraView& view,
+    core::u32 margin_px) noexcept;
+
+// The plate view on a mesh wall, and the fitted mesh view the plate is then
+// warped through.
+struct IcvfxMeshView final {
+    SceneRenderView render{};
+    output::MeshPerspectiveView mesh_view{};
+};
+
+// The mesh-wall counterpart of `inner_frustum_view`.
+//
+// A curved wall has no single rectangle to build an off-axis frustum through,
+// so the plate is the same two steps the outer frustum on that wall already
+// is: one perspective render from the tracked eye, fitted to the triangles of
+// the surface under the plate rectangle (`output::MeshDestinationWindow`), and
+// a projective warp of that render through the same triangles into the
+// rectangle. The warped plate then covers `plan.inner_rect` exactly as a flat
+// wall's plate does, and composites through the same `IcvfxCompositor`.
+//
+// Every input is replicated, so a refusal is reached on every node alike. The
+// error says which: MeshBehindEye when part of the wall under the plate is
+// behind the tracked eye, DegenerateFrustum when no triangle lies under the
+// rectangle or the plan is not drawing, InvalidMesh / InvalidSurface for
+// unusable geometry or placement, InvalidClipRange / InvalidEye for the
+// tracked camera.
+//
+// No plate depth of field: `plate_lens` describes a flat wall's plane and a
+// curved wall has none, so it is left empty and the plate renders sharp. The
+// caller reports that when depth of field was authored.
+[[nodiscard]] core::Result<IcvfxMeshView, output::PerspectiveMappingError>
+inner_frustum_mesh_view(const scene::Scene& scene,
+                        const scene::TrackedCameraView& view,
+                        const output::PhysicalSurface& surface,
+                        const IcvfxSurfaceMesh& mesh,
+                        const IcvfxPlan& plan) noexcept;
+
 // Frame-path counters. Reading them performs no query, allocation, or wait.
 struct IcvfxStats final {
     core::u64 frames_planned{};

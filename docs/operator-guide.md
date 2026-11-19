@@ -1070,14 +1070,20 @@ always-on layer.
 ### Camera tracking feeds
 
 A tracked camera takes its pose from a **feed**: a tracker protocol the
-Director listens to on a UDP port. Feeds are project state. Select a camera,
-press **+ New feed** in its TRACKING section, pick the feed from the **Feed**
-list, and its settings appear below: **State** (Listening or not), **Protocol**,
-**Port**, the camera or rigid-body id, the sensor and fallback lens the plate is
-sized from, and the **Up axis**, **Heading**, **Origin** and **Scale** that place
-the tracker's numbers on the stage. Only the Director opens the socket; every
-render node receives the pose the Director sampled, stamped for an exact
-control frame, so two nodes never disagree about where the camera is.
+Director listens to on a UDP port. Feeds are project state and are set up in
+**File > Project Settings > FEEDS** (a camera's **Feed settings** button opens
+it there): **Name**, **Listening**, **Protocol**, **Port**, for NatNet the
+**Motive IP**, **Command port** and **Multicast** group, a **Status** line, the
+sensor and fallback lens the plate is sized from, and the **Up axis**,
+**Heading**, **Origin** and **Scale** that place the tracker's numbers on the
+stage. **NEW FEED** adds one; Apply writes the edits as one undo step.
+
+On the camera, the TRACKING section keeps only what belongs to the camera:
+pick the **Feed**, then the **Rigid body** (NatNet) or **Camera ID** (FreeD,
+OpenTrackIO) that identifies this camera on it, and the inner frustum rows.
+Only the Director opens the socket; every render node receives the pose the
+Director sampled, stamped for an exact control frame, so two nodes never
+disagree about where the camera is.
 
 Three protocols are supported:
 
@@ -1088,12 +1094,18 @@ Three protocols are supported:
   the sample's `sourceNumber`; a feed authored for camera 0 takes samples that
   name no camera.
 - **NatNet** - OptiTrack Motive's streaming protocol. The camera is a rigid
-  body in the volume. **Rigid body** is its streaming id from Motive's Assets
-  pane, or 0 for the first body in every frame. **Port** is Motive's data
-  port (1511), **Multicast** is the group Motive streams to (239.255.42.99),
-  and **Command port** (1510) is where the Director asks Motive which NatNet
-  version it speaks. Motive's streaming pane must be set to **Multicast**;
-  unicast is not supported. Frames that arrive before Motive has answered are
+  body in the volume. Choosing NatNet fills in Motive's defaults: data
+  **Port** 1511, **Command port** 1510 and **Multicast** 239.255.42.99. Set
+  **Motive IP** to the Motive machine's address (the "Local Interface" in its
+  Streaming pane): the Director then asks Motive for its NatNet version and
+  its rigid bodies straight away, and joins the multicast group on the network
+  interface that reaches it. Left empty, the server is found from the first
+  multicast frame instead. The camera's **Rigid body** list shows the bodies
+  by their Motive names, refreshed every few seconds so a body created in
+  Motive appears without reconnecting; **First in frame** takes whichever body
+  comes first, and a chosen body Motive no longer lists is shown as
+  "not streaming". Motive's streaming pane must be set to **Multicast**.
+  Frames that arrive before Motive has answered are
   counted under **No handshake** in Live Data and nothing is tracked until it
   does, because the frame layout depends on the version and a guessed one
   tracks the wrong bytes. A body Motive lists but cannot solve this frame is
@@ -1109,6 +1121,32 @@ Three protocols are supported:
 wall is drawing. Without a tracker, `scripts/send-freed-tracking.ps1` and
 `scripts/send-natnet-tracking.ps1` stand in for a FreeD encoder and for
 Motive; each script's help describes the feed settings it expects.
+
+A tracked plate is drawn on every surface shape: flat, horizontal-arc and
+imported UV-mesh walls. On a curved or UV-mesh wall the plate rectangle is
+found over the whole surface's mesh, so every output sharing the wall agrees
+on where it ends. It covers only the part of the wall the camera sees, plus
+the margin: on an arc it is as tall as the camera's view, not the wall. The
+plate is rendered from the tracked camera and warped through the same mesh as
+the wall around it, so it lines up with the outer frustum across the feather.
+An output whose UV mesh has not finished loading draws no plate until it has.
+The plate is rendered at the resolution the output shows that wall at, never
+above the wall's raster. A UV-mesh wall shown at a quarter of its raster
+therefore costs a quarter of the plate pixels.
+After an asset refresh the plate renderer reopens the scene's media before
+it draws. Until then the plate is left off, the frame counts as incomplete,
+and a buffered output holds its last complete frame. The node log names each
+viewport's plate state again every time it changes, for example `inner
+frustum: map 100058: plate found on this curved or UV-mesh wall`. A side wall
+the camera is not facing reports that it meets no part of the frustum, and
+that does not hide the state of the wall the camera is facing.
+If part of the wall under the plate is behind the tracked camera, the output
+leaves that plate out and logs why. Plate depth of field is not applied on a
+curved or UV-mesh wall, because there is no single wall plane to measure the
+wall's own blur against; the plate is drawn sharp and the node log says so.
+Live Data reports the same rectangle the outputs draw. Until the Director has
+loaded a wall's UV mesh itself, the Plate row reads **Not known here** with
+the reason, rather than claiming the camera sees nothing.
 
 ## Project settings
 

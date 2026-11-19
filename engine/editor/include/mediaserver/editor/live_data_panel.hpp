@@ -130,6 +130,11 @@ struct TrackedCameraObservation final {
   // coverage percentage hides it, because "100 %" looks like a camera framing
   // the wall exactly rather than one overshooting it.
   bool inner_rect_clamped{};
+  // Why the Director could not derive the rectangle when `inner_rect` is
+  // absent although the camera may well be drawing a plate: a curved or
+  // UV-mesh wall whose mesh the Director does not hold (yet). Empty when the
+  // rectangle was derived or the camera genuinely sees no wall.
+  std::string inner_rect_unknown;
 
   bool operator==(const TrackedCameraObservation &) const = default;
 };
@@ -169,6 +174,36 @@ struct NodeTrackingObservation final {
 
 // What the whole ICVFX path is doing this frame, beside the trackers feeding
 // it. Absent members mean the Director had nothing to report.
+// One rigid body a NatNet server described, as an operator picks it.
+struct TrackingRigidBody final {
+  core::i32 id{};
+  std::string name;
+
+  bool operator==(const TrackingRigidBody &) const = default;
+};
+
+// One authored feed's link, whether or not any camera is bound to it. This is
+// what the feed settings and a camera's rigid body picker read: the bodies a
+// Motive server says it has are discovered, never authored, so they reach the
+// editor here rather than through the document.
+struct TrackingFeedObservation final {
+  doc::NodeId source{};
+  TrackingLinkState state{TrackingLinkState::Idle};
+  // What a NatNet server said it was, and the address it is being reached
+  // at, once known. Empty otherwise.
+  std::string server_description;
+  std::string server_address;
+  std::vector<TrackingRigidBody> rigid_bodies;
+  core::u64 accepted{};
+  std::string last_error;
+
+  bool operator==(const TrackingFeedObservation &) const = default;
+};
+
+[[nodiscard]] const TrackingFeedObservation *
+find_feed(std::span<const TrackingFeedObservation> feeds,
+          doc::NodeId source) noexcept;
+
 struct LiveDataState final {
   // Every tracked camera, in composite order: the last one listed is the one
   // on top where two plates overlap.
@@ -183,6 +218,8 @@ struct LiveDataState final {
   std::vector<NodeTrackingObservation> nodes;
   // Show frame the values above belong to.
   core::u64 show_frame{};
+  // Every authored feed's link, bound or not.
+  std::vector<TrackingFeedObservation> feeds;
 
   bool operator==(const LiveDataState &) const = default;
 };
@@ -202,6 +239,10 @@ enum class InnerFrustumReport : core::u8 {
   // Authored and tracking, but the camera sees no part of this canvas. Fix
   // where the camera is pointing, or the wall's calibration.
   OffCanvas,
+  // Authored and tracking, but the Director cannot say where the plate is:
+  // it does not hold the curved or UV-mesh wall the plate would be on. The
+  // nodes may be drawing it; `inner_rect_unknown` says why this cannot.
+  Unknown,
   // A plate is on the wall.
   Drawing,
 };

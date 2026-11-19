@@ -1541,7 +1541,13 @@ void SceneModel::put(const doc::Node& node) {
         }
         core::u32 source_port{};
         core::u32 source_camera{};
-        if (!as_u32(reader.integer(schema::tracking_port, 0), source_port) ||
+        // Absent, a NatNet source listens where Motive streams by default.
+        const std::int64_t default_port =
+            source.settings.protocol == TrackerProtocolKind::NatNet
+            ? static_cast<std::int64_t>(natnet_default_data_port)
+            : 0;
+        if (!as_u32(reader.integer(schema::tracking_port, default_port),
+                    source_port) ||
             !as_u32(reader.integer(schema::tracking_camera_id, 0),
                     source_camera)) {
             reader.fail();
@@ -1565,6 +1571,11 @@ void SceneModel::put(const doc::Node& node) {
         const auto group =
             reader.text(schema::tracking_multicast_group, default_group);
         if (!parse_multicast_group(group, source.settings.multicast_group)) {
+            reader.fail();
+        }
+        const auto server =
+            reader.text(schema::tracking_server_address, "0.0.0.0");
+        if (!parse_ipv4_address(server, source.settings.server_address)) {
             reader.fail();
         }
         source.settings.sensor_height_mm = reader.number(

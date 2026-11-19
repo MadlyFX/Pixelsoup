@@ -191,7 +191,8 @@ ProxyPlaybackResolution resolve_proxy_playback(
             ProxyPlaybackReason::FrameMapKeyMismatch, key);
     }
     if (frame_map_observation->frame_map.source_time_by_proxy_frame.empty() ||
-        !valid_proxy_frame_map(frame_map_observation->frame_map)) {
+        (!frame_map_observation->validated &&
+         !valid_proxy_frame_map(frame_map_observation->frame_map))) {
         return unavailable_proxy(asset, source_readiness,
                                  ProxyPlaybackReason::FrameMapInvalid, key);
     }

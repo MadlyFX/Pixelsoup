@@ -95,11 +95,9 @@ constexpr float camera_fov_y = 183.0F;
 constexpr float tracking_none_y = 319.0F;
 constexpr float tracking_first_source_y = 345.0F;
 constexpr float tracking_second_source_y = 371.0F;
-// The bound feed's own rows follow the list and the "+ New feed" button:
-// State, Protocol, Port, Camera ID, then the three lens rows.
-constexpr float tracker_state_y = 371.0F;
-constexpr float tracker_protocol_y = 397.0F;
-constexpr float tracker_port_y = 423.0F;
+// The bound feed's one camera-owned row follows the list and the button row:
+// a NatNet feed's rigid body, or a FreeD/OpenTrackIO camera number.
+constexpr float tracker_body_y = 371.0F;
 constexpr float well_x = 150.0F;
 // An object's EFFECTS section follows MATERIAL, which ends in five texture
 // rows (Base color, Metal / rough, Normal, Occlusion, Emission). The first
@@ -1782,76 +1780,78 @@ void the_chosen_feed_is_the_only_row_that_authors_nothing() {
     UI_CHECK(none.named_edits.size()==1 && none.named_edits[0].property==scene::schema::camera_tracking_source && none.named_edits[0].value==0.0);
 }
 
-// The bound feed's own settings sit under the camera that uses it, and the
-// edits are addressed to the feed's node while the selection stays the camera.
-// That is the whole point of putting them here: an operator setting a port is
-// looking at the camera it feeds, not hunting for a separate object.
-void a_bound_feed_is_configured_where_it_is_chosen() {
-    Harness state;
-    state.element = make_camera(feed);
-    state.sources = two_feeds();
-    static_cast<void>(state.frame(well_x, tracker_state_y, false));
-    static_cast<void>(state.frame(well_x, tracker_state_y, true));
-    const editor::InspectorFrame listening =
-        state.frame(well_x, tracker_state_y, false);
-    UI_CHECK(listening.component_edits.empty());
-    UI_CHECK(listening.named_edits.size() == 1U);
-    UI_CHECK(listening.named_edits.front().node == feed);
-    UI_CHECK(listening.named_edits.front().property
-             == scene::schema::tracking_enabled);
-    // The first feed is authored on, so this switches it off.
-    UI_CHECK(near(listening.named_edits.front().value, 0.0));
+// A Motive camera is picked by the name its rigid body has in Motive, from
+// the list the server described - not by typing the streaming id it assigned.
+// The edit is addressed to the feed, which is what carries the id to the
+// listener, while the selection stays the camera.
+void a_motive_camera_picks_its_rigid_body_by_name() {
+    std::vector<scene::TrackingSource> sources = two_feeds();
+    sources[0].settings.protocol = scene::TrackerProtocolKind::NatNet;
+    sources[0].settings.port = 1511U;
+    editor::TrackingFeedObservation observed{};
+    observed.source = feed;
+    observed.state = editor::TrackingLinkState::Receiving;
+    observed.server_description = "Motive 3.5.1, NatNet 4.5";
+    observed.rigid_bodies = {{5, "Camera A"}, {11, "Witness"}};
+    const std::vector<editor::TrackingFeedObservation> feeds{observed};
 
-    Harness protocol;
-    protocol.element = make_camera(feed);
-    protocol.sources = two_feeds();
-    const editor::InspectorFrame swapped = protocol.choose(tracker_protocol_y,0,1);
-    UI_CHECK(swapped.named_edits.size() == 1U);
-    UI_CHECK(swapped.named_edits.front().node == feed);
-    UI_CHECK(swapped.named_edits.front().property
-             == scene::schema::tracking_protocol);
-    UI_CHECK(near(swapped.named_edits.front().value, 1.0));
-    // The third choice is NatNet; the Director spells the index into the
-    // document, so the value is the choice and not a toggle.
-    Harness natnet;
-    natnet.element = make_camera(feed);
-    natnet.sources = two_feeds();
-    const editor::InspectorFrame third =
-        natnet.choose(tracker_protocol_y, 0, 2);
-    UI_CHECK(third.named_edits.size() == 1U);
-    UI_CHECK(third.named_edits.front().property
-             == scene::schema::tracking_protocol);
-    UI_CHECK(near(third.named_edits.front().value, 2.0));
+    Harness h;
+    h.element = make_camera(feed);
+    h.sources = sources;
+    h.panel.set_tracking_feeds(feeds);
+    // First in frame, Camera A, Witness: the third choice is id 11.
+    const editor::InspectorFrame picked = h.choose(tracker_body_y, 0, 2);
+    UI_CHECK(picked.named_edits.size() == 1U);
+    UI_CHECK(picked.named_edits.front().node == feed);
+    UI_CHECK(picked.named_edits.front().property
+             == scene::schema::tracking_camera_id);
+    UI_CHECK(near(picked.named_edits.front().value, 11.0));
+    // Choosing what is already chosen authors nothing.
+    UI_CHECK(h.choose(tracker_body_y, 0, 0).named_edits.empty());
 
-    // An unbound camera offers no feed settings at all, so the rows below the
-    // list are the camera's own: nothing here can edit a feed that is not
-    // bound, and nothing addresses an edit to a node the camera does not name.
-    Harness unbound;
-    unbound.element = make_camera();
-    unbound.sources = two_feeds();
-    static_cast<void>(unbound.frame(well_x, tracker_state_y, false));
-    static_cast<void>(unbound.frame(well_x, tracker_state_y, true));
-    const editor::InspectorFrame nothing =
-        unbound.frame(well_x, tracker_state_y, false);
-    for (const editor::NamedEdit& edit : nothing.named_edits) {
-        UI_CHECK(edit.node == subject);
-        UI_CHECK(edit.property != scene::schema::tracking_enabled);
-        UI_CHECK(edit.property != scene::schema::tracking_protocol);
+    // An authored body Motive no longer lists stays the selection, named by
+    // its id, rather than reading as "first in frame"; picking a listed body
+    // from there replaces it.
+    Harness stale;
+    sources[0].settings.camera_id = 7U;
+    stale.element = make_camera(feed);
+    stale.sources = sources;
+    stale.panel.set_tracking_feeds(feeds);
+    const editor::InspectorFrame replaced = stale.choose(tracker_body_y, 3, 1);
+    UI_CHECK(replaced.named_edits.size() == 1U);
+    UI_CHECK(near(replaced.named_edits.front().value, 5.0));
+
+    // The feed's own setup is not here: no row on a camera addresses a port,
+    // an address or a protocol to the feed.
+    Harness scan;
+    scan.element = make_camera(feed);
+    scan.sources = sources;
+    scan.panel.set_tracking_feeds(feeds);
+    for (float y = tracker_body_y + 26.0F; y < 600.0F; y += 13.0F) {
+        static_cast<void>(scan.frame(well_x, y, false));
+        static_cast<void>(scan.frame(well_x, y, true));
+        const editor::InspectorFrame released = scan.frame(well_x, y, false);
+        for (const editor::NamedEdit& edit : released.named_edits) {
+            UI_CHECK(edit.node != feed);
+        }
+        static_cast<void>(scan.type("", false, true));
     }
 }
 
-void a_port_is_a_whole_number_inside_its_own_range() {
+// FreeD and OpenTrackIO name their camera by number in every packet, so the
+// number stays the camera's row, whole and addressed to the feed.
+void a_numbered_feed_keeps_its_camera_number() {
     Harness h;
     h.element = make_camera(feed);
     h.sources = two_feeds();
-    h.click(field_x0, tracker_port_y);
-    static_cast<void>(h.type("70000.5", false, false));
+    h.click(field_x0, tracker_body_y);
+    static_cast<void>(h.type("12.6", false, false));
     const editor::InspectorFrame typed = h.type("", true, false);
     UI_CHECK(typed.named_edits.size() == 1U);
     UI_CHECK(typed.named_edits.front().node == feed);
     UI_CHECK(typed.named_edits.front().property
-             == scene::schema::tracking_port);
-    UI_CHECK(near(typed.named_edits.front().value, 65535.0));
+             == scene::schema::tracking_camera_id);
+    UI_CHECK(near(typed.named_edits.front().value, 13.0));
 }
 
 // A spot light can be authored from the Inspector, and its controls name the
@@ -2420,10 +2420,10 @@ constexpr std::array<Case, 64U> cases{{
      &a_camera_binds_the_feed_the_operator_picks},
     {"the chosen feed is the only row that authors nothing",
      &the_chosen_feed_is_the_only_row_that_authors_nothing},
-    {"a bound feed is configured where it is chosen",
-     &a_bound_feed_is_configured_where_it_is_chosen},
-    {"a port is a whole number inside its own range",
-     &a_port_is_a_whole_number_inside_its_own_range},
+    {"a motive camera picks its rigid body by name",
+     &a_motive_camera_picks_its_rigid_body_by_name},
+    {"a numbered feed keeps its camera number",
+     &a_numbered_feed_keeps_its_camera_number},
     {"a track inspects the screen it owns",
      &a_track_inspects_the_screen_it_owns},
     {"the aspect lock is one control on the track",

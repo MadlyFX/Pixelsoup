@@ -60,8 +60,11 @@ InnerFrustumReport inner_frustum_report(
   }
   // Authored on and drawing nothing. Which of the two reasons it is decides
   // what the operator has to go and fix, so they are never merged.
-  return camera.tracking.has_pose ? InnerFrustumReport::OffCanvas
-                                  : InnerFrustumReport::WaitingForPose;
+  if (!camera.tracking.has_pose) {
+    return InnerFrustumReport::WaitingForPose;
+  }
+  return camera.inner_rect_unknown.empty() ? InnerFrustumReport::OffCanvas
+                                           : InnerFrustumReport::Unknown;
 }
 
 PlateCoverage plate_coverage(
@@ -370,6 +373,11 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (report == InnerFrustumReport::Off) {
       row("Plate", "Off. The wall shows the authored camera here.",
           ctx.theme().text_muted);
+    } else if (report == InnerFrustumReport::Unknown) {
+      // Not "None": the nodes may be drawing a plate the Director cannot
+      // place, and the operator needs to know which of the two it is.
+      row("Plate", "Not known here: " + camera.inner_rect_unknown + ".",
+          ctx.theme().warning);
     } else if (report != InnerFrustumReport::Drawing) {
       row("Plate",
           report == InnerFrustumReport::OffCanvas
@@ -474,6 +482,20 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     ctx.panel(thumb, ctx.theme().divider);
   }
   ctx.outline(bounds, ctx.theme().divider);
+}
+
+const TrackingFeedObservation *
+find_feed(std::span<const TrackingFeedObservation> feeds,
+          doc::NodeId source) noexcept {
+  if (source == doc::NodeId{}) {
+    return nullptr;
+  }
+  for (const TrackingFeedObservation &feed : feeds) {
+    if (feed.source == source) {
+      return &feed;
+    }
+  }
+  return nullptr;
 }
 
 } // namespace mediaserver::editor

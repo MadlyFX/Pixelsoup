@@ -239,6 +239,15 @@ asset's proxy is ready its clips show the source, so nothing waits.
 Switching between proxy and source maps through the proxy's frame table, so
 no cut or key moves by a frame.
 
+The proxy cache sits beside the source, often on a network share, so frames
+never wait on it: the Director checks each proxy's cache entry once, then a
+background worker keeps that state current. A proxy or segment the Director
+publishes is used from the next frame; a cache entry changed from outside -
+deleted by hand, say - is noticed within about a quarter of a second. A
+proxy's frame table is checked once, when its file is copied out for
+playback, and a table that fails the check is reported as a frame-mapping
+failure for that clip.
+
 A proxy is made in segments of about ten seconds of source, each usable as
 soon as it is published. The segment under each clip's playhead in Program
 and Stage is made first, then the rest of the file from there, then its

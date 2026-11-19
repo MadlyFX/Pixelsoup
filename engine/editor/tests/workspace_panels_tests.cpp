@@ -11,6 +11,7 @@
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <mediaserver/scene/scene_schema.hpp>
 #include <string>
 #include <utility>
 #include <vector>
@@ -3724,7 +3725,9 @@ void output_monitor_cluster_health_keeps_node_controls_reachable() {
     input.set_mouse_position(409.0F, 100.0F);
     input.set_mouse_button(gui::MouseButton::Left, down);
     ctx.new_frame();
-    return panel.draw(ctx, bounds, state);
+    auto result = panel.draw(ctx, bounds, state);
+    ctx.draw_overlays(bounds);
+    return result;
   };
   static_cast<void>(frame(false));
   static_cast<void>(frame(true));
@@ -4038,7 +4041,7 @@ struct ProjectSettingsHarness final {
   // after, 14px in from the card's sides, fields after a 132px label column.
   static constexpr float tab_y = card_y + 34.0F + 6.0F + 18.0F + 2.0F;
   static constexpr float content_y = tab_y + 24.0F + 6.0F + 1.0F + 6.0F;
-  static constexpr float tab_width = (card_width - 28.0F - 6.0F) / 2.0F;
+  static constexpr float tab_width = (card_width - 28.0F - 12.0F) / 3.0F;
 
   // DEFAULTS on the left; CANCEL and APPLY on the right, 6px apart; all 84px
   // wide and 6px up from the card's bottom edge.
@@ -4060,7 +4063,8 @@ struct ProjectSettingsHarness final {
                      tab_y, tab_width, 24.0F};
   }
   [[nodiscard]] static gui::Rect tracking_tab() { return category_tab(0U); }
-  [[nodiscard]] static gui::Rect lens_tab() { return category_tab(1U); }
+  [[nodiscard]] static gui::Rect feeds_tab() { return category_tab(1U); }
+  [[nodiscard]] static gui::Rect lens_tab() { return category_tab(2U); }
   // LENS CALIBRATION heading, then the Projection row's first choice.
   [[nodiscard]] static gui::Rect calibrated_lens_button() {
     return gui::Rect{card_x + 14.0F + 132.0F, content_y + 24.0F, 116.0F,
@@ -4100,6 +4104,47 @@ struct ProjectSettingsHarness final {
     static_cast<void>(frame(x, y, false));
     static_cast<void>(frame(x, y, true));
     return frame(x, y, false);
+  }
+
+  // A frame with keys or typed text and no pointer movement.
+  editor::ProjectSettingsFrame keys(std::string_view text,
+                                    std::optional<gui::Key> key) {
+    input.new_frame();
+    if (!text.empty()) {
+      input.add_text(text);
+    }
+    if (key) {
+      input.add_key(*key);
+    }
+    ctx.new_frame();
+    auto result = panel.draw(ctx, bounds, state);
+    ctx.draw_overlays(bounds);
+    return result;
+  }
+
+  // The FEEDS pane for one NatNet feed, laid out with the same form the
+  // panel uses: the heading, its caption and NEW FEED, then the feed's
+  // section with Name, Listening, Protocol, Data port and Motive IP.
+  struct FeedRows final {
+    gui::Rect protocol;
+    gui::Rect port;
+    gui::Rect server;
+  };
+  [[nodiscard]] FeedRows feed_rows() const {
+    const gui::Metrics &m = ctx.theme().metrics;
+    gui::FormLayout form{
+        gui::Rect{card_x, content_y - m.gap, card_width, 2000.0F}, m};
+    static_cast<void>(form.heading());
+    static_cast<void>(form.caption());
+    static_cast<void>(form.control());
+    static_cast<void>(form.section());
+    static_cast<void>(form.row());
+    static_cast<void>(form.control());
+    FeedRows rows{};
+    rows.protocol = form.row().field;
+    rows.port = form.row().field;
+    rows.server = form.row().field;
+    return rows;
   }
 };
 
@@ -4158,6 +4203,64 @@ struct LiveSettingsHarness {
     static_cast<void>(click(58.0F+40.0F*static_cast<float>(section),30));
   }
 };
+
+// Feed setup lives in Project settings: a feed switched to NatNet starts on
+// Motive's own ports, the Motive IP is typed here, and Apply writes each
+// change to the feed's node rather than to the settings node.
+void project_settings_feeds_author_a_motive_feed() {
+  ProjectSettingsHarness h;
+  const doc::NodeId feed{42U};
+  scene::TrackingSource source{};
+  source.node = feed;
+  source.name = "Tracker";
+  h.state.tracking_sources = {source};
+  h.panel.open(h.state.settings, h.state.renderer);
+  static_cast<void>(h.click(ProjectSettingsHarness::feeds_tab()));
+  // Nothing drafted, nothing to apply.
+  UI_CHECK(h.click(ProjectSettingsHarness::apply_button()).feed_edits.empty());
+  h.panel.open(h.state.settings, h.state.renderer);
+  h.panel.show_feeds();
+
+  // FreeD, OpenTrackIO, NatNet: the third choice.
+  const auto rows = h.feed_rows();
+  static_cast<void>(h.click(rows.protocol));
+  UI_CHECK(h.ctx.menu_open(gui::ui_id(gui::ui_id("project-settings.test"),
+                                      "feeds.protocol", feed.value())));
+  static_cast<void>(h.keys("", gui::Key::Down));
+  static_cast<void>(h.keys("", gui::Key::Down));
+  static_cast<void>(h.keys("", gui::Key::Enter));
+  // The Motive IP row only exists for NatNet.
+  static_cast<void>(h.click(rows.server));
+  static_cast<void>(h.keys("192.168.25.60", std::nullopt));
+  static_cast<void>(h.keys("", gui::Key::Enter));
+
+  const auto applied = h.click(ProjectSettingsHarness::apply_button());
+  UI_CHECK(!applied.apply);
+  UI_CHECK(!h.panel.is_open());
+  const auto find = [&applied](std::string_view property)
+      -> const editor::ProjectFeedEdit * {
+    for (const auto &edit : applied.feed_edits) {
+      if (edit.property == property) {
+        return &edit;
+      }
+    }
+    return nullptr;
+  };
+  const auto *protocol = find(scene::schema::tracking_protocol);
+  UI_CHECK(protocol != nullptr && protocol->node == feed &&
+           protocol->value == 2.0);
+  const auto *port = find(scene::schema::tracking_port);
+  UI_CHECK(port != nullptr && port->node == feed && port->value == 1511.0);
+  const auto *server = find(scene::schema::tracking_server_address);
+  UI_CHECK(server != nullptr && server->text &&
+           *server->text == "192.168.25.60");
+  // The protocol is written before the port, so the explicit port wins over
+  // the Director's own default for a newly NatNet feed.
+  UI_CHECK(protocol < port);
+  // The command port was already Motive's default, so it is not rewritten.
+  UI_CHECK(find(scene::schema::tracking_command_port) == nullptr);
+
+}
 
 void project_settings_apply_reports_the_edited_values() {
   ProjectSettingsHarness h;h.panel.open(h.state.settings,h.state.renderer);
@@ -4665,7 +4768,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 140U> cases{{
+constexpr std::array<Case, 141U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -4879,6 +4982,8 @@ constexpr std::array<Case, 140U> cases{{
      &output_monitor_cluster_health_keeps_node_controls_reachable},
     {"project settings apply reports the edited values",
      &project_settings_apply_reports_the_edited_values},
+    {"project settings feeds author a motive feed",
+     &project_settings_feeds_author_a_motive_feed},
     {"scene file fields request matching pickers without editing",
      &scene_file_fields_request_the_matching_picker_without_editing},
     {"project settings cancel discards the draft",

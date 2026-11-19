@@ -445,7 +445,10 @@ void a_natnet_socket_joins_the_group_and_completes_the_handshake() {
             asio::buffer(request.data(), request.size()), from, 0, error);
         if (!error && received == 4U) {
             asked = true;
-            LISTENER_CHECK(from.port() == data_port);
+            // From the listener's own command socket, not the data port: on
+            // the Motive machine itself the server holds the data port too,
+            // and a reply sent there would reach Motive, not the Director.
+            LISTENER_CHECK(from.port() != data_port);
             LISTENER_CHECK(track::natnet_message_id(
                                std::span<const std::byte>{request.data(), 4U})
                            == track::natnet_connect_message);
@@ -645,12 +648,143 @@ void reconfiguring_is_idempotent_for_an_unchanged_source() {
     LISTENER_CHECK(!listener.sample());
 }
 
+// A 4.1 description of two rigid bodies, sized as Motive writes it.
+[[nodiscard]] std::vector<std::byte> natnet_descriptions() {
+    std::vector<std::byte> bytes;
+    const auto u8 = [&bytes](core::u8 value) {
+        bytes.push_back(static_cast<std::byte>(value));
+    };
+    const auto u32 = [&u8](core::u32 value) {
+        for (core::u32 shift = 0U; shift < 32U; shift += 8U) {
+            u8(static_cast<core::u8>((value >> shift) & 0xFFU));
+        }
+    };
+    const auto body = [&](std::string_view name, core::i32 id) {
+        u32(1U);
+        u32(static_cast<core::u32>(name.size() + 1U + 4U + 4U + 12U + 4U));
+        for (const char c : name) {
+            u8(static_cast<core::u8>(c));
+        }
+        u8(0U);
+        u32(static_cast<core::u32>(id));
+        u32(0xFFFF'FFFFU);
+        for (int index = 0; index < 12; ++index) {
+            u8(0U);
+        }
+        u32(0U);
+    };
+    u8(static_cast<core::u8>(track::natnet_model_definitions_message));
+    u8(0U);
+    u8(0U);
+    u8(0U);
+    u32(2U);
+    body("Camera A", 5);
+    body("Witness", 11);
+    return bytes;
+}
+
+void a_natnet_feed_lists_the_rigid_bodies_the_server_describes() {
+    scene::TrackingSourceSettings source{};
+    source.protocol = scene::TrackerProtocolKind::NatNet;
+    source.port = 1511U;
+    server::TrackerListener listener;
+    LISTENER_CHECK(listener.configure(source));
+    // A description before the version is not guessed at.
+    LISTENER_CHECK(!listener.deliver(natnet_descriptions()));
+    LISTENER_CHECK(listener.status().rigid_bodies.empty());
+    LISTENER_CHECK(!listener.deliver(natnet_server_info()));
+    LISTENER_CHECK(!listener.deliver(natnet_descriptions()));
+    const auto bodies = listener.status().rigid_bodies;
+    LISTENER_CHECK(bodies.size() == 2U);
+    LISTENER_CHECK(bodies[0] == (server::TrackerRigidBody{5, "Camera A"}));
+    LISTENER_CHECK(bodies[1] == (server::TrackerRigidBody{11, "Witness"}));
+    // Neither is a pose.
+    LISTENER_CHECK(listener.status().accepted == 0U);
+    LISTENER_CHECK(!listener.sample());
+}
+
+void an_authored_server_is_asked_before_any_frame_arrives() {
+    // Multicast may not be reaching this host at all, which is exactly when
+    // an operator most needs to see that the server answers and what it has.
+    asio::io_context context;
+    asio::ip::udp::socket server{context};
+    std::error_code error;
+    server.open(asio::ip::udp::v4(), error);
+    LISTENER_CHECK(!error);
+    server.bind(asio::ip::udp::endpoint{
+                    asio::ip::make_address_v4("127.0.0.1"), 0U}, error);
+    LISTENER_CHECK(!error);
+    server.non_blocking(true, error);
+    LISTENER_CHECK(!error);
+
+    asio::ip::udp::socket probe{context};
+    probe.open(asio::ip::udp::v4(), error);
+    probe.bind(asio::ip::udp::endpoint{asio::ip::udp::v4(), 0U}, error);
+    const unsigned short data_port = probe.local_endpoint().port();
+    probe.close(error);
+
+    scene::TrackingSourceSettings source{};
+    source.enabled = true;
+    source.protocol = scene::TrackerProtocolKind::NatNet;
+    source.port = data_port;
+    source.command_port = server.local_endpoint().port();
+    source.server_address = {127U, 0U, 0U, 1U};
+    server::TrackerListener listener;
+    LISTENER_CHECK(listener.configure(source));
+    LISTENER_CHECK(listener.status().server_address == "127.0.0.1");
+
+    // Answers each request as Motive would: the version to a connect, the
+    // asset list to a description request.
+    std::array<std::byte, 16U> request{};
+    core::u64 connects = 0U;
+    core::u64 descriptions = 0U;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (listener.status().rigid_bodies.empty()
+           && std::chrono::steady_clock::now() < deadline) {
+        asio::ip::udp::endpoint from;
+        const std::size_t received = server.receive_from(
+            asio::buffer(request.data(), request.size()), from, 0, error);
+        if (error || received != 4U) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            continue;
+        }
+        const auto message = track::natnet_message_id(
+            std::span<const std::byte>{request.data(), 4U});
+        const auto reply = message == track::natnet_connect_message
+            ? natnet_server_info()
+            : natnet_descriptions();
+        if (message == track::natnet_connect_message) {
+            ++connects;
+        } else {
+            LISTENER_CHECK(message
+                           == track::natnet_request_model_definitions_message);
+            ++descriptions;
+        }
+        server.send_to(asio::buffer(reply.data(), reply.size()), from, 0,
+                       error);
+        LISTENER_CHECK(!error);
+    }
+    LISTENER_CHECK(connects >= 1U);
+    LISTENER_CHECK(descriptions >= 1U);
+    const auto status = listener.status();
+    LISTENER_CHECK(status.server_description == "Motive 3.1.0, NatNet 4.1");
+    LISTENER_CHECK(status.rigid_bodies.size() == 2U);
+    LISTENER_CHECK(status.rigid_bodies[1].name == "Witness");
+    LISTENER_CHECK(status.datagrams >= 2U && status.accepted == 0U);
+    listener.stop();
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+constexpr std::array<Case, 12U> cases{{
+    {"a natnet feed lists the rigid bodies the server describes",
+     &a_natnet_feed_lists_the_rigid_bodies_the_server_describes},
+    {"an authored server is asked before any frame arrives",
+     &an_authored_server_is_asked_before_any_frame_arrives},
     {"a natnet feed holds until the server answers, then tracks its body",
      &a_natnet_feed_holds_until_the_server_answers_then_tracks_its_body},
     {"a natnet socket joins the group and completes the handshake",

@@ -171,6 +171,9 @@ if(BUILD_TESTING)
     mediaserver_server_test(cluster_lifecycle_controller)
     mediaserver_server_test(cluster_observability)
     mediaserver_server_test(compositor_authoring)
+    # The Live Data panel's plate rectangle on flat, curved and UV-mesh walls,
+    # derived the way the nodes derive it.
+    mediaserver_server_test(director_live_data)
     mediaserver_server_test(edit_coalescing_policy)
     mediaserver_server_test(feed_map_authoring)
     mediaserver_server_test(ffmpeg_waveform_decoder)

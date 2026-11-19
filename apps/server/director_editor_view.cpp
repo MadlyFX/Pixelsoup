@@ -963,11 +963,13 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
         // Read only. The tracker was sampled and stamped at the frame
         // boundary above; the panel reports that, and never drives it.
         const editor::LiveDataState live_data_view =
-            director_live_data(tracker_listeners, director_pose_channels, director_pose_predictors,
+            director_live_data(tracker_listeners, authored_tracking_sources,
+                               director_pose_channels, director_pose_predictors,
                                scene_frame, feed_map,
                                input.control_frame.value(),
                                timeline.program_frame,
-                               director_node_tracking);
+                               director_node_tracking,
+                               &live_data_surface_meshes);
         observe_timeline_playback(tick, inputs);
         next_editor_refresh = Clock::now() + editor_refresh_interval;
         refresh_history_state();

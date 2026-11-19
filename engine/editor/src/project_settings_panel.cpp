@@ -2,6 +2,8 @@
 
 #include "workspace_panel_helpers.hpp"
 
+#include <mediaserver/scene/scene_schema.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -28,7 +30,323 @@ namespace {
 // card taller than the window is cut to the window, and its pane scrolls.
 constexpr float project_settings_card_height = 700.0F;
 
+constexpr std::array<std::string_view, 3U> feed_protocol_choices{
+    {"FreeD", "OpenTrackIO", "NatNet (OptiTrack)"}};
+constexpr std::array<std::string_view, 2U> feed_axes_choices{
+    {"Stage (Y up)", "Z up"}};
+
+[[nodiscard]] std::size_t
+protocol_index(scene::TrackerProtocolKind protocol) noexcept {
+  switch (protocol) {
+  case scene::TrackerProtocolKind::FreeD:
+    return 0U;
+  case scene::TrackerProtocolKind::OpenTrackIO:
+    return 1U;
+  case scene::TrackerProtocolKind::NatNet:
+    return 2U;
+  }
+  return 0U;
+}
+
+[[nodiscard]] scene::TrackerProtocolKind
+protocol_at(std::size_t index) noexcept {
+  return index == 2U   ? scene::TrackerProtocolKind::NatNet
+         : index == 1U ? scene::TrackerProtocolKind::OpenTrackIO
+                       : scene::TrackerProtocolKind::FreeD;
+}
+
+// The server field drafts empty for "not set", which is what an operator
+// leaves it as to discover the server from its frames.
+[[nodiscard]] std::string
+server_text(const std::array<core::u8, 4U> &address) {
+  return scene::ipv4_address_set(address) ? scene::ipv4_address_text(address)
+                                          : std::string{};
+}
+
+[[nodiscard]] bool parse_server(const std::string &text,
+                                std::array<core::u8, 4U> &into) noexcept {
+  if (text.empty()) {
+    into = {};
+    return true;
+  }
+  return scene::parse_ipv4_address(text, into);
+}
+
+// What the feed's link is doing, in the operator's terms: the one line that
+// says whether the numbers above are right.
+[[nodiscard]] std::string feed_status_text(
+    const scene::TrackingSourceSettings &settings,
+    const TrackingFeedObservation *observed) {
+  const bool natnet = settings.protocol == scene::TrackerProtocolKind::NatNet;
+  if (observed == nullptr || observed->state == TrackingLinkState::Idle) {
+    return settings.port == 0U ? "Not listening: give it a port"
+                               : "Not listening";
+  }
+  if (observed->state == TrackingLinkState::BindFailed) {
+    return "Could not open the port: " + observed->last_error;
+  }
+  if (natnet && observed->server_description.empty()) {
+    return observed->server_address.empty()
+               ? std::string{"Waiting for frames on the multicast group"}
+               : "Waiting for Motive at " + observed->server_address;
+  }
+  if (!natnet) {
+    return observed->state == TrackingLinkState::Receiving
+               ? std::string{"Receiving"}
+               : std::string{"Waiting for data"};
+  }
+  std::string text = observed->server_description;
+  if (!observed->server_address.empty()) {
+    text += " at " + observed->server_address;
+  }
+  const std::size_t bodies = observed->rigid_bodies.size();
+  text += ", " + std::to_string(bodies) +
+          (bodies == 1U ? " rigid body" : " rigid bodies");
+  return text;
+}
+
 } // namespace
+
+void ProjectSettingsPanel::show_feeds() noexcept {
+  category_ = Category::Feeds;
+  scroll_.reset();
+}
+
+std::vector<ProjectFeedEdit>
+ProjectSettingsPanel::feed_edits(const ProjectSettingsState &state) const {
+  std::vector<ProjectFeedEdit> edits;
+  for (const FeedDraft &draft : feed_drafts_) {
+    const auto authored = std::find_if(
+        state.tracking_sources.begin(), state.tracking_sources.end(),
+        [&draft](const scene::TrackingSource &source) {
+          return source.node == draft.source.node;
+        });
+    if (authored == state.tracking_sources.end()) {
+      continue;
+    }
+    const doc::NodeId node = draft.source.node;
+    const scene::TrackingSourceSettings &was = authored->settings;
+    const scene::TrackingSourceSettings &now = draft.source.settings;
+    const auto number = [&](std::string_view property, double value) {
+      edits.push_back({node, std::string{property}, value, std::nullopt});
+    };
+    const auto text = [&](std::string_view property, std::string value) {
+      edits.push_back({node, std::string{property}, 0.0, std::move(value)});
+    };
+    if (!draft.name.empty() && draft.name != authored->name) {
+      text(scene::schema::tracking_source_name, draft.name);
+    }
+    // Protocol first: switching to NatNet fills Motive's ports where none
+    // were authored, and the explicit ports below then win.
+    if (now.protocol != was.protocol) {
+      number(scene::schema::tracking_protocol,
+             static_cast<double>(protocol_index(now.protocol)));
+    }
+    if (now.enabled != was.enabled) {
+      number(scene::schema::tracking_enabled, now.enabled ? 1.0 : 0.0);
+    }
+    if (now.port != was.port) {
+      number(scene::schema::tracking_port, static_cast<double>(now.port));
+    }
+    if (now.command_port != was.command_port) {
+      number(scene::schema::tracking_command_port,
+             static_cast<double>(now.command_port));
+    }
+    std::array<core::u8, 4U> server{};
+    if (parse_server(draft.server, server) && server != was.server_address) {
+      text(scene::schema::tracking_server_address, server_text(server));
+    }
+    std::array<core::u8, 4U> group{};
+    if (scene::parse_multicast_group(draft.multicast, group) &&
+        group != was.multicast_group) {
+      text(scene::schema::tracking_multicast_group,
+           scene::multicast_group_text(group));
+    }
+    if (now.sensor_height_mm != was.sensor_height_mm) {
+      number(scene::schema::tracking_sensor_height_mm, now.sensor_height_mm);
+    }
+    if (now.sensor_aspect_ratio != was.sensor_aspect_ratio) {
+      number(scene::schema::tracking_sensor_aspect, now.sensor_aspect_ratio);
+    }
+    if (now.fallback_focal_length_mm != was.fallback_focal_length_mm) {
+      number(scene::schema::tracking_fallback_focal_mm,
+             now.fallback_focal_length_mm);
+    }
+    if (now.calibration.axes != was.calibration.axes) {
+      number(scene::schema::tracking_axes,
+             now.calibration.axes == scene::TrackerAxes::ZUpRightHanded ? 1.0
+                                                                        : 0.0);
+    }
+    if (now.calibration.heading != was.calibration.heading) {
+      number(scene::schema::tracking_heading, now.calibration.heading);
+    }
+    if (now.calibration.origin.x != was.calibration.origin.x) {
+      number(scene::schema::tracking_origin_x, now.calibration.origin.x);
+    }
+    if (now.calibration.origin.y != was.calibration.origin.y) {
+      number(scene::schema::tracking_origin_y, now.calibration.origin.y);
+    }
+    if (now.calibration.origin.z != was.calibration.origin.z) {
+      number(scene::schema::tracking_origin_z, now.calibration.origin.z);
+    }
+    if (now.calibration.scale != was.calibration.scale) {
+      number(scene::schema::tracking_scale, now.calibration.scale);
+    }
+  }
+  return edits;
+}
+
+void ProjectSettingsPanel::draw_feeds(gui::UiContext &ctx,
+                                      gui::FormLayout &form,
+                                      const ProjectSettingsState &state,
+                                      ProjectSettingsFrame &result) {
+  const gui::Metrics &m = ctx.theme().metrics;
+  ctx.label(form.heading(), "TRACKING FEEDS", ctx.theme().accent);
+  ctx.label(form.caption(),
+            "Each feed is one tracking system the Director listens to. "
+            "Pick a camera's feed and rigid body in the Inspector.",
+            ctx.theme().text_muted);
+  {
+    gui::Rect strip = form.control();
+    if (preferences_button(ctx, gui::ui_id(id_, "feeds.add"),
+                           gui::cut_left(strip, m.button_width), "NEW FEED",
+                           true)) {
+      result.add_tracking_source = true;
+    }
+  }
+  if (feed_drafts_.empty()) {
+    ctx.label(form.caption(), "No feeds yet.", ctx.theme().text_muted);
+    return;
+  }
+
+  for (FeedDraft &draft : feed_drafts_) {
+    const core::u64 salt = draft.source.node.value();
+    scene::TrackingSourceSettings &settings = draft.source.settings;
+    static_cast<void>(gui::draw_form_section(
+        ctx, form, draft.name.empty() ? draft.source.name : draft.name,
+        ctx.theme().accent));
+
+    const auto text_row = [&](std::string_view label, std::string_view key,
+                              std::string &value, bool valid,
+                              std::string_view tip) {
+      const gui::FormRow row = form.row();
+      ctx.label(row.label, label, ctx.theme().text);
+      static_cast<void>(
+          ctx.text_field(gui::ui_id(id_, key, salt), row.field, value));
+      ctx.tooltip(row.field, tip);
+      if (!valid) {
+        ctx.label(form.note(), "Four numbers 0-255 separated by dots",
+                  ctx.theme().warning);
+      }
+    };
+    const auto port_row = [&](std::string_view label, std::string_view key,
+                              core::u32 &value) {
+      const gui::FormRow row = form.row();
+      ctx.label(row.label, label, ctx.theme().text);
+      double edited{};
+      if (tracking_fields_.draw(ctx, gui::ui_id(id_, key, salt), row.field, "",
+                                static_cast<double>(value), 1.0, edited, 0) &&
+          std::isfinite(edited)) {
+        value = static_cast<core::u32>(std::llround(std::clamp(
+            edited, 0.0, static_cast<double>(scene::max_tracking_port))));
+      }
+    };
+    const auto float_row = [&](std::string_view label, std::string_view key,
+                               float &value, double speed, int decimals) {
+      const gui::FormRow row = form.row();
+      ctx.label(row.label, label, ctx.theme().text);
+      double edited{};
+      if (tracking_fields_.draw(ctx, gui::ui_id(id_, key, salt), row.field, "",
+                                static_cast<double>(value), speed, edited,
+                                decimals) &&
+          std::isfinite(edited)) {
+        value = static_cast<float>(edited);
+      }
+    };
+    const auto choice_row = [&](std::string_view label, std::string_view key,
+                                std::span<const std::string_view> choices,
+                                std::size_t &selected) {
+      const gui::FormRow row = form.row();
+      ctx.label(row.label, label, ctx.theme().text);
+      return ctx.dropdown(gui::ui_id(id_, key, salt), row.field, choices,
+                          selected);
+    };
+
+    text_row("Name", "feeds.name", draft.name, true,
+             "What a camera's feed list calls it");
+    static_cast<void>(ctx.checkbox(gui::ui_id(id_, "feeds.enabled", salt),
+                                   form.control(), settings.enabled,
+                                   "Listening"));
+    std::size_t protocol = protocol_index(settings.protocol);
+    if (choice_row("Protocol", "feeds.protocol", feed_protocol_choices,
+                   protocol)) {
+      const scene::TrackerProtocolKind chosen = protocol_at(protocol);
+      if (chosen == scene::TrackerProtocolKind::NatNet &&
+          settings.protocol != chosen && settings.port == 0U) {
+        // Motive's own defaults, so a stock install needs nothing typed.
+        settings.port = scene::natnet_default_data_port;
+        settings.command_port = scene::natnet_default_command_port;
+      }
+      settings.protocol = chosen;
+    }
+    const bool natnet =
+        settings.protocol == scene::TrackerProtocolKind::NatNet;
+    port_row(natnet ? "Data port" : "Port", "feeds.port", settings.port);
+    if (natnet) {
+      std::array<core::u8, 4U> parsed{};
+      text_row("Motive IP", "feeds.server", draft.server,
+               parse_server(draft.server, parsed),
+               "The Motive machine's address. Leave empty to find it from "
+               "the first frame.");
+      if (draft.server.empty()) {
+        ctx.label(form.note(), "Found from the first frame when empty",
+                  ctx.theme().text_muted);
+      }
+      port_row("Command port", "feeds.command", settings.command_port);
+      text_row("Multicast", "feeds.multicast", draft.multicast,
+               scene::parse_multicast_group(draft.multicast, parsed),
+               "The group Motive streams to, from its Streaming pane. "
+               "239.255.42.99 is its default.");
+    }
+    const TrackingFeedObservation *const observed =
+        find_feed(state.feeds, draft.source.node);
+    const bool faulted =
+        observed != nullptr &&
+        (observed->state == TrackingLinkState::BindFailed ||
+         (!observed->last_error.empty() && observed->accepted == 0U &&
+          observed->state != TrackingLinkState::Idle));
+    {
+      const gui::FormRow row = form.row();
+      ctx.label(row.label, "Status", ctx.theme().text);
+      ctx.label(row.field, feed_status_text(settings, observed),
+                faulted ? ctx.theme().warning : ctx.theme().text_muted);
+    }
+
+    float_row("Sensor mm", "feeds.sensor", settings.sensor_height_mm, 0.05, 2);
+    float_row("Sensor AR", "feeds.aspect", settings.sensor_aspect_ratio, 0.005,
+              3);
+    float_row("Focal mm", "feeds.focal", settings.fallback_focal_length_mm,
+              0.5, 1);
+    std::size_t axes =
+        settings.calibration.axes == scene::TrackerAxes::ZUpRightHanded ? 1U
+                                                                        : 0U;
+    if (choice_row("Up axis", "feeds.axes", feed_axes_choices, axes)) {
+      settings.calibration.axes = axes == 1U
+                                      ? scene::TrackerAxes::ZUpRightHanded
+                                      : scene::TrackerAxes::StageNative;
+    }
+    float_row("Heading turns", "feeds.heading", settings.calibration.heading,
+              0.001, 4);
+    float_row("Origin X", "feeds.origin-x", settings.calibration.origin.x,
+              0.01, 3);
+    float_row("Origin Y", "feeds.origin-y", settings.calibration.origin.y,
+              0.01, 3);
+    float_row("Origin Z", "feeds.origin-z", settings.calibration.origin.z,
+              0.01, 3);
+    float_row("Scale", "feeds.scale", settings.calibration.scale, 0.005, 3);
+    settings.calibration = scene::clamped(settings.calibration);
+  }
+}
 
 void ProjectSettingsPanel::open(
     const scene::EffectSettings &settings,
@@ -43,6 +361,9 @@ void ProjectSettingsPanel::open(
           ? std::optional<scene::LensProfile>{scene::clamped(*lens_profile)}
           : std::nullopt;
   category_ = Category::Tracking;
+  // Adopted from the state on the first frame drawn, like a feed added
+  // while the dialog is open.
+  feed_drafts_.clear();
   scroll_.reset();
   open_ = true;
 }
@@ -55,6 +376,27 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     return result;
   }
   const gui::Metrics &m = ctx.theme().metrics;
+  // Feeds follow the document: a removed one leaves the draft, and one added
+  // (NEW FEED, or by undo) joins it as authored.
+  std::erase_if(feed_drafts_, [&state](const FeedDraft &draft) {
+    return std::none_of(state.tracking_sources.begin(),
+                        state.tracking_sources.end(),
+                        [&draft](const scene::TrackingSource &source) {
+                          return source.node == draft.source.node;
+                        });
+  });
+  for (const scene::TrackingSource &source : state.tracking_sources) {
+    const bool drafted = std::any_of(
+        feed_drafts_.begin(), feed_drafts_.end(),
+        [&source](const FeedDraft &draft) {
+          return draft.source.node == source.node;
+        });
+    if (!drafted) {
+      feed_drafts_.push_back(FeedDraft{
+          source, source.name, server_text(source.settings.server_address),
+          scene::multicast_group_text(source.settings.multicast_group)});
+    }
+  }
   const ModalCard modal = begin_modal(
       ctx, bounds, project_settings_card_height, "PROJECT SETTINGS");
 
@@ -75,7 +417,7 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   // Tracking setup and lens calibration share the modal; scene controls live
   // in the Inspector.
-  constexpr std::size_t category_count = 2U;
+  constexpr std::size_t category_count = 3U;
   const auto tab = [&](Category category, std::string_view id,
                        std::string_view label, std::size_t index) {
     const gui::Rect tab_bounds =
@@ -102,7 +444,8 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   };
   tab(Category::Tracking, "project.tab.tracking", "TRACKING", 0U);
-  tab(Category::Lens, "project.tab.lens", "LENS", 1U);
+  tab(Category::Feeds, "project.tab.feeds", "FEEDS", 1U);
+  tab(Category::Lens, "project.tab.lens", "LENS", 2U);
 
   gui::FormLayout form{body, m, scroll_.begin(ctx, body)};
 
@@ -167,6 +510,10 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               "A camera keeps its own values once added; edit them in the "
               "Inspector.",
               ctx.theme().text_muted);
+  }
+
+  if (category_ == Category::Feeds) {
+    draw_feeds(ctx, form, state, result);
   }
 
   // Lens controls deliberately author only calibration. Zoom/focus/iris are
@@ -277,10 +624,12 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     lens_draft_ = scene::clamped(*lens_draft_);
   }
 
-  const bool changed = draft_ != state.settings ||
-                       renderer_draft_ != state.renderer ||
-                       environment_draft_ != state.environment ||
-                       lens_draft_ != state.lens_profile;
+  const bool settings_changed = draft_ != state.settings ||
+                                renderer_draft_ != state.renderer ||
+                                environment_draft_ != state.environment ||
+                                lens_draft_ != state.lens_profile;
+  std::vector<ProjectFeedEdit> pending_feed_edits = feed_edits(state);
+  const bool changed = settings_changed || !pending_feed_edits.empty();
   gui::Rect buttons = modal.footer;
   const gui::Rect defaults_button = gui::cut_left(buttons, m.button_width);
   const gui::Rect apply_button = gui::cut_right(buttons, m.button_width);
@@ -304,8 +653,11 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     return result;
   }
   if (applied) {
-    result.apply = ProjectSettingsValues{
-        draft_, renderer_draft_, environment_draft_, lens_draft_};
+    if (settings_changed) {
+      result.apply = ProjectSettingsValues{
+          draft_, renderer_draft_, environment_draft_, lens_draft_};
+    }
+    result.feed_edits = std::move(pending_feed_edits);
   }
   if (applied || cancelled || dismissed) {
     tracking_fields_.cancel(ctx);

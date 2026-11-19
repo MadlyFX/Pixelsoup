@@ -1219,7 +1219,8 @@ inline constexpr float max_tracker_origin_m = 10'000.0F;
 struct TrackingSourceSettings final {
     bool enabled{};
     TrackerProtocolKind protocol{TrackerProtocolKind::FreeD};
-    // UDP port the Director listens on. Zero is an unconfigured source.
+    // UDP port the Director listens on. Zero is an unconfigured source. A
+    // NatNet source defaults to Motive's data port, 1511.
     core::u32 port{};
     // Which physical camera on the stage this source carries. FreeD puts a
     // camera id in every datagram; a mismatch is counted and dropped rather
@@ -1232,6 +1233,12 @@ struct TrackingSourceSettings final {
     // reports its NatNet version. Both default to Motive's own defaults.
     std::array<core::u8, 4U> multicast_group{239U, 255U, 42U, 99U};
     core::u32 command_port{1'510U};
+    // NatNet only. The Motive machine's address. When set, the Director
+    // contacts the server at once - learning its version and the names of its
+    // rigid bodies before any frame arrives - and joins the multicast group
+    // on the interface that reaches it. All zero discovers the server from
+    // the first frame instead, which needs multicast to already arrive.
+    std::array<core::u8, 4U> server_address{};
     // Active sensor height in millimetres. With the tracker's focal length
     // this resolves a vertical field of view on the Director, which every node
     // then receives already decided.
@@ -1390,6 +1397,9 @@ struct TrackingSource final {
 inline constexpr std::size_t max_tracking_sources = 16U;
 
 inline constexpr core::u32 max_tracking_port = 65'535U;
+// Motive's defaults, which a NatNet source starts from.
+inline constexpr core::u32 natnet_default_data_port = 1'511U;
+inline constexpr core::u32 natnet_default_command_port = 1'510U;
 inline constexpr float min_sensor_extent_mm = 1.0F;
 inline constexpr float max_sensor_extent_mm = 200.0F;
 inline constexpr float min_focal_length_mm = 1.0F;
@@ -1405,6 +1415,20 @@ inline constexpr float max_focal_length_mm = 2'000.0F;
     std::string_view text, std::array<core::u8, 4U>& into) noexcept;
 [[nodiscard]] std::string multicast_group_text(
     const std::array<core::u8, 4U>& group);
+// Any IPv4 address in the same spelling. All zero means "not set".
+[[nodiscard]] inline bool parse_ipv4_address(
+    std::string_view text, std::array<core::u8, 4U>& into) noexcept {
+    return parse_multicast_group(text, into);
+}
+[[nodiscard]] inline std::string ipv4_address_text(
+    const std::array<core::u8, 4U>& address) {
+    return multicast_group_text(address);
+}
+[[nodiscard]] constexpr bool ipv4_address_set(
+    const std::array<core::u8, 4U>& address) noexcept {
+    return address[0] != 0U || address[1] != 0U || address[2] != 0U
+        || address[3] != 0U;
+}
 
 // The vertical field of view, in turns, that a focal length produces on this
 // sensor. This is the Director's lens resolution, kept beside the settings it

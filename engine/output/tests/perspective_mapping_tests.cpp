@@ -617,6 +617,241 @@ void a_curved_mesh_bounds_the_region_conservatively() {
              .valid);
 }
 
+
+// A flat 20 m x 20 m wall of 1 m cells facing +Z, centred on `centre`, with
+// UV0 over its whole 2000 x 2000 raster (100 pixels per metre, v down).
+[[nodiscard]] output::ProjectionMesh grid_wall(scene::Vec3 centre) {
+    constexpr core::u32 cells = 20U;
+    output::ProjectionMesh mesh{};
+    for (core::u32 row = 0U; row <= cells; ++row) {
+        for (core::u32 column = 0U; column <= cells; ++column) {
+            const float x = -10.0F + static_cast<float>(column);
+            const float y = 10.0F - static_cast<float>(row);
+            mesh.vertices.push_back(output::ProjectionMeshVertex{
+                scene::Vec3{centre.x + x, centre.y + y, centre.z},
+                static_cast<float>(column) / static_cast<float>(cells),
+                static_cast<float>(row) / static_cast<float>(cells)});
+        }
+    }
+    for (core::u32 row = 0U; row < cells; ++row) {
+        for (core::u32 column = 0U; column < cells; ++column) {
+            const core::u32 top_left = row * (cells + 1U) + column;
+            const core::u32 bottom_left = top_left + cells + 1U;
+            mesh.indices.insert(mesh.indices.end(),
+                                {top_left, bottom_left, top_left + 1U,
+                                 top_left + 1U, bottom_left,
+                                 bottom_left + 1U});
+        }
+    }
+    return mesh;
+}
+
+// tan(half field of view) = 0.9: from 5 m away a square frustum covers a 9 m
+// square of wall, which falls between the 1 m cell edges.
+[[nodiscard]] scene::Camera square_camera() noexcept {
+    scene::Camera camera = tracked_camera(scene::Vec3{}, 0.0F);
+    camera.field_of_view = std::atan(0.9F) / 3.14159265358979323846F;
+    return camera;
+}
+
+[[nodiscard]] bool within_a_pixel(core::u32 value, core::u32 expected) noexcept {
+    return value + 1U >= expected && value <= expected + 1U;
+}
+
+void a_mesh_region_is_where_the_frustum_crosses_the_wall() {
+    const scene::Canvas destination{2'000U, 2'000U};
+    const auto region = output::inner_frustum_region(
+        grid_wall(scene::Vec3{0.0F, 0.0F, -5.0F}), destination,
+        square_camera(), 1.0F, 0U);
+    // The 9 m footprint is x, y in [-4.5, 4.5]: pixels 550 to 1450 on both
+    // axes - not the 500 to 1500 of the whole cells it passes through.
+    PERSPECTIVE_CHECK(region.valid);
+    PERSPECTIVE_CHECK(!region.clamped);
+    PERSPECTIVE_CHECK(within_a_pixel(region.rect.x, 550U));
+    PERSPECTIVE_CHECK(within_a_pixel(region.rect.y, 550U));
+    PERSPECTIVE_CHECK(within_a_pixel(region.rect.x + region.rect.width, 1'450U));
+    PERSPECTIVE_CHECK(within_a_pixel(region.rect.y + region.rect.height, 1'450U));
+
+    // The margin grows it outward on every side.
+    const auto margined = output::inner_frustum_region(
+        grid_wall(scene::Vec3{0.0F, 0.0F, -5.0F}), destination,
+        square_camera(), 1.0F, 20U);
+    PERSPECTIVE_CHECK(margined.rect.x + 20U == region.rect.x);
+    PERSPECTIVE_CHECK(margined.rect.width == region.rect.width + 40U);
+
+    // A horizontal arc's triangles run the full height of the wall; its plate
+    // still only runs the height of the camera's view.
+    auto arc_surface = front_surface();
+    auto arc = output::horizontal_arc_mesh(arc_surface, 0.2F, 32U);
+    PERSPECTIVE_CHECK(arc.has_value());
+    const auto on_arc = output::inner_frustum_region(
+        arc.value(), arc_surface.raster, tracked_camera(scene::Vec3{}, 0.05F),
+        16.0F / 9.0F, 0U);
+    PERSPECTIVE_CHECK(on_arc.valid);
+    PERSPECTIVE_CHECK(!on_arc.clamped);
+    PERSPECTIVE_CHECK(on_arc.rect.height < arc_surface.raster.height / 2U);
+    PERSPECTIVE_CHECK(on_arc.rect.y > 0U);
+}
+
+void an_imported_mesh_region_follows_its_placement() {
+    const scene::Canvas destination{2'000U, 2'000U};
+    // File coordinates: centred on the origin. The placement carries the wall
+    // 3 m right and 5 m in front of a camera that has not moved, so the
+    // camera now sees the wall's local x in [-7.5, 1.5]: pixels 250 to 1150.
+    const output::ProjectionMesh local = grid_wall(scene::Vec3{});
+    output::ProjectionMeshPlacement placement{};
+    placement.calibration = front_surface();
+    placement.calibration.center = scene::Vec3{3.0F, 0.0F, -5.0F};
+    const auto placed = output::inner_frustum_region(
+        local, placement, destination, square_camera(), 1.0F, 0U);
+    PERSPECTIVE_CHECK(placed.valid);
+    PERSPECTIVE_CHECK(within_a_pixel(placed.rect.x, 250U));
+    PERSPECTIVE_CHECK(within_a_pixel(placed.rect.x + placed.rect.width, 1'150U));
+    PERSPECTIVE_CHECK(within_a_pixel(placed.rect.y, 550U));
+    // Exactly what the same wall already in the world gives.
+    const auto world = output::inner_frustum_region(
+        grid_wall(scene::Vec3{3.0F, 0.0F, -5.0F}), destination,
+        square_camera(), 1.0F, 0U);
+    PERSPECTIVE_CHECK(placed == world);
+
+    // The lens-aware placement form agrees with its world form too.
+    scene::LensProfile profile{};
+    profile.sensor_width_mm = 36.0F;
+    profile.sensor_height_mm = 24.0F;
+    profile.focal_length_mm = 35.0F;
+    const auto lens_placed = output::inner_frustum_region(
+        local, placement, destination, square_camera(), profile,
+        scene::LensEncoders{}, 0U);
+    const auto lens_world = output::inner_frustum_region(
+        grid_wall(scene::Vec3{3.0F, 0.0F, -5.0F}), destination,
+        square_camera(), profile, scene::LensEncoders{}, 0U);
+    PERSPECTIVE_CHECK(lens_placed.valid);
+    PERSPECTIVE_CHECK(lens_placed == lens_world);
+
+    // An unusable placement is no plate, not the unplaced file's plate.
+    output::ProjectionMeshPlacement broken = placement;
+    broken.scale = 0.0F;
+    PERSPECTIVE_CHECK(!output::inner_frustum_region(
+                           local, broken, destination, square_camera(), 1.0F,
+                           0U)
+                           .valid);
+}
+
+// A front panel at z = -4 on the left half of the destination and a back
+// panel at z = +4 on the right half: no one view from the origin sees both.
+[[nodiscard]] output::ProjectionMesh front_and_back_panels() {
+    output::ProjectionMesh mesh{};
+    mesh.vertices = {
+        {scene::Vec3{-2.0F, 1.0F, -4.0F}, 0.0F, 0.0F},
+        {scene::Vec3{-2.0F, -1.0F, -4.0F}, 0.0F, 1.0F},
+        {scene::Vec3{2.0F, 1.0F, -4.0F}, 0.5F, 0.0F},
+        {scene::Vec3{2.0F, -1.0F, -4.0F}, 0.5F, 1.0F},
+        {scene::Vec3{2.0F, 1.0F, 4.0F}, 0.5F, 0.0F},
+        {scene::Vec3{2.0F, -1.0F, 4.0F}, 0.5F, 1.0F},
+        {scene::Vec3{-2.0F, 1.0F, 4.0F}, 1.0F, 0.0F},
+        {scene::Vec3{-2.0F, -1.0F, 4.0F}, 1.0F, 1.0F},
+    };
+    mesh.indices = {0U, 1U, 2U, 2U, 1U, 3U, 4U, 5U, 6U, 6U, 5U, 7U};
+    return mesh;
+}
+
+void a_windowed_fit_sees_only_the_wall_under_the_window() {
+    const output::ProjectionMesh mesh = front_and_back_panels();
+    const scene::Canvas destination{2'000U, 1'000U};
+    PERSPECTIVE_CHECK(!output::mesh_perspective_view_for(mesh, eye, 0.1F,
+                                                         1'000.0F)
+                           .has_value());
+
+    // The left half of the front panel: x in [-2, 0] at 4 m.
+    const output::MeshDestinationWindow left{
+        destination, scene::CanvasRect{0U, 0U, 500U, 1'000U}};
+    const auto fitted =
+        output::mesh_perspective_view_for(mesh, left, eye, 0.1F, 1'000.0F);
+    PERSPECTIVE_CHECK(fitted.has_value());
+    // Aimed at the middle of the window's own wall, (-1, 0, -4), and fitted
+    // edge to edge to it: the left and right edges of that patch are the
+    // frustum's sides, and its nearer edge (x = 0) its top and bottom.
+    const float reach = std::sqrt(17.0F);
+    PERSPECTIVE_CHECK(std::abs(fitted.value().forward.x + 1.0F / reach) < 1.0e-4F);
+    PERSPECTIVE_CHECK(std::abs(fitted.value().forward.z + 4.0F / reach) < 1.0e-4F);
+    const auto ndc = [&](scene::Vec3 point) {
+        const scene::Vec4 clip = scene::transform(
+            fitted.value().matrices.view_projection,
+            scene::Vec4{point.x, point.y, point.z, 1.0F});
+        PERSPECTIVE_CHECK(clip.w > 0.0F);
+        return scene::Vec3{clip.x / clip.w, clip.y / clip.w, 0.0F};
+    };
+    PERSPECTIVE_CHECK(std::abs(ndc(scene::Vec3{-2.0F, 0.0F, -4.0F}).x + 1.0F) < 1.0e-4F);
+    PERSPECTIVE_CHECK(std::abs(ndc(scene::Vec3{0.0F, 0.0F, -4.0F}).x - 1.0F) < 1.0e-4F);
+    PERSPECTIVE_CHECK(std::abs(ndc(scene::Vec3{0.0F, 1.0F, -4.0F}).y - 1.0F) < 1.0e-4F);
+    PERSPECTIVE_CHECK(std::abs(ndc(scene::Vec3{0.0F, -1.0F, -4.0F}).y + 1.0F) < 1.0e-4F);
+    // The back panel, behind this view, had no say in it.
+    const scene::FrustumWindow& frustum = fitted.value().frustum;
+    PERSPECTIVE_CHECK(frustum.right > frustum.left);
+
+    // Placement-aware form: the same panels carried 1 m up.
+    output::ProjectionMeshPlacement placement{};
+    placement.calibration = front_surface();
+    placement.calibration.center = scene::Vec3{0.0F, 1.0F, 0.0F};
+    const auto lifted = output::mesh_perspective_view_for(
+        mesh, placement, left, eye, 0.1F, 1'000.0F);
+    PERSPECTIVE_CHECK(lifted.has_value());
+    // Now aimed at (-1, 1, -4).
+    PERSPECTIVE_CHECK(std::abs(lifted.value().forward.y
+                               - 1.0F / std::sqrt(18.0F))
+                      < 1.0e-4F);
+
+    // A window that only touches the front panel's right edge sees none of
+    // it: the fit is the back panel's alone, which faces the other way.
+    const output::MeshDestinationWindow back{
+        destination, scene::CanvasRect{1'000U, 0U, 1'000U, 1'000U}};
+    const auto behind =
+        output::mesh_perspective_view_for(mesh, back, eye, 0.1F, 1'000.0F);
+    PERSPECTIVE_CHECK(behind.has_value());
+    PERSPECTIVE_CHECK(behind.value().forward.z > 0.9F);
+
+    // A window outside the destination, or under no triangle, is refused.
+    const output::MeshDestinationWindow outside{
+        destination, scene::CanvasRect{1'500U, 0U, 1'000U, 1'000U}};
+    PERSPECTIVE_CHECK(
+        output::mesh_perspective_view_for(mesh, outside, eye, 0.1F, 1'000.0F)
+            .error()
+        == output::PerspectiveMappingError::RegionOutsideSurface);
+    output::ProjectionMesh front_only{};
+    front_only.vertices.assign(mesh.vertices.begin(), mesh.vertices.begin() + 4);
+    front_only.indices = {0U, 1U, 2U, 2U, 1U, 3U};
+    PERSPECTIVE_CHECK(
+        output::mesh_perspective_view_for(front_only, back, eye, 0.1F, 1'000.0F)
+            .error()
+        == output::PerspectiveMappingError::DegenerateFrustum);
+}
+
+void a_windowed_warp_fills_its_target_with_the_window() {
+    const output::ProjectionMesh mesh = front_and_back_panels();
+    const scene::Canvas destination{2'000U, 1'000U};
+    const output::MeshDestinationWindow window{
+        destination, scene::CanvasRect{500U, 250U, 500U, 500U}};
+    const auto view =
+        output::mesh_perspective_view_for(mesh, window, eye, 0.1F, 1'000.0F);
+    PERSPECTIVE_CHECK(view.has_value());
+    const auto warped =
+        output::mesh_warp_vertices(mesh, view.value(), nullptr, window);
+    PERSPECTIVE_CHECK(warped.has_value());
+    PERSPECTIVE_CHECK(warped.value().size() == mesh.vertices.size());
+    // u = 0.5 is pixel 1000, the window's right edge: clip +1. u = 0 is pixel
+    // 0, a full window width left of the window's left edge: clip -3.
+    PERSPECTIVE_CHECK(warped.value()[2U].destination_clip.x == 1.0F);
+    PERSPECTIVE_CHECK(warped.value()[0U].destination_clip.x == -3.0F);
+    // v = 0 is pixel 0, half a window above it: clip +2 (clip y points up).
+    PERSPECTIVE_CHECK(warped.value()[0U].destination_clip.y == 2.0F);
+    PERSPECTIVE_CHECK(warped.value()[1U].destination_clip.y == -2.0F);
+    // The unwindowed warp is unchanged: UV0 over the whole target.
+    const auto whole = output::mesh_warp_vertices(mesh, view.value());
+    PERSPECTIVE_CHECK(whole.has_value());
+    PERSPECTIVE_CHECK(whole.value()[2U].destination_clip.x == 0.0F);
+    PERSPECTIVE_CHECK(whole.value()[0U].destination_clip.x == -1.0F);
+}
+
 [[nodiscard]] bool near(scene::Vec3 a, scene::Vec3 b, float tolerance) noexcept {
     return std::abs(a.x - b.x) < tolerance && std::abs(a.y - b.y) < tolerance
         && std::abs(a.z - b.z) < tolerance;
@@ -849,7 +1084,15 @@ void a_calibrated_lens_sizes_the_plate_rather_than_the_feed_fallback() {
     PERSPECTIVE_CHECK(!turned.value().valid);
 }
 
-constexpr std::array<Case, 19U> cases{{
+constexpr std::array<Case, 23U> cases{{
+    {"a mesh region is where the frustum crosses the wall",
+     &a_mesh_region_is_where_the_frustum_crosses_the_wall},
+    {"an imported mesh region follows its placement",
+     &an_imported_mesh_region_follows_its_placement},
+    {"a windowed fit sees only the wall under the window",
+     &a_windowed_fit_sees_only_the_wall_under_the_window},
+    {"a windowed warp fills its target with the window",
+     &a_windowed_warp_fills_its_target_with_the_window},
     {"a pitched quarter turn faces a ceiling down onto the front wall",
      &a_pitched_quarter_turn_faces_a_ceiling_down_onto_the_front_wall},
     {"a yaw keeps the authored pitch", &a_yaw_keeps_the_authored_pitch},

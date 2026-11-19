@@ -324,12 +324,15 @@ struct MeshWarpVertex final {
 // from one would be in that node's coordinates, and two nodes would disagree
 // about where the plate ends. `destination` is that shared canvas.
 //
-// The test is deliberately conservative. Each triangle is classified against
-// the tracked camera's four side clip planes; a triangle entirely outside any
-// one of them is skipped, and every other triangle contributes all three of its
-// destination-UV corners. A triangle that merely straddles a plane therefore
-// contributes more than the frustum strictly covers. That is the outward
-// direction, and it is the direction the inner frustum must err in.
+// Each triangle is clipped against the tracked camera's four side clip planes
+// in homogeneous clip space, carrying its destination UV0, and the region is
+// the outward-rounded bound of what survives (plus `margin_px`). UV0 is affine
+// across a triangle, so the bound is where the frustum's edges actually cross
+// the wall rather than the whole of every triangle an edge passes through -
+// which on a horizontal arc, whose triangles run the full wall height, is the
+// difference between a plate the camera's height and one the wall's. A
+// triangle with a non-finite corner contributes all three corners: unusable
+// geometry widens the plate, never shrinks it.
 [[nodiscard]] scene::InnerFrustumRegion inner_frustum_region(
     const ProjectionMesh& mesh,
     scene::Canvas destination,
@@ -344,6 +347,40 @@ struct MeshWarpVertex final {
     const scene::LensProfile& profile,
     const scene::LensEncoders& encoders,
     core::u32 margin_px) noexcept;
+
+// Placement-aware forms for imported geometry, whose cached vertices stay in
+// file-local coordinates. Each vertex is placed as it is classified; no
+// world-space mesh is materialised. None of the mesh forms allocate, so a node
+// can evaluate them on its frame path.
+[[nodiscard]] scene::InnerFrustumRegion inner_frustum_region(
+    const ProjectionMesh& local_mesh,
+    const ProjectionMeshPlacement& placement,
+    scene::Canvas destination,
+    const scene::Camera& tracked,
+    float aspect_ratio,
+    core::u32 margin_px) noexcept;
+
+[[nodiscard]] scene::InnerFrustumRegion inner_frustum_region(
+    const ProjectionMesh& local_mesh,
+    const ProjectionMeshPlacement& placement,
+    scene::Canvas destination,
+    const scene::Camera& tracked,
+    const scene::LensProfile& profile,
+    const scene::LensEncoders& encoders,
+    core::u32 margin_px) noexcept;
+
+// A rectangle of a complete surface mesh's shared destination raster. UV0
+// (0,0)-(1,1) spans `destination`; `region` is the part of it a view is fitted
+// to or a warp writes. This is how a tracked plate on a curved wall is built:
+// the plate rectangle comes from `inner_frustum_region` above, the plate view
+// is fitted to the triangles under that rectangle only, and the warp maps that
+// rectangle - not the whole surface - onto its target.
+struct MeshDestinationWindow final {
+    scene::Canvas destination{1U, 1U};
+    scene::CanvasRect region{};
+
+    bool operator==(const MeshDestinationWindow&) const = default;
+};
 
 // Fits one generalized perspective render to every indexed mesh vertex. The
 // default stage-up axis is suitable for vertical LED walls; callers may supply
@@ -369,6 +406,33 @@ mesh_perspective_view_for(const ProjectionMesh& local_mesh,
                           scene::Vec3 stage_up =
                               scene::Vec3{0.0F, 1.0F, 0.0F}) noexcept;
 
+// Windowed forms: every triangle is clipped to `window.region` in destination
+// pixels (UV0 and position are both affine across a triangle, so the clipped
+// corners are the wall points on the window's edges) and the view is fitted
+// to what survives - exactly the wall under the window. The rest of the
+// surface, including any part behind the eye, does not constrain the fit. A
+// window no triangle reaches is a DegenerateFrustum; a window outside the
+// destination is RegionOutsideSurface; wall under the window behind the eye is
+// MeshBehindEye.
+[[nodiscard]] core::Result<MeshPerspectiveView, PerspectiveMappingError>
+mesh_perspective_view_for(const ProjectionMesh& mesh,
+                          const MeshDestinationWindow& window,
+                          scene::Vec3 eye,
+                          float near_plane,
+                          float far_plane,
+                          scene::Vec3 stage_up =
+                              scene::Vec3{0.0F, 1.0F, 0.0F}) noexcept;
+
+[[nodiscard]] core::Result<MeshPerspectiveView, PerspectiveMappingError>
+mesh_perspective_view_for(const ProjectionMesh& local_mesh,
+                          const ProjectionMeshPlacement& placement,
+                          const MeshDestinationWindow& window,
+                          scene::Vec3 eye,
+                          float near_plane,
+                          float far_plane,
+                          scene::Vec3 stage_up =
+                              scene::Vec3{0.0F, 1.0F, 0.0F}) noexcept;
+
 // Resolves the two coordinate spaces consumed by the GPU mesh-warp pass.
 // Indices remain those in ProjectionMesh; the returned vector is parallel to
 // mesh.vertices and deterministic for identical input bits.
@@ -385,6 +449,16 @@ mesh_warp_vertices(const ProjectionMesh& mesh,
 mesh_warp_vertices(const ProjectionMesh& local_mesh,
                    const MeshPerspectiveView& view,
                    const ProjectionMeshPlacement& placement) noexcept;
+
+// Windowed form: `window.region` of the destination fills the warp target and
+// the rest of the surface lands outside clip space. `placement` is null for a
+// mesh already in stage space.
+[[nodiscard]] core::Result<std::vector<MeshWarpVertex>,
+                           PerspectiveMappingError>
+mesh_warp_vertices(const ProjectionMesh& mesh,
+                   const MeshPerspectiveView& view,
+                   const ProjectionMeshPlacement* placement,
+                   const MeshDestinationWindow& window) noexcept;
 
 // Projects a world point through the same projective UV warp as the output
 // shader. This is the inverse lookup the editor needs for picking and outlines:

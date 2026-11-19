@@ -591,12 +591,154 @@ void a_z_up_tracker_pans_about_its_own_up() {
     NATNET_CHECK(parsed.value().pose.y == 1.5F && parsed.value().pose.z == 2.5F);
 }
 
+// A rigid body description in the shape `version` writes it: name, id,
+// parent, offset, then (3.0+) markers with their labels and (4.0+) names.
+// `trailing` stands in for fields a newer server appends, which a sized
+// dataset must let the parser skip without reading.
+[[nodiscard]] Bytes rigid_body_description(
+    track::NatNetVersion version, std::string_view name, core::i32 id,
+    core::u32 markers, core::u32 trailing = 0U) {
+    Bytes out;
+    out.cstring(name);
+    out.i32(id);
+    out.i32(-1);
+    out.f32(0.1F);
+    out.f32(0.2F);
+    out.f32(0.3F);
+    if (version.major >= 3U) {
+        out.u32(markers);
+        for (core::u32 marker = 0U; marker < markers; ++marker) {
+            out.f32(1.0F);
+            out.f32(2.0F);
+            out.f32(3.0F);
+        }
+        for (core::u32 marker = 0U; marker < markers; ++marker) {
+            out.i32(static_cast<core::i32>(marker + 1U));
+        }
+        if (version.major >= 4U) {
+            for (core::u32 marker = 0U; marker < markers; ++marker) {
+                out.cstring("Marker");
+            }
+        }
+    }
+    for (core::u32 extra = 0U; extra < trailing; ++extra) {
+        out.u8(0xAAU);
+    }
+    return out;
+}
+
+[[nodiscard]] Bytes marker_set_description(std::string_view name) {
+    Bytes out;
+    out.cstring(name);
+    out.u32(2U);
+    out.cstring("Marker 001");
+    out.cstring("Marker 002");
+    return out;
+}
+
+void the_description_request_is_the_protocols_own() {
+    const auto request = track::natnet_model_definitions_request();
+    NATNET_CHECK(track::natnet_message_id(request)
+          == track::natnet_request_model_definitions_message);
+    NATNET_CHECK(request[1] == std::byte{0} && request[2] == std::byte{0}
+          && request[3] == std::byte{0});
+}
+
+void sized_descriptions_list_rigid_bodies_by_name() {
+    // 4.1+: every dataset is prefixed with its size, so a camera description,
+    // a marker set, and fields this parser has never heard of are all
+    // skipped by their declared length.
+    Bytes datasets;
+    const auto dataset = [&datasets](core::i32 kind, const Bytes& body) {
+        datasets.i32(kind);
+        datasets.u32(static_cast<core::u32>(body.data.size()));
+        datasets.append(body);
+    };
+    dataset(0, marker_set_description("all"));
+    dataset(1, rigid_body_description(v4_1, "Camera A", 7, 3, 16U));
+    Bytes camera;
+    camera.cstring("Prime 41");
+    camera.f32(1.0F);
+    dataset(5, camera);
+    dataset(1, rigid_body_description(v4_1, "Camera B", 12, 0));
+    Bytes out;
+    out.u16(track::natnet_model_definitions_message);
+    out.u16(static_cast<core::u16>(4U + datasets.data.size()));
+    out.u32(4U);
+    out.append(datasets);
+
+    const auto parsed =
+        track::parse_natnet_model_definitions(out.data, v4_1);
+    NATNET_CHECK(parsed);
+    NATNET_CHECK(parsed.value().complete);
+    const auto bodies = parsed.value().bodies();
+    NATNET_CHECK(bodies.size() == 2U);
+    NATNET_CHECK(bodies[0].id == 7 && std::string_view{bodies[0].name.data()} == "Camera A");
+    NATNET_CHECK(bodies[1].id == 12 && std::string_view{bodies[1].name.data()} == "Camera B");
+
+    // A dataset claiming more bytes than arrived is a short datagram.
+    Bytes cut = out;
+    cut.data.resize(cut.data.size() - 3U);
+    const auto short_read =
+        track::parse_natnet_model_definitions(cut.data, v4_1);
+    NATNET_CHECK(!short_read
+          && short_read.error() == track::TrackerParseError::Truncated);
+    // A frame is not a description.
+    Bytes frame;
+    frame.u16(track::natnet_frame_message);
+    frame.u16(4U);
+    frame.u32(0U);
+    const auto wrong =
+        track::parse_natnet_model_definitions(frame.data, v4_1);
+    NATNET_CHECK(!wrong
+          && wrong.error() == track::TrackerParseError::UnrecognizedMessage);
+}
+
+void unsized_descriptions_walk_what_they_can_read() {
+    // Before 4.1 nothing says how long a dataset is, so each is walked in
+    // its own shape: marker sets and skeletons are passed over (a skeleton's
+    // bones are not camera bodies), and a kind with no reader ends the walk
+    // with what was found before it.
+    Bytes out;
+    out.u16(track::natnet_model_definitions_message);
+    out.u16(0U);
+    out.u32(5U);
+    out.i32(0);
+    out.append(marker_set_description("all"));
+    out.i32(1);
+    out.append(rigid_body_description(v3_0, "Crane", 3, 2));
+    out.i32(2);
+    out.cstring("Actor");
+    out.i32(40);
+    out.u32(1U);
+    out.append(rigid_body_description(v3_0, "Hip", 41, 1));
+    out.i32(1);
+    out.append(rigid_body_description(v3_0, "Steadicam", 9, 4));
+    out.i32(5);
+    out.cstring("Prime 41");
+
+    const auto parsed =
+        track::parse_natnet_model_definitions(out.data, v3_0);
+    NATNET_CHECK(parsed);
+    NATNET_CHECK(!parsed.value().complete);
+    const auto bodies = parsed.value().bodies();
+    NATNET_CHECK(bodies.size() == 2U);
+    NATNET_CHECK(bodies[0].id == 3 && std::string_view{bodies[0].name.data()} == "Crane");
+    NATNET_CHECK(bodies[1].id == 9 && std::string_view{bodies[1].name.data()} == "Steadicam");
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+constexpr std::array<Case, 13U> cases{{
+    {"the description request is the protocol's own",
+     &the_description_request_is_the_protocols_own},
+    {"sized descriptions list rigid bodies by name",
+     &sized_descriptions_list_rigid_bodies_by_name},
+    {"unsized descriptions walk what they can read",
+     &unsized_descriptions_walk_what_they_can_read},
     {"the connect request and message ids are the protocol's own",
      &the_connect_request_and_message_ids_are_the_protocols_own},
     {"server info reports the version and the transport",

@@ -573,7 +573,66 @@ void authored_refresh_generation_replaces_the_mesh_and_diagnostics_reuse_it() {
   MAPPED_CHECK(cache.resolve(scene_frame, map)->projection_mesh() == second->projection_mesh());
 }
 
-constexpr std::array<Case, 8U> cases{{
+// A tracked plate's rectangle has to be derived over the complete surface,
+// not over the region one output owns, or two nodes would disagree about where
+// the plate ends. The projection therefore carries the complete mesh beside the
+// region mesh it warps with.
+void a_mapped_projection_carries_the_complete_surface_mesh() {
+  const auto scene_frame = frame();
+
+  // An arc output owning the right half of its raster: the region mesh spans
+  // only that half in surface terms, the complete mesh the whole raster.
+  auto half = arc_map(0.20F, 61U);
+  half.source = scene::CanvasRect{960U, 0U, 960U, 1080U};
+  half.viewport = scene::CanvasRect{0U, 0U, 960U, 1080U};
+  render::OutputProjectionCache half_cache;
+  const auto partial = half_cache.resolve(scene_frame, half);
+  MAPPED_CHECK(partial.has_value());
+  MAPPED_CHECK(partial->retained_mesh != nullptr);
+  MAPPED_CHECK(partial->surface_mesh != nullptr);
+  MAPPED_CHECK(partial->surface_mesh != partial->retained_mesh);
+  // 32 authored columns over the whole raster: 33 ribs of two vertices. The
+  // half-raster region mesh has its own 16 columns, 17 ribs.
+  MAPPED_CHECK(partial->surface_mesh->vertices.size() == 66U);
+  MAPPED_CHECK(partial->retained_mesh->vertices.size() == 34U);
+  // The complete mesh's left edge is the raster's left edge; its first rib
+  // sits left of the region mesh's first rib, which starts mid-wall.
+  MAPPED_CHECK(partial->surface_mesh->vertices.front().destination_u == 0.0F);
+  MAPPED_CHECK(partial->surface_mesh->vertices.back().destination_u == 1.0F);
+  MAPPED_CHECK(partial->surface_mesh->vertices.front().position.x <
+               partial->retained_mesh->vertices.front().position.x - 1.0F);
+  // Its region's left rib is the complete mesh's middle rib, bit for bit,
+  // because both are built through the same absolute-pixel expression.
+  MAPPED_CHECK(partial->surface_mesh->vertices[32U].position ==
+               partial->retained_mesh->vertices.front().position);
+  // Held, not rebuilt, while the authored key is unchanged.
+  const auto again = half_cache.resolve(scene_frame, half);
+  MAPPED_CHECK(again.has_value());
+  MAPPED_CHECK(again->surface_mesh == partial->surface_mesh);
+
+  // An output owning the whole raster already warps with the complete mesh.
+  render::OutputProjectionCache whole_cache;
+  const auto whole = whole_cache.resolve(scene_frame, arc_map(0.20F, 62U));
+  MAPPED_CHECK(whole.has_value());
+  MAPPED_CHECK(whole->surface_mesh == whole->retained_mesh);
+
+  // An imported patch always owns its whole raster, so its file is the
+  // complete mesh.
+  Fixture files;
+  files.write("complete.obj", patch_a);
+  const auto imported = imported_map(files.path("complete.obj"), 63U);
+  render::OutputProjectionCache imported_cache;
+  static_cast<void>(imported_cache.resolve(scene_frame, imported));
+  const auto loaded = wait_and_resolve(imported_cache, scene_frame, imported);
+  MAPPED_CHECK(loaded.has_value());
+  MAPPED_CHECK(loaded->surface_mesh != nullptr);
+  MAPPED_CHECK(loaded->surface_mesh == loaded->retained_mesh);
+  MAPPED_CHECK(loaded->mesh_placement.has_value());
+}
+
+constexpr std::array<Case, 9U> cases{{
+    {"a mapped projection carries the complete surface mesh",
+     &a_mapped_projection_carries_the_complete_surface_mesh},
     {"a camera stage carries flat and arc faces without rebuilding meshes",
      &a_camera_stage_carries_flat_and_arc_faces_without_rebuilding_meshes},
     {"authored refresh and diagnostic mesh reuse", &authored_refresh_generation_replaces_the_mesh_and_diagnostics_reuse_it},

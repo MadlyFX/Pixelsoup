@@ -392,6 +392,9 @@ void EditorShell::Frame::finish() {
     settings_view.passes = impl.program_renderer.renderer_passes();
     settings_view.reflection_anchor = impl.scene_selection.primary();
     settings_view.bake_running = impl.bake_job != nullptr;
+    settings_view.tracking_sources.assign(tracking_sources.begin(),
+                                          tracking_sources.end());
+    settings_view.feeds = live_data.feeds;
     settings_view.bake_status = bake_activity;
     if (impl.bake_job) {
       const auto& progress = impl.bake_job->progress();
@@ -432,6 +435,27 @@ void EditorShell::Frame::finish() {
       edit.camera_node = project_settings.camera_node;
       edit.gesture = modal_was_open ? impl.next_edit_gesture++ : impl.begin_gesture();
       result.project_settings = std::move(edit);
+    }
+    if (!settings_frame.feed_edits.empty()) {
+      // One gesture with the settings above when both changed, so Apply is
+      // one undo step whatever it touched.
+      const core::u64 gesture = result.project_settings.has_value()
+          ? result.project_settings->gesture
+          : impl.next_edit_gesture++;
+      for (const ProjectFeedEdit &edit : settings_frame.feed_edits) {
+        result.generic_edits.push_back(
+            GenericEdit{edit.node, edit.property, edit.value, gesture,
+                        edit.text});
+      }
+    }
+    if (settings_frame.add_tracking_source) {
+      result.adds.push_back(AddIntent{AddKind::TrackingSource,
+                                      std::string{},
+                                      1U,
+                                      impl.next_edit_gesture++,
+                                      16.0F / 9.0F,
+                                      {},
+                                      authored_stage.id});
     }
     if (modal_was_open && !impl.project_settings_panel.is_open()) {
       ui.clear_focus();

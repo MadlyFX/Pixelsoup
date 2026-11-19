@@ -7,6 +7,8 @@
 
 #include <mediaserver/doc/ids.hpp>
 
+#include <asio/ip/address.hpp>
+
 #include <memory>
 #include <optional>
 #include <span>
@@ -43,6 +45,14 @@ enum class TrackerListenerState : core::u8 {
 [[nodiscard]] std::string_view tracker_listener_state_name(
     TrackerListenerState state) noexcept;
 
+// One rigid body a NatNet server described, as an operator picks it.
+struct TrackerRigidBody final {
+    core::i32 id{};
+    std::string name;
+
+    bool operator==(const TrackerRigidBody&) const = default;
+};
+
 // Everything the operator's panel needs, as one already-computed snapshot.
 // Reading it performs no syscall, no allocation, and no wait.
 struct TrackerListenerStatus final {
@@ -72,6 +82,12 @@ struct TrackerListenerStatus final {
     // What the server said it was, once it has answered, e.g.
     // "Motive 3.1.0, NatNet 4.1". Empty for every other protocol.
     std::string server_description;
+    // The NatNet server this feed is talking to, authored or discovered from
+    // the first frame, as dotted decimal. Empty until known.
+    std::string server_address;
+    // The rigid bodies the server last described, in its order. Empty until
+    // it has answered, and for every other protocol.
+    std::vector<TrackerRigidBody> rigid_bodies;
     // The last pose that reached the slot, if any.
     std::optional<track::TrackedPose> last_pose;
     // Vertical field of view resolved from the authored sensor and the pose's
@@ -126,15 +142,25 @@ public:
     [[nodiscard]] bool awaiting_handshake() const noexcept;
 
 private:
-    // Sends a connect request to the command port of the host the last frame
-    // arrived from. Called from the receive thread after a frame that could
-    // not be decoded for want of a version; bounded to one request per run of
-    // frames, so a server that never answers is not flooded.
-    void request_handshake() noexcept;
+    // NatNet's half of the conversation. Sends one request to the server's
+    // command port from the command socket: a connect until the server has
+    // said which version it speaks, then a request for its asset
+    // descriptions until it has answered, then the same request every few
+    // seconds so a rigid body created in Motive mid-session appears. Nothing
+    // is sent until the server's address is known.
+    void natnet_tick() noexcept;
+    // Records the address a NatNet frame arrived from as the server's, when
+    // none was authored, and asks it at once rather than at the next tick.
+    void discover_server(const asio::ip::address& from) noexcept;
     // Issues one asynchronous receive and re-issues from its own completion,
     // so the socket is always armed and a datagram wakes the thread the moment
     // it lands rather than at the next tick of a poll.
     void arm_receive() noexcept;
+    // The same for the NatNet command socket, which carries the server's
+    // replies and, when Motive streams unicast, its frames.
+    void arm_command_receive() noexcept;
+    // Re-arms the NatNet request timer from its own completion.
+    void arm_timer() noexcept;
 
     struct State;
     std::unique_ptr<State> state_;

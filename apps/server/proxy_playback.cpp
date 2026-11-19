@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -504,12 +505,6 @@ ProxyPlaybackService::ProxyPlaybackService(
     server::ProxyGenerationService& artifacts)
     : ProxyPlaybackService(&artifacts) {}
 
-ProxyPlaybackService::ProxyPlaybackService(
-    server::ProxyGenerationService* artifacts)
-    : artifacts_(artifacts) {}
-
-ProxyPlaybackService::~ProxyPlaybackService() { reset(); }
-
 struct ProxyPlaybackService::PendingMaterialization final {
     assets::MediaAsset asset;
     assets::DerivativeKey key;
@@ -519,6 +514,137 @@ struct ProxyPlaybackService::PendingMaterialization final {
     bool complete{};
     std::jthread worker;
 };
+
+// What the derivative caches last said about each key resolve() asks for.
+// Inspecting opens and checks a file next to the source - often on a network
+// share - so doing it for every placement on every frame stalled the frame.
+// The frame reads a key in place once; from then on this worker re-reads the
+// keys frames still ask for, and a publication through the generation service
+// makes the next frame read them in place again so a new proxy is never missed.
+struct ProxyPlaybackService::CacheInspections final {
+    using Clock = std::chrono::steady_clock;
+    // How stale a remembered state may get when nothing in this process
+    // published: a cache changed by another process or by hand.
+    static constexpr std::chrono::milliseconds refresh_interval{250};
+    // A key no frame has asked for in this long is forgotten.
+    static constexpr std::chrono::seconds forget_after{5};
+
+    struct Entry final {
+        assets::MediaAsset asset;
+        assets::DerivativeKey key;
+        CacheInspection observed;
+        core::u64 publications{};
+        Clock::time_point asked{};
+        Clock::time_point observed_at{};
+    };
+
+    [[nodiscard]] Entry* find(const assets::DerivativeKey& key) noexcept {
+        const auto found = std::find_if(
+            entries.begin(), entries.end(),
+            [&](const Entry& entry) { return entry.key == key; });
+        return found == entries.end() ? nullptr : &*found;
+    }
+
+    void run(std::stop_token stop, server::ProxyGenerationService& artifacts) {
+        std::unique_lock lock{mutex};
+        while (!stop.stop_requested()) {
+            static_cast<void>(wake.wait_for(lock, stop, refresh_interval,
+                                            [] { return false; }));
+            if (stop.stop_requested()) {
+                return;
+            }
+            const Clock::time_point now = Clock::now();
+            std::erase_if(entries, [&](const Entry& entry) {
+                return now - entry.asked > forget_after;
+            });
+            std::vector<std::pair<assets::MediaAsset, assets::DerivativeKey>>
+                due;
+            for (const Entry& entry : entries) {
+                if (now - entry.observed_at >= refresh_interval) {
+                    due.emplace_back(entry.asset, entry.key);
+                }
+            }
+            lock.unlock();
+            for (const auto& [asset, key] : due) {
+                if (stop.stop_requested()) {
+                    break;
+                }
+                // Read before inspecting: a publication after this point
+                // stays newer than the result and is read again in place.
+                const core::u64 publications = artifacts.publications();
+                CacheInspection observed = artifacts.inspect(asset, key);
+                const std::scoped_lock store{mutex};
+                if (Entry* const entry = find(key);
+                    entry != nullptr && entry->publications <= publications) {
+                    entry->observed = std::move(observed);
+                    entry->publications = publications;
+                    entry->observed_at = Clock::now();
+                }
+            }
+            lock.lock();
+        }
+    }
+
+    std::mutex mutex;
+    std::condition_variable_any wake;
+    std::vector<Entry> entries;
+    // Last, so it is joined before the state it reads is destroyed.
+    std::jthread worker;
+};
+
+ProxyPlaybackService::ProxyPlaybackService(
+    server::ProxyGenerationService* artifacts)
+    : artifacts_(artifacts),
+      inspections_(std::make_unique<CacheInspections>()) {}
+
+ProxyPlaybackService::~ProxyPlaybackService() { reset(); }
+
+ProxyPlaybackService::CacheInspection ProxyPlaybackService::observe_cache(
+    const assets::MediaAsset& asset,
+    const assets::DerivativeKey& key) noexcept {
+    try {
+        const core::u64 publications = artifacts_->publications();
+        {
+            const std::scoped_lock lock{inspections_->mutex};
+            if (CacheInspections::Entry* const entry =
+                    inspections_->find(key);
+                entry != nullptr && entry->publications == publications) {
+                entry->asked = CacheInspections::Clock::now();
+                return entry->observed;
+            }
+        }
+        CacheInspection observed = artifacts_->inspect(asset, key);
+        const CacheInspections::Clock::time_point now =
+            CacheInspections::Clock::now();
+        const std::scoped_lock lock{inspections_->mutex};
+        if (CacheInspections::Entry* const entry = inspections_->find(key)) {
+            entry->asset = asset;
+            entry->observed = observed;
+            entry->publications = publications;
+            entry->asked = now;
+            entry->observed_at = now;
+        } else {
+            inspections_->entries.push_back(CacheInspections::Entry{
+                asset, key, observed, publications, now, now});
+        }
+        if (!inspections_->worker.joinable()) {
+            CacheInspections* const state = inspections_.get();
+            server::ProxyGenerationService* const artifacts = artifacts_;
+            inspections_->worker = std::jthread{
+                [state, artifacts](std::stop_token stop) {
+                    try {
+                        state->run(stop, *artifacts);
+                    } catch (...) {
+                        // Frames keep reading in place after a publication;
+                        // without the worker only outside changes go unseen.
+                    }
+                }};
+        }
+        return observed;
+    } catch (...) {
+        return artifacts_->inspect(asset, key);
+    }
+}
 
 bool ProxyPlaybackService::ensure_session_root(std::error_code& error) {
     if (!session_root_.empty()) {
@@ -566,6 +692,13 @@ ProxyPlaybackService::materialize(
         session_root.empty()) {
         return std::nullopt;
     }
+    // Proved once here, on the worker, so the show thread can trust the map
+    // on every frame instead of re-walking all of it per placement.
+    if (artifact.receipt.frame_map.source_time_by_proxy_frame.empty() ||
+        !assets::valid_proxy_frame_map(artifact.receipt.frame_map)) {
+        error = std::make_error_code(std::errc::invalid_argument);
+        return std::nullopt;
+    }
 
     const std::string key =
         assets::derivative_key_string(artifact.receipt.key);
@@ -604,7 +737,7 @@ ProxyPlaybackService::materialize(
         std::move(artifact.receipt.source_metadata),
         assets::ProxyFrameMapObservation{
             artifact.receipt.key,
-            std::move(artifact.receipt.frame_map)}};
+            std::move(artifact.receipt.frame_map), true}};
 }
 
 void ProxyPlaybackService::collect_completed_materialization() noexcept {
@@ -682,7 +815,10 @@ bool ProxyPlaybackService::start_materialization(
                             std::move(loaded).value(), session_root, stop,
                             materialization_error);
                         if (!result.has_value()) {
-                            issue = ProxyPlacementIssue::MaterializationFailed;
+                            issue = materialization_error ==
+                                    std::errc::invalid_argument
+                                ? ProxyPlacementIssue::FrameMappingFailed
+                                : ProxyPlacementIssue::MaterializationFailed;
                         }
                     }
                 } catch (...) {
@@ -819,7 +955,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                           assets::DerivativeCacheError{
                               assets::DerivativeCacheErrorCode::OpenFailed,
                               {}})
-                    : artifacts_->inspect(*asset, *key);
+                    : observe_cache(*asset, *key);
                 if (!inspected) {
                     observation.issue =
                         ProxyPlacementIssue::CacheInspectionFailed;
@@ -914,7 +1050,7 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                         return nullptr;
                     }
                     const auto inspected =
-                        artifacts_->inspect(*asset, segment_key);
+                        observe_cache(*asset, segment_key);
                     if (inspected && inspected.value().state ==
                                          assets::DerivativeState::Ready) {
                         static_cast<void>(
@@ -950,11 +1086,22 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                 frame_map);
             if (observation.resolution.selection ==
                 assets::ProxyPlaybackSelection::Proxy) {
+                // A materialized map was proven on its worker; the per-frame
+                // lookup is then a binary search, not a full re-validation.
+                const auto frame_lookup =
+                    [validated = frame_map->validated](
+                        const assets::ProxyFrameMap& map,
+                        const assets::PresentationTime& time) {
+                        return validated
+                            ? assets::proxy_frame_at_or_before_in_valid_map(
+                                  map, time)
+                            : assets::proxy_frame_at_or_before(map, time);
+                    };
                 const auto source_time = assets::presentation_time_for_frame(
                     original.frame_index,
                     proxy_source_metadata->frame_rate);
                 const auto mapped = source_time
-                    ? assets::proxy_frame_at_or_before(
+                    ? frame_lookup(
                           frame_map->frame_map, source_time.value())
                     : assets::ProxyFrameLookupResult::failure(
                           source_time.error());
@@ -992,9 +1139,9 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                                     + original.loop_count - 1U,
                                 proxy_source_metadata->frame_rate);
                             if (first_time && last_time) {
-                                const auto first = assets::proxy_frame_at_or_before(
+                                const auto first = frame_lookup(
                                     frame_map->frame_map, first_time.value());
-                                const auto last = assets::proxy_frame_at_or_before(
+                                const auto last = frame_lookup(
                                     frame_map->frame_map, last_time.value());
                                 if (first && last && first.value() && last.value()
                                     && *last.value() >= *first.value()
@@ -1061,6 +1208,13 @@ void ProxyPlaybackService::reset() noexcept {
     }
     materialized_.clear();
     failed_materializations_.clear();
+    if (inspections_ != nullptr) {
+        try {
+            const std::scoped_lock lock{inspections_->mutex};
+            inspections_->entries.clear();
+        } catch (...) {
+        }
+    }
     if (!session_root_.empty()) {
         const fs::path parent = session_root_.parent_path();
         std::error_code ignored;

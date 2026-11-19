@@ -4,6 +4,7 @@
 
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
+#include <mediaserver/editor/live_data_panel.hpp>
 #include <mediaserver/editor/number_field.hpp>
 #include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace mediaserver::editor {
 
@@ -115,6 +117,22 @@ struct ProjectSettingsState final {
   // Program is a published revision drawn with renderer settings other than
   // these; the next PUBLISH carries these to Program.
   bool program_renderer_differs{};
+  // The authored tracking feeds and their live links. Filled by the editor
+  // shell from the frame's own copies, like the observed fields above.
+  std::vector<scene::TrackingSource> tracking_sources;
+  std::vector<TrackingFeedObservation> feeds;
+};
+
+// One change to one tracking feed, addressed to the feed's own node. Feeds are
+// document nodes rather than fields of the settings node, so Apply writes them
+// as ordinary property edits in the same gesture.
+struct ProjectFeedEdit final {
+  doc::NodeId node{};
+  std::string property;
+  double value{};
+  std::optional<std::string> text;
+
+  bool operator==(const ProjectFeedEdit &) const = default;
 };
 
 struct ProjectSettingsValues final {
@@ -132,6 +150,11 @@ struct ProjectSettingsFrame final {
   bool cancel_bake{};
   // A committed modal draft or an immediate edit from the scene Inspector.
   std::optional<ProjectSettingsValues> apply;
+  // Feed edits committed by Apply, in the order they should be written.
+  std::vector<ProjectFeedEdit> feed_edits;
+  // NEW FEED was pressed. Adding a node is immediate, like adding anything
+  // else; its settings are then drafted here like every other feed's.
+  bool add_tracking_source{};
 };
 
 class ProjectSettingsPanel final {
@@ -143,6 +166,9 @@ public:
             const std::optional<scene::LensProfile> &lens_profile = {},
             const scene::Environment &environment = {});
   void close() noexcept { open_ = false; }
+  // Opens on the tracking feeds rather than the first tab: what a camera's
+  // "Feed settings" button asks for.
+  void show_feeds() noexcept;
   void adopt_bake(const scene::BakedLighting& baked) { environment_draft_.baked = baked; }
   [[nodiscard]] bool is_open() const noexcept { return open_; }
 
@@ -153,7 +179,22 @@ public:
                                           const ProjectSettingsState &state);
 
 private:
-  enum class Category : core::u8 { Tracking, Lens };
+  enum class Category : core::u8 { Tracking, Feeds, Lens };
+
+  // One feed's draft. The address fields are drafted as typed, so a value
+  // that does not parse yet is shown as typed rather than snapped back.
+  struct FeedDraft final {
+    scene::TrackingSource source;
+    std::string name;
+    std::string server;
+    std::string multicast;
+  };
+
+  void draw_feeds(gui::UiContext &ctx, gui::FormLayout &form,
+                  const ProjectSettingsState &state,
+                  ProjectSettingsFrame &result);
+  [[nodiscard]] std::vector<ProjectFeedEdit>
+  feed_edits(const ProjectSettingsState &state) const;
 
   gui::UiId id_{};
   bool open_{};
@@ -162,6 +203,7 @@ private:
   scene::RendererSettings renderer_draft_{};
   scene::Environment environment_draft_{};
   std::optional<scene::LensProfile> lens_draft_;
+  std::vector<FeedDraft> feed_drafts_;
   NumberField tracking_fields_;
   gui::ScrollRegion scroll_;
 };

@@ -197,7 +197,8 @@ bool ProjectionMeshWarp::render(
     rhi::CommandList& commands, const rhi::Texture& source,
     const output::ProjectionMesh& mesh,
     const output::MeshPerspectiveView& view,
-    const output::ProjectionMeshPlacement* placement) noexcept {
+    const output::ProjectionMeshPlacement* placement,
+    const output::MeshDestinationWindow* window) noexcept {
     constexpr const char* feature = "projection mesh warp";
     graph_.begin();
     if (!source || !source.desc().sampled) {
@@ -213,9 +214,11 @@ bool ProjectionMeshWarp::render(
             feature, "the mesh is empty or exceeds the warp's vertex limits"));
         return false;
     }
-    auto resolved = placement != nullptr
-                        ? output::mesh_warp_vertices(mesh, view, *placement)
-                        : output::mesh_warp_vertices(mesh, view);
+    auto resolved = window != nullptr
+        ? output::mesh_warp_vertices(mesh, view, placement, *window)
+        : placement != nullptr
+            ? output::mesh_warp_vertices(mesh, view, *placement)
+            : output::mesh_warp_vertices(mesh, view);
     if (!resolved) {
         static_cast<void>(core::report_idle_once(
             feature, "the mesh vertices could not be projected from the eye"));

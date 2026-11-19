@@ -183,6 +183,17 @@ void the_inner_frustum_report_distinguishes_every_reason() {
   off_canvas.cameras.front().inner_rect.reset();
   LIVE_CHECK(report(off_canvas) == editor::InnerFrustumReport::OffCanvas);
 
+  // A curved or UV-mesh wall the Director does not hold: the camera may well
+  // be drawing a plate, so it is not reported as seeing nothing.
+  editor::LiveDataState unknown = receiving_state();
+  unknown.cameras.front().inner_rect.reset();
+  unknown.cameras.front().inner_rect_unknown =
+      "the Director is still loading this wall's UV mesh";
+  LIVE_CHECK(report(unknown) == editor::InnerFrustumReport::Unknown);
+  // No pose still outranks it: there is nothing to place without one.
+  unknown.cameras.front().tracking.has_pose = false;
+  LIVE_CHECK(report(unknown) == editor::InnerFrustumReport::WaitingForPose);
+
   LIVE_CHECK(report(receiving_state()) ==
              editor::InnerFrustumReport::Drawing);
 

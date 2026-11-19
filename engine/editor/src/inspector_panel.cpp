@@ -190,25 +190,6 @@ constexpr std::array<std::string_view, 3U> xyz{{"X", "Y", "Z"}};
 constexpr std::array<std::string_view, 3U> ypr{{"Y", "P", "R"}};
 constexpr std::array<std::string_view, 3U> rgb{{"R", "G", "B"}};
 
-// The name a protocol goes by in the Inspector, spelled the way the tracker
-// vendors spell it.
-[[nodiscard]] std::string_view tracker_protocol_name(
-    scene::TrackerProtocolKind protocol) noexcept {
-    switch (protocol) {
-    case scene::TrackerProtocolKind::OpenTrackIO:
-        return "OpenTrackIO";
-    case scene::TrackerProtocolKind::NatNet:
-        return "NatNet";
-    case scene::TrackerProtocolKind::FreeD:
-    default:
-        return "FreeD";
-    }
-}
-
-// The protocol choices in the order the Director's authoring numbers them.
-constexpr std::array<std::string_view, 3U> tracker_protocol_choices{
-    {"FreeD", "OpenTrackIO", "NatNet"}};
-
 // One value of a vehicle's rig, by the compositor's name for it; nothing for
 // a name the rig does not have.
 [[nodiscard]] std::optional<float> rig_value(
@@ -3203,178 +3184,129 @@ void InspectorPanel::draw_camera_tracking(
         // wants one is the moment they are pointing a camera at it.
         const gui::Rect row = take_row(cursor, row_height);
         cursor.space(row_gap);
+        const float button_width = std::min((row.width - 4.0F) * 0.5F, 128.0F);
         if (ctx.button(gui::ui_id(id_, "tracking.add", element.node.value()),
-                       gui::Rect{row.x, row.y, std::min(row.width, 128.0F),
-                                 row.height},
+                       gui::Rect{row.x, row.y, button_width, row.height},
                        "+ New feed")
             && !element.locked) {
             frame.add_tracking_source = true;
         }
+        // Where a feed's address, ports and calibration are set up.
+        const gui::Rect settings_button{row.x + button_width + 4.0F, row.y,
+                                        button_width, row.height};
+        if (ctx.button(gui::ui_id(id_, "tracking.settings",
+                                  element.node.value()),
+                       settings_button, "Feed settings")) {
+            frame.open_feed_settings = true;
+        }
+        ctx.tooltip(settings_button,
+                    "Set up feeds - Motive IP, ports, multicast and "
+                    "calibration - in Project settings");
     }
 
-    // The bound feed's own settings, inline. They belong to the feed and the
-    // edits are addressed to its node, but this is where an operator is
-    // looking when they want them, so this is where they are.
+    // Which body on the feed is this camera. The feed's own setup - its
+    // address, ports and calibration - is the tracking installation's and
+    // lives in Project settings; what belongs to the camera is which of the
+    // things that system tracks is mounted on it.
     if (bound != nullptr) {
         const scene::TrackingSourceSettings& settings = bound->settings;
-        // The option a dropdown landed on, written by `feed_toggle` when it
-        // returns true for a dropdown row.
-        std::size_t chosen = 0U;
-        const auto feed_toggle = [&](std::string_view label, std::string_view text,
-                                     std::string_view property, bool lit, core::u64 salt) {
-            const gui::Rect row = take_row(cursor, row_height);
-            cursor.space(row_gap);
-            const float lw = std::clamp(row.width * label_fraction, label_min, label_max);
-            ctx.label({row.x, row.y, lw, row.height}, label, ctx.theme().text_muted);
-            const gui::Rect well{row.x + lw, row.y, row.width - lw, row.height};
-            const auto id = gui::ui_id(id_, property, bound->node.value() + salt);
-            if (property == scene::schema::tracking_enabled)
-                return ctx.checkbox(id, well, lit, "Listening") && !element.locked;
-            constexpr std::array<std::string_view, 2> axes_choices{
-                "Stage (Y up)", "Z up"};
-            const std::span<const std::string_view> choices =
-                property == scene::schema::tracking_protocol
-                ? std::span<const std::string_view>{tracker_protocol_choices}
-                : std::span<const std::string_view>{axes_choices};
-            std::size_t selected = 0U;
-            for (std::size_t index = 0U; index < choices.size(); ++index) {
-                if (choices[index] == text) {
-                    selected = index;
-                }
-            }
-            if (!ctx.dropdown(id, well, choices, selected) || element.locked) {
-                return false;
-            }
-            chosen = selected;
-            return true;
-        };
-        // Two words, both true: a listening feed is bound to its socket, an
-        // authored one is only described. Nothing here half-opens a port.
-        if (feed_toggle("State",
-                        settings.enabled ? "Listening" : "Not listening",
-                        scene::schema::tracking_enabled, settings.enabled,
-                        0U)) {
-            frame.named_edits.push_back(
-                NamedEdit{bound->node,
-                          std::string{scene::schema::tracking_enabled},
-                          settings.enabled ? 0.0 : 1.0});
-        }
-        if (feed_toggle("Protocol", tracker_protocol_name(settings.protocol),
-                        scene::schema::tracking_protocol, true, 1U)) {
-            // The index into `tracker_protocol_choices`; the Director spells
-            // it into the document.
-            frame.named_edits.push_back(
-                NamedEdit{bound->node,
-                          std::string{scene::schema::tracking_protocol},
-                          static_cast<double>(chosen)});
-        }
         const bool natnet =
             settings.protocol == scene::TrackerProtocolKind::NatNet;
-        feed_ = bound->node;
-        constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
-        const auto feed_row = [&](std::string_view label,
-                                  std::string_view property, float value,
-                                  float speed) {
-            const std::array<float, 1U> values{value};
-            const std::array<FieldBinding, 1U> bindings{
-                {{FieldDomain::Tracking, {}, property}}};
-            vector_row(ctx, cursor, label, scalar_axis, values, speed,
-                       bindings, frame);
-        };
-        feed_row("Port", scene::schema::tracking_port,
-                 static_cast<float>(settings.port), 1.0F);
-        // For Motive the camera is a rigid body, named by the streaming id
-        // its Assets pane shows; zero takes the first body in every frame.
-        feed_row(natnet ? "Rigid body" : "Camera ID",
-                 scene::schema::tracking_camera_id,
-                 static_cast<float>(settings.camera_id), 1.0F);
+        const TrackingFeedObservation* const observed =
+            find_feed(feeds_, bound->node);
         if (natnet) {
-            // Motive streams frames to a multicast group and answers the
-            // Director's version query on a command port. Both default to
-            // Motive's own defaults, and change only when its streaming pane
-            // has been changed to match.
-            feed_row("Command port", scene::schema::tracking_command_port,
-                     static_cast<float>(settings.command_port), 1.0F);
+            // Picked by the name Motive's Assets pane shows, not by its
+            // streaming id. The list is what the server last described; an
+            // authored id it no longer lists stays visible rather than
+            // silently reading as "first in frame".
+            std::vector<std::string> labels{"First in frame"};
+            std::vector<core::i32> ids{0};
+            std::size_t selected = 0U;
+            if (observed != nullptr) {
+                for (const TrackingRigidBody& body : observed->rigid_bodies) {
+                    if (body.id <= 0) {
+                        continue;
+                    }
+                    labels.push_back(body.name.empty()
+                                         ? "Rigid body " + std::to_string(body.id)
+                                         : body.name);
+                    ids.push_back(body.id);
+                    if (static_cast<core::u32>(body.id) == settings.camera_id) {
+                        selected = ids.size() - 1U;
+                    }
+                }
+            }
+            if (settings.camera_id != 0U && selected == 0U) {
+                labels.push_back("ID " + std::to_string(settings.camera_id)
+                                 + " (not streaming)");
+                ids.push_back(static_cast<core::i32>(settings.camera_id));
+                selected = ids.size() - 1U;
+            }
+            std::vector<std::string_view> choices;
+            choices.reserve(labels.size());
+            for (const std::string& label : labels) {
+                choices.push_back(label);
+            }
             const gui::Rect row = take_row(cursor, row_height);
             cursor.space(row_gap);
-            const float lw = std::clamp(row.width * label_fraction,
-                                        label_min, label_max);
-            ctx.label({row.x, row.y, lw, row.height}, "Multicast",
+            const float lw = std::clamp(row.width * label_fraction, label_min,
+                                        label_max);
+            ctx.label({row.x, row.y, lw, row.height}, "Rigid body",
                       ctx.theme().text_muted);
             const gui::Rect well{row.x + lw, row.y, row.width - lw,
                                  row.height};
-            const std::string authored_group =
-                scene::multicast_group_text(settings.multicast_group);
-            if (multicast_node_ != bound->node
-                || multicast_authored_ != authored_group) {
-                multicast_node_ = bound->node;
-                multicast_authored_ = authored_group;
-                multicast_draft_ = authored_group;
+            const std::size_t was = selected;
+            if (ctx.dropdown(gui::ui_id(id_, "tracking.rigid-body",
+                                        bound->node.value()),
+                             well, choices, selected)
+                && !element.locked && selected != was
+                && selected < ids.size()) {
+                frame.named_edits.push_back(NamedEdit{
+                    bound->node, std::string{scene::schema::tracking_camera_id},
+                    static_cast<double>(ids[selected])});
             }
-            if (ctx.text_field(gui::ui_id(id_, "tracking.multicast",
-                                   bound->node.value()),
-                               well, multicast_draft_)
-                && !element.locked) {
-                std::array<core::u8, 4U> parsed{};
-                if (scene::parse_multicast_group(multicast_draft_, parsed)) {
-                    frame.text_edits.push_back(
-                        {bound->node,
-                         std::string{scene::schema::tracking_multicast_group},
-                         multicast_draft_});
-                }
-            }
-            std::array<core::u8, 4U> parsed{};
             ctx.tooltip(well,
-                        scene::parse_multicast_group(multicast_draft_, parsed)
-                            ? "The group Motive streams to, from its "
-                              "Streaming pane. 239.255.42.99 is its default."
-                            : "Four numbers 0-255 separated by dots");
+                        "The rigid body mounted on this camera, as Motive "
+                        "names it in its Assets pane");
+        } else {
+            // FreeD and OpenTrackIO name their camera by number in every
+            // packet, so the number is the choice.
+            feed_ = bound->node;
+            constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
+            const std::array<float, 1U> values{
+                static_cast<float>(settings.camera_id)};
+            const std::array<FieldBinding, 1U> bindings{{{
+                FieldDomain::Tracking, {}, scene::schema::tracking_camera_id}}};
+            vector_row(ctx, cursor, "Camera ID", scalar_axis, values, 1.0F,
+                       bindings, frame);
+            feed_ = doc::NodeId{};
         }
-        // The lens the feed reports through. A FreeD packet carries a zoom
-        // encoder, not a field of view; these are what turn one into the
-        // other, so they describe the equipment and live with the feed.
-        feed_row("Sensor mm", scene::schema::tracking_sensor_height_mm,
-                 settings.sensor_height_mm, 0.05F);
-        feed_row("Sensor AR", scene::schema::tracking_sensor_aspect,
-                 settings.sensor_aspect_ratio, 0.005F);
-        feed_row("Focal mm", scene::schema::tracking_fallback_focal_mm,
-                 settings.fallback_focal_length_mm, 0.5F);
-        // Where this tracking system's numbers sit relative to the stage.
-        //
-        // Nothing in a datagram says which way the tracker was surveyed, and
-        // an uncalibrated feed puts the camera somewhere unrelated to the wall
-        // and aims it at nothing - which reads as a broken plate rather than a
-        // missing setting. Heading is the one an operator touches daily; the
-        // rest are set once at bring-up.
-        if (feed_toggle("Up axis",
-                        settings.calibration.axes
-                                == scene::TrackerAxes::ZUpRightHanded
-                            ? "Z up"
-                            : "Stage (Y up)",
-                        scene::schema::tracking_axes, true, 2U)) {
-            const bool z_up = settings.calibration.axes
-                == scene::TrackerAxes::ZUpRightHanded;
-            frame.named_edits.push_back(
-                NamedEdit{bound->node,
-                          std::string{scene::schema::tracking_axes},
-                          z_up ? 0.0 : 1.0});
+
+        // One line of the link's state, so a camera that is not tracking
+        // says why without opening anything.
+        std::string status;
+        gui::UiColor status_colour = ctx.theme().text_muted;
+        if (!settings.enabled) {
+            status = "Feed not listening";
+        } else if (observed == nullptr
+                   || observed->state == TrackingLinkState::Idle) {
+            status = "Feed not listening";
+        } else if (observed->state == TrackingLinkState::BindFailed) {
+            status = "Feed could not open its port";
+            status_colour = ctx.theme().warning;
+        } else if (natnet && observed->server_description.empty()) {
+            status = observed->server_address.empty()
+                ? std::string{"Waiting for Motive"}
+                : "Waiting for Motive at " + observed->server_address;
+        } else if (natnet && observed->rigid_bodies.empty()) {
+            status = "Waiting for Motive's rigid bodies";
+        } else {
+            status = natnet ? observed->server_description
+                            : std::string{"Receiving"};
         }
-        // "turns" in the label for the same reason the transform rows say it:
-        // Live Data reads pose angles out in degrees because that is what an
-        // operator thinks in, and a field that took degrees here while the
-        // document stored turns would be off by a factor of 360 in the one
-        // place someone is trying to line a plate up.
-        feed_row("Heading turns", scene::schema::tracking_heading,
-                 settings.calibration.heading, 0.001F);
-        feed_row("Origin X", scene::schema::tracking_origin_x,
-                 settings.calibration.origin.x, 0.01F);
-        feed_row("Origin Y", scene::schema::tracking_origin_y,
-                 settings.calibration.origin.y, 0.01F);
-        feed_row("Origin Z", scene::schema::tracking_origin_z,
-                 settings.calibration.origin.z, 0.01F);
-        feed_row("Scale", scene::schema::tracking_scale,
-                 settings.calibration.scale, 0.005F);
-        feed_ = doc::NodeId{};
+        const gui::Rect note = take_row(cursor, row_height);
+        cursor.space(row_gap);
+        ctx.label(note, status, status_colour);
     } else if (sources.empty()) {
         const gui::Rect note = take_row(cursor, row_height);
         cursor.space(row_gap);

@@ -173,6 +173,9 @@ private:
     };
 
     struct PendingMaterialization;
+    struct CacheInspections;
+    using CacheInspection = core::Result<assets::DerivativeCacheEntry,
+                                         assets::DerivativeCacheError>;
     struct FailedMaterialization final {
         assets::DerivativeKey key;
         ProxyPlacementIssue issue{ProxyPlacementIssue::ArtifactLoadFailed};
@@ -188,12 +191,20 @@ private:
     [[nodiscard]] bool start_materialization(
         const assets::MediaAsset& asset,
         const assets::DerivativeKey& key) noexcept;
+    // The cache state resolve() decides from. It reads the disk only for a
+    // key it has not seen yet or after this service's generator published;
+    // otherwise it returns what the inspection worker last read.
+    [[nodiscard]] CacheInspection observe_cache(
+        const assets::MediaAsset& asset,
+        const assets::DerivativeKey& key) noexcept;
 
     server::ProxyGenerationService* artifacts_{};
     std::filesystem::path session_root_;
     std::vector<MaterializedProxy> materialized_;
     std::unique_ptr<PendingMaterialization> pending_materialization_;
     std::vector<FailedMaterialization> failed_materializations_;
+    // Last, so its worker stops before anything above goes away.
+    std::unique_ptr<CacheInspections> inspections_;
 };
 
 } // namespace mediaserver::app

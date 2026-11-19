@@ -516,6 +516,10 @@ if(BUILD_TESTING)
                 SDL3::SDL3
     )
     mediaserver_set_project_options(mediaserver_render_icvfx_tests)
+    # Real projection meshes from a four-surface curved LED wall, loaded the
+    # way a node loads them.
+    target_compile_definitions(mediaserver_render_icvfx_tests PRIVATE
+        MEDIASERVER_FOUR_LED_WALL_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/four-led-wall")
     add_test(
         NAME mediaserver.render_icvfx
         COMMAND mediaserver_render_icvfx_tests

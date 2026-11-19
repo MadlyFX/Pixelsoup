@@ -6,6 +6,7 @@
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
 
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -332,6 +333,10 @@ public:
 
     [[nodiscard]] const std::filesystem::path& cache_root() const noexcept;
 
+    // Counts publish attempts made through this service, from any thread.
+    // Callers that remember inspect() results read them again once it moves.
+    [[nodiscard]] core::u64 publications() const noexcept;
+
 private:
     struct RoutedCache final {
         std::filesystem::path root;
@@ -359,6 +364,7 @@ private:
     std::optional<NextToSourceProxyCacheConfig> next_to_source_cache_;
     std::vector<RoutedCache> routed_caches_;
     std::mutex routed_caches_mutex_;
+    std::atomic<core::u64> publications_{};
     std::filesystem::path runtime_root_;
     std::unique_ptr<ProxyEncoderBackend> backend_;
     ProxyGenerationConfig config_;
