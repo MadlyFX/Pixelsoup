@@ -600,6 +600,10 @@ struct DirectorShowLoop final {
     bool editor_asset_manifest_stale{true};
     // Operator requests refused since start-up, for the stopping report.
     core::u64 refused_operator_requests{};
+    // The complete curved and UV-mesh wall geometry the Live Data panel
+    // reports plate rectangles over. Read on the editor refresh; imported
+    // files load on the projection cache's own worker.
+    DirectorSurfaceMeshes live_data_surface_meshes{};
 
     // Runs both threads until stopped, closed or out of run frames; returns
     // the exit code. The caller's thread becomes the show thread.

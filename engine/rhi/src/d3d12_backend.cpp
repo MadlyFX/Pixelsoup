@@ -476,6 +476,9 @@ struct D3d12Device final {
     // Device Removed Extended Data was switched on before this device was
     // made, and whether its report has already been written.
     bool breadcrumbs{};
+    // Present only with validation on and a runtime without message
+    // callbacks: drained to stderr after every submission instead.
+    ComPtr<ID3D12InfoQueue> validation_messages;
     mutable std::atomic<bool> breadcrumbs_reported{};
     // Textures released while a recording or unfinished GPU work still uses
     // them. Destroying one then would free memory and descriptors the GPU is
@@ -1267,6 +1270,25 @@ bool d3d12_available() noexcept {
     return false;
 }
 
+// Validation output, at most three times per message kind: a message
+// repeated every frame must not crowd out the one that explains a fault.
+[[nodiscard]] static bool say_validation_message(D3D12_MESSAGE_ID id) noexcept {
+    static std::mutex guard;
+    static std::array<std::pair<int, unsigned>, 256U> seen{};
+    static std::size_t used = 0U;
+    const std::lock_guard lock{guard};
+    for (std::size_t index = 0U; index < used; ++index) {
+        if (seen[index].first == static_cast<int>(id)) {
+            return ++seen[index].second <= 3U;
+        }
+    }
+    if (used == seen.size()) {
+        return false;
+    }
+    seen[used++] = {static_cast<int>(id), 1U};
+    return true;
+}
+
 core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     const DeviceConfig& config) noexcept {
     using Result = core::Result<D3d12CreatedDevice, RhiError>;
@@ -1286,10 +1308,27 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
             debug_layer = true;
         }
     }
+    // MEDIASERVER_GPU_VALIDATION=1 adds GPU-based validation, which checks
+    // descriptor, resource-state and bounds use on the GPU itself. Very slow;
+    // it implies the debug layer.
+    bool gpu_validation = false;
+    {
+        char flag[8]{};
+        if (GetEnvironmentVariableA("MEDIASERVER_GPU_VALIDATION", flag,
+                                    static_cast<DWORD>(sizeof(flag))) > 0U &&
+            flag[0] == '1') {
+            gpu_validation = true;
+            debug_layer = true;
+        }
+    }
     if (debug_layer) {
         ComPtr<ID3D12Debug> debug;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
             debug->EnableDebugLayer();
+            ComPtr<ID3D12Debug1> validating;
+            if (gpu_validation && SUCCEEDED(debug.As(&validating))) {
+                validating->SetEnableGPUBasedValidation(TRUE);
+            }
         }
     }
     // Opt-in GPU hang diagnosis. With MEDIASERVER_GPU_BREADCRUMBS=1 the
@@ -1383,6 +1422,41 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     if (!state->device) {
         delete state;
         return Result::failure(RhiError::Unavailable);
+    }
+    if (debug_layer) {
+        // Validation messages go to stderr - the process log - as well as to
+        // an attached debugger, so a node with no debugger still says what
+        // the runtime objected to. Needs the D3D12 runtime that has
+        // ID3D12InfoQueue1; older runtimes keep debugger-only output.
+        ComPtr<ID3D12InfoQueue1> queue;
+        if (SUCCEEDED(state->device.As(&queue))) {
+            DWORD cookie = 0U;
+            static_cast<void>(queue->RegisterMessageCallback(
+                [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity,
+                   D3D12_MESSAGE_ID id, LPCSTR description, void*) {
+                    if (severity > D3D12_MESSAGE_SEVERITY_WARNING) {
+                        return;
+                    }
+                    if (!say_validation_message(id)) {
+                        return;
+                    }
+                    std::fprintf(stderr, "d3d12 %s %d: %s\n",
+                                 severity <= D3D12_MESSAGE_SEVERITY_ERROR
+                                     ? "error" : "warning",
+                                 static_cast<int>(id),
+                                 description != nullptr ? description : "");
+                },
+                D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie));
+        }
+        if (!queue) {
+            static_cast<void>(
+                state->device.As(&state->validation_messages));
+        }
+        std::fprintf(stderr,
+                     "d3d12: validation on (GPU-based %s, messages %s)\n",
+                     gpu_validation ? "on" : "off",
+                     queue || state->validation_messages ? "to the log"
+                                                         : "to a debugger only");
     }
     D3D12_COMMAND_QUEUE_DESC queue_desc{};
     queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1752,6 +1826,7 @@ std::string_view d3d12_lost_reason(void* value) noexcept {
     case DXGI_ERROR_DEVICE_RESET: return "the GPU was reset after a fault";
     case DXGI_ERROR_DRIVER_INTERNAL_ERROR: return "the graphics driver failed";
     case DXGI_ERROR_INVALID_CALL: return "the GPU was given work it could not run";
+    case E_OUTOFMEMORY: return "the GPU ran out of video memory";
     default: return "the GPU device was removed (a driver reset, update or fault)";
     }
 }
@@ -4110,6 +4185,35 @@ core::Result<void*, RhiError> d3d12_submit(
     }
     ID3D12CommandList* lists[]{commands->list.Get()};
     state->graphics_queue->ExecuteCommandLists(1U, lists);
+    if (state->validation_messages) {
+        // Validation errors and warnings recorded so far, to the log.
+        const UINT64 stored =
+            state->validation_messages->GetNumStoredMessages();
+        for (UINT64 index = 0U; index < stored; ++index) {
+            SIZE_T length = 0U;
+            if (FAILED(state->validation_messages->GetMessage(
+                    index, nullptr, &length)) || length == 0U) {
+                continue;
+            }
+            std::vector<char> bytes(length);
+            auto* message = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
+            if (FAILED(state->validation_messages->GetMessage(
+                    index, message, &length))) {
+                continue;
+            }
+            if (message->Severity > D3D12_MESSAGE_SEVERITY_WARNING
+                || !say_validation_message(message->ID)) {
+                continue;
+            }
+            std::fprintf(stderr, "d3d12 %s %d: %s\n",
+                         message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR
+                             ? "error" : "warning",
+                         static_cast<int>(message->ID),
+                         message->pDescription != nullptr
+                             ? message->pDescription : "");
+        }
+        state->validation_messages->ClearStoredMessages();
+    }
     // ExecuteCommandLists has no failure return. From this point onward the GPU
     // may reference every resource captured by the recording, even if Present
     // or Signal subsequently reports a failure.

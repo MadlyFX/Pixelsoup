@@ -833,6 +833,10 @@ inline constexpr std::string_view tracking_multicast_group =
     "tracking_multicast_group";
 inline constexpr std::string_view tracking_command_port =
     "tracking_command_port";
+// NatNet only: the Motive machine's address as dotted decimal. Absent
+// discovers the server from the first frame.
+inline constexpr std::string_view tracking_server_address =
+    "tracking_server_address";
 inline constexpr std::string_view tracking_sensor_height_mm =
     "tracking_sensor_height_mm";
 inline constexpr std::string_view tracking_sensor_aspect =

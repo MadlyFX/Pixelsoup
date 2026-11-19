@@ -4,6 +4,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/render/compositor_scene_executor.hpp>
 #include <mediaserver/render/icvfx.hpp>
+#include <mediaserver/render/projection_mesh_warp.hpp>
 #include <mediaserver/render/render_error.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/scene.hpp>
@@ -59,6 +60,11 @@ public:
 
     // Draws the inner frustum and composites it over `outer`.
     //
+    // `shown` is the extent in output pixels the caller displays `slice` at
+    // (an output map's viewport). The plate renderer is sized from the wall
+    // raster at that density, never above the raster itself; zero means the
+    // raster. See `shown_extent` in icvfx_stage.cpp for why it matters.
+    //
     // Returns `&outer` unchanged - not a copy - whenever there is no plate for
     // this output to draw: no tracking, no authored inner frustum, or a slice
     // that misses the rectangle entirely. That last case is the whole
@@ -84,12 +90,47 @@ public:
            const output::PhysicalSurface &surface, scene::CanvasRect slice,
            std::span<const scene::InnerFrustumRegion> regions,
            const rhi::Texture &outer,
-           MediaCache *shared_media_cache = nullptr) noexcept;
+           MediaCache *shared_media_cache = nullptr,
+           scene::Canvas shown = scene::Canvas{0U, 0U}) noexcept;
+
+    // The same stack on a wall that is not flat.
+    //
+    // `outer` is the mesh-warped wall image this output already drew, which
+    // is in `surface.raster` pixels over `slice` exactly as a flat wall's is -
+    // so the composite, the feather and the skip decision are unchanged. What
+    // differs is how each plate is made: `inner_frustum_mesh_view` fits one
+    // render from the tracked eye to the triangles of `mesh` under the plate
+    // rectangle, and the stage's own warp projects that render through the
+    // same triangles into the rectangle before it is composited.
+    //
+    // `regions` must come from the mesh form of `output::inner_frustum_region`
+    // over the same complete `mesh`. A camera whose plate view the mesh
+    // refuses - wall behind the tracked eye under the plate - is dropped from
+    // the stack and reported, as a flat wall drops an eye behind it. Null only
+    // for a real failure: a refused command, a target that could not be made.
+    [[nodiscard]] const rhi::Texture *
+    record(rhi::CommandList &commands, const scene::Scene &frame,
+           const output::PhysicalSurface &surface, const IcvfxSurfaceMesh &mesh,
+           scene::CanvasRect slice,
+           std::span<const scene::InnerFrustumRegion> regions,
+           const rhi::Texture &outer,
+           MediaCache *shared_media_cache = nullptr,
+           scene::Canvas shown = scene::Canvas{0U, 0U}) noexcept;
 
     // The plans this output produced last frame, one per tracked camera, in
     // composite order. Empty when the scene has no tracked cameras.
     [[nodiscard]] std::span<const IcvfxPlan> last_plans() const noexcept {
         return last_plans_;
+    }
+    // A plate this stage owed last call but could not render because its own
+    // renderer was still adopting the frame's media (a new asset generation:
+    // every media source is re-opened before anything is drawn). That plate
+    // was left off and the rest of the stack drawn, rather than failing the
+    // output - and the presenter reports the frame incomplete, so a buffered
+    // output holds its last complete frame instead of showing one without the
+    // plate. Any other refusal of a plate render still fails the call.
+    [[nodiscard]] bool plate_pending() const noexcept {
+        return plate_pending_;
     }
     // Summed across the compositors, so a stack of plates reports the work it
     // actually did rather than whichever half landed on one of them.
@@ -110,8 +151,21 @@ private:
     // moves every frame, and a target that reallocated with it would be an
     // allocation in the middle of a command list.
     [[nodiscard]] bool ensure_inner(
-        const scene::Scene &frame,
-        const output::PhysicalSurface &surface) noexcept;
+        const scene::Scene &frame, const output::PhysicalSurface &surface,
+        scene::CanvasRect slice, scene::Canvas shown) noexcept;
+    // The plate warp, at the inner target's extent. Made the first time a
+    // plate is drawn on a mesh wall, alongside the inner executor, so a show
+    // on flat walls never pays for it.
+    [[nodiscard]] bool ensure_plate_warp() noexcept;
+
+    [[nodiscard]] const rhi::Texture *
+    record_stack(rhi::CommandList &commands, const scene::Scene &frame,
+                 const output::PhysicalSurface &surface,
+                 const IcvfxSurfaceMesh *mesh, scene::CanvasRect slice,
+                 std::span<const scene::InnerFrustumRegion> regions,
+                 const rhi::Texture &outer,
+                 MediaCache *shared_media_cache,
+                 scene::Canvas shown) noexcept;
 
     rhi::Device *device_{};
     RendererLimits limits_{};
@@ -123,9 +177,14 @@ private:
     // Constructed the first time a plate is drawn rather than at create, so a
     // show with no tracking never pays for a second renderer.
     std::optional<CompositorSceneExecutor> inner_;
+    std::optional<ProjectionMeshWarp> plate_warp_;
     core::u32 inner_width_{};
     core::u32 inner_height_{};
+    // The raster extent the plate renderer is sized from; see ensure_inner.
+    core::u32 base_width_{};
+    core::u32 base_height_{};
     std::vector<IcvfxPlan> last_plans_;
+    bool plate_pending_{};
 };
 
 } // namespace mediaserver::render

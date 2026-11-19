@@ -43,6 +43,8 @@ namespace mediaserver::track {
 // Message ids in the two-byte header every NatNet packet starts with.
 inline constexpr core::u16 natnet_connect_message = 0U;
 inline constexpr core::u16 natnet_server_info_message = 1U;
+inline constexpr core::u16 natnet_request_model_definitions_message = 4U;
+inline constexpr core::u16 natnet_model_definitions_message = 5U;
 inline constexpr core::u16 natnet_frame_message = 7U;
 
 // Motive's defaults. The data port is where frames arrive; the command port is
@@ -101,6 +103,51 @@ struct NatNetServerInfo final {
 
 [[nodiscard]] core::Result<NatNetServerInfo, TrackerParseError>
 parse_natnet_server_info(std::span<const std::byte> datagram) noexcept;
+
+// The four bytes that ask a server to describe its assets: what each rigid
+// body is called, which is the only way an operator can pick "Camera A"
+// rather than look up the streaming id Motive assigned it. Send it to the
+// command port once the version is known; the reply arrives where it came
+// from.
+[[nodiscard]] std::array<std::byte, 4U>
+natnet_model_definitions_request() noexcept;
+
+// One rigid body the server described: its streaming id and asset name.
+inline constexpr std::size_t max_natnet_rigid_body_name_bytes = 64U;
+struct NatNetRigidBodyDescription final {
+    core::i32 id{};
+    // Null-terminated, truncated to fit.
+    std::array<char, max_natnet_rigid_body_name_bytes> name{};
+
+    bool operator==(const NatNetRigidBodyDescription&) const = default;
+};
+
+// Far past any camera volume; a description listing more is truncated to
+// this many rather than allocated without bound on the receive thread.
+inline constexpr std::size_t max_natnet_rigid_body_descriptions = 64U;
+
+struct NatNetModelDefinitions final {
+    std::array<NatNetRigidBodyDescription,
+               max_natnet_rigid_body_descriptions> rigid_bodies{};
+    std::size_t rigid_body_count{};
+    // Whether every dataset was walked. Before 4.1 a dataset carries no size,
+    // so a kind this parser does not read ends the walk early; the bodies
+    // found before it are still reported.
+    bool complete{};
+
+    [[nodiscard]] std::span<const NatNetRigidBodyDescription>
+    bodies() const noexcept {
+        return {rigid_bodies.data(), rigid_body_count};
+    }
+};
+
+// Decodes the reply to `natnet_model_definitions_request()` for the
+// top-level rigid bodies it describes - the assets an operator can put on a
+// camera. Skeleton bones, marker sets, cameras, force plates and devices are
+// skipped.
+[[nodiscard]] core::Result<NatNetModelDefinitions, TrackerParseError>
+parse_natnet_model_definitions(std::span<const std::byte> datagram,
+                               NatNetVersion version) noexcept;
 
 // Which axis Motive calls up. Positions are left in the tracker's frame for
 // the scene's calibration to map, as every protocol's are; the quaternion

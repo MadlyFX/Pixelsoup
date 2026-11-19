@@ -434,104 +434,172 @@ inner_frustum_region(const PhysicalSurface& surface,
     return region_from_corners(surface, tracked, corners, margin_px);
 }
 
-scene::InnerFrustumRegion inner_frustum_region(
-    const ProjectionMesh& mesh,
-    scene::Canvas destination,
-    const scene::Camera& tracked,
-    float aspect_ratio,
+namespace {
+
+// The mesh inner frustum, shared by every overload so the mesh path has one
+// body and one behaviour (see `region_from_corners` for why that matters).
+//
+// Each triangle is clipped against the tracked camera's four side planes in
+// homogeneous clip space, carrying its destination UV0 along, and the region is
+// the bound of what survives. Clip space is an affine image of the triangle's
+// plane for one projection, and UV0 is affine across the triangle, so the
+// clipped UVs are exactly where the frustum edges cross the wall - not the
+// whole triangle the edge passes through. On a horizontal arc, whose triangles
+// run the full height of the wall, that is the difference between a plate the
+// height of the camera's view and one the height of the wall. Near and far are
+// deliberately absent: the camera physically sees the wall whether or not the
+// wall lies inside the render's depth range. Clipping in homogeneous space
+// also discards what is behind the eye without dividing by a meaningless w.
+//
+// Allocation-free on purpose: a node evaluates this on its frame path, once
+// per tracked camera per mesh-warped output. Each triangle transforms its own
+// three corners - a shared vertex is transformed more than once, always by the
+// same expression - and clips into two fixed arrays.
+//
+// Only the bounds of the surviving points are kept. `scene::inner_frustum_rect`
+// reads nothing but their minimum and maximum, so handing it the two bounding
+// corners is exactly the rectangle it would derive from every point.
+[[nodiscard]] scene::InnerFrustumRegion mesh_inner_frustum_region_impl(
+    const ProjectionMesh& mesh, const ProjectionMeshPlacement* placement,
+    scene::Canvas destination, const scene::Mat4& view_projection,
     core::u32 margin_px) noexcept {
+    MeshPlacementBasis placed{};
+    if (placement != nullptr && !placement_basis(*placement, placed)) {
+        return scene::InnerFrustumRegion{};
+    }
+    struct ClipPoint final {
+        scene::Vec4 clip{};
+        float u{};
+        float v{};
+    };
+    // A triangle clipped by four planes has at most seven corners.
+    constexpr std::size_t max_corners = 8U;
+    using Polygon = std::array<ClipPoint, max_corners>;
+    // Signed distance inside each side plane: left, right, bottom, top.
+    const auto inside = [](const scene::Vec4& clip, std::size_t plane) noexcept {
+        switch (plane) {
+        case 0U:
+            return clip.w + clip.x;
+        case 1U:
+            return clip.w - clip.x;
+        case 2U:
+            return clip.w + clip.y;
+        default:
+            return clip.w - clip.y;
+        }
+    };
+    const auto corner = [&](core::u32 index) noexcept {
+        const ProjectionMeshVertex& vertex = mesh.vertices[index];
+        const scene::Vec3 position = placement != nullptr
+            ? placed_position(vertex.position, placed)
+            : vertex.position;
+        return ClipPoint{
+            scene::transform(
+                view_projection,
+                scene::Vec4{position.x, position.y, position.z, 1.0F}),
+            vertex.destination_u, vertex.destination_v};
+    };
+
+    bool any = false;
+    float min_u = 0.0F;
+    float max_u = 0.0F;
+    float min_v = 0.0F;
+    float max_v = 0.0F;
+    const auto include = [&](float u, float v) noexcept {
+        if (!any) {
+            min_u = u;
+            max_u = u;
+            min_v = v;
+            max_v = v;
+            any = true;
+            return;
+        }
+        min_u = std::min(min_u, u);
+        max_u = std::max(max_u, u);
+        min_v = std::min(min_v, v);
+        max_v = std::max(max_v, v);
+    };
+
+    Polygon polygon{};
+    Polygon clipped{};
+    for (std::size_t triangle = 0U; triangle + 2U < mesh.indices.size();
+         triangle += 3U) {
+        polygon[0U] = corner(mesh.indices[triangle]);
+        polygon[1U] = corner(mesh.indices[triangle + 1U]);
+        polygon[2U] = corner(mesh.indices[triangle + 2U]);
+        if (!finite(polygon[0U].clip) || !finite(polygon[1U].clip)
+            || !finite(polygon[2U].clip)) {
+            // An unusable corner cannot be clipped honestly. Keep the whole
+            // triangle in the bound rather than quietly shrinking the plate.
+            for (std::size_t index = 0U; index < 3U; ++index) {
+                include(polygon[index].u, polygon[index].v);
+            }
+            continue;
+        }
+        std::size_t count = 3U;
+        for (std::size_t plane = 0U; plane < 4U && count != 0U; ++plane) {
+            std::size_t kept = 0U;
+            for (std::size_t index = 0U; index < count; ++index) {
+                const ClipPoint& from = polygon[index];
+                const ClipPoint& to = polygon[(index + 1U) % count];
+                const float from_inside = inside(from.clip, plane);
+                const float to_inside = inside(to.clip, plane);
+                if (from_inside >= 0.0F) {
+                    clipped[kept++] = from;
+                }
+                if ((from_inside >= 0.0F) != (to_inside >= 0.0F)) {
+                    const float t = from_inside / (from_inside - to_inside);
+                    const auto lerp = [t](float a, float b) noexcept {
+                        return a + (b - a) * t;
+                    };
+                    clipped[kept++] = ClipPoint{
+                        scene::Vec4{lerp(from.clip.x, to.clip.x),
+                                    lerp(from.clip.y, to.clip.y),
+                                    lerp(from.clip.z, to.clip.z),
+                                    lerp(from.clip.w, to.clip.w)},
+                        lerp(from.u, to.u), lerp(from.v, to.v)};
+                }
+            }
+            polygon = clipped;
+            count = kept;
+        }
+        for (std::size_t index = 0U; index < count; ++index) {
+            include(polygon[index].u, polygon[index].v);
+        }
+    }
+    if (!any) {
+        return scene::InnerFrustumRegion{};
+    }
+    const auto width = static_cast<float>(destination.width);
+    const auto height = static_cast<float>(destination.height);
+    const std::array<scene::CanvasProjection, 2U> bounds{{
+        scene::CanvasProjection{min_u * width, min_v * height, 0.0F, true},
+        scene::CanvasProjection{max_u * width, max_v * height, 0.0F, true},
+    }};
+    return scene::inner_frustum_rect(destination, bounds, margin_px);
+}
+
+[[nodiscard]] scene::InnerFrustumRegion mesh_inner_frustum_region_aspect(
+    const ProjectionMesh& mesh, const ProjectionMeshPlacement* placement,
+    scene::Canvas destination, const scene::Camera& tracked,
+    float aspect_ratio, core::u32 margin_px) noexcept {
     if (!valid(mesh) || !scene::valid(destination) || !scene::valid(tracked)
         || !finite(aspect_ratio) || !(aspect_ratio > 0.0F)) {
         return scene::InnerFrustumRegion{};
     }
-
     const scene::ViewMatrices view =
         scene::view_for_aspect(tracked, aspect_ratio);
     if (!finite(view.view_projection)) {
         return scene::InnerFrustumRegion{};
     }
-
-    // One outside-flag per side clip plane, in clip space so a vertex behind
-    // the eye classifies correctly instead of folding through the divide.
-    // Near and far are deliberately absent: the camera physically sees the wall
-    // whether or not the wall lies inside the render's depth range.
-    struct Classified final {
-        core::u8 outside{};
-    };
-    constexpr core::u8 outside_left = 1U << 0U;
-    constexpr core::u8 outside_right = 1U << 1U;
-    constexpr core::u8 outside_bottom = 1U << 2U;
-    constexpr core::u8 outside_top = 1U << 3U;
-
-    std::vector<Classified> classified;
-    std::vector<scene::CanvasProjection> covered;
-    try {
-        classified.resize(mesh.vertices.size());
-        covered.reserve(mesh.indices.size());
-    } catch (const std::bad_alloc&) {
-        return scene::InnerFrustumRegion{};
-    }
-    for (std::size_t index = 0U; index < mesh.vertices.size(); ++index) {
-        const scene::Vec3 position = mesh.vertices[index].position;
-        const scene::Vec4 clip = scene::transform(
-            view.view_projection,
-            scene::Vec4{position.x, position.y, position.z, 1.0F});
-        core::u8 flags = 0U;
-        if (!finite(clip)) {
-            // An unusable vertex is inside every plane, which keeps it in the
-            // bound rather than quietly shrinking the rectangle.
-            classified[index] = Classified{0U};
-            continue;
-        }
-        if (clip.x < -clip.w) {
-            flags |= outside_left;
-        }
-        if (clip.x > clip.w) {
-            flags |= outside_right;
-        }
-        if (clip.y < -clip.w) {
-            flags |= outside_bottom;
-        }
-        if (clip.y > clip.w) {
-            flags |= outside_top;
-        }
-        classified[index] = Classified{flags};
-    }
-
-    for (std::size_t triangle = 0U; triangle + 2U < mesh.indices.size();
-         triangle += 3U) {
-        const core::u32 a = mesh.indices[triangle];
-        const core::u32 b = mesh.indices[triangle + 1U];
-        const core::u32 c = mesh.indices[triangle + 2U];
-        const core::u8 shared = static_cast<core::u8>(
-            classified[a].outside & classified[b].outside
-            & classified[c].outside);
-        if (shared != 0U) {
-            continue;
-        }
-        for (const core::u32 index : {a, b, c}) {
-            const ProjectionMeshVertex& vertex = mesh.vertices[index];
-            // Capacity was reserved for every index, so this cannot grow.
-            covered.push_back(scene::CanvasProjection{
-                vertex.destination_u * static_cast<float>(destination.width),
-                vertex.destination_v * static_cast<float>(destination.height),
-                0.0F,
-                true,
-            });
-        }
-    }
-    if (covered.empty()) {
-        return scene::InnerFrustumRegion{};
-    }
-    return scene::inner_frustum_rect(destination, covered, margin_px);
+    return mesh_inner_frustum_region_impl(mesh, placement, destination,
+                                          view.view_projection, margin_px);
 }
 
-scene::InnerFrustumRegion inner_frustum_region(
-    const ProjectionMesh& mesh,
-    scene::Canvas destination,
-    const scene::Camera& tracked,
-    const scene::LensProfile& profile,
-    const scene::LensEncoders& encoders,
+[[nodiscard]] scene::InnerFrustumRegion mesh_inner_frustum_region_lens(
+    const ProjectionMesh& mesh, const ProjectionMeshPlacement* placement,
+    scene::Canvas destination, const scene::Camera& tracked,
+    const scene::LensProfile& profile, const scene::LensEncoders& encoders,
     core::u32 margin_px) noexcept {
     if (!valid(mesh) || !scene::valid(destination)) {
         return scene::InnerFrustumRegion{};
@@ -548,70 +616,56 @@ scene::InnerFrustumRegion inner_frustum_region(
     if (!finite(view.view_projection)) {
         return scene::InnerFrustumRegion{};
     }
+    return mesh_inner_frustum_region_impl(mesh, placement, destination,
+                                          view.view_projection, margin_px);
+}
 
-    struct Classified final {
-        core::u8 outside{};
-    };
-    constexpr core::u8 outside_left = 1U << 0U;
-    constexpr core::u8 outside_right = 1U << 1U;
-    constexpr core::u8 outside_bottom = 1U << 2U;
-    constexpr core::u8 outside_top = 1U << 3U;
-    std::vector<Classified> classified;
-    std::vector<scene::CanvasProjection> covered;
-    try {
-        classified.resize(mesh.vertices.size());
-        covered.reserve(mesh.indices.size());
-    } catch (const std::bad_alloc&) {
-        return scene::InnerFrustumRegion{};
-    }
-    for (std::size_t index = 0U; index < mesh.vertices.size(); ++index) {
-        const scene::Vec3 position = mesh.vertices[index].position;
-        const scene::Vec4 clip = scene::transform(
-            view.view_projection,
-            scene::Vec4{position.x, position.y, position.z, 1.0F});
-        core::u8 flags = 0U;
-        if (!finite(clip)) {
-            classified[index] = Classified{};
-            continue;
-        }
-        if (clip.x < -clip.w) {
-            flags |= outside_left;
-        }
-        if (clip.x > clip.w) {
-            flags |= outside_right;
-        }
-        if (clip.y < -clip.w) {
-            flags |= outside_bottom;
-        }
-        if (clip.y > clip.w) {
-            flags |= outside_top;
-        }
-        classified[index] = Classified{flags};
-    }
-    for (std::size_t triangle = 0U; triangle + 2U < mesh.indices.size();
-         triangle += 3U) {
-        const core::u32 a = mesh.indices[triangle];
-        const core::u32 b = mesh.indices[triangle + 1U];
-        const core::u32 c = mesh.indices[triangle + 2U];
-        const core::u8 shared = static_cast<core::u8>(
-            classified[a].outside & classified[b].outside
-            & classified[c].outside);
-        if (shared != 0U) {
-            continue;
-        }
-        for (const core::u32 index : {a, b, c}) {
-            const ProjectionMeshVertex& vertex = mesh.vertices[index];
-            covered.push_back(scene::CanvasProjection{
-                vertex.destination_u * static_cast<float>(destination.width),
-                vertex.destination_v * static_cast<float>(destination.height),
-                0.0F,
-                true,
-            });
-        }
-    }
-    return covered.empty()
-        ? scene::InnerFrustumRegion{}
-        : scene::inner_frustum_rect(destination, covered, margin_px);
+} // namespace
+
+scene::InnerFrustumRegion inner_frustum_region(
+    const ProjectionMesh& mesh,
+    scene::Canvas destination,
+    const scene::Camera& tracked,
+    float aspect_ratio,
+    core::u32 margin_px) noexcept {
+    return mesh_inner_frustum_region_aspect(mesh, nullptr, destination,
+                                            tracked, aspect_ratio, margin_px);
+}
+
+scene::InnerFrustumRegion inner_frustum_region(
+    const ProjectionMesh& mesh,
+    scene::Canvas destination,
+    const scene::Camera& tracked,
+    const scene::LensProfile& profile,
+    const scene::LensEncoders& encoders,
+    core::u32 margin_px) noexcept {
+    return mesh_inner_frustum_region_lens(mesh, nullptr, destination, tracked,
+                                          profile, encoders, margin_px);
+}
+
+scene::InnerFrustumRegion inner_frustum_region(
+    const ProjectionMesh& local_mesh,
+    const ProjectionMeshPlacement& placement,
+    scene::Canvas destination,
+    const scene::Camera& tracked,
+    float aspect_ratio,
+    core::u32 margin_px) noexcept {
+    return mesh_inner_frustum_region_aspect(local_mesh, &placement,
+                                            destination, tracked,
+                                            aspect_ratio, margin_px);
+}
+
+scene::InnerFrustumRegion inner_frustum_region(
+    const ProjectionMesh& local_mesh,
+    const ProjectionMeshPlacement& placement,
+    scene::Canvas destination,
+    const scene::Camera& tracked,
+    const scene::LensProfile& profile,
+    const scene::LensEncoders& encoders,
+    core::u32 margin_px) noexcept {
+    return mesh_inner_frustum_region_lens(local_mesh, &placement, destination,
+                                          tracked, profile, encoders,
+                                          margin_px);
 }
 
 bool valid(const ProjectionMesh& mesh) noexcept {
@@ -871,11 +925,18 @@ horizontal_arc_mesh(const PhysicalSurface& surface, float total_arc_turns,
 mesh_perspective_view_for_impl(
     const ProjectionMesh& mesh, scene::Vec3 eye, float near_plane,
     float far_plane, scene::Vec3 stage_up,
-    const ProjectionMeshPlacement* placement) noexcept {
+    const ProjectionMeshPlacement* placement,
+    const MeshDestinationWindow* window = nullptr) noexcept {
     using Result =
         core::Result<MeshPerspectiveView, PerspectiveMappingError>;
     if (!valid(mesh)) {
         return Result::failure(PerspectiveMappingError::InvalidMesh);
+    }
+    if (window != nullptr
+        && (!scene::valid(window->destination)
+            || window->region.width == 0U || window->region.height == 0U
+            || !scene::contains(window->destination, window->region))) {
+        return Result::failure(PerspectiveMappingError::RegionOutsideSurface);
     }
     MeshPlacementBasis placed{};
     if (placement != nullptr && !placement_basis(*placement, placed)) {
@@ -894,15 +955,118 @@ mesh_perspective_view_for_impl(
         return Result::failure(PerspectiveMappingError::InvalidClipRange);
     }
 
-    scene::Vec3 minimum = position_for(mesh.vertices[mesh.indices.front()]);
-    if (!finite(minimum)) {
-        return Result::failure(PerspectiveMappingError::InvalidMesh);
-    }
-    scene::Vec3 maximum = minimum;
-    for (const core::u32 index : mesh.indices) {
-        const scene::Vec3 position = position_for(mesh.vertices[index]);
+    // The points the view is fitted to, visited in one fixed order by every
+    // pass below. Without a window they are the indexed vertices, exactly as
+    // before windows existed. With one, each triangle is clipped to the window
+    // in destination pixels - UV0 and position are both affine across a
+    // triangle, so the clipped corners are the true wall points on the window's
+    // edges - and the surviving corners are visited instead. The rest of the
+    // surface, however far it wraps, has no say in the fit.
+    struct WindowPoint final {
+        scene::Vec3 position{};
+        float x{};
+        float y{};
+    };
+    using WindowPolygon = std::array<WindowPoint, 8U>;
+    const auto window_inside = [&](const WindowPoint& point,
+                                   std::size_t edge) noexcept {
+        const auto left = static_cast<float>(window->region.x);
+        const auto top = static_cast<float>(window->region.y);
+        const auto right = static_cast<float>(
+            static_cast<core::u64>(window->region.x) + window->region.width);
+        const auto bottom = static_cast<float>(
+            static_cast<core::u64>(window->region.y) + window->region.height);
+        switch (edge) {
+        case 0U:
+            return point.x - left;
+        case 1U:
+            return right - point.x;
+        case 2U:
+            return point.y - top;
+        default:
+            return bottom - point.y;
+        }
+    };
+    const auto visit = [&](auto&& each) noexcept -> bool {
+        if (window == nullptr) {
+            for (const core::u32 index : mesh.indices) {
+                if (!each(position_for(mesh.vertices[index]))) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        const auto width = static_cast<float>(window->destination.width);
+        const auto height = static_cast<float>(window->destination.height);
+        WindowPolygon polygon{};
+        WindowPolygon clipped{};
+        for (std::size_t triangle = 0U; triangle + 2U < mesh.indices.size();
+             triangle += 3U) {
+            for (std::size_t corner = 0U; corner < 3U; ++corner) {
+                const ProjectionMeshVertex& vertex =
+                    mesh.vertices[mesh.indices[triangle + corner]];
+                polygon[corner] = WindowPoint{position_for(vertex),
+                                              vertex.destination_u * width,
+                                              vertex.destination_v * height};
+            }
+            std::size_t count = 3U;
+            for (std::size_t edge = 0U; edge < 4U && count != 0U; ++edge) {
+                std::size_t kept = 0U;
+                for (std::size_t index = 0U; index < count; ++index) {
+                    const WindowPoint& from = polygon[index];
+                    const WindowPoint& to = polygon[(index + 1U) % count];
+                    const float from_inside = window_inside(from, edge);
+                    const float to_inside = window_inside(to, edge);
+                    // Strictly inside keeps a point; a triangle that only
+                    // touches the window's edge covers none of its pixels.
+                    if (from_inside > 0.0F) {
+                        clipped[kept++] = from;
+                    }
+                    if ((from_inside > 0.0F) != (to_inside > 0.0F)
+                        && from_inside != to_inside) {
+                        const float t =
+                            from_inside / (from_inside - to_inside);
+                        const auto lerp = [t](float a, float b) noexcept {
+                            return a + (b - a) * t;
+                        };
+                        clipped[kept++] = WindowPoint{
+                            scene::Vec3{lerp(from.position.x, to.position.x),
+                                        lerp(from.position.y, to.position.y),
+                                        lerp(from.position.z, to.position.z)},
+                            lerp(from.x, to.x), lerp(from.y, to.y)};
+                    }
+                }
+                polygon = clipped;
+                count = kept;
+            }
+            // Fewer than three corners is a sliver along an edge: no area of
+            // the window, nothing to fit.
+            if (count < 3U) {
+                continue;
+            }
+            for (std::size_t index = 0U; index < count; ++index) {
+                if (!each(polygon[index].position)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    bool any = false;
+    bool unusable = false;
+    scene::Vec3 minimum{};
+    scene::Vec3 maximum{};
+    static_cast<void>(visit([&](const scene::Vec3& position) noexcept {
         if (!finite(position)) {
-            return Result::failure(PerspectiveMappingError::InvalidMesh);
+            unusable = true;
+            return false;
+        }
+        if (!any) {
+            minimum = position;
+            maximum = position;
+            any = true;
+            return true;
         }
         minimum.x = std::min(minimum.x, position.x);
         minimum.y = std::min(minimum.y, position.y);
@@ -910,6 +1074,15 @@ mesh_perspective_view_for_impl(
         maximum.x = std::max(maximum.x, position.x);
         maximum.y = std::max(maximum.y, position.y);
         maximum.z = std::max(maximum.z, position.z);
+        return true;
+    }));
+    if (unusable) {
+        return Result::failure(PerspectiveMappingError::InvalidMesh);
+    }
+    if (!any) {
+        // No part of the surface lands in the window, so there is nothing to
+        // fit a view to.
+        return Result::failure(PerspectiveMappingError::DegenerateFrustum);
     }
     const scene::Vec3 centre = (minimum + maximum) * 0.5F;
     const scene::Vec3 to_centre = centre - eye;
@@ -924,22 +1097,18 @@ mesh_perspective_view_for_impl(
     // vertices instead. Both are fixed-order sums, so every node derives the
     // same view.
     scene::Vec3 angular{};
-    for (const core::u32 index : mesh.indices) {
-        const scene::Vec3 to_vertex = position_for(mesh.vertices[index]) - eye;
+    static_cast<void>(visit([&](const scene::Vec3& position) noexcept {
+        const scene::Vec3 to_vertex = position - eye;
         const float distance = scene::length(to_vertex);
         if (distance > 1.0e-6F) {
             angular = angular + to_vertex * (1.0F / distance);
         }
-    }
-    const auto all_in_front = [&](scene::Vec3 direction) noexcept {
-        for (const core::u32 index : mesh.indices) {
-            const scene::Vec3 to_vertex =
-                position_for(mesh.vertices[index]) - eye;
-            if (!(scene::dot(to_vertex, direction) > 1.0e-6F)) {
-                return false;
-            }
-        }
         return true;
+    }));
+    const auto all_in_front = [&](scene::Vec3 direction) noexcept {
+        return visit([&](const scene::Vec3& position) noexcept {
+            return scene::dot(position - eye, direction) > 1.0e-6F;
+        });
     };
     scene::Vec3 forward = scene::normalize(to_centre);
     if (!all_in_front(forward) && finite(angular)
@@ -962,13 +1131,12 @@ mesh_perspective_view_for_impl(
     float right_edge = -std::numeric_limits<float>::infinity();
     float bottom = std::numeric_limits<float>::infinity();
     float top = -std::numeric_limits<float>::infinity();
-    for (const core::u32 index : mesh.indices) {
-        const scene::Vec3 position = position_for(mesh.vertices[index]);
+    const bool in_front = visit([&](const scene::Vec3& position) noexcept {
         const scene::Vec4 camera = scene::transform(
             view, scene::Vec4{position.x, position.y, position.z, 1.0F});
         const float depth = -camera.z;
         if (!finite(camera) || !(depth > 1.0e-6F)) {
-            return Result::failure(PerspectiveMappingError::MeshBehindEye);
+            return false;
         }
         const float scale = near_plane / depth;
         const float x = camera.x * scale;
@@ -977,6 +1145,10 @@ mesh_perspective_view_for_impl(
         right_edge = std::max(right_edge, x);
         bottom = std::min(bottom, y);
         top = std::max(top, y);
+        return true;
+    });
+    if (!in_front) {
+        return Result::failure(PerspectiveMappingError::MeshBehindEye);
     }
     if (!finite(left) || !finite(right_edge) || !finite(bottom)
         || !finite(top) || !(right_edge > left) || !(top > bottom)) {
@@ -1016,15 +1188,62 @@ mesh_perspective_view_for(const ProjectionMesh& local_mesh,
                                           far_plane, stage_up, &placement);
 }
 
+core::Result<MeshPerspectiveView, PerspectiveMappingError>
+mesh_perspective_view_for(const ProjectionMesh& mesh,
+                          const MeshDestinationWindow& window,
+                          scene::Vec3 eye, float near_plane, float far_plane,
+                          scene::Vec3 stage_up) noexcept {
+    return mesh_perspective_view_for_impl(mesh, eye, near_plane, far_plane,
+                                          stage_up, nullptr, &window);
+}
+
+core::Result<MeshPerspectiveView, PerspectiveMappingError>
+mesh_perspective_view_for(const ProjectionMesh& local_mesh,
+                          const ProjectionMeshPlacement& placement,
+                          const MeshDestinationWindow& window,
+                          scene::Vec3 eye, float near_plane, float far_plane,
+                          scene::Vec3 stage_up) noexcept {
+    return mesh_perspective_view_for_impl(local_mesh, eye, near_plane,
+                                          far_plane, stage_up, &placement,
+                                          &window);
+}
+
 [[nodiscard]] static core::Result<std::vector<MeshWarpVertex>,
                                   PerspectiveMappingError>
 mesh_warp_vertices_impl(const ProjectionMesh& mesh,
                         const MeshPerspectiveView& view,
-                        const ProjectionMeshPlacement* placement) noexcept {
+                        const ProjectionMeshPlacement* placement,
+                        const MeshDestinationWindow* window = nullptr) noexcept {
     using Result = core::Result<std::vector<MeshWarpVertex>,
                                 PerspectiveMappingError>;
     if (!valid(mesh)) {
         return Result::failure(PerspectiveMappingError::InvalidMesh);
+    }
+    if (window != nullptr
+        && (!scene::valid(window->destination)
+            || window->region.width == 0U || window->region.height == 0U
+            || !scene::contains(window->destination, window->region))) {
+        return Result::failure(PerspectiveMappingError::RegionOutsideSurface);
+    }
+    // Destination UV0 to connector clip space. Without a window UV0 spans the
+    // whole target; with one, the window's pixels do, and everything outside
+    // it falls beyond clip space where the rasterizer discards it. Fixed
+    // per-call constants, so every node maps a vertex through the same bits.
+    float scale_x = 1.0F;
+    float scale_y = 1.0F;
+    float offset_x = 0.0F;
+    float offset_y = 0.0F;
+    if (window != nullptr) {
+        const auto destination_width =
+            static_cast<float>(window->destination.width);
+        const auto destination_height =
+            static_cast<float>(window->destination.height);
+        const auto region_width = static_cast<float>(window->region.width);
+        const auto region_height = static_cast<float>(window->region.height);
+        scale_x = destination_width / region_width;
+        scale_y = destination_height / region_height;
+        offset_x = static_cast<float>(window->region.x) / region_width;
+        offset_y = static_cast<float>(window->region.y) / region_height;
     }
     MeshPlacementBasis placed{};
     if (placement != nullptr && !placement_basis(*placement, placed)) {
@@ -1051,9 +1270,16 @@ mesh_warp_vertices_impl(const ProjectionMesh& mesh,
             if (!finite(source)) {
                 return Result::failure(PerspectiveMappingError::InvalidMesh);
             }
+            // The unwindowed case keeps its original expression exactly, so
+            // the outer warp is bit-for-bit what it was before windows.
+            const float u = window != nullptr
+                ? vertex.destination_u * scale_x - offset_x
+                : vertex.destination_u;
+            const float v = window != nullptr
+                ? vertex.destination_v * scale_y - offset_y
+                : vertex.destination_v;
             resolved.push_back(MeshWarpVertex{
-                scene::Vec4{vertex.destination_u * 2.0F - 1.0F,
-                            1.0F - vertex.destination_v * 2.0F, 0.0F, 1.0F},
+                scene::Vec4{u * 2.0F - 1.0F, 1.0F - v * 2.0F, 0.0F, 1.0F},
                 source,
             });
         }
@@ -1074,6 +1300,14 @@ mesh_warp_vertices(const ProjectionMesh& local_mesh,
                    const MeshPerspectiveView& view,
                    const ProjectionMeshPlacement& placement) noexcept {
     return mesh_warp_vertices_impl(local_mesh, view, &placement);
+}
+
+core::Result<std::vector<MeshWarpVertex>, PerspectiveMappingError>
+mesh_warp_vertices(const ProjectionMesh& mesh,
+                   const MeshPerspectiveView& view,
+                   const ProjectionMeshPlacement* placement,
+                   const MeshDestinationWindow& window) noexcept {
+    return mesh_warp_vertices_impl(mesh, view, placement, &window);
 }
 
 [[nodiscard]] static scene::CanvasProjection project_through_mesh_warp_impl(

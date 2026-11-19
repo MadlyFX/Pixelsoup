@@ -203,6 +203,10 @@ struct OutputProjectionCache::AsyncState final
   struct MeshObservation final {
     std::shared_ptr<const ProjectionMeshKey> key;
     std::shared_ptr<const output::ProjectionMesh> mesh;
+    // The complete surface mesh this key's region belongs to, in the same
+    // coordinates as `mesh`. Identical to `mesh` for an imported surface and
+    // for an arc whose region is its whole raster.
+    std::shared_ptr<const output::ProjectionMesh> complete;
   };
 
   struct Executor final {
@@ -351,6 +355,7 @@ struct OutputProjectionCache::AsyncState final
       }
       observed_key_ = key_;
       observed_mesh_ = mesh_;
+      observed_complete_ = complete_mesh_;
     }
 
     // The observation is render-thread-owned. If publication holds the state
@@ -360,24 +365,29 @@ struct OutputProjectionCache::AsyncState final
       // If the try-lock lost to publication, retain the requested replacement
       // key with a null answer. A command-fenced caller must freeze that cold
       // observation instead of retrying and adopting midway through recording.
-      return MeshObservation{std::move(replacement), {}};
+      return MeshObservation{std::move(replacement), {}, {}};
     }
-    return MeshObservation{observed_key_, observed_mesh_};
+    return MeshObservation{observed_key_, observed_mesh_, observed_complete_};
   }
 
   [[nodiscard]] std::shared_ptr<const output::ProjectionMesh>
   resolve_mesh(const output::OutputMap &map,
-               const output::ResolvedProjectionSurface &surface, core::u64 requested_generation = 0U) noexcept {
+               const output::ResolvedProjectionSurface &surface, core::u64 requested_generation = 0U,
+               std::shared_ptr<const output::ProjectionMesh> *complete = nullptr) noexcept {
     const MeshObservation observed = observe_mesh(map, surface, requested_generation);
-    return observed.key != nullptr && observed.key->matches(map, surface, requested_generation)
-               ? observed.mesh
-               : nullptr;
+    const bool matched = observed.key != nullptr &&
+                         observed.key->matches(map, surface, requested_generation);
+    if (complete != nullptr) {
+      *complete = matched ? observed.complete : nullptr;
+    }
+    return matched ? observed.mesh : nullptr;
   }
 
   void reconcile_recording() noexcept {
     if (!recording_) {
       recording_key_.reset();
       recording_mesh_.reset();
+      recording_complete_.reset();
       return;
     }
     if (recording_.outcome() == rhi::CommandRecordingOutcome::Pending) {
@@ -386,6 +396,7 @@ struct OutputProjectionCache::AsyncState final
     recording_ = {};
     recording_key_.reset();
     recording_mesh_.reset();
+    recording_complete_.reset();
   }
 
   [[nodiscard]] bool recording_pending() const noexcept {
@@ -395,48 +406,61 @@ struct OutputProjectionCache::AsyncState final
 
   [[nodiscard]] std::shared_ptr<const output::ProjectionMesh>
   resolve_mesh(rhi::CommandList &commands, const output::OutputMap &map,
-               const output::ResolvedProjectionSurface &surface, core::u64 requested_generation = 0U) noexcept {
+               const output::ResolvedProjectionSurface &surface, core::u64 requested_generation = 0U,
+               std::shared_ptr<const output::ProjectionMesh> *complete = nullptr) noexcept {
+    // Every answer below hands back the complete mesh frozen beside the region
+    // mesh it returns, so a plate and the wall under it always come from the
+    // same observation.
+    const auto answer =
+        [complete](bool matched,
+                   const std::shared_ptr<const output::ProjectionMesh> &mesh,
+                   const std::shared_ptr<const output::ProjectionMesh> &whole)
+        -> std::shared_ptr<const output::ProjectionMesh> {
+      if (complete != nullptr) {
+        *complete = matched ? whole : nullptr;
+      }
+      return matched ? mesh : nullptr;
+    };
     reconcile_recording();
     const rhi::CommandRecordingToken current = commands.recording_token();
 
     if (recording_pending()) {
       if (current && current.same_recording(recording_)) {
-        return recording_key_ != nullptr &&
-                       recording_key_->matches(map, surface, requested_generation)
-                   ? recording_mesh_
-                   : nullptr;
+        return answer(recording_key_ != nullptr &&
+                          recording_key_->matches(map, surface, requested_generation),
+                      recording_mesh_, recording_complete_);
       }
       if (!current) {
         // Ledger exhaustion is permanently latched by CommandList. Hold this
         // slot's exact frozen answer; never retry/adopt midway through it.
-        return recording_key_ != nullptr &&
-                       recording_key_->matches(map, surface, requested_generation)
-                   ? recording_mesh_
-                   : nullptr;
+        return answer(recording_key_ != nullptr &&
+                          recording_key_->matches(map, surface, requested_generation),
+                      recording_mesh_, recording_complete_);
       }
       // Two live outer recordings may not share one mutable observation slot.
       // The caller refuses this recording and can retry after the owner ends.
       static_cast<void>(core::report_idle_once(
           "imported projection surface",
           "an earlier frame's recording still holds this surface's mesh slot"));
-      return {};
+      return answer(false, {}, {});
     }
 
     if (!current) {
       // No transaction identity means no admission or publication adoption.
       // The render-thread-owned observation is the only safe stale answer.
-      return observed_key_ != nullptr && observed_key_->matches(map, surface, requested_generation)
-                 ? observed_mesh_
-                 : nullptr;
+      return answer(observed_key_ != nullptr &&
+                        observed_key_->matches(map, surface, requested_generation),
+                    observed_mesh_, observed_complete_);
     }
 
     MeshObservation observed = observe_mesh(map, surface, requested_generation);
     recording_ = current;
     recording_key_ = std::move(observed.key);
     recording_mesh_ = std::move(observed.mesh);
-    return recording_key_ != nullptr && recording_key_->matches(map, surface, requested_generation)
-               ? recording_mesh_
-               : nullptr;
+    recording_complete_ = std::move(observed.complete);
+    return answer(recording_key_ != nullptr &&
+                      recording_key_->matches(map, surface, requested_generation),
+                  recording_mesh_, recording_complete_);
   }
 
   [[nodiscard]] bool refresh_imported_mesh() noexcept {
@@ -487,12 +511,15 @@ struct OutputProjectionCache::AsyncState final
     generation_ = next_generation(generation_);
     key_.reset();
     mesh_.reset();
+    complete_mesh_.reset();
     phase_ = ProjectionMeshPhase::Empty;
     observed_key_.reset();
     observed_mesh_.reset();
+    observed_complete_.reset();
     recording_ = {};
     recording_key_.reset();
     recording_mesh_.reset();
+    recording_complete_.reset();
     next_gate_.reset();
     publish_status_locked();
     changed_.notify_all();
@@ -540,6 +567,7 @@ private:
     generation_ = next_generation(generation_);
     key_ = std::move(replacement);
     mesh_.reset();
+    complete_mesh_.reset();
 
     if (key_->surface.shape == output::ProjectionSurfaceShape::HorizontalArc) {
       phase_ = ProjectionMeshPhase::AwaitingAdmission;
@@ -552,11 +580,27 @@ private:
           mesh_ = std::make_shared<const output::ProjectionMesh>(
               std::move(built).value());
           phase_ = ProjectionMeshPhase::Ready;
+          // The complete surface, which a tracked plate's rectangle is
+          // derived over so every node agrees on it. The same procedural
+          // build as the region's, once per authored key - never per frame.
+          // A region covering the whole raster already is that mesh.
+          if (key_->region == scene::whole(key_->surface.geometry.raster)) {
+            complete_mesh_ = mesh_;
+          } else {
+            auto whole = output::horizontal_arc_mesh(
+                key_->surface.geometry, key_->surface.horizontal_arc_turns,
+                key_->surface.mesh_columns);
+            if (whole.has_value()) {
+              complete_mesh_ = std::make_shared<const output::ProjectionMesh>(
+                  std::move(whole).value());
+            }
+          }
         } else {
           phase_ = ProjectionMeshPhase::Failed;
         }
       } catch (...) {
         mesh_.reset();
+        complete_mesh_.reset();
         phase_ = ProjectionMeshPhase::Failed;
       }
       publish_status_locked();
@@ -609,6 +653,9 @@ private:
     }
     if (loaded && completed_mesh != nullptr) {
       mesh_ = std::move(completed_mesh);
+      // One imported file is one complete surface patch: its UV0 owns the
+      // surface's whole raster (see feed_map_model's resolution).
+      complete_mesh_ = mesh_;
       phase_ = ProjectionMeshPhase::Ready;
     } else {
       // A same-key explicit refresh keeps the previously ready mesh. Its
@@ -632,6 +679,7 @@ private:
   std::condition_variable changed_;
   std::shared_ptr<const ProjectionMeshKey> key_;
   std::shared_ptr<const output::ProjectionMesh> mesh_;
+  std::shared_ptr<const output::ProjectionMesh> complete_mesh_;
   ProjectionMeshPhase phase_{ProjectionMeshPhase::Empty};
   core::u64 generation_{};
   std::atomic<core::u64> status_{};
@@ -641,12 +689,14 @@ private:
   // worker publication never mutate this retained observation.
   std::shared_ptr<const ProjectionMeshKey> observed_key_;
   std::shared_ptr<const output::ProjectionMesh> observed_mesh_;
+  std::shared_ptr<const output::ProjectionMesh> observed_complete_;
 
   // Render-thread-owned snapshot for one outer command recording. Worker
   // publication changes mesh_, never these fields.
   rhi::CommandRecordingToken recording_;
   std::shared_ptr<const ProjectionMeshKey> recording_key_;
   std::shared_ptr<const output::ProjectionMesh> recording_mesh_;
+  std::shared_ptr<const output::ProjectionMesh> recording_complete_;
 };
 
 const output::ProjectionMesh *
@@ -694,7 +744,8 @@ bool OutputProjectionCache::try_reset() noexcept {
 }
 
 std::shared_ptr<const output::ProjectionMesh>
-OutputProjectionCache::resolve_mesh(const output::OutputMap &map) noexcept {
+OutputProjectionCache::resolve_mesh(const output::OutputMap &map,
+                                    core::u64 asset_generation) noexcept {
   if (state_ == nullptr ||
       map.projection != output::FeedProjection::PlanarSurface ||
       !map.resolved_surface.has_value()) {
@@ -704,14 +755,15 @@ OutputProjectionCache::resolve_mesh(const output::OutputMap &map) noexcept {
   if (surface.shape == output::ProjectionSurfaceShape::Planar) {
     return {};
   }
-  return state_->resolve_mesh(map, surface);
+  return state_->resolve_mesh(map, surface, asset_generation);
 }
 
 namespace {
 
 [[nodiscard]] std::optional<MappedProjection> build_mapped_projection(
     const scene::Scene &frame, const output::OutputMap &map,
-    std::shared_ptr<const output::ProjectionMesh> mesh) noexcept {
+    std::shared_ptr<const output::ProjectionMesh> mesh,
+    std::shared_ptr<const output::ProjectionMesh> complete) noexcept {
   if (map.projection != output::FeedProjection::PlanarSurface ||
       !map.resolved_surface.has_value()) {
     return std::nullopt;
@@ -752,6 +804,7 @@ namespace {
         SceneRenderView{built.value().matrices, built.value().eye,
                         built.value().forward, map.node.value()},
         {},
+        {},
         std::nullopt};
     projection.surface_up = geometry.up;
     return projection;
@@ -780,6 +833,7 @@ namespace {
         SceneRenderView{mesh_view.value().matrices, mesh_view.value().eye,
                         mesh_view.value().forward, map.node.value()};
     projection.retained_mesh = std::move(mesh);
+    projection.surface_mesh = std::move(complete);
     projection.mesh_view.emplace(std::move(mesh_view).value());
     projection.mesh_placement = placement;
     projection.surface_up = geometry.up;
@@ -832,6 +886,7 @@ namespace {
         SceneRenderView{mesh_view.value().matrices, mesh_view.value().eye,
                         mesh_view.value().forward, map.node.value()};
     projection.retained_mesh = std::move(mesh);
+    projection.surface_mesh = std::move(complete);
     projection.mesh_view.emplace(std::move(mesh_view).value());
     projection.mesh_placement.emplace(placement);
     projection.surface_up = geometry.up;
@@ -852,11 +907,13 @@ OutputProjectionCache::resolve(const scene::Scene &frame,
   }
   const output::ResolvedProjectionSurface &surface = *map.resolved_surface;
   std::shared_ptr<const output::ProjectionMesh> mesh;
+  std::shared_ptr<const output::ProjectionMesh> complete;
   if (surface.shape != output::ProjectionSurfaceShape::Planar) {
     if (state_ == nullptr) return std::nullopt;
-    mesh = state_->resolve_mesh(map, surface, scene::asset_generation_key(frame));
+    mesh = state_->resolve_mesh(map, surface, scene::asset_generation_key(frame),
+                                &complete);
   }
-  return build_mapped_projection(frame, map, std::move(mesh));
+  return build_mapped_projection(frame, map, std::move(mesh), std::move(complete));
 }
 
 std::optional<MappedProjection> OutputProjectionCache::resolve(
@@ -868,13 +925,15 @@ std::optional<MappedProjection> OutputProjectionCache::resolve(
   }
   const output::ResolvedProjectionSurface &surface = *map.resolved_surface;
   std::shared_ptr<const output::ProjectionMesh> mesh;
+  std::shared_ptr<const output::ProjectionMesh> complete;
   if (surface.shape != output::ProjectionSurfaceShape::Planar) {
     if (state_ == nullptr) {
       return std::nullopt;
     }
-    mesh = state_->resolve_mesh(commands, map, surface, scene::asset_generation_key(frame));
+    mesh = state_->resolve_mesh(commands, map, surface,
+                                scene::asset_generation_key(frame), &complete);
   }
-  return build_mapped_projection(frame, map, std::move(mesh));
+  return build_mapped_projection(frame, map, std::move(mesh), std::move(complete));
 }
 
 void OutputProjectionCacheRegistry::prepare_recording(
@@ -1134,7 +1193,8 @@ const rhi::Texture *record_output_mapped_scene_impl(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
     ProjectionCaches &projection_cache, rhi::CommandList &commands,
     const scene::Scene &frame, const output::OutputMap &map,
-    bool &mapping_unavailable, MediaCache *shared_media_cache) noexcept {
+    bool &mapping_unavailable, MediaCache *shared_media_cache,
+    MappedProjection *used) noexcept {
   if (map.projection == output::FeedProjection::CanvasSlice) {
     return record_scene(executor, commands, frame, map.source,
                         shared_media_cache);
@@ -1143,6 +1203,9 @@ const rhi::Texture *record_output_mapped_scene_impl(
   if (!projection.has_value()) {
     mapping_unavailable = true;
     return nullptr;
+  }
+  if (used != nullptr) {
+    *used = *projection;
   }
   const auto rendered =
       executor.execute(commands, frame, projection->render_view,
@@ -1161,7 +1224,7 @@ const rhi::Texture *record_output_mapped_scene_impl(
     ProjectionCaches &projection_cache, rhi::CommandList &commands,
     const compositor::CompositorGraph &graph, const scene::Scene &frame,
     const output::OutputMap &map, bool &mapping_unavailable,
-    MediaCache *shared_media_cache) noexcept {
+    MediaCache *shared_media_cache, MappedProjection *used) noexcept {
   if (map.projection == output::FeedProjection::CanvasSlice) {
     return record_scene(executor, commands, graph, frame, map.source,
                         shared_media_cache);
@@ -1170,6 +1233,9 @@ const rhi::Texture *record_output_mapped_scene_impl(
   if (!projection.has_value()) {
     mapping_unavailable = true;
     return nullptr;
+  }
+  if (used != nullptr) {
+    *used = *projection;
   }
   const auto finish = [&](const auto &rendered) -> const rhi::Texture * {
     if (!rendered) {
@@ -1206,10 +1272,11 @@ const rhi::Texture *record_output_mapped_scene(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
     OutputProjectionCache &projection_cache, rhi::CommandList &commands,
     const scene::Scene &frame, const output::OutputMap &map,
-    bool &mapping_unavailable, MediaCache *shared_media_cache) noexcept {
+    bool &mapping_unavailable, MediaCache *shared_media_cache,
+    MappedProjection *used) noexcept {
   return record_output_mapped_scene_impl(
       executor, mesh_warp, projection_cache, commands, frame, map,
-      mapping_unavailable, shared_media_cache);
+      mapping_unavailable, shared_media_cache, used);
 }
 
 const rhi::Texture *record_output_mapped_scene(
@@ -1217,10 +1284,10 @@ const rhi::Texture *record_output_mapped_scene(
     OutputProjectionCacheRegistry &projection_caches,
     rhi::CommandList &commands, const scene::Scene &frame,
     const output::OutputMap &map, bool &mapping_unavailable,
-    MediaCache *shared_media_cache) noexcept {
+    MediaCache *shared_media_cache, MappedProjection *used) noexcept {
   return record_output_mapped_scene_impl(
       executor, mesh_warp, projection_caches, commands, frame, map,
-      mapping_unavailable, shared_media_cache);
+      mapping_unavailable, shared_media_cache, used);
 }
 
 const rhi::Texture *record_output_mapped_scene(
@@ -1228,10 +1295,10 @@ const rhi::Texture *record_output_mapped_scene(
     OutputProjectionCache &projection_cache, rhi::CommandList &commands,
     const compositor::CompositorGraph &graph, const scene::Scene &frame,
     const output::OutputMap &map, bool &mapping_unavailable,
-    MediaCache *shared_media_cache) noexcept {
+    MediaCache *shared_media_cache, MappedProjection *used) noexcept {
   return record_output_mapped_scene_impl(
       executor, mesh_warp, projection_cache, commands, graph, frame, map,
-      mapping_unavailable, shared_media_cache);
+      mapping_unavailable, shared_media_cache, used);
 }
 
 const rhi::Texture *record_output_mapped_scene(
@@ -1240,10 +1307,10 @@ const rhi::Texture *record_output_mapped_scene(
     rhi::CommandList &commands,
     const compositor::CompositorGraph &graph, const scene::Scene &frame,
     const output::OutputMap &map, bool &mapping_unavailable,
-    MediaCache *shared_media_cache) noexcept {
+    MediaCache *shared_media_cache, MappedProjection *used) noexcept {
   return record_output_mapped_scene_impl(
       executor, mesh_warp, projection_caches, commands, graph, frame, map,
-      mapping_unavailable, shared_media_cache);
+      mapping_unavailable, shared_media_cache, used);
 }
 
 } // namespace mediaserver::render

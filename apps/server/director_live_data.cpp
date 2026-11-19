@@ -1,6 +1,7 @@
 #include "director_live_data.hpp"
 
 #include <mediaserver/output/perspective_mapping.hpp>
+#include <mediaserver/render/icvfx.hpp>
 #include <mediaserver/scene/lens.hpp>
 
 #include <algorithm>
@@ -29,13 +30,85 @@ void inject_tracked_poses(scene::Scene &scene,
     }
 }
 
+DirectorSurfaceMeshes::Answer DirectorSurfaceMeshes::resolve(
+    const output::ProjectionSurface &surface,
+    const output::StagePlacement &stage, core::u64 asset_generation) {
+    Answer answer{};
+    if (surface.shape == output::ProjectionSurfaceShape::Planar ||
+        !surface.node) {
+        answer.missing = "the face has no surface mesh";
+        return answer;
+    }
+    Entry *entry = nullptr;
+    for (Entry &candidate : entries_) {
+        if (candidate.surface == surface.node) {
+            entry = &candidate;
+            break;
+        }
+    }
+    if (entry == nullptr) {
+        entries_.push_back(
+            Entry{surface.node, std::make_unique<render::OutputProjectionCache>()});
+        entry = &entries_.back();
+    }
+    // The face as a node would see it through an output that owns its whole
+    // raster - the resolution feed_map_model gives every imported patch.
+    output::OutputMap map{};
+    map.node = surface.node;
+    map.projection = output::FeedProjection::PlanarSurface;
+    map.surface = surface.node;
+    map.source = scene::whole(surface.geometry.raster);
+    map.resolved_surface = output::ResolvedProjectionSurface{
+        surface.geometry,         surface.shape,
+        surface.horizontal_arc_turns, surface.mesh_columns,
+        surface.mesh_source,      surface.mesh_scale};
+    map.resolved_surface->mesh_asset = surface.mesh_asset;
+    map.resolved_surface->color = surface.color;
+    map.resolved_surface->stage = stage;
+    answer.mesh = entry->cache->resolve_mesh(map, asset_generation);
+    if (answer.mesh == nullptr) {
+        const render::OutputProjectionCacheStatus status =
+            entry->cache->status();
+        const bool imported =
+            surface.shape == output::ProjectionSurfaceShape::ImportedMesh;
+        if (status.state == render::OutputProjectionCacheState::Failed) {
+            answer.missing =
+                imported ? "the Director could not load this wall's UV mesh"
+                         : "the Director could not build this wall's arc mesh";
+        } else {
+            answer.missing =
+                imported ? "the Director is still loading this wall's UV mesh"
+                         : "the Director has not built this wall's arc mesh yet";
+        }
+        return answer;
+    }
+    if (surface.shape == output::ProjectionSurfaceShape::ImportedMesh) {
+        answer.placement =
+            output::ProjectionMeshPlacement{surface.geometry, surface.mesh_scale};
+    }
+    return answer;
+}
+
+void DirectorSurfaceMeshes::retain(const output::FeedMap &feed_map) {
+    std::erase_if(entries_, [&](const Entry &entry) {
+        const output::ProjectionSurface *const surface =
+            feed_map.surface_for(entry.surface);
+        return surface == nullptr ||
+               surface->shape == output::ProjectionSurfaceShape::Planar;
+    });
+}
+
 // The plate rectangle *and* whether it is the whole-wall fallback. Returning
 // only the rectangle threw the distinction away at the one place the operator
 // could have been told about it, and a clamped plate is not a detail: it costs
 // every pixel of the wall.
 [[nodiscard]] std::optional<scene::InnerFrustumRegion> director_inner_frustum_rect(
     const scene::Scene &frame, const scene::TrackedCameraView &view,
-    const output::FeedMap &feed_map) {
+    const output::FeedMap &feed_map, DirectorSurfaceMeshes *meshes,
+    DirectorPlateUnknown *unknown) {
+    if (unknown != nullptr) {
+        *unknown = DirectorPlateUnknown{};
+    }
     if (!view.drawing() || !frame.renderer_settings.icvfx.inner_frustum ||
         feed_map.stage.anchor == output::StageAnchor::Camera) {
         // Nodes draw no plate on a stage carried by the scene camera; see the
@@ -44,8 +117,38 @@ void inject_tracked_poses(scene::Scene &scene,
     }
     const scene::Camera tracked = scene::tracked_view_camera(
         view.authored, view.pose, view.encoders);
+    // The first face whose mesh the Director does not hold. Reported only if
+    // no face yields a rectangle: a camera that cannot be shown on a curved
+    // wall is not the same as a camera that sees no wall at all.
+    std::string_view missing;
+    const core::u32 margin = scene::clamped(view.icvfx).margin_px;
     for (const output::ProjectionSurface &surface : feed_map.surfaces) {
         if (surface.shape != output::ProjectionSurfaceShape::Planar) {
+            // The node's mesh path, over the same complete mesh.
+            if (meshes == nullptr) {
+                if (missing.empty()) {
+                    missing = "the Director does not hold curved or UV-mesh "
+                              "wall geometry on this path";
+                }
+                continue;
+            }
+            const DirectorSurfaceMeshes::Answer held = meshes->resolve(
+                surface, feed_map.stage, scene::asset_generation_key(frame));
+            if (held.mesh == nullptr) {
+                if (missing.empty()) {
+                    missing = held.missing;
+                }
+                continue;
+            }
+            const render::IcvfxSurfaceMesh complete{
+                held.mesh.get(),
+                held.placement.has_value() ? &*held.placement : nullptr};
+            const scene::InnerFrustumRegion region =
+                render::inner_frustum_mesh_region(
+                    complete, surface.geometry.raster, tracked, view, margin);
+            if (region.valid) {
+                return region;
+            }
             continue;
         }
         // The same lens the wall sizes its plate with. This readout is the
@@ -62,6 +165,9 @@ void inject_tracked_poses(scene::Scene &scene,
         if (region && region.value().valid) {
             return region.value();
         }
+    }
+    if (unknown != nullptr) {
+        unknown->reason = missing;
     }
     return std::nullopt;
 }
@@ -124,19 +230,42 @@ void inject_tracked_poses(scene::Scene &scene,
 
 [[nodiscard]] editor::LiveDataState director_live_data(
     const server::TrackerListenerPool &listeners,
+    std::span<const scene::TrackingSource> sources,
     const TrackedCameraChannels &channels,
     const server::DirectorPosePredictors &predictors,
     const scene::Scene &frame,
     const output::FeedMap &feed_map,
     core::u64 control_frame,
     core::u64 show_frame,
-    std::vector<editor::NodeTrackingObservation> nodes) {
+    std::vector<editor::NodeTrackingObservation> nodes,
+    DirectorSurfaceMeshes *surface_meshes) {
+    if (surface_meshes != nullptr) {
+        surface_meshes->retain(feed_map);
+    }
     editor::LiveDataState live{};
     live.nodes = std::move(nodes);
     live.icvfx = frame.renderer_settings.icvfx;
     live.canvas = frame.canvas;
     live.show_frame = show_frame;
     live.cameras.reserve(frame.tracked_cameras.size());
+    live.feeds.reserve(sources.size());
+    for (const scene::TrackingSource &source : sources) {
+        const server::TrackerListenerStatus status =
+            listeners.status(source.node);
+        editor::TrackingFeedObservation feed{};
+        feed.source = source.node;
+        feed.state = static_cast<editor::TrackingLinkState>(
+            static_cast<core::u8>(status.state));
+        feed.server_description = status.server_description;
+        feed.server_address = status.server_address;
+        feed.rigid_bodies.reserve(status.rigid_bodies.size());
+        for (const server::TrackerRigidBody &body : status.rigid_bodies) {
+            feed.rigid_bodies.push_back({body.id, body.name});
+        }
+        feed.accepted = status.accepted;
+        feed.last_error = status.last_error;
+        live.feeds.push_back(std::move(feed));
+    }
 
     for (const scene::TrackedCameraView &view : frame.tracked_cameras) {
         const server::TrackerListenerStatus status =
@@ -204,10 +333,13 @@ void inject_tracked_poses(scene::Scene &scene,
             observed.tracking.longest_hold =
                 entry->channel.counters().longest_hold;
         }
-        if (const auto region =
-                director_inner_frustum_rect(frame, view, feed_map)) {
+        DirectorPlateUnknown unknown{};
+        if (const auto region = director_inner_frustum_rect(
+                frame, view, feed_map, surface_meshes, &unknown)) {
             observed.inner_rect = region->rect;
             observed.inner_rect_clamped = region->clamped;
+        } else {
+            observed.inner_rect_unknown.assign(unknown.reason);
         }
         live.cameras.push_back(std::move(observed));
     }

@@ -55,13 +55,17 @@ public:
     // Records a black-cleared connector image. The source is the one
     // asymmetric scene render described by `view`; uncovered destination UVs
     // intentionally stay black. `placement` is required only when `mesh`
-    // retains imported file-local positions. False is a
-    // validation/capacity/backend error.
+    // retains imported file-local positions. `window`, when given, maps that
+    // rectangle of the mesh's destination raster onto the whole target instead
+    // of UV0 0..1 - how a tracked plate is warped into its own rectangle on a
+    // curved wall. False is a validation/capacity/backend error.
     [[nodiscard]] bool render(rhi::CommandList& commands,
                               const rhi::Texture& source,
                               const output::ProjectionMesh& mesh,
                               const output::MeshPerspectiveView& view,
                               const output::ProjectionMeshPlacement* placement =
+                                  nullptr,
+                              const output::MeshDestinationWindow* window =
                                   nullptr) noexcept;
 
 private:

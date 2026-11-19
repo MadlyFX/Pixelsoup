@@ -5205,7 +5205,9 @@ void tracking_sources_round_trip_and_are_clamped() {
                                 whole(schema::tracking_camera_id, 7),
                                 whole(schema::tracking_command_port, 1600),
                                 text(schema::tracking_multicast_group,
-                                     "239.255.42.100")}))
+                                     "239.255.42.100"),
+                                text(schema::tracking_server_address,
+                                     "192.168.25.60")}))
                      .set(node(2U, schema::tracking_source_type,
                                {text(schema::tracking_protocol,
                                      schema::natnet_protocol)}))));
@@ -5224,6 +5226,12 @@ void tracking_sources_round_trip_and_are_clamped() {
                 == "239.255.42.100");
     const scene::TrackingSourceSettings& defaults =
         motive_sources.back().settings;
+    MODEL_CHECK(motive.server_address
+                == (std::array<core::u8, 4U>{192U, 168U, 25U, 60U}));
+    // Silent about its port, a NatNet feed listens on Motive's data port,
+    // and with no server address it discovers the server from its frames.
+    MODEL_CHECK(defaults.port == 1'511U);
+    MODEL_CHECK(!scene::ipv4_address_set(defaults.server_address));
     MODEL_CHECK(defaults.command_port == 1'510U);
     MODEL_CHECK(defaults.multicast_group
                 == (std::array<core::u8, 4U>{239U, 255U, 42U, 99U}));
@@ -5242,6 +5250,19 @@ void tracking_sources_round_trip_and_are_clamped() {
                 && parsed == (std::array<core::u8, 4U>{224U, 0U, 0U, 1U}));
     MODEL_CHECK(!scene::parse_multicast_group("224.0.0.1 ", parsed));
     MODEL_CHECK(!scene::parse_multicast_group("224..0.1", parsed));
+    // A malformed server address is refused like a malformed group.
+    scene::SceneModel bad_server;
+    bad_server.reset(scoped(doc::Root{}.set(node(
+        1U, schema::tracking_source_type,
+        {text(schema::tracking_protocol, schema::natnet_protocol),
+         text(schema::tracking_server_address, "motive.local")}))));
+    MODEL_CHECK(bad_server.counters().rejected == 1U);
+    // FreeD has no default port: an unconfigured FreeD feed stays at zero.
+    scene::SceneModel freed_default;
+    freed_default.reset(scoped(doc::Root{}.set(node(
+        1U, schema::tracking_source_type,
+        {text(schema::tracking_protocol, schema::freed_protocol)}))));
+    MODEL_CHECK(freed_default.tracking_sources().front().settings.port == 0U);
 
     // A protocol this build cannot honour is refused rather than guessed at:
     // tracking with the wrong parser is worse than not tracking.

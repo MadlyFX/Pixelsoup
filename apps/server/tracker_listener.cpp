@@ -21,6 +21,7 @@
 #include <asio/ip/multicast.hpp>
 #include <asio/ip/udp.hpp>
 #include <asio/socket_base.hpp>
+#include <asio/steady_timer.hpp>
 
 namespace mediaserver::server {
 namespace {
@@ -37,11 +38,20 @@ namespace {
         : track::max_opentrackio_sample_bytes;
 }
 
-// While a NatNet server has not answered, one connect request goes out for
-// this many frames received. Motive streams at the camera rate, so this is a
-// retry every second or so against a command port that is blocked or busy,
-// rather than one per frame.
-constexpr core::u64 handshake_retry_frames = 60U;
+// How often the NatNet request timer fires. A connect or description request
+// is four bytes, so retrying this often against a server that has not
+// answered costs nothing and gets a feed live within half a second of Motive
+// starting.
+constexpr std::chrono::milliseconds natnet_tick_period{500};
+// Once described, the rigid body list is asked for again every this many
+// ticks, so a body added in Motive shows up without reconnecting.
+constexpr core::u32 natnet_definition_refresh_ticks = 10U;
+
+[[nodiscard]] asio::ip::address_v4 to_address(
+    const std::array<core::u8, 4U>& bytes) noexcept {
+    return asio::ip::address_v4{asio::ip::address_v4::bytes_type{
+        bytes[0], bytes[1], bytes[2], bytes[3]}};
+}
 
 [[nodiscard]] track::NatNetUpAxis natnet_up_axis(
     const scene::TrackerCalibration& calibration) noexcept {
@@ -85,9 +95,22 @@ struct TrackerListener::State final {
     // and a consumer still has to tell a repeated pose from a stalled sender.
     core::u64 received_ordinal{};
     // NatNet: the version the server answered with, and how many frames have
-    // arrived since the last connect request went out. Both under `mutex`.
+    // arrived without one. Both under `mutex`.
     std::optional<track::NatNetVersion> natnet_version;
     core::u64 frames_since_handshake_request{};
+    // NatNet: the server's address, authored or discovered, whether it has
+    // described its rigid bodies yet, and ticks since it last did. Under
+    // `mutex`.
+    std::optional<asio::ip::address_v4> natnet_server;
+    bool natnet_described{};
+    core::u32 natnet_ticks_since_description{};
+    // NatNet: the socket requests go out on, bound to an ephemeral port as
+    // the SDK's own client does. Replies come back to it. Owned like the data
+    // socket, and serviced by the same context.
+    std::optional<asio::ip::udp::socket> command_socket;
+    std::vector<std::byte> command_buffer;
+    asio::ip::udp::endpoint command_from;
+    std::optional<asio::steady_timer> timer;
 
     void record(const track::TrackedPose& pose,
                 scene::Turns field_of_view) {
@@ -184,6 +207,41 @@ bool TrackerListener::deliver(
             // to be two-way, which Waiting does not say.
             if (state_->status.state == TrackerListenerState::Waiting) {
                 state_->status.state = TrackerListenerState::Receiving;
+            }
+            return false;
+        }
+        if (*message == track::natnet_model_definitions_message) {
+            std::optional<track::NatNetVersion> version;
+            {
+                const std::lock_guard lock{state_->mutex};
+                version = state_->natnet_version;
+            }
+            if (!version) {
+                // Descriptions are versioned like frames; one that arrives
+                // before the server's version is not guessed at.
+                return false;
+            }
+            const auto definitions =
+                track::parse_natnet_model_definitions(datagram, *version);
+            if (!definitions) {
+                state_->refuse(definitions.error());
+                return false;
+            }
+            try {
+                std::vector<TrackerRigidBody> bodies;
+                bodies.reserve(definitions.value().rigid_body_count);
+                for (const track::NatNetRigidBodyDescription& body :
+                     definitions.value().bodies()) {
+                    bodies.push_back(
+                        TrackerRigidBody{body.id, std::string{body.name.data()}});
+                }
+                const std::lock_guard lock{state_->mutex};
+                state_->status.rigid_bodies = std::move(bodies);
+                state_->natnet_described = true;
+                state_->natnet_ticks_since_description = 0U;
+            } catch (const std::exception&) {
+                // The list is a convenience for picking a body; failing to
+                // allocate it leaves the previous one and costs no pose.
             }
             return false;
         }
@@ -295,7 +353,17 @@ bool TrackerListener::configure(
         // again rather than assumed from the last one.
         state_->natnet_version.reset();
         state_->frames_since_handshake_request = 0U;
+        state_->natnet_server.reset();
+        state_->natnet_described = false;
+        state_->natnet_ticks_since_description = 0U;
+        if (bounded.protocol == scene::TrackerProtocolKind::NatNet
+            && scene::ipv4_address_set(bounded.server_address)) {
+            state_->natnet_server = to_address(bounded.server_address);
+            state_->status.server_address =
+                scene::ipv4_address_text(bounded.server_address);
+        }
     }
+    const bool natnet = bounded.protocol == scene::TrackerProtocolKind::NatNet;
     if (!bounded.enabled) {
         return true;
     }
@@ -313,19 +381,56 @@ bool TrackerListener::configure(
         if (!error) {
             socket.bind(endpoint, error);
         }
-        if (!error && bounded.protocol == scene::TrackerProtocolKind::NatNet) {
+        if (!error && natnet) {
             // Motive streams to a multicast group rather than to this host,
-            // so the socket has to ask for the group's traffic. Joining on
-            // every interface is what the SDK's own client does.
-            const asio::ip::address_v4 group{
-                asio::ip::address_v4::bytes_type{
-                    bounded.multicast_group[0], bounded.multicast_group[1],
-                    bounded.multicast_group[2], bounded.multicast_group[3]}};
+            // so the socket has to ask for the group's traffic. Joined on the
+            // interface that routes to the authored server: a machine with a
+            // tracking network beside a control network otherwise joins on
+            // whichever the routing table prefers, and hears nothing.
+            const asio::ip::address_v4 group =
+                to_address(bounded.multicast_group);
+            asio::ip::address_v4 interface_address =
+                asio::ip::address_v4::any();
+            if (scene::ipv4_address_set(bounded.server_address)) {
+                // Connecting a UDP socket sends nothing; it only asks the
+                // stack which local address it would send from.
+                asio::ip::udp::socket probe{state_->context};
+                std::error_code probe_error;
+                probe.open(asio::ip::udp::v4(), probe_error);
+                if (!probe_error) {
+                    probe.connect(
+                        asio::ip::udp::endpoint{
+                            to_address(bounded.server_address),
+                            static_cast<unsigned short>(bounded.command_port)},
+                        probe_error);
+                }
+                if (!probe_error) {
+                    const auto local = probe.local_endpoint(probe_error);
+                    if (!probe_error && local.address().is_v4()
+                        && !local.address().is_loopback()) {
+                        interface_address = local.address().to_v4();
+                    }
+                }
+                probe.close(probe_error);
+            }
             if (!group.is_multicast()) {
                 error = std::make_error_code(std::errc::invalid_argument);
             } else {
-                socket.set_option(asio::ip::multicast::join_group(group),
-                                  error);
+                socket.set_option(
+                    asio::ip::multicast::join_group(group, interface_address),
+                    error);
+            }
+        }
+        std::optional<asio::ip::udp::socket> command;
+        if (!error && natnet) {
+            command.emplace(state_->context);
+            command->open(asio::ip::udp::v4(), error);
+            if (!error) {
+                command->bind(
+                    asio::ip::udp::endpoint{asio::ip::udp::v4(), 0U}, error);
+            }
+            if (!error) {
+                command->non_blocking(true, error);
             }
         }
         if (error) {
@@ -336,6 +441,10 @@ bool TrackerListener::configure(
         }
         socket.non_blocking(true, error);
         state_->socket.emplace(std::move(socket));
+        if (command) {
+            state_->command_socket.emplace(std::move(*command));
+            state_->timer.emplace(state_->context);
+        }
     } catch (const std::exception& failure) {
         const std::lock_guard lock{state_->mutex};
         state_->status.state = TrackerListenerState::BindFailed;
@@ -349,9 +458,17 @@ bool TrackerListener::configure(
     }
     state_->stop_requested.store(false, std::memory_order_release);
     state_->buffer.assign(max_datagram_bytes(bounded.protocol), std::byte{});
+    if (state_->command_socket) {
+        state_->command_buffer.assign(track::max_natnet_datagram_bytes,
+                                      std::byte{});
+    }
     // Armed before the thread starts, so the context has work the moment it
     // runs and `run()` cannot return immediately on an idle tracker.
     arm_receive();
+    arm_command_receive();
+    // An authored server is asked at once rather than half a second from now.
+    natnet_tick();
+    arm_timer();
     try {
         // The thread does nothing but service completions. A datagram wakes it
         // when it arrives rather than at the next tick of a poll, which is the
@@ -390,12 +507,7 @@ void TrackerListener::arm_receive() noexcept {
             if (!error) {
                 static_cast<void>(deliver(std::span<const std::byte>{
                     state_->buffer.data(), received}));
-                if (awaiting_handshake()) {
-                    // The frame could not be decoded without the server's
-                    // version. It came from the server, so its address is
-                    // where the connect request goes.
-                    request_handshake();
-                }
+                discover_server(state_->from.address());
             } else if (error == asio::error::message_size) {
                 // A datagram longer than the buffer. Windows reports this and
                 // hands back the truncated bytes while Linux truncates
@@ -411,40 +523,118 @@ void TrackerListener::arm_receive() noexcept {
         });
 }
 
-bool TrackerListener::awaiting_handshake() const noexcept {
-    const std::lock_guard lock{state_->mutex};
-    return state_->status.source.protocol == scene::TrackerProtocolKind::NatNet
-        && state_->status.source.enabled && !state_->natnet_version;
-}
-
-void TrackerListener::request_handshake() noexcept {
-    if (!state_->socket) {
+void TrackerListener::arm_command_receive() noexcept {
+    if (!state_->command_socket
+        || state_->stop_requested.load(std::memory_order_acquire)) {
         return;
     }
-    core::u16 command_port = 0U;
-    {
-        const std::lock_guard lock{state_->mutex};
-        // The first frame that needed a version asks at once; after that,
-        // one request per run of frames.
-        if (state_->frames_since_handshake_request != 1U
-            && state_->frames_since_handshake_request % handshake_retry_frames
-                != 1U) {
+    state_->command_socket->async_receive_from(
+        asio::buffer(state_->command_buffer.data(),
+                     state_->command_buffer.size()),
+        state_->command_from,
+        [this](const std::error_code& error, std::size_t received) {
+            if (state_->stop_requested.load(std::memory_order_acquire)
+                || error == asio::error::operation_aborted) {
+                return;
+            }
+            if (!error) {
+                static_cast<void>(deliver(std::span<const std::byte>{
+                    state_->command_buffer.data(), received}));
+            } else if (error == asio::error::message_size) {
+                state_->refuse(track::TrackerParseError::Truncated);
+            } else if (error != asio::error::connection_refused
+                       && error != asio::error::connection_reset) {
+                // Windows reports an ICMP port-unreachable from a request to
+                // a server that is not running as a reset on the next
+                // receive. That is the timer's retry to handle, not an error
+                // worth showing.
+                const std::lock_guard lock{state_->mutex};
+                state_->status.last_error = error.message();
+            }
+            arm_command_receive();
+        });
+}
+
+void TrackerListener::arm_timer() noexcept {
+    if (!state_->timer
+        || state_->stop_requested.load(std::memory_order_acquire)) {
+        return;
+    }
+    try {
+        state_->timer->expires_after(natnet_tick_period);
+    } catch (const std::exception&) {
+        return;
+    }
+    state_->timer->async_wait([this](const std::error_code& error) {
+        if (error
+            || state_->stop_requested.load(std::memory_order_acquire)) {
             return;
         }
+        natnet_tick();
+        arm_timer();
+    });
+}
+
+void TrackerListener::discover_server(
+    const asio::ip::address& from) noexcept {
+    if (!state_->command_socket || !from.is_v4()) {
+        return;
+    }
+    {
+        const std::lock_guard lock{state_->mutex};
+        if (state_->natnet_server) {
+            return;
+        }
+        state_->natnet_server = from.to_v4();
+        std::error_code ignored;
+        state_->status.server_address = from.to_string(ignored);
+    }
+    natnet_tick();
+}
+
+void TrackerListener::natnet_tick() noexcept {
+    if (!state_->command_socket) {
+        return;
+    }
+    asio::ip::address_v4 server;
+    core::u16 command_port = 0U;
+    bool connect = false;
+    {
+        const std::lock_guard lock{state_->mutex};
+        if (!state_->natnet_server) {
+            return;
+        }
+        server = *state_->natnet_server;
         command_port =
             static_cast<core::u16>(state_->status.source.command_port);
+        if (!state_->natnet_version) {
+            connect = true;
+        } else if (state_->natnet_described
+                   && ++state_->natnet_ticks_since_description
+                       < natnet_definition_refresh_ticks) {
+            return;
+        } else {
+            state_->natnet_ticks_since_description = 0U;
+        }
     }
-    const asio::ip::udp::endpoint server{state_->from.address(), command_port};
-    const auto request = track::natnet_connect_request();
+    const auto request = connect ? track::natnet_connect_request()
+                                 : track::natnet_model_definitions_request();
     std::error_code error;
     // The socket is non-blocking and a four-byte datagram either goes or
-    // does not; the reply, if any, arrives through the ordinary receive.
-    static_cast<void>(state_->socket->send_to(
-        asio::buffer(request.data(), request.size()), server, 0, error));
+    // does not; the reply, if any, arrives through the command receive.
+    static_cast<void>(state_->command_socket->send_to(
+        asio::buffer(request.data(), request.size()),
+        asio::ip::udp::endpoint{server, command_port}, 0, error));
     if (error) {
         const std::lock_guard lock{state_->mutex};
         state_->status.last_error = error.message();
     }
+}
+
+bool TrackerListener::awaiting_handshake() const noexcept {
+    const std::lock_guard lock{state_->mutex};
+    return state_->status.source.protocol == scene::TrackerProtocolKind::NatNet
+        && state_->status.source.enabled && !state_->natnet_version;
 }
 
 void TrackerListener::stop() noexcept {
@@ -461,6 +651,12 @@ void TrackerListener::stop() noexcept {
         state_->socket->close(ignored);
         state_->socket.reset();
     }
+    if (state_->command_socket) {
+        std::error_code ignored;
+        state_->command_socket->close(ignored);
+        state_->command_socket.reset();
+    }
+    state_->timer.reset();
     const std::lock_guard lock{state_->mutex};
     if (state_->status.state != TrackerListenerState::BindFailed) {
         state_->status.state = TrackerListenerState::Idle;

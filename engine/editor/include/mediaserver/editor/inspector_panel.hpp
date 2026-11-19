@@ -4,6 +4,7 @@
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/file_picker.hpp>
+#include <mediaserver/editor/live_data_panel.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/number_field.hpp>
 #include <mediaserver/gui/form_layout.hpp>
@@ -120,6 +121,9 @@ struct InspectorFrame final {
     // A camera asked for a new tracker feed. Feeds are project state, so the
     // shell authors one rather than the panel inventing a node id.
     bool add_tracking_source{};
+    // The camera's "Feed settings" button: open Project settings on its
+    // feeds, where a feed's address, ports and calibration live.
+    bool open_feed_settings{};
     // A field is mid-scrub or mid-type. The shell holds one gesture open for as
     // long as this is true, so a drag across a field is one undo step.
     bool editing{};
@@ -154,6 +158,13 @@ struct InspectorFrame final {
 class InspectorPanel final {
   public:
     explicit InspectorPanel(gui::UiId id) noexcept : id_(id) {}
+
+    // The feeds' live links, for a camera's rigid body picker. Valid until
+    // the next call; the shell sets it before each draw.
+    void set_tracking_feeds(
+        std::span<const TrackingFeedObservation> feeds) noexcept {
+        feeds_ = feeds;
+    }
 
     // Compatibility form for single-element callers and focused panel tests.
     // `also_selected` affects only the header because those callers have not
@@ -199,11 +210,6 @@ class InspectorPanel final {
     void draw_linked(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
     doc::NodeId ies_node_{};
     std::string ies_authored_, ies_draft_;
-    // The NatNet multicast group field, drafted the same way: the text the
-    // operator is typing, and the authored value it was opened from so a
-    // change from elsewhere replaces an untouched draft.
-    doc::NodeId multicast_node_{};
-    std::string multicast_authored_, multicast_draft_;
 
     enum class FieldDomain : core::u8 {
         Animation,
@@ -387,6 +393,7 @@ class InspectorPanel final {
     std::span<const scene::ChannelKeyframes> keyframes_{};
     std::span<const scene::EffectInstance> effects_{};
     std::span<const scene::TrackingSource> sources_{};
+    std::span<const TrackingFeedObservation> feeds_{};
     // The feed whose rows are being drawn, so a numeric edit lands on the feed
     // node while the selection stays the camera.
     doc::NodeId feed_{};

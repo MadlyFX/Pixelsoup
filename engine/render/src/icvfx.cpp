@@ -100,6 +100,24 @@ static_assert(sizeof(IcvfxUniform) == 48U);
     return uniform;
 }
 
+// The inner frustum's temporal-history identity. Stable by construction: it
+// names "this camera's plate in this scene", never the pose, so a moving or
+// zooming camera produces motion vectors rather than a history reset. Shared
+// by the flat-wall and mesh-wall views so a plate keeps its history whichever
+// wall shape carries it.
+[[nodiscard]] core::u64 plate_history_identity(
+    const scene::Scene& scene,
+    const scene::TrackedCameraView& tracked_view) noexcept {
+    core::u64 identity = 0x4943'5646'5849'4E4EULL; // "ICVFXINN"
+    identity ^= scene.id.value() + 0x9E37'79B9'7F4A'7C15ULL
+        + (identity << 6U) + (identity >> 2U);
+    // The tracked camera node, so each camera keeps its own temporal history
+    // and swapping which physical camera is live is the cut it actually is.
+    identity ^= tracked_view.camera.value() + 0x9E37'79B9'7F4A'7C15ULL
+        + (identity << 6U) + (identity >> 2U);
+    return identity;
+}
+
 // The same edge test the shader performs, and deliberately the same shape:
 // this is the seam two nodes have to agree on.
 [[nodiscard]] float edge_distance(float value, float low,
@@ -222,14 +240,7 @@ std::optional<SceneRenderView> inner_frustum_view(
     // Stable by construction. See the header: a pose-derived identity would
     // reset temporal history on every frame the camera moved, which is every
     // frame that matters.
-    core::u64 identity = 0x4943'5646'5849'4E4EULL; // "ICVFXINN"
-    identity ^= scene.id.value() + 0x9E37'79B9'7F4A'7C15ULL
-        + (identity << 6U) + (identity >> 2U);
-    // The tracked camera node, so each camera keeps its own temporal history
-    // and swapping which physical camera is live is the cut it actually is.
-    identity ^= tracked_view.camera.value() + 0x9E37'79B9'7F4A'7C15ULL
-        + (identity << 6U) + (identity >> 2U);
-    view.history_identity = identity;
+    view.history_identity = plate_history_identity(scene, tracked_view);
     view.clip_planes = SceneClipPlanes{tracked.near_plane, tracked.far_plane};
     view.guard_band = true;
     view.shutter_seconds = tracked.shutter_seconds;
@@ -253,6 +264,73 @@ std::optional<SceneRenderView> inner_frustum_view(
     lens.region_height_m = surface.height * static_cast<float>(plan.inner_rect.height) / surface.raster.height;
     view.plate_lens = lens;
     return view;
+}
+
+scene::InnerFrustumRegion inner_frustum_mesh_region(
+    const IcvfxSurfaceMesh& mesh, scene::Canvas raster,
+    const scene::Camera& tracked, const scene::TrackedCameraView& view,
+    core::u32 margin_px) noexcept {
+    if (mesh.mesh == nullptr) {
+        return scene::InnerFrustumRegion{};
+    }
+    if (view.authored.lens_profile.has_value()) {
+        return mesh.placement != nullptr
+            ? output::inner_frustum_region(*mesh.mesh, *mesh.placement, raster,
+                                           tracked, *view.authored.lens_profile,
+                                           view.encoders, margin_px)
+            : output::inner_frustum_region(*mesh.mesh, raster, tracked,
+                                           *view.authored.lens_profile,
+                                           view.encoders, margin_px);
+    }
+    return mesh.placement != nullptr
+        ? output::inner_frustum_region(*mesh.mesh, *mesh.placement, raster,
+                                       tracked, view.pose.aspect_ratio,
+                                       margin_px)
+        : output::inner_frustum_region(*mesh.mesh, raster, tracked,
+                                       view.pose.aspect_ratio, margin_px);
+}
+
+core::Result<IcvfxMeshView, output::PerspectiveMappingError>
+inner_frustum_mesh_view(const scene::Scene& scene,
+                        const scene::TrackedCameraView& tracked_view,
+                        const output::PhysicalSurface& surface,
+                        const IcvfxSurfaceMesh& mesh,
+                        const IcvfxPlan& plan) noexcept {
+    using MeshViewResult =
+        core::Result<IcvfxMeshView, output::PerspectiveMappingError>;
+    if (!plan.active || plan.skipped) {
+        return MeshViewResult::failure(output::PerspectiveMappingError::DegenerateFrustum);
+    }
+    if (mesh.mesh == nullptr) {
+        return MeshViewResult::failure(output::PerspectiveMappingError::InvalidMesh);
+    }
+    const scene::Camera tracked = tracked_stage_camera(tracked_view);
+    // Fitted to the wall under the plate only. The rest of a curved wall -
+    // possibly wrapping round behind the camera - has no say in this view,
+    // which is what keeps the plate dense and the fit possible at all.
+    const output::MeshDestinationWindow window{surface.raster, plan.inner_rect};
+    const auto fitted = mesh.placement != nullptr
+        ? output::mesh_perspective_view_for(*mesh.mesh, *mesh.placement,
+                                            window, tracked.eye,
+                                            tracked.near_plane,
+                                            tracked.far_plane)
+        : output::mesh_perspective_view_for(*mesh.mesh, window, tracked.eye,
+                                            tracked.near_plane,
+                                            tracked.far_plane);
+    if (!fitted) {
+        return MeshViewResult::failure(fitted.error());
+    }
+    IcvfxMeshView built{};
+    built.mesh_view = fitted.value();
+    built.render.matrices = built.mesh_view.matrices;
+    built.render.eye = built.mesh_view.eye;
+    built.render.forward = built.mesh_view.forward;
+    built.render.history_identity = plate_history_identity(scene, tracked_view);
+    built.render.clip_planes =
+        SceneClipPlanes{tracked.near_plane, tracked.far_plane};
+    built.render.guard_band = true;
+    built.render.shutter_seconds = tracked.shutter_seconds;
+    return MeshViewResult::success(built);
 }
 
 float icvfx_composite_weight(

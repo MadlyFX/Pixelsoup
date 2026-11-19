@@ -28,6 +28,14 @@ struct MappedProjection final {
   // command recording. A refresh can publish a replacement concurrently
   // without invalidating this frame's mesh pointer.
   std::shared_ptr<const output::ProjectionMesh> retained_mesh;
+  // The complete surface mesh `retained_mesh` is a region of, in the same
+  // coordinates and placed by the same `mesh_placement`. UV0 spans the
+  // surface's whole raster, which is what a tracked plate's rectangle has to
+  // be derived over for every node to agree on it. The same pointer as
+  // `retained_mesh` for an imported surface and for an arc output that owns
+  // its whole raster; null for a planar surface, or when an arc's complete
+  // build failed.
+  std::shared_ptr<const output::ProjectionMesh> surface_mesh;
   std::optional<output::MeshPerspectiveView> mesh_view;
   // Present only for imported geometry, whose retained vertices remain in
   // immutable file-local coordinates across live calibration animation.
@@ -126,8 +134,13 @@ public:
   // coordinates; callers apply the current surface calibration and mesh scale
   // when they need world positions. It has the same exact-source, nonblocking
   // observation/admission semantics as resolve(); planar mappings return null.
+  //
+  // `asset_generation` is `scene::asset_generation_key` of the frame the
+  // caller is showing, so an asset refresh re-reads an imported mesh here
+  // exactly as it does on the render path; zero for callers with no frame.
   [[nodiscard]] std::shared_ptr<const output::ProjectionMesh>
-  resolve_mesh(const output::OutputMap &map) noexcept;
+  resolve_mesh(const output::OutputMap &map,
+               core::u64 asset_generation = 0U) noexcept;
 
   // Operator/control-path request to re-read the currently authored imported
   // mesh. Failures otherwise remain sticky forever. This records one new
@@ -219,26 +232,34 @@ private:
 // Records the exact image before the final window-sized copy. Canvas feeds
 // render their authored crop; physical feeds render an asymmetric view and,
 // when needed, project it through the generated/imported UV mesh.
+//
+// `used`, when given, receives the projection this recording drew with -
+// the same frozen mesh observation, so a tracked plate composited over the
+// result is derived from exactly the geometry the wall under it was warped
+// through. Untouched for a canvas feed or when no projection resolved.
 [[nodiscard]] const rhi::Texture *record_output_mapped_scene(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
     OutputProjectionCache &projection_cache, rhi::CommandList &commands,
     const scene::Scene &frame, const output::OutputMap &map,
     bool &mapping_unavailable,
-    MediaCache *shared_media_cache = nullptr) noexcept;
+    MediaCache *shared_media_cache = nullptr,
+    MappedProjection *used = nullptr) noexcept;
 
 [[nodiscard]] const rhi::Texture *record_output_mapped_scene(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
     OutputProjectionCacheRegistry &projection_caches,
     rhi::CommandList &commands, const scene::Scene &frame,
     const output::OutputMap &map, bool &mapping_unavailable,
-    MediaCache *shared_media_cache = nullptr) noexcept;
+    MediaCache *shared_media_cache = nullptr,
+    MappedProjection *used = nullptr) noexcept;
 
 [[nodiscard]] const rhi::Texture *record_output_mapped_scene(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
     OutputProjectionCache &projection_cache, rhi::CommandList &commands,
     const compositor::CompositorGraph &graph, const scene::Scene &frame,
     const output::OutputMap &map, bool &mapping_unavailable,
-    MediaCache *shared_media_cache = nullptr) noexcept;
+    MediaCache *shared_media_cache = nullptr,
+    MappedProjection *used = nullptr) noexcept;
 
 [[nodiscard]] const rhi::Texture *record_output_mapped_scene(
     CompositorSceneExecutor &executor, ProjectionMeshWarp &mesh_warp,
@@ -246,6 +267,7 @@ private:
     rhi::CommandList &commands,
     const compositor::CompositorGraph &graph, const scene::Scene &frame,
     const output::OutputMap &map, bool &mapping_unavailable,
-    MediaCache *shared_media_cache = nullptr) noexcept;
+    MediaCache *shared_media_cache = nullptr,
+    MappedProjection *used = nullptr) noexcept;
 
 } // namespace mediaserver::render
