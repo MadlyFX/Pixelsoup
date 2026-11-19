@@ -78,10 +78,14 @@ using Property = std::pair<std::string, doc::PropertyValue>;
                 {text(schema::scene_name, "Mask Stage")});
 }
 
-[[nodiscard]] doc::Node object_node(core::u64 id, core::u64 scene_id) {
+// A flat layer: masks are drawn in a target's one flat surface, so the
+// ordinary mask target is a quad rather than the object default box.
+[[nodiscard]] doc::Node object_node(core::u64 id, core::u64 scene_id,
+                                    std::string_view primitive = "quad") {
     return node(id, schema::object_type,
                 {whole(schema::scene_id,
-                       static_cast<std::int64_t>(scene_id))});
+                       static_cast<std::int64_t>(scene_id)),
+                 text(schema::primitive, primitive)});
 }
 
 [[nodiscard]] doc::Node group_node(
@@ -1120,7 +1124,67 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 15U> cases{{
+// A box, sphere or imported model has no one flat surface for a mask's
+// coordinates to name; the renderer refuses any frame carrying such a program.
+// Evaluation drops it and reports it, so the picture still renders, and new
+// masks on such a target are refused at creation. A mask already authored on
+// one stays editable so it can be turned off or deleted.
+void masks_need_a_flat_surface_to_be_made_or_drawn() {
+    doc::Node model = node(
+        13U, schema::model_type,
+        {whole(schema::scene_id, 1), text(schema::source, "statue.glb")});
+    scene::SceneModel evaluated_model;
+    evaluated_model.reset(root_of({
+        stage_node(1U), object_node(10U, 1U, "plane"),
+        object_node(11U, 1U, "box"), object_node(12U, 1U, "sphere"), model,
+        mask_node(20U, 1U, 10U), mask_node(21U, 1U, 11U),
+        mask_node(22U, 1U, 12U), mask_node(23U, 1U, 13U)}));
+    const scene::Scene frame = evaluated(evaluated_model);
+    MASK_CHECK(frame.mask_programs.size() == 1U);
+    MASK_CHECK(frame.mask_programs.front().target == doc::NodeId{10U});
+    const auto diagnostics = evaluated_model.mask_diagnostics(doc::NodeId{1U});
+    MASK_CHECK(!has_diagnostic(diagnostics,
+                               scene::MaskDiagnosticKind::InvalidTarget,
+                               doc::NodeId{20U}));
+    for (const core::u64 mask : {21U, 22U, 23U}) {
+        MASK_CHECK(has_diagnostic(diagnostics,
+                                  scene::MaskDiagnosticKind::InvalidTarget,
+                                  doc::NodeId{mask}));
+    }
+    // Every authored mask is still listed for the Masks panel.
+    MASK_CHECK(evaluated_model.masks(doc::NodeId{1U}).size() == 4U);
+
+    const doc::Root base = root_of({
+        stage_node(1U), object_node(10U, 1U, "plane"),
+        object_node(11U, 1U, "box"), node(12U, schema::object_type,
+                                          {whole(schema::scene_id, 1)}),
+        model, mask_node(21U, 1U, 11U)});
+    scene::CreateMaskRequest request{};
+    request.scene = doc::NodeId{1U};
+    request.name = "Cut";
+    request.shape = scene::RectangleMaskShape{
+        scene::MaskBounds{0.25F, 0.25F, 0.75F, 0.75F}};
+    request.target = doc::NodeId{10U};
+    MASK_CHECK(scene::plan_create_mask(base, request, doc::NodeId{30U})
+                   .has_value());
+    // 11 is an authored box, 12 the default box, 13 an imported model.
+    for (const core::u64 target : {11U, 12U, 13U}) {
+        request.target = doc::NodeId{target};
+        const auto refused =
+            scene::plan_create_mask(base, request, doc::NodeId{30U});
+        MASK_CHECK(!refused.has_value());
+        MASK_CHECK(refused.error().code ==
+                   scene::MaskAuthoringErrorCode::UnsupportedTarget);
+    }
+    MASK_CHECK(scene::plan_set_mask_enabled(base, doc::NodeId{1U},
+                                            doc::NodeId{21U}, false)
+                   .has_value());
+    MASK_CHECK(scene::plan_delete_mask(base, doc::NodeId{1U},
+                                       doc::NodeId{21U})
+                   .has_value());
+}
+
+constexpr std::array<Case, 16U> cases{{
     {"typed shapes and finite values normalize at the model boundary",
      &typed_shapes_and_finite_values_normalize_at_the_model_boundary},
     {"programs use strict order and exact coverage folds",
@@ -1151,6 +1215,8 @@ constexpr std::array<Case, 15U> cases{{
      &one_mask_replacement_undoes_and_redoes_exactly},
     {"source plane and extent follow the drawable surface",
      &source_plane_and_extent_follow_the_drawable_surface},
+    {"masks need a flat surface to be made or drawn",
+     &masks_need_a_flat_surface_to_be_made_or_drawn},
 }};
 
 } // namespace

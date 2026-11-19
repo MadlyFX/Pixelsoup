@@ -240,17 +240,36 @@ MasksPanelFrame MasksPanel::draw(
   gui::Rect area = bounds;
   gui::Rect title = gui::cut_top(area, title_height);
   ctx.panel(title, ctx.theme().background);
+  // A target with nothing flat to cut says so where the space would be named,
+  // and the tooltip says what can be masked instead.
+  const bool no_surface = target.target && !target.flat_surface;
   const std::string_view title_text =
-      target.coordinate_space == scene::MaskCoordinateSpace::AuthoredCanvas
+      no_surface ? "NOTHING FLAT TO MASK"
+      : target.coordinate_space == scene::MaskCoordinateSpace::AuthoredCanvas
           ? "CANVAS SPACE"
           : "SOURCE SPACE";
-  ctx.label(gui::inset(title, text_inset, 0.0F), title_text, ctx.theme().text);
+  ctx.label(gui::inset(title, text_inset, 0.0F), title_text,
+            no_surface ? ctx.theme().warning : ctx.theme().text);
+  if (no_surface) {
+    // A group's masks still reach the renderer, which refuses the frame;
+    // any other target's are dropped and the layer renders uncut.
+    ctx.tooltip(title,
+                target.coordinate_space ==
+                        scene::MaskCoordinateSpace::AuthoredCanvas
+                    ? "Masks cut a flat layer: a clip, quad or plane. A mask "
+                      "here stops the render until it is turned off or "
+                      "deleted."
+                    : "Masks cut a flat layer: a clip, quad or plane. Masks "
+                      "already here are not drawn; turn them off or delete "
+                      "them.");
+  }
   ctx.panel(gui::cut_bottom(title, 1.0F), ctx.theme().divider);
 
   const gui::Rect tools = gui::cut_top(area, tools_height);
   ctx.panel(tools, ctx.theme().background);
   const gui::Rect tool_strip = gui::inset(tools, gap);
-  const bool can_create = authoring_enabled && target.scene && target.target;
+  const bool can_create = authoring_enabled && target.scene && target.target &&
+                          target.flat_surface;
   const auto tool_bounds = [&](std::size_t index) noexcept {
     return gui::column(tool_strip, index, 3U, gap);
   };

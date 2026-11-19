@@ -3271,18 +3271,29 @@ SceneModel::MaskProjection SceneModel::resolve_masks(
         }
         SceneId owner{};
         bool is_group{};
+        // A SourceLayer mask is drawn in its target's source plane, so only a
+        // target with one flat surface can carry it: a clip, a quad or a
+        // plane. A box, sphere, imported model or particle effect has no one
+        // surface for the mask's coordinates to name, and the renderer would
+        // refuse every frame it is on air. Such a mask is dropped here and
+        // reported, so the picture still renders and the Masks panel says why.
+        bool flat_surface{true};
         if (const auto* object =
                 std::get_if<ObjectEntry>(&found->second)) {
             owner = object->scene;
+            flat_surface = mask_source_plane(object->mesh.primitive).has_value();
         } else if (const auto* media =
                        std::get_if<MediaEntry>(&found->second)) {
             owner = media->scene;
+            flat_surface = mask_source_plane(media->mesh.primitive).has_value();
         } else if (const auto* model =
                        std::get_if<ModelEntry>(&found->second)) {
             owner = model->scene;
+            flat_surface = false;
         } else if (const auto* effect =
                        std::get_if<ParticleEffectEntry>(&found->second)) {
             owner = effect->scene;
+            flat_surface = false;
         } else if (const auto* group =
                        std::get_if<GroupEntry>(&found->second)) {
             owner = group->scene;
@@ -3294,6 +3305,11 @@ SceneModel::MaskProjection SceneModel::resolve_masks(
         }
         if (owner != scene_id) {
             diagnose(MaskDiagnosticKind::CrossSceneTarget, mask.source,
+                     mask.target);
+            return std::nullopt;
+        }
+        if (!flat_surface) {
+            diagnose(MaskDiagnosticKind::InvalidTarget, mask.source,
                      mask.target);
             return std::nullopt;
         }

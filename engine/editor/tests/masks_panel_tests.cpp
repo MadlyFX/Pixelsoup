@@ -190,6 +190,29 @@ void shape_tools_emit_explicit_target_space_and_familiar_modifiers() {
   MASKS_PANEL_CHECK(!harness.click(70.0F, 39.0F).intent.has_value());
 }
 
+// A box, sphere, model or group has no flat surface for a mask. No shape tool
+// makes one there, but masks already on it can still be turned off, so an
+// operator can clear what the render cannot draw.
+void a_target_without_a_flat_surface_makes_no_new_mask() {
+  Harness harness;
+  harness.target.flat_surface = false;
+  harness.selection.mask = {};
+  MASKS_PANEL_CHECK(!harness.click(70.0F, 39.0F).intent.has_value());
+  MASKS_PANEL_CHECK(!harness.click(210.0F, 39.0F).intent.has_value());
+  MASKS_PANEL_CHECK(!harness.click(350.0F, 39.0F).intent.has_value());
+
+  const auto toggled = harness.click(16.0F, 91.0F);
+  const auto *enabled = intent_as<editor::MaskEnabledIntent>(toggled);
+  MASKS_PANEL_CHECK(enabled != nullptr);
+  MASKS_PANEL_CHECK(enabled->mask == doc::NodeId{21U});
+  MASKS_PANEL_CHECK(!enabled->enabled);
+
+  harness.target.flat_surface = true;
+  MASKS_PANEL_CHECK(
+      intent_as<editor::MaskCreateIntent>(harness.click(70.0F, 39.0F)) !=
+      nullptr);
+}
+
 void rows_share_only_mask_selection_and_enabled_intents() {
   Harness harness;
   harness.selection.mask = {};
@@ -409,7 +432,9 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
+    {"a target without a flat surface makes no new mask",
+     &a_target_without_a_flat_surface_makes_no_new_mask},
     {"shape tools emit explicit target space and familiar modifiers",
      &shape_tools_emit_explicit_target_space_and_familiar_modifiers},
     {"rows share only mask selection and enabled intents",

@@ -1,5 +1,7 @@
 #include <mediaserver/scene/mask_authoring.hpp>
 
+#include <mediaserver/scene/geometry.hpp>
+#include <mediaserver/scene/scene.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
@@ -258,6 +260,36 @@ public:
                      owner);
     }
     return std::nullopt;
+}
+
+// A new mask needs a target it can be drawn on. A SourceLayer mask lives in
+// its target's one flat surface, and a group's canvas-space mask has no
+// retained composite to cut yet, so the renderer would refuse every frame
+// either is on air. Only creation is refused: masks already on such a target
+// stay editable, so an operator can still turn them off or delete them.
+[[nodiscard]] inline std::optional<MaskAuthoringError> validate_drawable_target(
+    const DocumentIndex& index, doc::NodeId target_id) noexcept {
+    const doc::Node* const target = index.node(target_id);
+    if (target == nullptr) {
+        return error(MaskAuthoringErrorCode::TargetMissing, target_id);
+    }
+    if (target->type == schema::media_type) {
+        return std::nullopt;
+    }
+    if (target->type == schema::object_type) {
+        Primitive primitive{Primitive::Box};
+        const auto* const held = find(target->properties, schema::primitive);
+        const auto* const name =
+            held == nullptr ? nullptr : std::get_if<std::string>(held);
+        if (held != nullptr &&
+            (name == nullptr || !parse_primitive(*name, primitive))) {
+            return error(MaskAuthoringErrorCode::UnsupportedTarget, target_id);
+        }
+        if (mask_source_plane(primitive).has_value()) {
+            return std::nullopt;
+        }
+    }
+    return error(MaskAuthoringErrorCode::UnsupportedTarget, target_id);
 }
 
 [[nodiscard]] inline bool valid_combine(MaskCombine combine) noexcept {
@@ -787,6 +819,10 @@ validate_mask_target(const DocumentIndex& index,
         }
         if (const auto problem = detail::validate_target(
                 index, request.scene, request.target)) {
+            return MaskAuthoringResult::failure(*problem);
+        }
+        if (const auto problem =
+                detail::validate_drawable_target(index, request.target)) {
             return MaskAuthoringResult::failure(*problem);
         }
         if (index.mask_count(request.scene) >= max_scene_masks) {

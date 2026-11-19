@@ -23,6 +23,10 @@ struct MasksPanelTarget final {
   doc::NodeId target{};
   scene::MaskCoordinateSpace coordinate_space{
       scene::MaskCoordinateSpace::SourceLayer};
+  // False when the target has no one flat surface to cut - a box, sphere,
+  // imported model, particle effect or group. Its existing masks still list,
+  // so they can be turned off or deleted, but no new one can be made.
+  bool flat_surface{true};
 
   bool operator==(const MasksPanelTarget &) const = default;
 };

@@ -462,9 +462,15 @@ A layer's mask is pinned to the layer's surface, not to the frame: it moves,
 turns and foreshortens with the layer, and the outline on Stage or Program
 Output is exactly where the render cuts. Feather and expansion are canvas
 pixels at the size the layer appears on the canvas. Only flat layers - quads,
-planes and media - have one surface for a mask to sit on; a mask on a volume or
-imported model reports `SOURCE MASK MAPPING UNAVAILABLE` on Stage, and the
-render refuses the frame rather than cut it somewhere arbitrary.
+planes and media - have one surface for a mask to sit on. With a box, sphere,
+imported model, particle effect or group selected, Masks reads `NOTHING FLAT TO
+MASK` and its Rectangle, Ellipse and Pen buttons are off; the Stage stays an
+ordinary Stage, and on Program Output the shape tools draw a new card instead.
+A mask already on such a layer - from an older project, or one whose quad was
+later changed to a box - still lists in Masks marked `TARGET CANNOT BE MASKED`.
+It is not drawn, and the layer renders uncut until the mask is turned off or
+deleted. A mask already on a group is different: the render still refuses the
+frame until that mask is turned off or deleted.
 
 Program Output authors masks only while it is showing the Stage's scene: the
 Program scene, or any scene in its Canvas view. On an output in

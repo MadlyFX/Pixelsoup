@@ -53,6 +53,9 @@ const doc::NodeId layer{10U};
     object.type = std::string{schema::object_type};
     object.properties.emplace(std::string{schema::scene_id},
                               static_cast<std::int64_t>(stage.value()));
+    // Masks cut a flat layer, so the layer is a quad.
+    object.properties.emplace(std::string{schema::primitive},
+                              std::string{"quad"});
     return doc::Root{}.set(stage_node).set(object);
 }
 

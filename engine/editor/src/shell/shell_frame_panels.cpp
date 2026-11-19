@@ -91,20 +91,40 @@ void EditorShell::Frame::prepare_panels() {
   const bool mask_target_supported =
       mask_target_element != nullptr &&
       !is_light(mask_target_element->kind);
+  // A mask is drawn in its target's one flat surface: a clip, or an object
+  // whose mesh is a quad or plane. Anything else would make the renderer
+  // refuse the frame, so its masks can be listed and removed but not made.
+  const auto flat_surface = [&](const ElementInfo &element) noexcept {
+    if (element.kind == ElementKind::Media) {
+      return true;
+    }
+    if (element.kind != ElementKind::Object) {
+      return false;
+    }
+    for (const scene::MeshInstance &instance : authored_stage.instances) {
+      if (instance.source == element.node) {
+        return scene::mask_source_plane(instance.mesh.primitive).has_value();
+      }
+    }
+    return false;
+  };
+  const bool mask_target_flat =
+      mask_target_supported && flat_surface(*mask_target_element);
   mask_target = MasksPanelTarget{
       authored_stage.id,
       mask_target_supported ? mask_target_element->node : doc::NodeId{},
       mask_target_element != nullptr &&
               mask_target_element->kind == ElementKind::Group
           ? scene::MaskCoordinateSpace::AuthoredCanvas
-          : scene::MaskCoordinateSpace::SourceLayer};
+          : scene::MaskCoordinateSpace::SourceLayer,
+      mask_target_flat};
   mask_authoring_enabled = mask_target_supported && !mask_target_element->locked &&
       !switcher.rehearsal_locked;
   // Stage switches interaction domains only while Masks is the visible tab
   // and a real target is selected. With no target it stays an ordinary Stage,
   // so the operator can click a drawable and enter mask mode on the next
   // projected frame.
-  mask_stage_active = impl.dock_host.visible(panel_masks) && mask_target_supported;
+  mask_stage_active = impl.dock_host.visible(panel_masks) && mask_target_flat;
   // Program Output shows the picture that is actually on the wall, which is
   // where a matte in the wrong place is noticed, so it authors masks too. It
   // may only do so while it and the Stage are the same scene: with Preview on
